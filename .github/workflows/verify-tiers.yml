@@ -7,21 +7,29 @@ on:
       request:
         required: true
         type: string
+      task:
+        description: Workflow job to run.
+        required: true
+        type: choice
+        options: [tier, lane]
+        default: tier
       commit:
         required: true
         type: string
       tier:
         required: true
-        type: choice
-        options: ['lane', '2', '3']
+        type: string
+        default: '2'
 
 permissions:
   contents: read
 
 jobs:
   verify:
-    if: inputs.tier != 'lane'
+    if: inputs.task == 'tier'
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
     timeout-minutes: 60
     steps:
       - name: Verify the dispatched ref
@@ -39,7 +47,6 @@ jobs:
         uses: ./.github/actions/install-nextest
         timeout-minutes: 10
       - name: Install mutation testing
-        if: inputs.tier == '3'
         uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
         timeout-minutes: 3
         with:
@@ -51,10 +58,11 @@ jobs:
 
   lane:
     name: Lane compile and lint
-    if: inputs.tier == 'lane'
+    if: inputs.task == 'lane'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
       CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
       CARGO_INCREMENTAL: "0"
     steps:
@@ -73,7 +81,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: tools/front-door
-          shared-key: front-door-ci-lint
+          shared-key: front-door-ci-lint-dev-all-features
           add-job-id-key: false
           save-if: false
       - name: Check formatting

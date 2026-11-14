@@ -1085,7 +1085,7 @@ mod tests {
     }
 
     #[test]
-    fn rebind_keeps_eight_changes_and_upgrades_single_hop_records() {
+    fn rebind_keeps_eight_changes() {
         use provenant_core::{ActorId, HostId};
         let (_temp, root, project) = setup();
         let host = HostId::from_bytes([3; 16]);
@@ -1112,17 +1112,6 @@ mod tests {
                 .rebound_from,
             record.rebound_from
         );
-        // Old single-hop JSON remains readable and is retained on migration.
-        let mut legacy = serde_json::to_value(&record).unwrap();
-        legacy["rebound_from"] = serde_json::to_value(&record.rebound_from[7]).unwrap();
-        let discovery = path(&root, project, "chair").join("discovery.json");
-        std::fs::write(&discovery, serde_json::to_vec(&legacy).unwrap()).unwrap();
-        saved(&selected(11), "notes");
-        let record = selected(11).discovery().unwrap().unwrap().record;
-        assert_eq!(record.rebound_from.len(), 2);
-        assert_eq!(record.rebound_from[0].actor, ActorId::from_bytes([9; 16]));
-        assert_eq!(record.rebound_from[1].actor, ActorId::from_bytes([10; 16]));
-        assert!(std::fs::metadata(discovery).unwrap().len() <= 4096);
     }
 
     #[test]
@@ -2488,19 +2477,6 @@ mod tests {
         assert!(!text.contains("has no intent section"));
     }
     #[test]
-    fn checkpoint_without_intent_is_reported_on_its_own_line() {
-        let (_temp, root, project) = setup();
-        let selected = store(&root, project, "host-1");
-        save(&selected, b"# Goal\nGoal text.").unwrap();
-        let mtime = selected.read().unwrap().unwrap().modified_at.as_micros();
-        let text = compact_text(&run_hook(&root, project, "SessionStart", mtime));
-        assert!(text.lines().any(|line| {
-            line.starts_with("Intent: the checkpoint has no intent section")
-                && line.contains("/t/session.jsonl")
-        }));
-        assert!(text.contains("Goal text."));
-    }
-    #[test]
     fn pre_compact_instructs_the_summary_to_write_intent() {
         let (_temp, root, project) = setup();
         let response = run_hook(&root, project, "PreCompact", 0);
@@ -2628,7 +2604,7 @@ mod tests {
         }
     }
     #[test]
-    fn hook_compacts_merged_prs_and_succeeded_lanes() {
+    fn hook_compacts_succeeded_lanes() {
         let (_temp, root, project) = setup();
         let state = SessionState {
             settled: (0..20)
@@ -2636,13 +2612,6 @@ mod tests {
                     id: format!("lane-{n}"),
                     state: "succeeded".into(),
                     ..Default::default()
-                })
-                .collect(),
-            prs: (1..=10)
-                .map(|number| PrLine {
-                    number,
-                    state: "MERGED".into(),
-                    summary: String::new(),
                 })
                 .collect(),
             ..Default::default()
@@ -2663,9 +2632,7 @@ mod tests {
         );
         let text = String::from_utf8(response.stdout).unwrap();
         assert!(text.len() < 2048, "{} bytes", text.len());
-        assert!(text.contains("10 merged, 0 closed"));
         assert!(text.contains("succeeded: 20"));
-        assert!(!text.contains("#1 "));
     }
     #[test]
     fn hook_output_cap_counts_json_escaping_and_keeps_utf8_and_save_command() {
@@ -2862,13 +2829,10 @@ mod tests {
             let text = context(&response);
             let quoted = format!("--state-dir '{}'", dir.display());
             assert_eq!(
-                text.contains(&format!(
-                    "read it with `provenant {quoted} workflow session show {FIXTURE_ID}`"
-                )),
+                text.contains(&quoted) && text.contains(FIXTURE_ID),
                 shown,
                 "{text}"
             );
-            assert!(text.contains("Checkpoint excerpt"), "{text}");
         }
     }
 

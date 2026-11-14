@@ -13,7 +13,7 @@ struct CommitSourcePreparation {
 
 impl CommitSourcePreparation {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        use provenant_core::{AttemptId, Digest, OperationId, RunId, TaskId};
+        use provenant_core::{AttemptId, Digest, OperationId};
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
         let temporary = tempfile::tempdir()?;
         let base = temporary.path().canonicalize()?;
@@ -38,7 +38,11 @@ impl CommitSourcePreparation {
             ..provenant_core::RootInputs::new(home.clone(), project.clone())
         }
         .resolve(&provenant_os::fs::SystemPathResolver)?;
-        let utility = provenant_confinement::UtilityRuntime::new(&git, &git_home)?;
+        let utility = provenant_confinement::UtilityRuntime::new(
+            &git,
+            &git_home,
+            roots.state.as_path(),
+        )?;
         let repo = utility.open_repo(
             &executor,
             &project,
@@ -51,17 +55,21 @@ impl CommitSourcePreparation {
         )?;
         let executable = assets.join("cursor/bin/agent");
         std::fs::create_dir_all(executable.parent().ok_or("provider parent")?)?;
-        std::fs::write(&executable, b"#!/bin/sh\nif [ \"$1\" = status ]; then printf 'Logged in successfully\\n'; else printf 'fixture-cursor 1.0\\n'; fi\n")?;
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = status ]; then printf '%s' '{}'; else printf 'fixture-cursor 1.0\\n'; fi\n",
+                include_str!("../../../../../tests/fixtures/providers/cursor/status.stdout")
+            ),
+        )?;
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
-        let run_id = RunId::from_bytes([71; 16]);
         let attempt_id = AttemptId::from_bytes([72; 16]);
-        let attempt = state.join(format!("runs/{run_id}/attempts/{attempt_id}"));
+        let attempt = state.join(format!("attempts/{attempt_id}"));
         let paths = run::LaunchPaths {
             attempt_id,
             operation_id: OperationId::parse("commit-source-preparation")?,
             task_index: 0,
             lane_depth: 1,
-            run_id,
             deadline_unix_ms: u64::MAX,
             scratch: attempt.join("scratch"),
             provider_state: attempt.join("provider-state"),
@@ -83,7 +91,6 @@ impl CommitSourcePreparation {
             head: Some(head),
             source_head: None,
             base_ref: None,
-            task_id: TaskId::from_bytes([73; 16]),
             profile: Default::default(),
             prompt_digest: provenant_records::CanonicalV1::file_digest(b"review fixture"),
             route: run::RequestedRoute::Model {
@@ -270,7 +277,7 @@ fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics
         if plan_error == "resolver" {
             assert_eq!(
                 refusal.terminal_cause,
-                Some(provenant_records::run::TerminalCause::RouteResolutionRefused),
+                provenant_records::run::TerminalCause::RouteResolutionRefused,
             );
             assert_eq!(
                 refusal.terminal_note.as_deref(),

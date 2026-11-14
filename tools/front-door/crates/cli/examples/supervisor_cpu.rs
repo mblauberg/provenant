@@ -2,9 +2,7 @@
 //! cargo run --release -p provenant-cli --example supervisor_cpu -- idle|churn
 #![allow(clippy::disallowed_methods)]
 
-use provenant_core::{
-    ActorId, AttemptId, CancelToken, Clock, Digest, RootInputs, RunId, TaskId, WaitBudget,
-};
+use provenant_core::{ActorId, AttemptId, CancelToken, Clock, Digest, RootInputs, WaitBudget};
 use provenant_os::{
     clock::SystemClock,
     fs::{Directory, LockMode},
@@ -87,12 +85,11 @@ fn capture(root: &Path, churn: bool) -> Result {
     }
     let mut inputs = RootInputs::new(home.clone(), project.clone());
     inputs.state_dir = Some(state.clone());
-    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let roots = provenant_os::fs::bind_roots(&inputs)?;
     let ctx = provenant_cli::fabric::Context::open(roots, &home, &project)?;
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let scope = Scope {
-        run: RunId::from_bytes([1; 16]),
         attempt: AttemptId::from_bytes([2; 16]),
         generation: 1,
     };
@@ -105,7 +102,6 @@ fn capture(root: &Path, churn: bool) -> Result {
         },
         project_id: ctx.identity.project,
         actor_id: ActorId::from_bytes([3; 16]),
-        run_id: scope.run,
         attempt_id: scope.attempt,
         host_delivery: None,
         sealed: None,
@@ -131,15 +127,14 @@ fn capture(root: &Path, churn: bool) -> Result {
         serde_json::json!({"schema_version":2,"graph_id":"cpu","nodes":[{"id":"parent","access":"read_only","prompt":"fixture","route":{"alias":"junior"}}]}),
     )?;
     journal.bind(GraphExecution {
-        review_base: None,
         extra: Default::default(),
-        integration_base: None,
+        bases: None,
         directory: project,
         document,
     })?;
     let checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
         "schema_version":1,"graph_id":"cpu","plan_digest":"fixture","nodes":[{
-            "id":"parent","state":"running","attempts":[{"key":{"graph_id":"cpu","node_id":"parent","route_index":0},"launched":true,"route":{"alias":"junior"},"state":"running","attempt_ref":format!("{}/{}",ctx.identity.host,scope.attempt),"launch_actor":"fixture"}]
+            "id":"parent","state":"running","attempts":[{"key":{"graph_id":"cpu","node_id":"parent","route_index":0, "attempt": 1},"launched":true,"route":{"alias":"junior"},"state":"running","attempt_ref":format!("{}/{}",ctx.identity.host,scope.attempt),"launch_actor":"fixture"}]
         }]
     }))?;
     journal.save(&checkpoint)?;
@@ -160,13 +155,14 @@ fn capture(root: &Path, churn: bool) -> Result {
         &clock,
     )?;
     let command = ProviderCommand {
+        policy: Default::default(),
         profile_file: None,
         priority: 0,
         lane_ports: None,
         requester: holder.actor_id,
         resolved_route: "fixture/cpu".into(),
         permission_plan_digest: Digest::from_bytes([0; 32]),
-        task: TaskId::from_bytes([4; 16]),
+        key: provenant_supervisor::custody::fixture_key(4),
         protected_commands: vec![],
         config_environment: fixture::config_environment(),
         argv: fixture::argv_with_args(

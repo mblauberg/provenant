@@ -7,7 +7,8 @@ fn fresh_resume_preserves_lineage_and_authority_without_provider_state() -> Test
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let mut original = input();
-    original.request.chair = Some(ChairBinding {
+    original.request.chair = Some(Chair {
+        process: None,
         extra: Default::default(),
         session: None,
         host: provenant_core::HostId::from_bytes([32; 16]),
@@ -18,13 +19,13 @@ fn fresh_resume_preserves_lineage_and_authority_without_provider_state() -> Test
         refuse: true,
         ..Fake::default()
     };
-    store.start(original.run_id, &fake, &|_, _| unreachable!(), &call)?;
-    let prior = original.attempts[0].attempt_id;
+    store.start(original.attempt_id, &fake, &|_, _| unreachable!(), &call)?;
+    let prior = original.attempt_id;
     let mut resume = Resume {
+        extend: Vec::new(),
         prior,
         expected_generation: 0,
         operation_id: "fresh-resume".parse()?,
-        run_id: RunId::from_bytes([90; 16]),
         attempt_id: AttemptId::from_bytes([91; 16]),
         prompt: "Original prompt\nPrior result tail\nNew prompt".into(),
         created_at: WallTime::from_micros(100)?,
@@ -34,20 +35,20 @@ fn fresh_resume_preserves_lineage_and_authority_without_provider_state() -> Test
         store.resume_fresh(&resume, "retained Codex rollout missing", &call)?,
         run
     );
-    let request = store.request(run.run_id, &call)?;
+    let request = store.request(run.attempt_id, &call)?;
     assert_eq!(request.parent, Some(prior));
     assert_eq!(request.chair, original.request.chair);
     assert_eq!(
-        request.tasks[0].authority_digest,
-        original.request.tasks[0].authority_digest
+        request.task.authority_digest,
+        original.request.task.authority_digest
     );
-    assert_eq!(request.tasks[0].writer, original.request.tasks[0].writer);
-    assert_eq!(request.tasks[0].route, original.request.tasks[0].route);
+    assert_eq!(request.task.writer, original.request.task.writer);
+    assert_eq!(request.task.route, original.request.task.route);
     assert_eq!(
         request.fresh_continuation.as_deref(),
         Some("retained Codex rollout missing")
     );
-    store.start(run.run_id, &fake, &|_, _| unreachable!(), &call)?;
+    store.start(run.attempt_id, &fake, &|_, _| unreachable!(), &call)?;
     assert_eq!(fake.resumed.get(), None);
     let record = store.record(resume.attempt_id, &call)?;
     assert_eq!(record.retry_of, Some(prior));
@@ -65,9 +66,9 @@ fn cancel_settles_a_prepared_attempt_nobody_holds() -> TestResult {
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
-    let batch = two_tasks(1);
+    let batch = input();
     store.create(&batch, &call)?;
-    let orphan = batch.attempts[0].attempt_id;
+    let orphan = batch.attempt_id;
     store.mark_starting(
         &store.record(orphan, &call)?,
         &route(),
@@ -77,12 +78,11 @@ fn cancel_settles_a_prepared_attempt_nobody_holds() -> TestResult {
         &call,
     )?;
     let scope = provenant_supervisor::custody::Scope {
-        run: batch.run_id,
         attempt: orphan,
         generation: 1,
     };
     drop(provenant_supervisor::fixture::acquire_writer(
-        store.attempt_dir(batch.run_id, orphan, false)?,
+        store.attempt_dir(orphan, false)?,
         scope,
         call.lock_budget(),
         &cancel,
@@ -115,10 +115,9 @@ fn reconcile_unreadable_reservation_only_retains_existing_temporary_data() -> Te
         let call = call(&clock, &cancel);
         let context = context(temp.path())?;
         let store = RunStore::open(&context, &call)?;
-        let run = two_tasks(2);
+        let run = input();
         store.create(&run, &call)?;
-        let terminal = run.attempts[0].attempt_id;
-        let sibling = run.attempts[1].attempt_id;
+        let terminal = run.attempt_id;
         let temporary = store.temporary_path(terminal, &call)?;
         if has_temporary {
             std::fs::write(temporary.join("keep.lock"), "keep")?;
@@ -149,7 +148,7 @@ fn reconcile_unreadable_reservation_only_retains_existing_temporary_data() -> Te
         assert_eq!(store.writer_fence_listing()?.issues.len(), 1);
 
         let found = store.reconcile_with_observer(
-            run.run_id,
+            run.attempt_id,
             &Fake::default(),
             &call,
             &provenant_supervisor::census::SystemProcessObserver,
@@ -157,12 +156,11 @@ fn reconcile_unreadable_reservation_only_retains_existing_temporary_data() -> Te
         if has_temporary {
             assert!(matches!(found.as_slice(), [
                 (id, Reconciled::TemporaryRetained { path, reason }),
-                (other, Reconciled::Queued),
-            ] if *id == terminal && *other == sibling && *path == temporary
+            ] if *id == terminal && *path == temporary
                 && reason.kind == TemporaryReasonKind::ReservationUnreadable));
             assert!(temporary.join("keep.lock").exists());
         } else {
-            assert_eq!(found, vec![(sibling, Reconciled::Queued)]);
+            assert!(found.is_empty());
         }
     }
     Ok(())
@@ -174,7 +172,7 @@ fn reconcile_retries_terminal_temporary_removal() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.create(&run, &call)?;
     let temporary = store.temporary_path(id, &call)?;
     // Settlement protects lock names while custody may still be retained.
@@ -188,10 +186,10 @@ fn reconcile_retries_terminal_temporary_removal() -> TestResult {
     assert_eq!(terminal(&store, id, &call)?, Outcome::Succeeded);
     assert!(temporary.is_dir());
 
-    assert_eq!(store.open_runs(10, &call)?, vec![run.run_id]);
+    assert_eq!(store.open_attempts(10, &call)?, vec![run.attempt_id]);
     assert_eq!(
         store.reconcile_with_observer(
-            run.run_id,
+            run.attempt_id,
             &Fake::default(),
             &call,
             &provenant_supervisor::census::SystemProcessObserver
@@ -200,7 +198,7 @@ fn reconcile_retries_terminal_temporary_removal() -> TestResult {
     );
     assert!(!temporary.exists());
     finish_reactions(&store)?;
-    assert!(store.open_runs(10, &call)?.is_empty());
+    assert!(store.open_attempts(10, &call)?.is_empty());
     assert_eq!(terminal(&store, id, &call)?, Outcome::Succeeded);
     Ok(())
 }
@@ -215,7 +213,7 @@ fn reconcile_preserves_protected_locks_outside_temporary() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.create(&run, &call)?;
     let temporary = store.temporary_path(id, &call)?;
     std::fs::write(temporary.join("writer.lock"), "disposable payload")?;
@@ -229,8 +227,8 @@ fn reconcile_preserves_protected_locks_outside_temporary() -> TestResult {
         WallTime::from_micros(150)?,
         &call,
     )?;
-    let attempt = store.attempt_dir(run.run_id, id, false)?;
-    let run_dir = store.run_dir(run.run_id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
+    let run_dir = store.attempt_dir(run.attempt_id, false)?;
     drop(attempt.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?);
     // The run lock may stay held while reconcile removes attempt payload.
     let _held = run_dir.try_lock(OsStr::new("publication.lock"), LockMode::Exclusive)?;
@@ -242,7 +240,7 @@ fn reconcile_preserves_protected_locks_outside_temporary() -> TestResult {
 
     assert_eq!(
         store.reconcile_with_observer(
-            run.run_id,
+            run.attempt_id,
             &Fake::default(),
             &call,
             &provenant_supervisor::census::SystemProcessObserver
@@ -264,55 +262,6 @@ fn reconcile_preserves_protected_locks_outside_temporary() -> TestResult {
     Ok(())
 }
 #[test]
-fn reconcile_reports_temporary_removal_failures_and_continues() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
-    let run = two_tasks(2);
-    store.create(&run, &call)?;
-    for new in &run.attempts {
-        let temporary = store.temporary_path(new.attempt_id, &call)?;
-        std::fs::write(temporary.join("payload.lock"), "discard")?;
-        store.withdraw(
-            new.attempt_id,
-            AttemptState::Queued {
-                extra: Default::default(),
-            },
-            Outcome::Cancelled,
-            "fixture",
-            WallTime::from_micros(150)?,
-            &call,
-        )?;
-    }
-    let retained = run.attempts[0].attempt_id;
-    let removed = run.attempts[1].attempt_id;
-    let temporary = store.temporary_path(retained, &call)?;
-    std::fs::write(temporary.join("payload"), "retain")?;
-    let _held = store.attempt_dir(run.run_id, retained, false)?.try_lock(
-        std::ffi::OsStr::new("writer.lock"),
-        provenant_os::fs::LockMode::Exclusive,
-    )?;
-    let removable = store.temporary_path(removed, &call)?;
-    std::fs::write(removable.join("payload"), "discard")?;
-
-    let found = store.reconcile_with_observer(
-        run.run_id,
-        &Fake::default(),
-        &call,
-        &provenant_supervisor::census::SystemProcessObserver,
-    )?;
-    assert!(matches!(found.as_slice(), [
-        (id, Reconciled::TemporaryRetained { path, reason }),
-        (other, Reconciled::TemporaryRemoved),
-    ] if *id == retained && *other == removed && *path == temporary
-        && reason.contains("writer.lock")));
-    assert!(temporary.join("payload").exists());
-    assert!(!removable.exists());
-    assert_eq!(terminal(&store, retained, &call)?, Outcome::Cancelled);
-    Ok(())
-}
-#[test]
 fn reconcile_leaves_nonterminal_and_reserved_temporary_data() -> TestResult {
     for reserved in [false, true] {
         let temp = tempfile::tempdir()?;
@@ -320,7 +269,7 @@ fn reconcile_leaves_nonterminal_and_reserved_temporary_data() -> TestResult {
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let run = input();
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         store.create(&run, &call)?;
         let temporary = store.temporary_path(id, &call)?;
         std::fs::write(temporary.join("keep.lock"), "keep")?;
@@ -347,7 +296,7 @@ fn reconcile_leaves_nonterminal_and_reserved_temporary_data() -> TestResult {
         // Also cover a reservation retained after its owner releases the lock.
         if reserved {
             drop(provenant_supervisor::fixture::acquire_writer(
-                store.attempt_dir(run.run_id, id, false)?,
+                store.attempt_dir(id, false)?,
                 RunStore::scope(&store.record(id, &call)?),
                 call.lock_budget(),
                 &cancel,
@@ -356,7 +305,7 @@ fn reconcile_leaves_nonterminal_and_reserved_temporary_data() -> TestResult {
         }
         std::fs::write(temporary.join("keep.lock"), "keep")?;
         let found = store.reconcile_with_observer(
-            run.run_id,
+            run.attempt_id,
             &Fake::default(),
             &call,
             &provenant_supervisor::census::SystemProcessObserver,
@@ -385,7 +334,7 @@ fn reconcile_terminal_writer_reservation_without_temporary() -> TestResult {
         let context = context(temp.path())?;
         let store = RunStore::open(&context, &call)?;
         let run = input();
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         store.create(&run, &call)?;
         let temporary = store.temporary_path(id, &call)?;
         store.mark_starting(
@@ -427,9 +376,9 @@ fn reconcile_terminal_writer_reservation_without_temporary() -> TestResult {
             &call,
         )?;
         assert!(!temporary.exists());
-        assert_eq!(store.open_runs(10, &call)?, vec![run.run_id]);
+        assert_eq!(store.open_attempts(10, &call)?, vec![run.attempt_id]);
         let found = store.reconcile_with_observer(
-            run.run_id,
+            run.attempt_id,
             &Fake::default(),
             &call,
             &provenant_supervisor::census::SystemProcessObserver,
@@ -438,14 +387,14 @@ fn reconcile_terminal_writer_reservation_without_temporary() -> TestResult {
             assert_eq!(found, vec![(id, Reconciled::Withdrawn)]);
             assert!(store.writer_fences()?.is_empty());
             finish_reactions(&store)?;
-            assert!(store.open_runs(10, &call)?.is_empty());
+            assert!(store.open_attempts(10, &call)?.is_empty());
         } else {
             assert!(
                 matches!(found.as_slice(), [(attempt, Reconciled::Uncertain { reason })]
                 if *attempt == id && matches!(reason, UncertainReason::WriterReservationRetained { .. }))
             );
             assert_eq!(store.writer_fences()?.len(), 1);
-            assert_eq!(store.open_runs(10, &call)?, vec![run.run_id]);
+            assert_eq!(store.open_attempts(10, &call)?, vec![run.attempt_id]);
         }
         assert!(!temporary.exists());
     }
@@ -459,12 +408,12 @@ fn reconcile_leaves_temporary_data_behind_a_writer_reservation() -> TestResult {
     let context = context(temp.path())?;
     let store = RunStore::open(&context, &call)?;
     let mut run = input();
-    run.request.tasks[0].writer = Some(WriterRequest {
-        extra: Default::default(),
+    run.request.task.writer = Some(WriterRequest {
+        extra: crate::tests::writer_extra(),
         project: temp.path().join("checkout"),
         worktree: temp.path().join("checkout/.worktrees/lane"),
     });
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.create(&run, &call)?;
     let temporary = store.temporary_path(id, &call)?;
     let candidate = temporary.join("candidate-0");
@@ -509,7 +458,7 @@ fn reconcile_leaves_temporary_data_behind_a_writer_reservation() -> TestResult {
     std::fs::write(corrupt.join("reservation.json"), b"corrupt")?;
     assert_eq!(store.writer_fence_listing()?.issues.len(), 1);
     assert!(
-        matches!(store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &provenant_supervisor::census::SystemProcessObserver)?.as_slice(),
+        matches!(store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &provenant_supervisor::census::SystemProcessObserver)?.as_slice(),
         [(attempt, Reconciled::Uncertain { reason: UncertainReason::WriterReservationRetained { .. } })]
         if *attempt == id)
     );
@@ -517,21 +466,21 @@ fn reconcile_leaves_temporary_data_behind_a_writer_reservation() -> TestResult {
     // Reconcile can withdraw the prepared reservation after its lock is released.
     drop(held);
     assert!(matches!(
-        store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &provenant_supervisor::census::SystemProcessObserver)?.as_slice(),
+        store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &provenant_supervisor::census::SystemProcessObserver)?.as_slice(),
         [(attempt, Reconciled::Withdrawn)] if *attempt == id
     ));
     assert!(store.writer_fences()?.is_empty());
     assert!(candidate.join("x.lock").exists());
     // The unreadable sibling remains a separate barrier until removed.
     assert!(matches!(
-        store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &provenant_supervisor::census::SystemProcessObserver)?.as_slice(),
+        store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &provenant_supervisor::census::SystemProcessObserver)?.as_slice(),
         [(attempt, Reconciled::TemporaryRetained { .. })] if *attempt == id
     ));
     assert!(candidate.join("x.lock").exists());
     std::fs::remove_file(corrupt.join("reservation.json"))?;
     assert_eq!(
         store.reconcile_with_observer(
-            run.run_id,
+            run.attempt_id,
             &Fake::default(),
             &call,
             &provenant_supervisor::census::SystemProcessObserver
@@ -550,7 +499,7 @@ fn reconcile_temporary_removal_never_follows_symlinks() -> TestResult {
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let run = input();
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         store.create(&run, &call)?;
         let temporary = store.temporary_path(id, &call)?;
         std::fs::write(temporary.join("keep.lock"), "keep")?;
@@ -567,7 +516,7 @@ fn reconcile_temporary_removal_never_follows_symlinks() -> TestResult {
         let outside = temp.path().join("outside");
         std::fs::create_dir(&outside)?;
         std::fs::write(outside.join("keep"), "keep")?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         if link_at_root {
             std::fs::remove_dir_all(&temporary)?;
             symlink(&outside, &temporary)?;
@@ -575,10 +524,10 @@ fn reconcile_temporary_removal_never_follows_symlinks() -> TestResult {
             std::fs::create_dir_all(temporary.join("candidate-0/target"))?;
             symlink(&outside, temporary.join("candidate-0/target/outside.lock"))?;
         }
-        assert_eq!(store.open_runs(10, &call)?, vec![run.run_id]);
+        assert_eq!(store.open_attempts(10, &call)?, vec![run.attempt_id]);
         assert_eq!(
             store.reconcile_with_observer(
-                run.run_id,
+                run.attempt_id,
                 &Fake::default(),
                 &call,
                 &provenant_supervisor::census::SystemProcessObserver
@@ -601,7 +550,7 @@ fn reconcile_removes_owner_only_temporary_and_retains_shared_modes() -> TestResu
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let run = input();
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         store.create(&run, &call)?;
         let temporary = store.temporary_path(id, &call)?;
         std::fs::write(temporary.join("keep.lock"), "keep")?;
@@ -620,7 +569,7 @@ fn reconcile_removes_owner_only_temporary_and_retains_shared_modes() -> TestResu
         std::fs::write(nested.join("s-1.lock"), "keep")?;
         std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(mode))?;
         let found = store.reconcile_with_observer(
-            run.run_id,
+            run.attempt_id,
             &Fake::default(),
             &call,
             &provenant_supervisor::census::SystemProcessObserver,
@@ -656,11 +605,8 @@ fn cancel_queued_work_without_an_attempt_directory() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let run = input();
     store.create(&run, &call)?;
-    let id = run.attempts[0].attempt_id;
-    let attempt = context
-        .state_root
-        .as_path()
-        .join(format!("runs/{}/attempts/{id}", run.run_id));
+    let id = run.attempt_id;
+    let attempt = context.state_root.as_path().join(format!("attempts/{id}"));
     // The queued transaction can survive a crash before directory publication.
     std::fs::remove_dir_all(attempt)?;
     assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Cancelled);

@@ -1,4 +1,4 @@
-use super::{EdgeError, Lease};
+use super::EdgeError;
 use provenant_core::{CancelToken, Clock, HostId, Roots, WaitBudget};
 use provenant_fabric_runtime::{
     config::FabricConfig,
@@ -9,6 +9,7 @@ use provenant_fabric_runtime::{
     },
     identity::{CrossHostProjectKey, Identity, IdentityError},
 };
+use provenant_os::clock::SystemClock;
 use provenant_os::{
     exec::{Executor, SystemExecutor},
     fs::{Directory, PublishMode},
@@ -28,9 +29,13 @@ pub struct Context {
     pub roots: Roots,
     pub identity: Identity,
     pub config: FabricConfig,
+    pub local_observation: provenant_fabric_runtime::coordination::ObservationSettings,
+    /// Project ports resolved once from the discovered project root.
+    pub port_table: provenant_config::PortTable,
     /// Origin captured with the effective graph configuration.
     pub graph_prompt_limit_source: provenant_fabric_runtime::graph::InputCapSource,
-    /// Captured once from the host-set MCP entry, never from tool arguments.
+    pub graph_decide_timeout_source: provenant_fabric_runtime::graph::DecideTimeoutSource,
+    /// Captured once from the host-set lane environment, never from arguments.
     pub in_lane: bool,
     pub(super) executor: SystemExecutor,
     pub(super) home: PathBuf,
@@ -126,6 +131,109 @@ pub fn current_session() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// Observe the invoking harness rather than the short-lived command process.
+pub fn chair_process() -> Option<provenant_records::custody::HolderProcess> {
+    use provenant_supervisor::census::{
+        ProcessObservation, ProcessObserver, SystemProcessObserver, current_process,
+    };
+    let ProcessObservation::Present(command) = current_process() else {
+        return None;
+    };
+    let ProcessObservation::Present(parent) =
+        SystemProcessObserver.observe_topology(command.parent_pid)
+    else {
+        return None;
+    };
+    Some(provenant_records::custody::HolderProcess {
+        boot: parent.identity.boot,
+        pid: parent.identity.pid,
+        native_start: parent.identity.native_start,
+    })
+}
+pub fn current_chair(context: &Context) -> provenant_records::custody::Chair {
+    provenant_records::custody::Chair {
+        extra: Default::default(),
+        host: context.identity.inbox.host,
+        actor: context.identity.inbox.actor,
+        session: current_session().or_else(|| {
+            provenant_workflow::session::chair_session_for(
+                &context.roots.state,
+                context.identity.project,
+                context.identity.inbox.actor,
+            )
+            .map(|s| s.as_str().to_owned())
+        }),
+        process: chair_process(),
+    }
+}
+
+/// Record a lifecycle acquisition without turning advisory custody into admission.
+pub fn acquire_custody(
+    context: &Context,
+    holder: &provenant_records::custody::Holder,
+    subjects: &[provenant_records::custody::Subject],
+) {
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = provenant_fabric_store::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    match provenant_fabric_runtime::custody::acquire(
+        &context.roots.state,
+        context.identity.project,
+        holder,
+        subjects,
+        provenant_records::custody::Origin::Provenant,
+        &call,
+    ) {
+        Ok(changes) => provenant_fabric_runtime::custody::warn(&changes),
+        Err(error) => provenant_fabric_runtime::custody::warning(format_args!(
+            "custody acquisition pending ({error}); use provenant adopt KIND:ID"
+        )),
+    }
+}
+pub fn checkout_branch(roots: &Roots, path: &Path) -> Result<Option<String>, EdgeError> {
+    use provenant_confinement::repo::GitRevision;
+    use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime};
+    let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
+    let runtime = UtilityRuntime::read_only(git, roots.state.as_path())?;
+    let executor = SystemExecutor::new(1)?;
+    let cancel = CancelToken::new();
+    let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
+    let repo = runtime.open_read_repo(&executor, path, budget, &cancel)?;
+    let result = provenant_confinement::run_read_utility(
+        &executor,
+        GitRead::SymbolicRevision {
+            revision: GitRevision::new("HEAD").map_err(|_| EdgeError::Invalid)?,
+        },
+        &repo,
+        &runtime,
+        budget,
+        &cancel,
+    )?;
+    if !matches!(result.termination, provenant_os::exec::Termination::Exit(0)) {
+        return Ok(None);
+    }
+    let reference = String::from_utf8(result.stdout.bytes).map_err(|_| EdgeError::Invalid)?;
+    Ok(reference
+        .trim()
+        .strip_prefix("refs/heads/")
+        .map(str::to_owned))
+}
+
+fn decide_timeout_source(
+    origins: &std::collections::BTreeMap<String, provenant_config::Origin>,
+) -> provenant_fabric_runtime::graph::DecideTimeoutSource {
+    use provenant_fabric_runtime::graph::DecideTimeoutSource;
+    match origins.get("domains.fabric.graph.decide_timeout_seconds") {
+        Some(provenant_config::Origin::User { .. }) => DecideTimeoutSource::Configured,
+        Some(provenant_config::Origin::Compiled { .. }) | None => {
+            DecideTimeoutSource::DomainDefault
+        }
+    }
+}
+
 fn prompt_limit_source(
     origins: &std::collections::BTreeMap<String, provenant_config::Origin>,
 ) -> provenant_fabric_runtime::graph::InputCapSource {
@@ -140,8 +248,10 @@ fn prompt_limit_source(
 impl Context {
     pub fn open(roots: Roots, home: &Path, cwd: &Path) -> Result<Self, EdgeError> {
         // Validate configuration before allocating identities or opening SQLite.
-        let resolved = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?;
+        let resolved = crate::config_reads::read_for(&roots, "fabric context")?;
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
+        let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
+        let local_observation = crate::wait::observation_settings(&resolved);
         let config = resolved.domains.fabric;
         private_dir(roots.state.as_path(), roots.state.as_path())?;
         let utility_root = if in_lane() {
@@ -158,13 +268,20 @@ impl Context {
         private_dir(utility_anchor, &utility_home)?;
         let lane = in_lane();
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
-        let runtime = provenant_confinement::UtilityRuntime::new(&git, &utility_home)?
-            .with_lane_roots(provenant_confinement::utility::lane_state_roots(
-                roots.state.as_path(),
-            ));
+        let runtime =
+            provenant_confinement::UtilityRuntime::new(&git, &utility_home, roots.state.as_path())?
+                .with_lane_roots(provenant_confinement::utility::lane_state_roots(
+                    roots.state.as_path(),
+                ));
         let executor = SystemExecutor::new(1)?;
         let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
         let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;
+        let project_root = discovered
+            .repository
+            .as_ref()
+            .map_or(discovered.location.common_dir(), |repo| repo.root_path());
+        let port_table =
+            provenant_config::PortTable::read_for(Some(project_root), roots.state.as_path())?;
         let binding = if lane {
             provenant_config::lookup_project(&roots, &discovered.location)?
                 .ok_or(EdgeError::Invalid)?
@@ -196,7 +313,10 @@ impl Context {
             roots,
             identity,
             config,
+            local_observation,
+            port_table,
             graph_prompt_limit_source,
+            graph_decide_timeout_source,
             in_lane: lane,
             executor,
             home: home.to_path_buf(),
@@ -205,14 +325,22 @@ impl Context {
     }
     /// Resolve existing identity and configuration without creating state.
     pub fn open_read_only(roots: Roots, home: &Path, cwd: &Path) -> Result<Self, EdgeError> {
-        let resolved = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?;
+        let resolved = crate::config_reads::read_for(&roots, "fabric context")?;
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
+        let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
+        let local_observation = crate::wait::observation_settings(&resolved);
         let config = resolved.domains.fabric;
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
-        let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
+        let runtime = provenant_confinement::UtilityRuntime::read_only(git, roots.state.as_path())?;
         let executor = SystemExecutor::new(1)?;
         let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
         let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;
+        let project_root = discovered
+            .repository
+            .as_ref()
+            .map_or(discovered.location.common_dir(), |repo| repo.root_path());
+        let port_table =
+            provenant_config::PortTable::read_for(Some(project_root), roots.state.as_path())?;
         let binding = provenant_config::lookup_project(&roots, &discovered.location)?
             .ok_or(EdgeError::Invalid)?;
         let host = provenant_config::lookup_host(&roots)?.ok_or(EdgeError::Invalid)?;
@@ -239,7 +367,10 @@ impl Context {
             roots,
             identity,
             config,
+            local_observation,
+            port_table,
             graph_prompt_limit_source,
+            graph_decide_timeout_source,
             in_lane: in_lane(),
             executor,
             home: home.to_path_buf(),
@@ -249,14 +380,22 @@ impl Context {
     /// Inspect templates and compile explanations before this host has an identity.
     /// The placeholder identity is never persisted or used to launch work.
     pub fn open_inspection(roots: Roots, home: &Path, cwd: &Path) -> Result<Self, EdgeError> {
-        let resolved = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?;
+        let resolved = crate::config_reads::read_for(&roots, "fabric context")?;
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
+        let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
+        let local_observation = crate::wait::observation_settings(&resolved);
         let config = resolved.domains.fabric;
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
-        let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
+        let runtime = provenant_confinement::UtilityRuntime::read_only(git, roots.state.as_path())?;
         let executor = SystemExecutor::new(1)?;
         let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
         let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;
+        let project_root = discovered
+            .repository
+            .as_ref()
+            .map_or(discovered.location.common_dir(), |repo| repo.root_path());
+        let port_table =
+            provenant_config::PortTable::read_for(Some(project_root), roots.state.as_path())?;
         let state_present = roots.state.as_path().try_exists()?;
         let binding = if state_present {
             provenant_config::lookup_project(&roots, &discovered.location)?
@@ -297,7 +436,10 @@ impl Context {
             roots,
             identity,
             config,
+            local_observation,
+            port_table,
             graph_prompt_limit_source,
+            graph_decide_timeout_source,
             in_lane: in_lane(),
             executor,
             home: home.to_path_buf(),
@@ -313,8 +455,11 @@ impl Context {
     ) -> Result<Self, EdgeError> {
         // Its working directory is the project's, as if started there.
         let cwd = binding.common_dir().parent().ok_or(EdgeError::Invalid)?;
-        let resolved = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?;
+        let port_table = provenant_config::PortTable::read_for(Some(cwd), roots.state.as_path())?;
+        let resolved = crate::config_reads::read_for(&roots, "fabric context")?;
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
+        let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
+        let local_observation = crate::wait::observation_settings(&resolved);
         let config = resolved.domains.fabric;
         let host = provenant_config::lookup_host(&roots)?.ok_or(EdgeError::Invalid)?;
         let key = match CrossHostProjectKey::from_home(home, binding.common_dir()) {
@@ -336,7 +481,10 @@ impl Context {
             roots,
             identity,
             config,
+            local_observation,
+            port_table,
             graph_prompt_limit_source,
+            graph_decide_timeout_source,
             in_lane: in_lane(),
             executor: SystemExecutor::new(1)?,
             home: home.to_path_buf(),
@@ -472,10 +620,18 @@ impl Context {
         // the attempt, even when another agent later resumes its graph.
         // Keep that namespace under the authenticated sending host rather
         // than adopting a caller-supplied actor ID on the receiving host.
-        let agent = if let PeerAction::Submit { extra, .. }
-        | PeerAction::Receipt { extra, .. }
-        | PeerAction::CancelSubmission { extra, .. } = &action
-        {
+        let graph_extra = match &action {
+            PeerAction::Submit { extra, .. }
+            | PeerAction::Receipt { extra, .. }
+            | PeerAction::CancelSubmission { extra, .. } => Some(extra),
+            PeerAction::Inbox { extra, .. }
+                if extra.get("graph_steer") == Some(&serde_json::Value::Bool(true)) =>
+            {
+                Some(extra)
+            }
+            _ => None,
+        };
+        let agent = if let Some(extra) = graph_extra {
             match extra.get("graph_launch_actor") {
                 Some(value) => {
                     let actor = value
@@ -485,6 +641,11 @@ impl Context {
                             PeerFailure::from(FacadeError::InvalidInput { detail: None })
                         })?;
                     format!("graph-{actor}")
+                }
+                None if extra.get("graph_steer").is_some() => {
+                    return Err(PeerFailure::from(FacadeError::InvalidInput {
+                        detail: None,
+                    }));
                 }
                 None => self.identity.inbox.agent.clone(),
             }
@@ -580,12 +741,6 @@ impl Context {
             value => Ok(value),
         }
     }
-    pub fn lease(&self, lease: Lease) -> Result<u64, EdgeError> {
-        if lease.lease_seconds > self.config.limits.lease_seconds {
-            return Err(EdgeError::Invalid);
-        }
-        Ok(lease.lease_seconds)
-    }
 }
 
 fn submit_after_probe(
@@ -599,68 +754,12 @@ fn submit_after_probe(
     submit().map_err(|error| peer_failure(peer, &error))
 }
 
-const MIN_SUBMIT_RELEASE: (u64, u64, u64) = (1, 6, 5);
-
-/// Refuse only capabilities the peer explicitly reports as incompatible.
+/// Format-2 health always reports the supported run operations.
 fn check_submit_health(peer: &str, result: PeerResult) -> Result<(), PeerFailure> {
     let PeerResult::Health { data, .. } = result else {
         return Ok(());
     };
-    let version = data.release.as_deref().and_then(|v| {
-        let valid_identifiers = |suffix: &str, prerelease: bool| {
-            suffix.split('.').all(|part| {
-                !part.is_empty()
-                    && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-                    && !(prerelease
-                        && part.len() > 1
-                        && part.starts_with('0')
-                        && part.bytes().all(|b| b.is_ascii_digit()))
-            })
-        };
-        let core = if let Some((core, build)) = v.split_once('+') {
-            if !valid_identifiers(build, false) {
-                return None;
-            }
-            core
-        } else {
-            v
-        };
-        let core = if let Some((core, prerelease)) = core.split_once('-') {
-            if !valid_identifiers(prerelease, true) {
-                return None;
-            }
-            core
-        } else {
-            core
-        };
-        let mut parts = core.split('.').map(|part| {
-            if part.len() > 1 && part.starts_with('0') {
-                return None;
-            }
-            if !part.bytes().all(|b| b.is_ascii_digit()) {
-                return None;
-            }
-            part.parse::<u64>().ok()
-        });
-        let version = (parts.next()??, parts.next()??, parts.next()??);
-        parts.next().is_none().then_some(version)
-    });
-    if version.is_some_and(|version| version < MIN_SUBMIT_RELEASE) {
-        return Err(PeerFailure::new(
-            FacadeError::PeerVersion,
-            format!(
-                "{peer}: peer release {} is too old for submission; run `provenant upgrade` on the peer",
-                provenant_fabric_runtime::hosts::plain_text(
-                    data.release.as_deref().unwrap_or("unknown"),
-                    80
-                )
-            ),
-        ));
-    }
-    if data
-        .run_capabilities
-        .is_some_and(|capabilities| !capabilities.submit)
-    {
+    if !data.run_capabilities.submit {
         return Err(PeerFailure::new(
             FacadeError::DispatchRefused {
                 reason: "peer does not support submission".into(),
@@ -887,15 +986,7 @@ mod tests {
         let host = HostId::from_bytes([2; 16]);
         let project =
             CrossHostProjectKey::from_home(Path::new("/home/a"), Path::new("/home/a/repo"))?;
-        for (release, submit, code) in [
-            (Some("1.6.4"), Some(true), Some("peer_version")),
-            (Some("1.6.5"), Some(false), Some("dispatch_refused")),
-            (Some("1.6.5"), Some(true), None),
-            (Some("1.6.5-rc.1"), Some(true), None),
-            (None, None, None),
-            (Some("unparseable"), None, None),
-            (Some("1.6.4-"), None, None),
-        ] {
+        for (submit, code) in [(false, Some("dispatch_refused")), (true, None)] {
             let calls = Cell::new(0);
             let stub = || {
                 calls.set(calls.get() + 1);
@@ -912,8 +1003,8 @@ mod tests {
                             host,
                             available: true,
                             execution: submit,
-                            release: release.map(str::to_owned),
-                            run_capabilities: submit.map(|submit| RunCapabilities {
+                            release: env!("CARGO_PKG_VERSION").into(),
+                            run_capabilities: RunCapabilities {
                                 submit,
                                 list: true,
                                 status: true,
@@ -922,8 +1013,8 @@ mod tests {
                                 resume: true,
                                 output: true,
                                 events: true,
-                            }),
-                            readiness: None,
+                            },
+                            readiness: provenant_fabric_runtime::hosts::PeerReadiness::reporting(),
                         },
                     },
                 })
@@ -933,14 +1024,6 @@ mod tests {
                 let error = result.unwrap_err();
                 assert_eq!(error.error.code(), code);
                 assert_eq!(calls.get(), 1);
-                if code == "peer_version" {
-                    assert!(
-                        error
-                            .detail
-                            .unwrap_or_default()
-                            .contains("provenant upgrade")
-                    );
-                }
             } else {
                 assert!(result.is_ok());
                 assert_eq!(calls.get(), 2);
@@ -950,9 +1033,9 @@ mod tests {
     }
 
     #[test]
-    fn prompt_limit_origin_distinguishes_default_from_explicit_same_value()
+    fn graph_setting_origins_distinguish_domain_default_from_explicit_same_value()
     -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_fabric_runtime::graph::InputCapSource;
+        use provenant_fabric_runtime::graph::{DecideTimeoutSource, InputCapSource};
         let temp = tempfile::tempdir()?;
         let mut inputs =
             provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("repo"));
@@ -967,7 +1050,13 @@ mod tests {
             super::prompt_limit_source(&default.origins),
             InputCapSource::Default
         );
+        assert_eq!(
+            super::decide_timeout_source(&default.origins),
+            DecideTimeoutSource::DomainDefault
+        );
         let configured = b"schema_version = 1
+[domains.fabric.graph]
+decide_timeout_seconds = 300
 [domains.fabric.graph.limits]
 node_prompt_bytes = 262144
 ";
@@ -983,6 +1072,10 @@ node_prompt_bytes = 262144
         assert_eq!(
             super::prompt_limit_source(&resolved.origins),
             InputCapSource::Configured
+        );
+        assert_eq!(
+            super::decide_timeout_source(&resolved.origins),
+            DecideTimeoutSource::Configured
         );
         Ok(())
     }

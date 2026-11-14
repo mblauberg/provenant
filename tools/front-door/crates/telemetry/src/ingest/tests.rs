@@ -46,12 +46,14 @@ impl Fixture {
     fn run(&self, dirs: &[(&str, &str)], chairs: &[&str], since: Option<&str>) -> Result<Report> {
         let dirs: Vec<_> = dirs
             .iter()
-            .map(|(account, dir)| ConfigDir {
-                account: (*account).into(),
+            .map(|(_, dir)| ConfigDir {
                 path: self.dir(dir),
             })
             .collect();
-        let chairs = chairs.iter().map(|s| (*s).to_owned()).collect();
+        let chairs = chairs
+            .iter()
+            .map(|s| ((*s).to_owned(), AccountIdentity::unknown()))
+            .collect();
         Ok(ingest(
             &self.roots,
             &Request {
@@ -118,71 +120,17 @@ fn segment_files(f: &Fixture) -> Result<Vec<String>> {
 }
 
 #[test]
-fn a_single_file_store_over_the_old_cap_is_split_on_first_open() -> Result {
-    use std::io::Write;
-    let f = Fixture::new()?;
-    let legacy = f.base.join("state/ingest.jsonl");
-    let mut out = std::io::BufWriter::new(std::fs::File::create(&legacy)?);
-    let padding = "x".repeat(64 << 10);
-    let days = ["2026-10-01", "2026-10-02", "2026-10-03"];
-    let total = 2_199usize;
-    for index in 0..total {
-        let row = Row {
-            schema_version: ROW_SCHEMA_VERSION,
-            account: "a".into(),
-            provider: PROVIDER.into(),
-            model: padding.clone(),
-            effort: None,
-            uncached_input: 1,
-            cache_read: 0,
-            cache_write: 0,
-            cache_write_1h: 0,
-            output: 1,
-            timestamp: format!("{}T00:00:00Z", days[index % days.len()]),
-            session: "s".into(),
-            message: format!("m{index}"),
-            source: Source::Lane,
-            agent_id: None,
-            native_config: None,
-            native_attempt: None,
-            reasoning_tokens: None,
-            reply: None,
-        };
-        serde_json::to_writer(&mut out, &row)?;
-        out.write_all(b"\n")?;
-    }
-    out.flush()?;
-    drop(out);
-    assert!(std::fs::metadata(&legacy)?.len() > 128 << 20);
-    // A reader gets the rows, split by day, and the single file is gone.
-    let rows = read_rows(&f.roots, &RowFilter::default())?;
-    assert_eq!(rows.len(), total);
-    assert!(!legacy.exists());
-    assert_eq!(segment_files(&f)?.len(), days.len());
-    // A window reads only its own days.
-    let window = RowFilter {
-        since: Some(
-            "2026-10-02T00:00:00Z"
-                .parse::<jiff::Timestamp>()?
-                .as_second(),
-        ),
-        until: Some(
-            "2026-10-02T23:59:59Z"
-                .parse::<jiff::Timestamp>()?
-                .as_second(),
-        ),
-        ..RowFilter::default()
-    };
-    assert_eq!(read_rows(&f.roots, &window)?.len(), total / days.len());
-    // Ingest then adds to the split store.
-    f.write(
-        "claude",
-        "projects/p/s1.jsonl",
-        &message("new", "2026-10-04T00:00:00Z", 1, 0, 0, 1),
-    )?;
-    let report = f.run(&DIRS, &[], None)?;
-    assert_eq!((report.added, report.store_full), (1, false));
-    assert_eq!(read_rows(&f.roots, &RowFilter::default())?.len(), total + 1);
+fn session_identity_override_round_trips_its_declared_store_shape() -> Result {
+    let record = SessionIdentityOverride::conflict("opaque-session");
+    let bytes = serde_json::to_vec(&record)?;
+    let decoded: SessionIdentityOverride = serde_json::from_slice(&bytes)?;
+    assert_eq!(decoded, record);
+    assert_eq!(decoded.schema_version, IDENTITY_OVERRIDE_SCHEMA_VERSION);
+    assert_eq!(decoded.provider, PROVIDER);
+    assert_eq!(
+        decoded.identity,
+        AccountIdentity::conflicting_provider_observations()
+    );
     Ok(())
 }
 
@@ -207,24 +155,6 @@ fn a_message_seen_on_both_sides_of_midnight_is_counted_once() -> Result {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].output, 9);
     assert_eq!(segment_files(&f)?, ["2026-10-01.jsonl"]);
-    Ok(())
-}
-
-#[test]
-fn legacy_lines_too_long_to_migrate_keep_the_old_file() -> Result {
-    let f = Fixture::new()?;
-    let legacy = f.base.join("state/ingest.jsonl");
-    let kept = serde_json::json!({"timestamp": "2026-10-01T00:00:00Z", "message": "m1"});
-    let huge = "x".repeat(MAX_ROW_LINE + 10);
-    std::fs::write(&legacy, format!("{kept}\n{huge}\n"))?;
-    read_rows(&f.roots, &RowFilter::default())?;
-    let aside = f.base.join("state/ingest.jsonl.unmigrated");
-    assert!(!legacy.exists());
-    assert!(std::fs::read_to_string(&aside)?.contains(&huge));
-    assert!(stored(&f)?.contains("\"m1\""));
-    // A later open does not migrate again.
-    read_rows(&f.roots, &RowFilter::default())?;
-    assert!(aside.exists());
     Ok(())
 }
 
@@ -275,7 +205,7 @@ fn effort_is_kept_only_when_it_is_a_short_identifier() -> Result {
 }
 
 #[test]
-fn rerun_adds_nothing_and_accounts_stay_distinct() -> Result {
+fn rerun_adds_nothing_and_unknown_identity_never_uses_directory_labels() -> Result {
     let f = Fixture::new()?;
     populate(&f)?;
     let first = f.run(&DIRS, &["s1"], None)?;
@@ -283,10 +213,9 @@ fn rerun_adds_nothing_and_accounts_stay_distinct() -> Result {
     let again = f.run(&DIRS, &["s1"], None)?;
     assert_eq!((again.added, again.already_present), (0, 5));
     let rows = read_rows(&f.roots, &RowFilter::default())?;
-    let account = |label: &str| rows.iter().filter(|r| r.account == label).count();
-    assert_eq!(
-        (account("anese"), account("pro"), account("unattributed")),
-        (3, 1, 1)
+    assert!(
+        rows.iter()
+            .all(|row| row.identity == AccountIdentity::unknown())
     );
     // Rows add up to the message usage, each message once at its largest counts.
     let m1 = rows.iter().find(|r| r.message == "m1").unwrap();
@@ -297,6 +226,13 @@ fn rerun_adds_nothing_and_accounts_stay_distinct() -> Result {
     );
     let source = |id: &str| rows.iter().find(|r| r.message == id).unwrap().source;
     assert_eq!(source("m1"), Source::Chair);
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.message == "m1")
+            .unwrap()
+            .identity,
+        AccountIdentity::unknown()
+    );
     assert_eq!(source("m3"), Source::Subagent);
     assert_eq!(source("m4"), Source::Lane);
     assert!(!stored(&f)?.contains("private"));
@@ -321,6 +257,171 @@ fn one_account_on_two_directories_counts_once() -> Result {
     let report = f.run(&dirs, &[], None)?;
     assert_eq!(report.directories, 2);
     assert_eq!(report.added, 3);
+    Ok(())
+}
+
+#[test]
+fn session_identities_split_usage_when_a_config_directory_rotates() -> Result {
+    let f = Fixture::new()?;
+    f.write(
+        "rotating",
+        "projects/p/session-a.jsonl",
+        &message("message-a", "2026-10-01T00:00:00Z", 1, 0, 0, 3),
+    )?;
+    f.write(
+        "rotating",
+        "projects/p/session-b.jsonl",
+        &message("message-b", "2026-10-01T00:00:01Z", 1, 0, 0, 9),
+    )?;
+    let first = AccountIdentity::known("claude", "account-a", "epoch-a");
+    let second = AccountIdentity::known("claude", "account-b", "epoch-b");
+    let chairs = BTreeMap::from([
+        ("session-a".to_owned(), first.clone()),
+        ("session-b".to_owned(), second.clone()),
+    ]);
+    let dirs = [ConfigDir {
+        path: f.dir("rotating"),
+    }];
+    let report = ingest(
+        &f.roots,
+        &Request {
+            dirs: &dirs,
+            chair_sessions: &chairs,
+            provider: None,
+            since: None,
+            deadline: None,
+            incremental: false,
+        },
+    )?;
+    assert_eq!(report.added, 2);
+    for account in ["claude/account-a", "claude/account-b"] {
+        assert_eq!(
+            report.accounts.get(account).map(|count| count.added),
+            Some(1)
+        );
+    }
+    let rows = read_rows(&f.roots, &RowFilter::default())?;
+    assert_eq!(rows.len(), 2);
+    let row_for = |session: &str| rows.iter().find(|row| row.session == session).unwrap();
+    assert_eq!(row_for("session-a").identity, first);
+    assert_eq!(row_for("session-a").output, 3);
+    assert_eq!(row_for("session-b").identity, second);
+    assert_eq!(row_for("session-b").output, 9);
+    Ok(())
+}
+
+#[test]
+fn a_conflicting_session_identity_masks_old_rows_and_absorbs_future_known_evidence() -> Result {
+    let f = Fixture::new()?;
+    f.write(
+        "rotating",
+        "projects/p/session-a.jsonl",
+        &message("message-a", "2026-10-01T00:00:00Z", 1, 0, 0, 3),
+    )?;
+    f.write(
+        "rotating",
+        "projects/p/session-b.jsonl",
+        &message("message-b", "2026-10-02T00:00:00Z", 1, 0, 0, 4),
+    )?;
+    f.write(
+        "rotating",
+        "projects/p/session-c.jsonl",
+        &message("message-c", "2026-10-03T00:00:00Z", 1, 0, 0, 5),
+    )?;
+    let dirs = [ConfigDir {
+        path: f.dir("rotating"),
+    }];
+    let known_a = AccountIdentity::provider_observation("claude", "account-a");
+    let first = BTreeMap::from([("session-a".to_owned(), known_a.clone())]);
+    ingest(
+        &f.roots,
+        &Request {
+            dirs: &dirs,
+            chair_sessions: &first,
+            provider: None,
+            since: None,
+            deadline: None,
+            incremental: false,
+        },
+    )?;
+    let old_account = RowFilter {
+        account: Some("claude/account-a".into()),
+        ..Default::default()
+    };
+    let before_conflict = read_rows(&f.roots, &old_account)?
+        .into_iter()
+        .find(|row| row.session == "session-a")
+        .ok_or("known row missing before conflict")?;
+    assert_eq!(before_conflict.identity, known_a);
+    let files = segment_files(&f)?;
+    let oldest = files.first().ok_or("no dated rows")?;
+    assert!(files.len() > RECENT_SEGMENTS);
+    assert!(
+        !files
+            .iter()
+            .rev()
+            .take(RECENT_SEGMENTS)
+            .any(|name| name == oldest)
+    );
+
+    let conflict = AccountIdentity::conflicting_provider_observations();
+    let conflicted = BTreeMap::from([("session-a".to_owned(), conflict.clone())]);
+    ingest(
+        &f.roots,
+        &Request {
+            dirs: &[],
+            chair_sessions: &conflicted,
+            provider: None,
+            since: None,
+            deadline: None,
+            incremental: false,
+        },
+    )?;
+    let historical = read_rows(&f.roots, &RowFilter::default())?
+        .into_iter()
+        .find(|row| row.session == "session-a")
+        .ok_or("historical row missing")?;
+    assert_eq!(historical.identity, conflict);
+    assert!(read_rows(&f.roots, &old_account)?.is_empty());
+
+    f.write(
+        "rotating",
+        "projects/p/session-a.jsonl",
+        &(message("message-a", "2026-10-01T00:00:00Z", 1, 0, 0, 3)
+            + &message("message-new", "2026-10-04T00:00:00Z", 2, 0, 0, 6)),
+    )?;
+    let known_b = BTreeMap::from([(
+        "session-a".to_owned(),
+        AccountIdentity::provider_observation("claude", "account-b"),
+    )]);
+    ingest(
+        &f.roots,
+        &Request {
+            dirs: &dirs,
+            chair_sessions: &known_b,
+            provider: None,
+            since: None,
+            deadline: None,
+            incremental: false,
+        },
+    )?;
+    let session_rows: Vec<_> = read_rows(&f.roots, &RowFilter::default())?
+        .into_iter()
+        .filter(|row| row.session == "session-a")
+        .collect();
+    assert_eq!(session_rows.len(), 2);
+    assert!(session_rows.iter().all(|row| row.identity == conflict));
+    assert!(
+        read_rows(
+            &f.roots,
+            &RowFilter {
+                account: Some("claude/account-b".into()),
+                ..Default::default()
+            }
+        )?
+        .iter()
+        .all(|row| row.session != "session-a")
+    );
     Ok(())
 }
 
@@ -357,7 +458,7 @@ fn since_and_provider_narrow_the_import() -> Result {
         &f.roots,
         &Request {
             dirs: &[],
-            chair_sessions: &BTreeSet::new(),
+            chair_sessions: &BTreeMap::new(),
             provider: Some("codex"),
             since: None,
             deadline: None,
@@ -413,7 +514,7 @@ fn linked_projects_and_session_directories_are_not_followed() -> Result {
 }
 
 #[test]
-fn registered_directories_get_their_label_and_the_rest_are_unattributed() -> Result {
+fn transcript_directories_do_not_supply_account_identity() -> Result {
     let f = Fixture::new()?;
     populate(&f)?;
     let home = f.base.clone();
@@ -422,25 +523,13 @@ fn registered_directories_get_their_label_and_the_rest_are_unattributed() -> Res
     std::fs::create_dir_all(home.join(".claude-extra/projects"))?;
     std::fs::create_dir_all(home.join(".claude-empty"))?;
     std::fs::write(home.join(".claude.json"), "{}")?;
-    let accounts = vec![("pro".to_owned(), vec![home.join(".claude-pro")])];
-    let dirs = config_dirs(&accounts, &home);
-    let labels: Vec<_> = dirs
+    let registered = vec![home.join(".claude-pro")];
+    let dirs = config_dirs(&registered, &home);
+    let names: Vec<_> = dirs
         .iter()
-        .map(|d| {
-            (
-                d.account.as_str(),
-                d.path.file_name().unwrap().to_str().unwrap(),
-            )
-        })
+        .map(|dir| dir.path.file_name().unwrap().to_str().unwrap())
         .collect();
-    assert_eq!(
-        labels,
-        [
-            ("pro", ".claude-pro"),
-            ("unattributed", ".claude"),
-            ("unattributed", ".claude-extra")
-        ]
-    );
+    assert_eq!(names, [".claude-pro", ".claude", ".claude-extra"]);
     Ok(())
 }
 
@@ -456,8 +545,8 @@ fn lines_this_build_cannot_read_survive_a_rewrite() -> Result {
     let day = f.base.join("state/ingest/2026-10-01.jsonl");
     // A row another schema version wrote, then a torn line from a crash.
     let current = std::fs::read_to_string(&day)?;
-    let foreign = current.replacen("{\"schema_version\":1,", "{\"schema_version\":2,", 1);
-    let torn = "{\"schema_version\":1,\"account\":\"half";
+    let foreign = current.replacen("{\"schema_version\":2,", "{\"schema_version\":3,", 1);
+    let torn = "{\"schema_version\":2,\"account\":\"half";
     std::fs::write(&day, format!("{foreign}{torn}\n"))?;
     f.write(
         "claude",
@@ -549,16 +638,13 @@ fn an_expired_deadline_reads_nothing_and_keeps_the_store() -> Result {
     )?;
     let dirs: Vec<ConfigDir> = DIRS
         .iter()
-        .map(|(account, dir)| ConfigDir {
-            account: (*account).into(),
-            path: f.dir(dir),
-        })
+        .map(|(_, dir)| ConfigDir { path: f.dir(dir) })
         .collect();
     let report = ingest(
         &f.roots,
         &Request {
             dirs: &dirs,
-            chair_sessions: &BTreeSet::new(),
+            chair_sessions: &BTreeMap::new(),
             provider: None,
             since: None,
             deadline: Some(Instant::now()),
@@ -580,10 +666,9 @@ fn incremental_ingest_resumes_complete_lines_and_recovers_replacements() -> Resu
     let first = message("m1", at, 10, 0, 0, 1);
     f.write("claude", path, &first)?;
     let dirs = [ConfigDir {
-        account: "unattributed".into(),
         path: f.dir("claude"),
     }];
-    let chairs = BTreeSet::new();
+    let chairs = BTreeMap::new();
     // A recently modified long session may contain messages older than the
     // hook's file cutoff; its cursor must not discard them.
     let since = "2026-10-02T00:00:00Z".parse()?;
@@ -645,11 +730,13 @@ fn incremental_ingest_upgrades_existing_chair_without_rereading() -> Result {
         &message("m1", "2026-10-01T00:00:00Z", 1, 0, 0, 1),
     )?;
     let dirs = [ConfigDir {
-        account: "a".into(),
         path: f.dir("claude"),
     }];
-    let chairs = BTreeSet::new();
-    let recorded_chairs = BTreeSet::from(["s1".to_owned()]);
+    let chairs = BTreeMap::new();
+    let recorded_chairs = BTreeMap::from([(
+        "s1".to_owned(),
+        AccountIdentity::known("claude", "account-key", "epoch"),
+    )]);
     let request = |chairs| Request {
         dirs: &dirs,
         chair_sessions: chairs,
@@ -659,11 +746,16 @@ fn incremental_ingest_upgrades_existing_chair_without_rereading() -> Result {
         incremental: true,
     };
     ingest(&f.roots, &request(&chairs))?;
+    // Recording the chair re-attributes stored rows; the source is not reread.
     assert_eq!(ingest(&f.roots, &request(&recorded_chairs))?.bytes_read, 0);
+    let rows = read_rows(&f.roots, &RowFilter::default())?;
     assert_eq!(
-        read_rows(&f.roots, &RowFilter::default())?[0].source,
-        Source::Chair
+        rows.len(),
+        1,
+        "idempotent attribution without duplicate rows"
     );
+    assert_eq!(rows[0].source, Source::Chair);
+    assert_eq!(rows[0].identity, recorded_chairs["s1"]);
     Ok(())
 }
 
@@ -705,15 +797,13 @@ fn native_attempt_links_only_its_matching_subagent_and_updates_after_settlement(
     )?;
     let dirs = [
         ConfigDir {
-            account: "a".into(),
             path: f.dir("claude"),
         },
         ConfigDir {
-            account: "b".into(),
             path: f.dir("other"),
         },
     ];
-    let chairs = BTreeSet::new();
+    let chairs = BTreeMap::new();
     let request = Request {
         dirs: &dirs,
         chair_sessions: &chairs,
@@ -757,7 +847,7 @@ fn native_attempt_links_only_its_matching_subagent_and_updates_after_settlement(
         .iter()
         .find(|r| r.message == "m3")
         .ok_or("other account")?;
-    assert_eq!(other.account, "b");
+    assert_eq!(other.identity, AccountIdentity::unknown());
     assert_eq!(other.native_attempt, None);
     let native = native_attempts::report(native_attempts::read(&f.roots)?, &rows);
     assert_eq!(native.attempts[0].attempt.alias, "reviewer");
@@ -984,18 +1074,6 @@ fn enrichment_preserves_existing_token_buckets_and_excludes_text() -> Result {
     fixture.run(&[("fixture-account", "native")], &[], None)?;
     let before = read_rows(&fixture.roots, &RowFilter::default())?;
     assert_eq!(before[0].buckets(), [10, 7, 60, 40, 3]);
-    // Simulate the stored version-1 row written by the preceding release.
-    let mut legacy = serde_json::to_value(&before[0])?;
-    legacy.as_object_mut().unwrap().remove("reply");
-    legacy.as_object_mut().unwrap().remove("reasoning_tokens");
-    std::fs::write(
-        fixture
-            .roots
-            .state
-            .as_path()
-            .join("ingest/2026-10-01.jsonl"),
-        format!("{legacy}\n"),
-    )?;
     fixture.run(&[("fixture-account", "native")], &[], None)?;
     let after = read_rows(&fixture.roots, &RowFilter::default())?;
     assert_eq!(before[0].buckets(), after[0].buckets());
@@ -1006,60 +1084,5 @@ fn enrichment_preserves_existing_token_buckets_and_excludes_text() -> Result {
     assert!(row.get("prompt").is_none());
     assert!(row.get("response").is_none());
     assert_eq!(row["reply"]["inferred"], "unknown");
-    // An old cursor cannot recover pending events; upgrade replays the native
-    // file, preserving token deduplication and the next reply's compaction.
-    let path = fixture
-        .dir("native")
-        .join("projects/p/fixture-session.jsonl");
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new().append(true).open(&path)?;
-    file.write_all(b"{\"type\":\"system\",\"subtype\":\"compact_boundary\"}\n")?;
-    let dirs = [ConfigDir {
-        account: "fixture-account".into(),
-        path: fixture.dir("native"),
-    }];
-    let chairs = BTreeSet::new();
-    let request = Request {
-        dirs: &dirs,
-        chair_sessions: &chairs,
-        provider: None,
-        since: None,
-        deadline: None,
-        incremental: true,
-    };
-    ingest(&fixture.roots, &request)?;
-    let cursor_path = fixture.roots.state.as_path().join(CURSORS);
-    let mut cursors: serde_json::Value = serde_json::from_slice(&std::fs::read(&cursor_path)?)?;
-    cursors["schema_version"] = serde_json::json!(1);
-    for cursor in cursors["files"].as_object_mut().unwrap().values_mut() {
-        cursor.as_object_mut().unwrap().remove("reply");
-        cursor.as_object_mut().unwrap().remove("last_reply");
-    }
-    std::fs::write(&cursor_path, serde_json::to_vec(&cursors)?)?;
-    file.write_all(
-        message("fixture-after-upgrade", "2026-10-01T00:00:02Z", 1, 0, 0, 1).as_bytes(),
-    )?;
-    ingest(&fixture.roots, &request)?;
-    let upgraded = read_rows(&fixture.roots, &RowFilter::default())?;
-    assert_eq!(upgraded.len(), 2);
-    assert_eq!(
-        upgraded
-            .iter()
-            .find(|row| row.message == "fixture-reply")
-            .unwrap()
-            .buckets(),
-        before[0].buckets()
-    );
-    assert_eq!(
-        upgraded
-            .iter()
-            .find(|row| row.message == "fixture-after-upgrade")
-            .unwrap()
-            .reply
-            .as_ref()
-            .unwrap()
-            .compactions,
-        1
-    );
     Ok(())
 }

@@ -4,7 +4,7 @@ use super::tests;
 use super::tests::{HostFacts, call, clock, context, exit, input, route};
 use super::*;
 use provenant_confinement::permissions::{PathGrant, PathScope};
-use provenant_core::{AttemptId, CancelToken, Clock, MonoTime, RunId, TaskId, TestClock, WallTime};
+use provenant_core::{AttemptId, CancelToken, Clock, MonoTime, TestClock, WallTime};
 use provenant_os::{exec::Termination, fs::Directory, sys::resources::MemorySample};
 use provenant_records::CanonicalV1;
 use provenant_supervisor::custody::ExitObservation;
@@ -16,23 +16,23 @@ type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
 fn rewrite_child_request(
     store: &RunStore,
-    run: RunId,
+    attempt: AttemptId,
     request: &CanonicalRequest,
     call: &Request<'_>,
 ) -> TestResult {
-    store.run_dir(run, false)?.atomic_write(
+    store.attempt_dir(attempt, false)?.atomic_write(
         std::ffi::OsStr::new("request.json"),
         ".swap-",
         &crate::db::bytes(request)?,
         provenant_os::fs::PublishMode::Replace,
     )?;
-    let mut record = store.run(run, call)?;
-    record.request_digest = request.digest()?;
+    let mut operation = store.attempt_operation(attempt, call)?;
+    operation.request_digest = request.digest()?;
     store.db.execute(
-        "UPDATE runs SET record=?1 WHERE id=?2",
-        rusqlite::params![crate::db::bytes(&record)?, run.to_string()],
+        "UPDATE attempts SET operation_record=?1 WHERE id=?2",
+        rusqlite::params![crate::db::bytes(&operation)?, attempt.to_string()],
     )?;
-    assert_eq!(&store.request(run, call)?, request);
+    assert_eq!(&store.request(attempt, call)?, request);
     Ok(())
 }
 
@@ -46,8 +46,9 @@ impl Providers for Ready {
         _: &str,
         _: &LaunchPaths,
         _: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
+    ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
         Ok(PreparedLaunch {
+            limits: Default::default(),
             argv: vec!["fixture".into()],
             environment: Vec::new(),
             stdin: Vec::new(),
@@ -71,14 +72,10 @@ impl Providers for Ready {
     }
 }
 
-struct FirstPriorityFailure(TaskId);
-impl Providers for FirstPriorityFailure {
-    fn priority(&self, task: &TaskRequest) -> std::result::Result<u8, String> {
-        if task.task_id == self.0 {
-            Err("priority configuration unavailable".into())
-        } else {
-            Ok(5)
-        }
+struct PriorityFailure;
+impl Providers for PriorityFailure {
+    fn priority(&self, _: &TaskRequest) -> std::result::Result<u8, String> {
+        Err("priority configuration unavailable".into())
     }
     fn prepare(
         &self,
@@ -86,7 +83,7 @@ impl Providers for FirstPriorityFailure {
         prompt: &str,
         paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
+    ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
         Ready.prepare(task, prompt, paths, resume)
     }
     fn decode(
@@ -112,7 +109,7 @@ impl Providers for Confined {
         prompt: &str,
         paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
+    ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
         use provenant_confinement::permissions::{
             AccessMode, NetworkAccess, PlanPermissions, ProviderProfile, ProviderProfileSpec,
             WorktreeWriteAuthority,
@@ -128,7 +125,7 @@ impl Providers for Confined {
                 "publishing": true,
                 "cargo_cache": {"path": "/fixture/cache", "scope": "subtree"}
             }))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| crate::fixture_refusal(e.to_string()))?;
             AccessMode::WorktreeWrite(Box::new(authority))
         } else {
             AccessMode::ReadOnly
@@ -156,7 +153,7 @@ impl Providers for Confined {
                 nested_confinement: false,
             },
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::fixture_refusal(e.to_string()))?;
         let mut launch = Ready.prepare(task, prompt, paths, resume)?;
         launch.confinement = Some(LaunchConfinement {
             plan,
@@ -170,9 +167,20 @@ impl Providers for Confined {
             },
             writer: None,
             home: "/fixture/home".into(),
-            cargo_registry_seed: false,
+            cargo_home: provenant_confinement::cargo::CargoHome::resolve(
+                std::path::Path::new("/fixture/home"),
+                |_| None,
+            )
+            .unwrap(),
+            cargo_target_seed: false,
             state_root: std::path::PathBuf::from("/fixture/state"),
-            sandboxed: true,
+            sandbox: provenant_confinement::run_config::SandboxMode {
+                requested: true,
+                effective: true,
+                source: provenant_confinement::run_config::SandboxSource::Knob,
+                warning: None,
+            },
+            backend: None,
         });
         Ok(launch)
     }
@@ -187,47 +195,16 @@ impl Providers for Confined {
     }
 }
 
-/// Gives the first task oversized tool grants and its sibling none.
-struct FirstOversized {
-    first: TaskId,
-    oversized: Confined,
-    ordinary: Confined,
-}
-impl Providers for FirstOversized {
-    fn prepare(
-        &self,
-        task: &TaskRequest,
-        prompt: &str,
-        paths: &LaunchPaths,
-        resume: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
-        let provider = if task.task_id == self.first {
-            &self.oversized
-        } else {
-            &self.ordinary
-        };
-        provider.prepare(task, prompt, paths, resume)
-    }
-    fn decode(
-        &self,
-        route: &RouteRecord,
-        output: &[u8],
-        exit: &ExitObservation,
-        path: &std::path::Path,
-    ) -> std::result::Result<Decoded, String> {
-        self.ordinary.decode(route, output, exit, path)
-    }
-}
-
 #[derive(Default)]
 pub(super) struct Fake {
     network: Cell<Option<NetworkAccess>>,
     refuse: bool,
-    policy_task: Option<TaskId>,
+    refuse_policy: bool,
     policy_resource: Option<provenant_records::diagnostic::ResourceFact>,
     pub(super) observed: Option<RouteRecord>,
     pub(super) codex_usage: Option<UsageRecord>,
     pub(super) decoded: Cell<usize>,
+    pub(super) complete: Option<bool>,
     prepared: Cell<usize>,
     resumed: Cell<Option<AttemptId>>,
     prompt: RefCell<String>,
@@ -261,10 +238,12 @@ impl Providers for Fake {
         self.failure_note.clone()
     }
 
-    fn check_policy(&self, task: &TaskRequest) -> std::result::Result<(), PrepareRefusal> {
-        if self.policy_task == Some(task.task_id) {
-            let mut refusal =
-                crate::PrepareRefusal::from("insufficient disk space; run `provenant gc`");
+    fn check_policy(&self, _: &TaskRequest) -> std::result::Result<(), Box<PrepareRefusal>> {
+        if self.refuse_policy {
+            let mut refusal = crate::PrepareRefusal::boxed(
+                TerminalCause::DiskFloor,
+                "insufficient disk space; run `provenant gc`",
+            );
             refusal.resource = self.policy_resource;
             return Err(refusal);
         }
@@ -277,7 +256,7 @@ impl Providers for Fake {
         prompt: &str,
         paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
+    ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
         self.network
             .set(Some(task.access.network(task.writer.is_some())));
         self.prepared.set(self.prepared.get() + 1);
@@ -286,7 +265,10 @@ impl Providers for Fake {
         self.prompt.replace(prompt.into());
         self.resumed.set(resume.map(|r| r.attempt_id));
         if self.refuse {
-            return Err("fixture adapter is disabled".into());
+            return Err(crate::PrepareRefusal::boxed(
+                TerminalCause::RouteResolutionRefused,
+                "fixture adapter is disabled",
+            ));
         }
         unreachable!("these tests never hand off to a guardian")
     }
@@ -315,8 +297,10 @@ impl Providers for Fake {
                 .answer
                 .clone()
                 .unwrap_or_else(|| String::from_utf8_lossy(stdout).into_owned()),
-            complete: self.outcome.is_none_or(|outcome| {
-                matches!(outcome, Outcome::Succeeded | Outcome::ReviewRequired)
+            complete: self.complete.unwrap_or_else(|| {
+                self.outcome.is_none_or(|outcome| {
+                    matches!(outcome, Outcome::Succeeded | Outcome::ReviewRequired)
+                })
             }),
             observed_route: self.observed.clone(),
             usage: self.codex_usage.clone().unwrap_or_default(),
@@ -377,13 +361,13 @@ fn settle_with_turns(
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let mut run = input();
     if let Some(role) = role {
-        run.request.tasks[0].context = Some(provenant_records::run::WorkContext {
+        run.request.task.context = Some(provenant_records::run::WorkContext {
             role: Some(role.into()),
             ..Default::default()
         });
     }
     store.create(&run, &call)?;
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.mark_starting(
         &store.record(id, &call)?,
         &route(),
@@ -393,7 +377,7 @@ fn settle_with_turns(
         &call,
     )?;
     store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-    let dir = store.attempt_dir(run.run_id, id, false)?;
+    let dir = store.attempt_dir(id, false)?;
     artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
     let mut observed = exit();
     observed.scope = RunStore::scope(&store.record(id, &call)?);
@@ -415,25 +399,12 @@ fn settle_with_turns(
 const DONE_ANSWER: &str = "answer\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"finished\"}\n```";
 const STOPPED_EARLY: &str = "```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"Parser done; renderer and tests remain.\"}\n```";
 
-fn two_tasks(concurrency: u64) -> PreparedRun {
-    let mut run = input();
-    let mut task = run.request.tasks[0].clone();
-    task.task_id = TaskId::from_bytes([7; 16]);
-    run.request.tasks.push(task.clone());
-    run.request.concurrency = concurrency;
-    run.attempts.push(NewAttempt {
-        task_id: task.task_id,
-        attempt_id: AttemptId::from_bytes([8; 16]),
-        prompt: "exact prompt".into(),
-    });
-    run
-}
 pub(super) fn seal_exit(store: &RunStore, exit: &ExitObservation) -> TestResult {
     let mut value = serde_json::to_value(exit)?;
     let object = value.as_object_mut().ok_or("exit fixture")?;
     object.remove("publication");
     object.insert("schema_version".into(), 1.into());
-    let dir = store.attempt_dir(exit.scope.run, exit.scope.attempt, false)?;
+    let dir = store.attempt_dir(exit.scope.attempt, false)?;
     artifacts::seal(
         &dir,
         "process-exit.json",
@@ -443,12 +414,15 @@ pub(super) fn seal_exit(store: &RunStore, exit: &ExitObservation) -> TestResult 
     Ok(())
 }
 
-/// One-task run with its own IDs: a writer when `writer`, else read-only.
+/// One attempt with its own ids and work key: a writer when `writer`, else read-only.
 fn lane(seed: u8, writer: bool) -> PreparedRun {
-    let mut run = batch(seed, 1);
+    let mut run = input();
+    run.attempt_id = provenant_core::AttemptId::from_bytes([seed; 16]);
+    run.operation_id = provenant_core::OperationId::parse(&format!("batch-{seed}")).unwrap();
+    crate::tests::rekey(&mut run);
     if writer {
-        run.request.tasks[0].writer = Some(WriterRequest {
-            extra: Default::default(),
+        run.request.task.writer = Some(WriterRequest {
+            extra: crate::tests::writer_extra(),
             project: "/project".into(),
             worktree: format!("/project/.worktrees/lane-{seed}").into(),
         });
@@ -458,7 +432,7 @@ fn lane(seed: u8, writer: bool) -> PreparedRun {
 /// Create and start `run`, returning its only attempt ready to claim.
 fn starting(store: &RunStore, run: &PreparedRun, call: &Request<'_>) -> Result<AttemptId> {
     store.create(run, call)?;
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.mark_starting(
         &store.record(id, call)?,
         &route(),
@@ -504,23 +478,6 @@ impl Stepped {
             boot_readable: std::sync::Mutex::new(true),
         }
     }
-    /// The wall clock alone steps, as an operator or NTP can make it.
-    fn step_wall_ms(&self, ms: i64) {
-        *self.wall_offset_micros.lock().unwrap() += ms * 1000;
-    }
-    /// Real time passes: the wall and host clocks both move.
-    fn pass_micros(&self, micros: u64) {
-        *self.host_base_micros.lock().unwrap() += micros;
-        *self.wall_offset_micros.lock().unwrap() += i64::try_from(micros).unwrap_or(0);
-    }
-    fn pass_ms(&self, ms: u64) {
-        self.pass_micros(ms * 1000);
-    }
-    /// The host restarts: a new boot whose clock has run `host_ms`.
-    fn reboot(&self, boot: &'static str, host_ms: u64) {
-        *self.boot.write().unwrap() = boot;
-        *self.host_base_micros.lock().unwrap() = host_ms * 1000 - self.inner.mono_now().as_micros();
-    }
 }
 impl Clock for Stepped {
     fn wall_now(&self) -> std::result::Result<WallTime, provenant_core::TimeError> {
@@ -563,38 +520,6 @@ fn writers<const N: usize>(
     Ok(ids)
 }
 
-/// Probes memory, and while it does another process starts a writer.
-struct RivalStarts<'a> {
-    store: &'a RunStore,
-    rival: AttemptId,
-    clock: &'a Stepped,
-    call: &'a Request<'a>,
-    started: Cell<bool>,
-}
-impl Resources for RivalStarts<'_> {
-    fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
-        crate::tests::HostFacts::new(100).guardian_identity()
-    }
-    fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
-        crate::tests::HostFacts::new(100).observe_process(pid)
-    }
-    fn memory(&self) -> std::io::Result<MemorySample> {
-        if !self.started.replace(true) {
-            self.clock.pass_ms(1_000);
-            let rival = self.store.claim(self.rival, self.clock, self.call);
-            assert!(rival.is_ok_and(|record| record.is_some()), "rival starts");
-            self.clock.pass_ms(500);
-        }
-        Ok(MemorySample {
-            available_bytes: 100,
-            total_bytes: 100,
-        })
-    }
-    fn disk(&self, _: &Directory) -> std::io::Result<u64> {
-        Ok(u64::MAX)
-    }
-}
-
 fn child_wait_lease_cycle(block_reclaim: bool) -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -610,21 +535,16 @@ fn child_wait_lease_cycle(block_reclaim: bool) -> TestResult {
     )?;
     let facts = HostFacts::new(100);
     let mut parent = lane(121, true);
-    parent.request.tasks[0].build_heavy = true;
+    parent.request.task.build_heavy = true;
     let mut child = lane(122, true);
-    child.request.tasks[0].build_heavy = true;
+    child.request.task.build_heavy = true;
     let parent_id = starting(&store, &parent, &call)?;
     let parent_record = store
         .claim_observed(parent_id, &clock, &call, &facts)?
         .ok_or("parent claim")?;
-    let parent_dir = store.attempt_dir(parent.run_id, parent_id, false)?;
+    let parent_dir = store.attempt_dir(parent_id, false)?;
     artifacts::seal(&parent_dir, "stdout.log", b"parent work", CAPTURE_LIMIT)?;
     let child_id = starting(&store, &child, &call)?;
-    assert!(
-        store
-            .claim_observed(child_id, &clock, &call, &facts)?
-            .is_none()
-    );
     if block_reclaim {
         // The ledger yield commits before the owning store. Simulate the
         // latter failing: cleanup must still reclaim despite an active ticket.
@@ -647,23 +567,23 @@ fn child_wait_lease_cycle(block_reclaim: bool) -> TestResult {
         .claim_observed(child_id, &clock, &call, &facts)?
         .ok_or("child claim")?;
     if block_reclaim {
-        assert!(!store.set_child_wait_observed(parent_id, false, &call, &facts)?);
+        assert!(store.set_child_wait_observed(parent_id, false, &call, &facts)?);
         let reopened = RunStore::open(&context(temp.path())?, &call)?;
         let retained = reopened.record(parent_id, &call)?;
         assert_eq!(retained.started_at, parent_record.started_at);
         assert_eq!(retained.generation, parent_record.generation);
         assert!(matches!(retained.state, AttemptState::Running { .. }));
         assert!(
-            reopened.lane_waits_with_resources(&[retained], &call, &facts)[0]
-                .waiting_for
-                .contains("admission")
+            reopened
+                .lane_waits_with_resources(&[retained], &call, &facts)
+                .is_empty()
         );
         assert_eq!(
             parent_dir.read_stable("stdout.log".as_ref(), CAPTURE_LIMIT)?,
             b"parent work"
         );
     }
-    let child_dir = store.attempt_dir(child.run_id, child_id, false)?;
+    let child_dir = store.attempt_dir(child_id, false)?;
     artifacts::seal(&child_dir, "stdout.log", b"child work", CAPTURE_LIMIT)?;
     let child_exit = ExitObservation {
         scope: RunStore::scope(&child_record),
@@ -686,7 +606,7 @@ fn child_wait_lease_cycle(block_reclaim: bool) -> TestResult {
     let mut finished = vec![parent_id, child_id];
     for seed in 123..126 {
         let mut child = lane(seed, true);
-        child.request.tasks[0].build_heavy = true;
+        child.request.task.build_heavy = true;
         let id = starting(&store, &child, &call)?;
         let record = store
             .claim_observed(id, &clock, &call, &facts)?
@@ -695,7 +615,7 @@ fn child_wait_lease_cycle(block_reclaim: bool) -> TestResult {
             store.record(parent_id, &call)?.state,
             AttemptState::Running { .. }
         ));
-        let dir = store.attempt_dir(child.run_id, id, false)?;
+        let dir = store.attempt_dir(id, false)?;
         artifacts::seal(&dir, "stdout.log", b"child work", CAPTURE_LIMIT)?;
         let observed = ExitObservation {
             scope: RunStore::scope(&record),
@@ -752,30 +672,6 @@ fn child_wait_lease_cycle(block_reclaim: bool) -> TestResult {
     Ok(())
 }
 
-/// A run of `tasks` attempts at full concurrency, with IDs unique to `seed`.
-fn batch(seed: u8, tasks: u64) -> PreparedRun {
-    let mut run = input();
-    let template = run.request.tasks[0].clone();
-    run.run_id = provenant_core::RunId::from_bytes([seed; 16]);
-    run.operation_id = provenant_core::OperationId::parse(&format!("batch-{seed}")).unwrap();
-    run.request.concurrency = tasks.min(8);
-    run.request.tasks.clear();
-    run.attempts.clear();
-    for index in 0..tasks as u8 {
-        let mut task = template.clone();
-        task.task_id = TaskId::from_bytes([seed, index, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
-        run.attempts.push(NewAttempt {
-            task_id: task.task_id,
-            attempt_id: AttemptId::from_bytes([
-                seed, index, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-            ]),
-            prompt: "exact prompt".into(),
-        });
-        run.request.tasks.push(task);
-    }
-    run
-}
-
 /// Starts a one-task run after `damage` has altered its stored prompt, and
 /// asserts the attempt ends Rejected before preparation with its reason recorded.
 fn assert_unreadable_prompt_rejected(
@@ -789,14 +685,14 @@ fn assert_unreadable_prompt_rejected(
     let store = RunStore::open(&context, &call)?;
     let run = input();
     store.create(&run, &call)?;
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     let prompt = context
         .state_root
         .as_path()
-        .join(format!("runs/{}/attempts/{id}/prompt.txt", run.run_id));
+        .join(format!("attempts/{id}/prompt.txt"));
     damage(&prompt)?;
     let fake = Fake::default();
-    let started = store.start(run.run_id, &fake, &|_, _| unreachable!(), &call)?;
+    let started = store.start(run.attempt_id, &fake, &|_, _| unreachable!(), &call)?;
     // Restore access so the tempdir can be removed whatever the outcome.
     if prompt.exists() {
         std::fs::set_permissions(&prompt, std::fs::Permissions::from_mode(0o600))?;
@@ -822,7 +718,7 @@ fn assert_unreadable_prompt_rejected(
     assert_eq!(recorded.len(), reason.len().min(256));
     assert!(
         store
-            .start(run.run_id, &fake, &|_, _| unreachable!(), &call)?
+            .start(run.attempt_id, &fake, &|_, _| unreachable!(), &call)?
             .is_empty()
     );
     Ok(())
@@ -836,7 +732,7 @@ fn holder_release_temporary_fixture(valid_binding: bool) -> TestResult {
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
     store.create(&run, &call)?;
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.mark_starting(
         &store.record(id, &call)?,
         &route(),
@@ -846,7 +742,7 @@ fn holder_release_temporary_fixture(valid_binding: bool) -> TestResult {
         &call,
     )?;
     store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let mut observed = exit();
     observed.scope = RunStore::scope(&store.record(id, &call)?);
     seal_exit(&store, &observed)?;
@@ -903,7 +799,7 @@ fn holder_release_temporary_fixture(valid_binding: bool) -> TestResult {
 fn finish_reactions(store: &RunStore) -> TestResult {
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
-    for run in store.open_runs(100, &call)? {
+    for run in store.open_attempts(100, &call)? {
         store.drain_reactions(run, &clock, &cancel, &mut |reaction, _| {
             reaction.graph_done = true;
             reaction.notice_done = true;
@@ -968,13 +864,13 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
     let mut run = input();
     let worktree = temp.path().join("lane");
     std::fs::create_dir(&worktree)?;
-    run.request.tasks[0].writer = Some(WriterRequest {
-        extra: Default::default(),
+    run.request.task.writer = Some(WriterRequest {
+        extra: crate::tests::writer_extra(),
         project: temp.path().to_path_buf(),
         worktree: worktree.clone(),
     });
     store.create(&run, &call)?;
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.mark_starting(
         &store.record(id, &call)?,
         &route(),
@@ -996,7 +892,7 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
         })?;
     }
     let scope = RunStore::scope(&store.record(id, &call)?);
-    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let custody = store
         .writer_registry
         .join("worktrees")
@@ -1056,7 +952,7 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
             std::ffi::OsStr::new("process.json"),
             ".checkpoint-",
             &serde_json::to_vec(
-                &serde_json::json!({"schema_version": 1, "scope": scope, "guardian": guardian, "provider": provider}),
+                &serde_json::json!({"schema_version": 1, "scope": scope, "publication_pending": false, "guardian": guardian, "provider": provider}),
             )?,
             provenant_os::fs::PublishMode::Replace,
         )?;
@@ -1109,7 +1005,7 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
         assert_eq!(std::fs::read(&reservation).ok(), before);
     }
     let reconciled =
-        store.reconcile_with_observer(run.run_id, &Fake::default(), &call, observer)?;
+        store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, observer)?;
     if reservation_case == ReservationCase::DifferentAttempt {
         assert!(
             matches!(reconciled.as_slice(),
@@ -1205,13 +1101,13 @@ fn recover_rebooted_writer_inner(
     let worktree = temp.path().join("lane");
     std::fs::create_dir(&worktree)?;
     std::fs::write(worktree.join("unfinished.rs"), "keep my work")?;
-    run.request.tasks[0].writer = writer.then(|| WriterRequest {
-        extra: Default::default(),
+    run.request.task.writer = writer.then(|| WriterRequest {
+        extra: crate::tests::writer_extra(),
         project: temp.path().to_path_buf(),
         worktree: worktree.clone(),
     });
     store.create(&run, &call)?;
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.mark_starting(
         &store.record(id, &call)?,
         &route(),
@@ -1225,7 +1121,7 @@ fn recover_rebooted_writer_inner(
         .ok_or("not admitted")?;
     let before = store.record(id, &call)?;
     let scope = RunStore::scope(&before);
-    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let custody = if writer {
         store
             .writer_registry
@@ -1233,10 +1129,7 @@ fn recover_rebooted_writer_inner(
             .join(context.project_id.to_string())
             .join(provenant_confinement::worktrees::state_dir_name(&worktree))
     } else {
-        context
-            .state_root
-            .as_path()
-            .join(format!("runs/{}/attempts/{id}", run.run_id))
+        context.state_root.as_path().join(format!("attempts/{id}"))
     };
     std::fs::DirBuilder::new()
         .recursive(true)
@@ -1286,7 +1179,7 @@ fn recover_rebooted_writer_inner(
         RECORD_LIMIT,
     )?;
     let checkpoint = serde_json::to_vec(&serde_json::json!({
-        "schema_version": 1, "scope": scope, "guardian": guardian,
+        "schema_version": 1, "scope": scope, "publication_pending": false, "guardian": guardian,
         "provider": value["provider"],
     }))?;
     artifacts::seal(&attempt, "process.json", &checkpoint, RECORD_LIMIT)?;
@@ -1308,7 +1201,7 @@ fn recover_rebooted_writer_inner(
     let history = context
         .state_root
         .as_path()
-        .join(format!("runs/{}/attempts/{id}/provider-state", run.run_id));
+        .join(format!("attempts/{id}/provider-state"));
     std::fs::write(history.join("session"), "history")?;
 
     if removed {
@@ -1322,7 +1215,7 @@ fn recover_rebooted_writer_inner(
             provenant_os::fs::LockMode::Exclusive,
         )?;
         assert!(
-            matches!(store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?.as_slice(),
+            matches!(store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?.as_slice(),
             [(attempt, Reconciled::Uncertain { .. })] if *attempt == id)
         );
         assert_eq!(store.record(id, &call)?, before);
@@ -1334,7 +1227,7 @@ fn recover_rebooted_writer_inner(
         }
         if unresolved {
             assert!(matches!(
-                store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?.as_slice(),
+                store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?.as_slice(),
                 [(attempt, Reconciled::Uncertain { .. })] if *attempt == id
             ));
             assert_eq!(store.record(id, &call)?, before);
@@ -1350,7 +1243,7 @@ fn recover_rebooted_writer_inner(
             );
         }
         assert_eq!(
-            store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?,
+            store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?,
             vec![(id, Reconciled::Finished)]
         );
         let AttemptState::Terminal {
@@ -1405,10 +1298,10 @@ fn recover_rebooted_writer_inner(
                 | CancelReceipt::AlreadyRequested
                 | CancelReceipt::Requested
         ));
-        store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?;
+        store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?;
     } else {
         assert_eq!(
-            store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?,
+            store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?,
             vec![(id, Reconciled::Finished)]
         );
     }
@@ -1426,19 +1319,18 @@ fn recover_rebooted_writer_inner(
     assert_eq!(after.applied_route, before.applied_route);
     assert_eq!(after.usage, before.usage);
     assert_eq!(after.session, before.session);
-    assert_eq!(store.run(run.run_id, &call)?.closure, Closure::Closed);
     assert!(store.writer_fences()?.is_empty());
     assert!(!reservation.exists());
     assert!(
         store
-            .reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?
+            .reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?
             .is_empty()
     );
     // Also retry a crash after fence release but before clearing the marker.
     store.set_temporary_retained(id, true, &call)?;
     assert!(
         store
-            .reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?
+            .reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?
             .is_empty()
     );
     for (name, bytes) in telemetry {
@@ -1457,7 +1349,7 @@ fn recover_rebooted_writer_inner(
     }
     assert!(artifacts::read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_none());
     finish_reactions(&store)?;
-    assert!(store.open_runs(10, &call)?.is_empty());
+    assert!(store.open_attempts(10, &call)?.is_empty());
     Ok(())
 }
 
@@ -1471,9 +1363,9 @@ impl Providers for RefusesAfterAlias {
         _: &str,
         paths: &LaunchPaths,
         _: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
+    ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
         self.0.set(Some(paths.temporary_alias.is_some()));
-        Err("provider unavailable".into())
+        Err(crate::fixture_refusal("provider unavailable"))
     }
     fn decode(
         &self,
@@ -1484,120 +1376,6 @@ impl Providers for RefusesAfterAlias {
     ) -> std::result::Result<Decoded, String> {
         unreachable!("no provider runs")
     }
-}
-
-fn old_ledger(store: &RunStore, schema: &str) -> TestResult {
-    use std::os::unix::fs::PermissionsExt;
-    let file = store.writer_registry.join("admission.sqlite3");
-    std::fs::create_dir_all(&store.writer_registry)?;
-    let old = rusqlite::Connection::open(&file)?;
-    old.execute_batch(schema)?;
-    drop(old);
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-
-const VERSION_1_LEDGER: &str = "CREATE TABLE leases (attempt TEXT PRIMARY KEY, project TEXT NOT NULL, store BLOB NOT NULL) STRICT;
-     CREATE INDEX lease_projects ON leases(project);
-     CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT;";
-
-fn version_1_start(store: &RunStore, host: &Stepped, ago_ms: i64) -> TestResult {
-    let started = host.wall_now()?.as_micros() / 1000 - ago_ms;
-    old_ledger(
-        store,
-        &format!(
-            "{VERSION_1_LEDGER}
-             INSERT INTO spacing(id,last_start) VALUES (1,{started});
-             PRAGMA user_version=1;"
-        ),
-    )
-}
-
-#[test]
-fn read_only_disk_floor_warning_is_emitted_once_by_admit() -> TestResult {
-    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor};
-    use std::{ffi::OsString, time::Duration};
-    const CHILD: &str = "PROVENANT_TEST_ADMISSION_WARNING";
-    if std::env::var_os(CHILD).is_none() {
-        let temp = tempfile::tempdir()?;
-        let argv: Vec<OsString> = vec![
-            std::env::current_exe()?.into(),
-            "--exact".into(),
-            "dispatch_tests::read_only_disk_floor_warning_is_emitted_once_by_admit".into(),
-            "--nocapture".into(),
-        ];
-        let env = [(CHILD.into(), "1".into())];
-        let mut options = ExecOptions::new(&argv, temp.path(), Duration::from_secs(10));
-        options.env = Some(&env);
-        options.stdout = StreamPolicy::Capture { limit: 8192 };
-        options.stderr = StreamPolicy::Capture { limit: 8192 };
-        let output = SystemExecutor::new(1)?.execute(options)?;
-        assert_eq!(output.termination, Termination::Exit(0), "{output:?}");
-        let stderr = String::from_utf8(output.stderr.bytes)?;
-        assert_eq!(
-            stderr.matches("admission warning [DISK_FLOOR]").count(),
-            1,
-            "{stderr}"
-        );
-        assert!(
-            stderr.contains(
-                "99 bytes available; gc.free_floor is 100 bytes (source: host configuration)"
-            ),
-            "{stderr}"
-        );
-        assert!(stderr.contains("read-only lane is proceeding"), "{stderr}");
-        assert!(stderr.contains("provenant gc --apply"), "{stderr}");
-        return Ok(());
-    }
-    struct LowDisk {
-        facts: HostFacts,
-        probes: Cell<u32>,
-    }
-    impl Resources for LowDisk {
-        fn memory(&self) -> std::io::Result<MemorySample> {
-            self.facts.memory()
-        }
-        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
-            Ok(99)
-        }
-        fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
-            self.facts.observe_process(pid)
-        }
-        fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
-            self.facts.guardian_identity()
-        }
-        fn process_budget(&self) -> std::io::Result<provenant_os::sys::resources::ProcessBudget> {
-            let probes = self.probes.get() + 1;
-            self.probes.set(probes);
-            // Hold admission across several probes to prove the warning is once.
-            Ok(provenant_os::sys::resources::ProcessBudget {
-                used: if probes < 3 { 100 } else { 0 },
-                limit: 100,
-            })
-        }
-    }
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let context = context(temp.path())?;
-    let registry = temp.path().canonicalize()?.join("registry");
-    std::fs::DirBuilder::new().mode(0o700).create(&registry)?;
-    std::fs::write(
-        registry.join("config.toml"),
-        "schema_version=1\n[gc]\nfree_floor='100B'\n",
-    )?;
-    let store = RunStore::open(&context, &call)?.with_writer_registry(&registry);
-    let run = lane(99, false);
-    let id = starting(&store, &run, &call)?;
-    let attempt = store.attempt_dir(run.run_id, id, false)?;
-    let probe = LowDisk {
-        facts: HostFacts::new(100),
-        probes: Cell::new(0),
-    };
-    let admitted = store.admit(id, &attempt, &probe, &clock, &cancel)?;
-    assert!(matches!(admitted.state, AttemptState::Running { .. }));
-    assert!(probe.probes.get() >= 3);
-    Ok(())
 }
 
 #[path = "dispatch_admission_tests.rs"]

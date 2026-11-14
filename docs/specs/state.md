@@ -5,198 +5,135 @@ Owner: `crates/core` (IDs, roots, time), `crates/records` (codecs, digests),
 Anchor: `crates/core/src/roots.rs`, `crates/records/tests/contracts.rs`,
 `crates/config/src/managed_tests.rs`
 
-State owns root selection, identities, record codecs, typed configuration and
-the managed installation. Config keys are listed in `provenant config schema`; the attempt layout is `AttemptFile`
-in `crates/records/src/attempt_file.rs`. Operator steps are in the [install
-runbook](../runbooks/install.md) and [GC runbook](../runbooks/gc.md). Paths
-are relative to `tools/front-door/`.
+Keys and defaults: `provenant config schema`. Operator steps: the
+[install](../runbooks/install.md) and [GC](../runbooks/gc.md) runbooks.
 
 ## Roots and identities
 
 ### Root selection never falls back
 
-The root is `--state-dir ABS`, then `PROVENANT_STATE_DIR`, then
-`~/.local/share/provenant/v1`; an empty or relative explicit value fails.
-State refuses a root that equals home or `/`, lies inside the product
-checkout or a pre-1.0 root, or contains `.agent-run`; existing ancestor
-aliases are resolved first. The contents of a pre-1.0 root are never opened.
-Reads, help and `root` create no state; writes create directories with mode
-0700 and files with mode 0600.
-- Why (default): a wrong root mixes or destroys another installation's state.
-- Test: `crates/core/src/roots.rs::roots_refuse_home_checkout_old_roots_and_any_agent_run_component`;
+An empty or relative explicit root fails and never yields to the default. A
+root that overlaps a declared credential, Git-metadata or other-state boundary
+is refused, whether it contains that location or lies inside it. Ordinary
+checkout/workspace directories and the retired agent-harness location warn
+with their source and proceed. OS binding captures existing Git markers and
+linked-worktree metadata; installed release directories imply no Git boundary.
+The same declaration and decision apply before
+and after alias binding. Existing workspace `.agent-run` stores are captured
+as other-state boundaries; that name alone establishes no boundary.
+Reads create no state.
+The first 2.0 install validates a sibling staging root against the captured
+install root inputs, changing only the state candidate, before stopping 1.x
+agents. It seeds only `config.toml`, `host-id` and `install/receipt.json` into an
+absent or empty default root; the 1.x root remains untouched.
+- Why: a wrong root mixes or destroys another installation's state.
+- Test: `crates/core/src/roots.rs::protected_locations_enforce_only_their_declared_boundaries`;
+  `crates/core/src/roots.rs::changing_the_candidate_preserves_all_captured_boundaries`;
+  `src/state_handoff.rs::tests::copies_only_owner_configuration_and_never_writes_the_old_root`;
   `tests/parser.rs::root_uses_release_location_and_explicit_state_without_creating_it`
 - Owner: `crates/core/src/roots.rs`, `src/roots.rs`
 
-### Exact identifiers and time
+### Identifiers have one spelling
 
-IDs are typed wrappers over 16 random bytes, shown as 32 lowercase hex digits.
-`GitOid` accepts only complete 40- or 64-hex-digit object names. `RelativePath` rejects
-absolute components, `.` and `..`, and durable paths use tagged `PathWire`,
-never lossy text. `WallTime` is UTC integer microseconds with one rendering. Durations use
-checked arithmetic. `CancelToken` is never serialised and never used as a
-provider signal.
-- Why (default): a value that normalises two ways lets one record alias another.
-- Test: `crates/core/src/ids.rs::identifiers_are_validated_at_the_wire_boundary`;
-  `crates/core/src/paths.rs::relative_paths_reject_normalisation_and_parent_traversal`
+A value that can normalise two ways is rejected at the wire boundary.
+- Why: two spellings let one record alias another.
+- Test: `crates/core/src/ids.rs::identifiers_are_validated_at_the_wire_boundary`
 - Owner: `crates/core/src/`
 
-## Readiness persistence
+### Graph names retain one identity
 
-Readiness evidence has a separate tree from quota snapshots, so a failed
-publication cannot corrupt an account commit. `crates/cli/src/quota.rs` owns
-its paths; [routing](routing.md#unknown-never-means-ready) owns readiness scope and freshness.
+A graph name identifies one graph generation for its project's lifetime.
+Checkpoint collection leaves a durable name reservation because retained
+attempt, chair and event records continue to refer to the graph by name. A
+collected name is not allocated to a later graph.
+- Why: reusing the name can collide with retained attempt keys or inherit a
+  stale chair association.
+- Test: `crates/fabric-runtime/src/graph/journal_tests.rs::checkpoint_collection_keeps_pending_graphs_and_reserves_collected_names`
+- Owner: `crates/fabric-runtime/src/graph/journal.rs`,
+  `src/fabric/interface.rs`
 
 ## Records
 
-### Owner change generations
+### Commit before signal
 
-Owners commit durable state before publishing the lossy change-generation
-signal. A failed signal must not fail the committed write. Readers treat absent,
-busy or reset generations as unknown and perform a bounded re-read; file events
-are hints, and clients reattach after replacement or directory recreation.
-
-Signal publication never writes through stray links or foreign entries. It
-starts a new epoch after replacement. It does not fsync, so power loss may roll
-back a generation; clients need a periodic full re-read even when generations
-compare equal. The signal's scope and timing constants belong to
-`crates/os/src/changes.rs`, not to the owner's transaction.
-- Owner: `crates/os/src/changes.rs`, with bumps at each committing owner
-- Test: `crates/cli/src/console.rs::changes_reports_unknown_and_comparison`;
-  `crates/fabric-store/src/tests.rs::signal_failure_reports_a_committed_fabric_write`;
-  `crates/config/src/tests.rs::config_edit_commits_when_the_change_signal_cannot_publish`;
-  `crates/workflow/src/session.rs::session_save_without_chair_identity_does_not_signal_chair`
+Owners commit durable state before the lossy change-generation signal; a
+failed signal never fails the committed write. Readers treat an absent or reset
+generation as unknown and re-read.
+- Why: a hint must not become a second source of truth.
+- Test: `crates/fabric-store/src/tests.rs::signal_failure_reports_a_committed_fabric_write`;
+  `crates/cli/src/console.rs::changes_reports_unknown_and_comparison`
+- Owner: `crates/os/src/changes.rs`
 
 ### Strict, bounded records
 
-Stored records are typed, versioned serde models. Extra record fields survive
-round trips and canonical digests; authority-bearing input validation is a
-separate boundary. Unsupported versions fail before mutation. The reader rejects duplicate members, invalid UTF-8, trailing input, non-finite
-numbers and out-of-range integers, caps the bytes it reads (1 MiB for config,
-8 MiB for records) and the nesting depth (64), and never repeats the rejected
-value in its error. Edge-built
-facts are `Serialize` only, so deserialisation cannot manufacture evidence.
-- Why (default): ambiguous JSON parses differently in different readers, and a forged
-  file must not become evidence.
+Unsupported versions fail before mutation. The reader rejects ambiguous or
+unbounded input and never echoes the rejected value. Closed codecs reject or
+discard unknown fields; records with explicit extension maps preserve their
+extensions. Edge-built facts are `Serialize` only.
+- Why: a forged file must not become evidence.
 - Test: `crates/records/tests/contracts.rs::bounded_decode_fails_closed_for_duplicates_utf8_trailing_and_integer_overflow`;
-  `crates/records/tests/contracts.rs::typed_decode_errors_do_not_disclose_rejected_values`;
-  `crates/records/tests/forward_compatibility.rs::request_digest_matches_the_newer_writers_canonical_record`
+  `crates/records/tests/contracts.rs::typed_decode_errors_do_not_disclose_rejected_values`
 - Owner: `crates/records/src/`
 
-### Digest preimage
+### One digest preimage
 
-`CanonicalV1` is UTF-8 JSON with no whitespace, keys sorted recursively by
-UTF-8 bytes, array order preserved, minimal string escapes, no Unicode
-normalisation, shortest decimal integers and no floats; it is not RFC 8785 (the JSON Canonicalization Scheme).
-`record_digest(kind, version, bytes)` hashes a fixed domain prefix, kind,
-version and canonical bytes as `sha256:<64 hex>`. `FileDigest` hashes raw
-bytes as a separate type. Domain owners choose which fields enter a digest.
-- Why (default): a digest is an identity only if every writer computes the same bytes.
-- Test: `crates/records/tests/contracts.rs::canonical_v1_sorts_keys_uses_required_escapes_and_separates_digest_domains`;
-  `crates/records/src/canonical.rs::record_digest_uses_exact_domain_framing_and_canonical_input_bytes`
+`CanonicalV1` bytes are deterministic and domain-framed; it is not RFC 8785.
+- Why: a digest is an identity only if every writer computes the same bytes.
+- Test: `crates/records/tests/contracts.rs::canonical_v1_sorts_keys_uses_required_escapes_and_separates_digest_domains`
 - Owner: `crates/records/src/canonical.rs`
-
-### YAML frontmatter
-
-Session summaries use a bounded YAML frontmatter header parsed with
-serde-saphyr and validated against the summary schema. Repository skill
-frontmatter and agent sidecars are checked by `scripts/check-harness`.
-- Why (default): validate metadata using maintained YAML parsers.
-- Test: `crates/workflow/src/session/summary.rs::tests`
-- Owner: `crates/workflow/src/session/summary.rs`, `scripts/check-harness`
 
 ## Configuration
 
-### Cargo seed switch
+### Config never widens authority
 
-The per-host Cargo seed switch must default on and must have no
-effect outside macOS. Its scope and manual configuration are described in
-the [worktree guide](../worktrees.md).
-- Why (default): cloning is a host-specific optimisation that falls back to an empty
-  store when unavailable, and a host may turn it off; it is never a
-  prerequisite for running a lane.
-- Test: `crates/fabric-runtime/src/config.rs::tests::lane_priority_defaults_and_bounds`;
-  `crates/run/src/cargo_seed.rs::tests::disabled_does_not_touch_cache`
-- Test: none (gap) for the non-macOS no-op.
-- Owner: `crates/fabric-runtime/src/config.rs`, `crates/run/src/cargo_seed.rs`
-
-### Cargo target seed generations
-
-The host may build a generation from the pinned `origin/main` commit in a
-scratch checkout. It publishes a read-only generation only after the build and
-manifest succeed and their contents are synced. A completion marker and frozen
-generation root distinguish finished publications from interrupted ones. GC
-reclaims incomplete generations and abandoned stages while protecting active
-builds. It holds the store lock and removes oldest generations until both the
-count and apparent-byte caps hold; a busy store is skipped.
-
-The host refreshes generations itself. Each daily collection, after fetching,
-queues a detached single-flight worker that rebuilds a project's seed only when
-`origin/main` has moved past its newest complete generation. The tick never
-builds inline. A busy build is a no-op; a failure is recorded in
-`<state>/tick/seed-result.json`, reported as `last_failed`, and does not fail
-the tick.
-- Test: `src/target_seed_build.rs::tests`; `crates/run/src/target_seed_gc.rs::tests`;
-  `src/tick.rs::tests::seed_refresh_is_queued_without_running_inline_and_a_spawn_failure_is_recorded`;
-  `src/tick.rs::seed_pass_treats_busy_as_a_noop_and_isolates_project_failures`;
-  `src/tick.rs::seed_pass_is_single_flight_and_respects_a_disabled_seed`
-- Owner: `src/target_seed_build.rs`, `src/tick.rs`, `crates/run/src/target_seed_gc.rs`
-
-### Strict typed config
-
-`config.toml` declares its supported schema version. Missing configuration
-uses defaults; syntax, version and filesystem-boundary failures refuse loading.
-Invalid optional values warn and use defaults. A malformed restriction must not
-become permission. Unknown optional keys survive an unrelated edit; `config set`
-validates the requested value and publishes atomically. `config show` redacts
-secrets and never rewrites the file. `provenant config schema`
-owns keys and defaults.
-- Why (default): configuration errors need visible remedies without silently expanding
-  authority or discarding unrelated user settings.
+Syntax, version and filesystem-boundary failures refuse loading; an invalid
+optional value warns and uses the default, and a malformed restriction never
+becomes permission. `config set` publishes atomically and keeps unknown keys;
+`config show` redacts secrets.
+Commands load their declared domains; invalid unused domains warn, and effective defaults retain their compiled source.
+One sourced port table declares verify, land, CI observation, worktree layout, naming, post-create, tracker, release and admission backends; repository values at `.provenant/ports.json` override host `state/ports.json`, then compiled builtin defaults. This repository stores its source at `config/ports.json` and links the optional Provenant path there; CI reads the source directly. Verify tiers declare free-form names, an explicit default, selection and host-load policy, while the builtin layout declares its roots and branch path once.
+The land command reuses `records::landing::RepositoryCommand`: exit 0 means landed, other nonzero exits refuse except its declared unknown code. A command port inherits only the declared execution-context environment (paths, home, temporary directory, locale and toolchain selection), plus explicit owner-supplied values; ambient credential and agent variables are not forwarded. A command port runs configured argv directly, followed by owner-supplied arguments, with no shell; declared exit codes select succeeded, unknown or refused. Consumers of response bytes treat incomplete capture as unavailable; exit-only admission uses declared exit success and records capture completeness separately. `none` disables that port without selecting the builtin behavior.
+Naming commands receive the requested branch and project path as arguments; complete single-line branch output derives a name. Empty output keeps the request; invalid output or a command failure warns and keeps it. Post-create commands receive the branch and new worktree path. Admission commands receive `PROVENANT_PORT_PHASE=acquire|release`, `PROVENANT_ADMISSION_ATTEMPT`, `PROVENANT_ADMISSION_EPOCH`, `PROVENANT_ADMISSION_WORKTREE`, `PROVENANT_ADMISSION_PROJECT` and an informational `PROVENANT_ADMISSION_OWNER_PID`. The repository owns its semaphore keyed by attempt and epoch: acquire and release are idempotent, and release fences any late acquire for the same epoch. A queued retry uses a new epoch. The existing `Starting` claim and launcher ownership cover acquisition and provider preparation, so cancellation retains admission until preparation unwinds. Provenant freezes the exact command/source privately before acquisition and invokes release outside terminal transaction locks. A matching successful command receipt proves release after terminal settlement without changing the immutable attempt record. Busy acquisition returns the attempt for retry after release is known, without a Provenant semaphore.
+CI observation commands receive `PROVENANT_PORT_REQUEST_PATH` and `PROVENANT_PORT_IF_NONE_MATCH` (empty when no validator is sent), and emit `{"status": number, "headers": {"etag": "..."}, "body": "UTF-8 response bytes"}`; 304 responses use an empty body. Repository discovery uses the same selected backend with the literal request path `repos/{owner}/{repo}`; its body is the UTF-8 JSON object `{"full_name":"owner/repo"}` and `none` refuses the lookup without using the builtin adapter. Verify command ports substitute `{tier}` in their declared argv and receive `PROVENANT_VERIFY_TIER`, `PROVENANT_VERIFY_PROJECT_ROOT` and the private `PROVENANT_VERIFY_EFFECTIVE_CONFIG_JSON`, which contains only the resolved verify declaration. The builtin engine uses that declaration so host overrides apply; direct repository CI still reads `config/ports.json` without Provenant. Tracker commands receive one issue number and emit the normalized projection `{body, state, kind}`. Release commands receive optional `--base` and `--head`, then emit the complete `{findings: [{rule, path, line, message}]}` set for Provenant to page; `path` uses the existing `PathWire` representation and `line` is one-based. Command receipts under host state bind typed owner/backend, command digest, source, phase and hashed request key to outcome, exit code, elapsed time and stdout digest; these receipt bodies omit argv, environment and output contents.
+- Why: errors need visible remedies without expanding authority.
 - Test: `crates/config/src/tests.rs::config_warns_on_optional_input_but_refuses_syntax_and_versions_without_echoing_input`;
-  `crates/config/src/tests.rs::config_filesystem_boundary_refuses_links_non_files_and_unreadable_roots`;
-  `crates/config/src/tests.rs::set_rejects_out_of_range_values_and_unknown_knobs`;
   `crates/config/src/tests.rs::knob_edit_preserves_unknown_keys_while_applying_the_edit`
 - Owner: `crates/config/src/`
 
-### Provider-state retention
+### Retention keeps evidence
 
-Settling an attempt prunes only proven regenerable provider caches. Garbage
-collection (GC) expires credential entries after 24 hours. It expires resumable
-state after `retention.provider_state_days`, archiving history first, and
-leaves result, captures, exit evidence and digests untouched; resume then
-fails `PROVIDER_STATE_EXPIRED` before spending. GC does not wait for locks,
-spares reservations and pending continuations, deletes only through
-identity-checked tombstones, never follows links and writes nothing on a dry
-run ([ADR 0031](../adr/0031-retain-provider-history-and-expire-resume-state.md)).
-- Why (default): freeing credentials and space must not destroy evidence or a session
-  in use.
+GC retains evidence and unimported Git work; it expires resumable provider state
+only after archiving history. It skips busy items, protects active reservations
+and continuations, and uses identity-checked deletion without following links.
+Usage retention belongs to [telemetry](telemetry.md#the-usage-ledger-outlives-the-run-store).
+Each retention class declares its owner, trigger, eligibility and settings; GC reports bytes per class with complete, partial or unavailable measurements.
+Removal records preserve subject, tip, subsumed or landed predicate and evidence source; shallow history, conflicted merge trees, offline forge and rewritten default branches remain typed kept outcomes.
+- Why: freeing space must not destroy evidence or a session in use.
 - Test: `crates/run/src/retention.rs::gc_spares_nonterminal_attempts_and_contention_and_reservations`;
   `crates/run/src/retention.rs::gc_retries_only_authorised_tombstones_and_never_follows_links`
+- Test: `crates/os/src/fs/ledger.rs::tests`;
+  `crates/telemetry/src/ledger/tests.rs::concurrent_retries_count_an_attempt_once`;
+  `crates/run/src/retention.rs::age_collection_keeps_unimported_git_until_custody_is_proven`;
+  `crates/run/src/target_seed_gc.rs::tests::active_clone_lock_prevents_collection`
 - Owner: `crates/run/src/retention.rs`
 
 ## Release identity
 
-### Source digest preimage
+### The source digest is the binary's identity
 
-The source digest covers shipped workspace source (each member's `src/`,
-`assets/` and `build.rs`), manifests, the lockfile, the toolchain, Cargo
-configuration, the release packager and bundled assets. Names are sorted
-workspace-relative POSIX paths, framed by lengths, under the prefix
-`provenant-source-v1`. Duplicate, missing, symlinked or escaping inputs are
-rejected and there is no override; test-only edits do not change it.
-- Why (default): the digest is the installed binary's identity.
+It covers shipped source, lockfile, toolchain, packager and bundled assets, with
+no override; test-only edits do not change it.
+- Why: the installed binary must be provably the reviewed source.
 - Test: `crates/records/src/source.rs::hashes_sorted_framed_names_and_exact_contents`;
   `build.rs::member_test_edits_do_not_change_the_source_digest`
 - Owner: `build.rs`, `crates/records/src/source.rs`
 
-### Immutable releases
+### Releases are immutable
 
-Install verifies manifest, platform, bytes and modes and smoke-tests the
-binary before trusting a release. `release.json` is published last; the
-release is then immutable and never repaired. Equal digests with different
-manifests fail `ReleaseConflict`. A digest proves identity, not publisher
-trust.
-- Why (default): a partial or swapped release must never run.
+Install verifies and smoke-tests a release before trusting it. `release.json`
+is published last and a published release is never repaired. A digest proves
+identity, not publisher trust.
+- Why: a partial or swapped release must never run.
 - Test: `crates/config/src/managed_tests.rs::bytes_and_modes_are_verified_and_existing_release_is_immutable`;
   `crates/config/src/managed_tests.rs::interrupted_release_publish_leaves_no_manifest_and_reapplies_with_real_staging_file`
 - Owner: `crates/config/src/release.rs`
@@ -205,90 +142,48 @@ trust.
 
 ### Preview before every write
 
-Every harness-config change is printed before it is applied. A failed
-preview prevents writes, and `--dry-run` creates no root, lock or receipt.
-Identity and bytes are rechecked before each atomic publication, and drift
-stops the install. Locks hold back only other installers, not running
-harness clients, so quit those clients first.
-- Why (default): the user's harness config changes only in view.
+A failed preview prevents writes, and `--dry-run` creates no root, lock or
+receipt. Identity and bytes are rechecked before each publication; drift stops
+the install.
+- Why: the user's harness config changes only in view.
 - Test: `crates/config/src/managed_tests.rs::dry_run_and_broken_preview_create_nothing`;
   `crates/config/src/managed_tests.rs::drift_between_preview_and_apply_refuses_before_file_writes`
 - Owner: `crates/config/src/managed.rs`
 
-### Only unchanged owned entries are removed
+### Only proven-owned entries change
 
-Removal unlinks only entries whose current value matches the receipt (the record of what install wrote), never
-recursively; edited entries, unmanaged siblings, state, user skills, config
-and the running binary stay. `--adopt-existing` never authorises deletion
-and refuses symlinked executables, foreign directories and inline secret
-environment variables. Protected destinations and paths under a mount point are refused before
-any read.
-- Why (default): install must never delete what it cannot prove it wrote.
+Removal unlinks only entries whose value still matches the receipt, never
+recursively; adoption does not authorise deletion. After a home or
+state-root move, stale entries are reported without their paths being inspected.
+- Why: an old path may now belong to something else.
 - Test: `crates/config/src/managed_tests.rs::uninstall_keeps_edited_links_and_unmanaged_siblings_and_binary`;
-  `crates/config/src/managed_tests.rs::mcp_conflict_does_not_adopt_foreign_env_or_create_state`
+  `crates/config/src/managed_tests.rs::uninstall_after_home_rename_never_acts_on_old_paths`
 - Owner: `crates/config/src/managed.rs`
 
-### Editors preserve foreign bytes
+### Foreign bytes and user hooks survive
 
-TOML edits use `toml_edit`; JSON and JSONC edits replace only owned values and
-reparse the result, keeping comments, trailing commas and order. Malformed, duplicate
-or ambiguous containers are rejected unchanged, the full user config is
-never logged, and symlinked configs are refused. Each MCP entry runs the
-absolute stable binary with `--state-dir ABS fabric mcp --client NAME` and
-no secret environment, matching the recorded contract for each client.
-- Why (default): a harness config holds the user's other tools and secrets.
+Edits replace only owned values, keeping comments and order; malformed or
+symlinked configs are refused unchanged. Edited hooks are not overwritten.
+- Why: a harness config holds the user's other tools and secrets.
 - Test: `crates/config/src/managed_tests.rs::five_client_install_preserves_foreign_hooks_comments_and_reapplies`;
-  `crates/config/src/managed_tests.rs::mcp_registry_matches_recorded_client_config_contracts`
-- Owner: `crates/config/src/splice.rs`, `crates/config/src/harness.rs`
+  `crates/config/src/managed_tests.rs::edited_inherited_hook_is_relinquished_but_explicit_on_names_recovery`
+- Owner: `crates/config/src/splice.rs`, `crates/config/src/hooks.rs`
 
-### Hook ownership
+### LaunchAgents are owned like any entry
 
-Omitting `--hooks` refreshes unchanged owned hooks and releases ownership of edited
-ones; a first install leaves hooks off. `--hooks on` refuses edited Claude
-hooks, and its error names `--hooks off` as the recovery, which removes exact owned
-matches. A user's own Codex `hooks = true` is kept.
-- Why (default): a user's hook edits outrank the installer's.
-- Test: `crates/config/src/managed_tests.rs::edited_inherited_hook_is_relinquished_but_explicit_on_names_recovery`;
-  `tests/install.rs::hook_ownership_survives_upgrade_without_flags_and_explicit_off_removes_it`
-- Owner: `crates/config/src/hooks.rs`
-
-### Moved homes are reported, never acted on
-
-After a home or state-root move, stale entries produce findings without
-their paths being inspected or changed; uninstall forgets selected stale
-ownership and reinstall leaves dangling links for manual cleanup.
-- Why (default): an old path may now belong to something else.
-- Test: `crates/config/src/managed_tests.rs::uninstall_after_home_rename_never_acts_on_old_paths`;
-  `crates/config/src/managed_tests.rs::check_after_home_rename_never_inspects_old_config_paths`
-- Owner: `crates/config/src/managed.rs`
-
-### LaunchAgents
-
-On macOS with the default root, install owns the peer-agent and host-tick LaunchAgents.
-They join the preview and receipt; publication refuses symlinks at the plist
-or any parent and stages with `O_NOFOLLOW | O_EXCL`. The peer agent's PATH
-never includes a directory inside a registered project's worktree. A failed
-bootout (unloading the agent) keeps the plist owned, and an older plist is
-adopted only if its bytes match the template exactly.
-- Why (default): a LaunchAgent runs unattended at login with the user's authority.
+The peer-agent and tick plists join the preview and receipt. A symlink at the
+plist or a parent is refused, and an older plist is adopted only on an exact
+byte match.
+- Why: a LaunchAgent runs unattended with the user's authority.
 - Test: `crates/config/src/managed_tests.rs::peer_agent_refuses_symlinked_plist_and_parent_before_writes`;
   `crates/fabric-runtime/src/peer_agent.rs::provider_path_skips_a_registered_project_and_clones_nested_in_it`
 - Owner: `crates/config/src/managed.rs`, `src/tick_agent.rs`
 
 ### Re-apply is the recovery
 
-Each update is atomic, and its parent directory is synced. A partial install lists applied and
-remaining actions, and re-running the same `install` recovers it, even with
-no receipt published. There are no rollback journals, saved binaries or
-displaced user files, and a full disk (ENOSPC) or an uncertain publication returns a typed
-failure.
-- Why (default): one idempotent path is easier to trust than a rollback engine.
+A partial install lists applied and remaining actions, and rerunning `install`
+recovers it, even with no receipt. There are no rollback journals.
+- Why: one idempotent path is easier to trust than a rollback engine.
 - Test: `crates/config/src/managed_tests.rs::crash_after_any_publication_reapplies_without_a_receipt`;
   `crates/config/src/managed_tests.rs::receipt_publish_failure_reports_partial_actions_and_reapplies`
 - Owner: `crates/config/src/managed.rs`
-
-## Not provided
-
-- Root pointers, seeded defaults and pre-1.0 root fallbacks.
-- `config reset`, project overlays and per-knob environment variables.
-- A telemetry ledger or import of old state.

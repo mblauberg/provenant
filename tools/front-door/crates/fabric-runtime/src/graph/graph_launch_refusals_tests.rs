@@ -75,10 +75,10 @@ fn admitted_launch_projects_typed_prompt_field_and_limit() {
     };
     let mut input: SubmitInput = serde_json::from_value(serde_json::json!({
         "op":"submit", "operation_id":"field-limit",
-        "tasks":[{"prompt":"valid", "route":{"kind":"named", "name":"utility"}, "timeout_seconds":1}]
+        "task":{"prompt":"valid", "route":{"kind":"named", "name":"utility"}, "timeout_seconds":1}
     })).unwrap();
-    let SubmitInput::Submit { tasks, .. } = &mut input;
-    tasks[0].prompt = format!("TOKEN_SENTINEL{}", "é".repeat(524_289));
+    let SubmitInput::Submit { task, .. } = &mut input;
+    task.prompt = format!("TOKEN_SENTINEL{}", "é".repeat(524_289));
     let cause = input
         .validate_input(provenant_core::WaitTransport::Cli)
         .unwrap_err();
@@ -96,7 +96,7 @@ fn admitted_launch_projects_typed_prompt_field_and_limit() {
     )
     .unwrap();
     let reason = run.checkpoint.nodes[0].advance_error.as_deref().unwrap();
-    assert!(reason.contains("tasks[0].prompt"));
+    assert!(reason.contains("task.prompt"));
     assert!(reason.contains("1048576"));
     assert!(reason.contains("retry"));
     assert!(!reason.contains("TOKEN_SENTINEL"));
@@ -265,9 +265,9 @@ fn launch_projection_omits_untrusted_error_sources() {
 fn launch_invalid_field_matrix_persists_only_approved_facts() {
     use crate::coordination::facade::{FacadeError, InvalidInputDetail};
     for (field, expected) in [
-        ("tasks[0].title".to_owned(), Some("tasks[0].title")),
-        ("tasks[0].TOKEN_SENTINEL\u{1b}".to_owned(), None),
-        (format!("tasks[0].TOKEN_SENTINEL{}", "é".repeat(2048)), None),
+        ("task.title".to_owned(), Some("task.title")),
+        ("task.TOKEN_SENTINEL\u{1b}".to_owned(), None),
+        (format!("task.TOKEN_SENTINEL{}", "é".repeat(2048)), None),
     ] {
         let mut owner = ErrorLauncher {
             now: Some(at(0)),
@@ -544,7 +544,7 @@ fn expanded_composite_identifiers_support_long_lane_names() {
 }
 
 #[test]
-fn launched_reader_fallback_reopens_file_checkpoint() {
+fn launched_reader_stop_restart_replays_file_checkpoint_without_new_work() {
     use provenant_core::{Clock, ProjectId};
     use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
     use std::os::unix::fs::PermissionsExt;
@@ -567,8 +567,7 @@ fn launched_reader_fallback_reopens_file_checkpoint() {
     journal
         .bind(GraphExecution {
             extra: Default::default(),
-            review_base: None,
-            integration_base: None,
+            bases: None,
             directory: base,
             document: document.clone(),
         })
@@ -581,11 +580,16 @@ fn launched_reader_fallback_reopens_file_checkpoint() {
         ..Default::default()
     };
     let run = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(run.checkpoint.nodes[0].attempts.len(), 2);
+    assert_eq!(run.checkpoint.nodes[0].recorded_attempts().count(), 2);
+    assert_eq!(owner.calls.len(), 2);
+    assert_ne!(owner.attempt_numbers[0], owner.attempt_numbers[1]);
     drop(journal);
     let mut journal =
         FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
-    let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+    let mut replay_owner = FakeOwner::default();
+    let replay = advance(&document, &mut replay_owner, &mut journal).unwrap();
+    assert!(replay_owner.calls.is_empty());
+    assert_eq!(replay.checkpoint, run.checkpoint);
     assert_eq!(replay.checkpoint.nodes[0].state, NodeState::Succeeded);
 }
 

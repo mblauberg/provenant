@@ -11,13 +11,12 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 
 COMMAND = "scripts/generate-reference"
 WORKSPACE = Path("tools/front-door")
-ALL_SCHEMAS = WORKSPACE / "crates/fabric-mcp/tests/fixtures/all-tool-schemas.json"
 KNOBS = Path("config/harness-knobs.json")
-DEFAULT_TOOLS = {"fabric_context", "fabric_mail", "fabric_run", "fabric_output", "fabric_discover"}
 GLOBAL_OPTIONS = ("json", "full", "state_dir", "project")
 
 
@@ -31,11 +30,16 @@ def cargo(root, *args):
     ).stdout
 
 
-def catalogue(root, binary=None, all_commands=False):
+def provenant_binary(root, binary=None):
     if binary is None:
         cargo(root, "build", "--locked", "--quiet", "-p", "provenant", "--bin", "provenant")
         metadata = json.loads(cargo(root, "metadata", "--no-deps", "--format-version=1"))
         binary = Path(metadata["target_directory"]) / "debug/provenant"
+    return binary
+
+
+def catalogue(root, binary=None, all_commands=False):
+    binary = provenant_binary(root, binary)
     try:
         result = subprocess.run(
             [str(binary), "help", *(["--all"] if all_commands else []), "--json"], cwd=root, check=True,
@@ -149,6 +153,41 @@ def cli_reference(data, all_commands=False):
     return text.rstrip() + "\n"
 
 
+def reference_data(root):
+    """Read the declarations from their Rust owners, never by parsing Rust source."""
+    output = cargo(root, "run", "--locked", "--quiet", "-p", "provenant-cli",
+                   "--bin", "print-reference-data")
+    data = json.loads(output)
+    if not isinstance(data.get("external_contract"), dict) or not isinstance(data.get("policy"), list):
+        raise ValueError("print-reference-data returned an unsupported document")
+    return data
+
+
+def external_contract_reference(data):
+    text = header("External contract", "crates/cli/src/external_contract.rs")
+    text += ("Only the interfaces below are declared outward contracts. Reading internal run or "
+             "state files is unsupported; use the CLI JSON interfaces.\n\n")
+    text += f"Declaration schema version: {data['schema_version']}.\n\n"
+    for interface in data['interfaces']:
+        text += "## " + interface['kind'].replace('_', ' ').title() + "\n\n"
+        text += fenced(interface) + "\n"
+    return text.rstrip() + "\n"
+
+
+def with_policy_effects(data, policy):
+    """Attach generated behaviour by the table's threshold, without a second knob list."""
+    for section in data.values():
+        if not isinstance(section, dict) or 'settings' not in section:
+            continue
+        prefix = section.get('path', '')
+        for name, setting in section['settings'].items():
+            effects = [rule['effect'] for rule in policy
+                       if rule['threshold'] == f"{prefix}.{name}"]
+            if effects:
+                setting['effect'] = setting.get('effect', '') + ' ' + ' '.join(effects)
+    return data
+
+
 def wire_schemas(root):
     """Published wire schemas, printed by the records crate that defines them."""
     output = cargo(root, "run", "--locked", "--quiet", "-p", "provenant-records", "--bin", "print-wire-schemas")
@@ -169,8 +208,7 @@ def schema_files(data):
         "These JSON Schemas (draft 2020-12) describe retained version 1 wire records.\n"
         "Their lane rows share the same projection. Historical schema filenames and\n"
         "titles are record identifiers, not current command guidance. Use the\n"
-        "[CLI reference](cli.md) for the graph commands. MCP tools emit schema version 2\n"
-        "as `_meta.\"io.provenant/schemaVersion\"`.\n\n"
+        "[CLI reference](cli.md) for the graph commands.\n\n"
         "A non-ok status may carry `error: null` and partial `data`, so the schemas\n"
         "check `data` only for `ok`, `pending` and `waiting`. An unobserved stop may\n"
         "carry only `data: {operation_id}` without `receipts`. Validate failures\n"
@@ -193,18 +231,6 @@ def schema_files(data):
         text += f"| `{entry['code']}` | {entry['kind']} | {entry['summary'].replace('|', '&#124;')} |\n"
     files["schemas.md"] = text
     return files
-
-
-def mcp_reference(data, all_tools):
-    text = header("MCP tool reference", ALL_SCHEMAS.as_posix())
-    for tool in data:
-        text += f"## `{tool['name']}`\n\n" + fenced(tool) + "\n"
-    names = {tool["name"] for tool in data}
-    text += "## Discoverable tools\n\n"
-    for tool in all_tools:
-        if tool["name"] not in names:
-            text += f"### `{tool['name']}`\n\n" + fenced(tool) + "\n"
-    return text.rstrip() + "\n"
 
 
 HOST_SECTIONS = (
@@ -308,7 +334,14 @@ def generate(root, binary=None):
         gaps.append(reason)
         files[name] = header("Source gap", reason) + "This source is unavailable.\n"
 
+    policy = None
     if (root / WORKSPACE / "Cargo.toml").is_file():
+        try:
+            declarations = reference_data(root)
+            files["external-contract.md"] = external_contract_reference(declarations["external_contract"])
+            policy = declarations["policy"]
+        except (ValueError, KeyError, TypeError, AttributeError, subprocess.CalledProcessError):
+            gap("external-contract.md", "provenant-cli print-reference-data is unavailable")
         for name, all_commands in [("cli.md", False), ("cli-all.md", True)]:
             try:
                 data = catalogue(root, binary, all_commands)
@@ -329,25 +362,17 @@ def generate(root, binary=None):
     ]:
         if (root / source).is_file():
             try:
-                files[name] = render(json.loads((root / source).read_text()))
+                data = json.loads((root / source).read_text())
+                if policy is not None:
+                    data = with_policy_effects(data, policy)
+                elif any(isinstance(section, dict) and 'settings' in section
+                         for section in data.values()):
+                    raise ValueError("policy behaviour declaration is unavailable")
+                files[name] = render(data)
             except (ValueError, KeyError, TypeError, AttributeError):
                 gap(name, f"{source} has no supported machine-readable schema")
         else:
             gap(name, f"{source} is missing")
-
-    if not (root / ALL_SCHEMAS).is_file():
-        gap("mcp-tools.md", f"{ALL_SCHEMAS} is missing")
-    else:
-        try:
-            all_tools = json.loads((root / ALL_SCHEMAS).read_text())
-            if not isinstance(all_tools, list):
-                raise ValueError("expected a tool list")
-            default_tools = [tool for tool in all_tools if tool["name"] in DEFAULT_TOOLS]
-            if {tool["name"] for tool in default_tools} != DEFAULT_TOOLS:
-                raise ValueError("missing default tools")
-            files["mcp-tools.md"] = mcp_reference(default_tools, all_tools)
-        except (ValueError, KeyError, TypeError, AttributeError):
-            gap("mcp-tools.md", f"{ALL_SCHEMAS} has no supported machine-readable schema")
 
     return files, gaps
 

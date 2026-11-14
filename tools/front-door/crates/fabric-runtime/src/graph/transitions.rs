@@ -2,6 +2,7 @@
 //! transition and saves before admitting the next effect. This module deliberately
 //! takes neither an `AttemptOwner` nor a `GraphJournal`.
 use super::*;
+use provenant_core::GitOid;
 
 /// Apply an accepted, nonterminal attempt observation without I/O.
 pub(super) fn apply_pending_observation(
@@ -23,6 +24,77 @@ pub(super) fn apply_unknown_observation(
     attempt.state = AttemptState::Unresolved;
     attempt.attempt_ref = reference;
     *state = NodeState::Running;
+}
+
+/// Retain the terminal predecessor and switch only the current route's row to
+/// its admitted continuation. Both remain independently addressable WorkKeys.
+pub(super) fn continue_attempt(
+    checkpoint: &mut GraphCheckpoint,
+    node_index: usize,
+    observation: AttemptObservation,
+    successor: AttemptContinuation,
+    usage: Option<AttemptUsage>,
+) -> Result<(), &'static str> {
+    let AttemptObservation::Terminal {
+        attempt_ref: Some(reference),
+        outcome,
+        launched,
+        stop,
+        ..
+    } = observation
+    else {
+        return Err("a continuation requires its terminal predecessor");
+    };
+    let progress = &mut checkpoint.nodes[node_index];
+    let attempt = progress
+        .attempts
+        .last_mut()
+        .ok_or("continuation has no predecessor")?;
+    if attempt.key.graph_id != successor.key.graph()
+        || attempt.key.node_id != successor.key.node()
+        || attempt.key.attempt.checked_add(1) != Some(successor.key.attempt())
+        || reference == successor.attempt_ref
+        || progress
+            .previous_attempts
+            .iter()
+            .any(|previous| previous.key.attempt == successor.key.attempt())
+    {
+        return Err("continuation must name the next WorkKey of the same node");
+    }
+    attempt.state = AttemptState::Terminal;
+    attempt.attempt_ref = Some(reference.clone());
+    attempt.outcome = Some(outcome);
+    attempt.launched = launched;
+    attempt.stop = stop;
+    attempt.usage = usage;
+    stamp_settlement(checkpoint, node_index);
+    // Record unknown usage while the settled predecessor is the current row.
+    record_usage_events(checkpoint, node_index, None, None);
+    let progress = &mut checkpoint.nodes[node_index];
+    let previous = progress
+        .attempts
+        .pop()
+        .ok_or("continuation has no predecessor")?;
+    let mut current = previous.clone();
+    current.key.attempt = successor.key.attempt();
+    current
+        .key
+        .extra
+        .insert("previous_attempt_ref".into(), reference.into());
+    current.attempt_ref = Some(successor.attempt_ref);
+    current.state = AttemptState::Running;
+    current.outcome = None;
+    current.stop = None;
+    current.usage = None;
+    current.settled = 0;
+    progress.previous_attempts.push(previous);
+    progress.attempts.push(current);
+    progress.state = NodeState::Running;
+    progress.launch_retry = None;
+    progress.advance_owner_code = None;
+    asks::refresh_wake(checkpoint);
+    update_usage_warnings(checkpoint);
+    Ok(())
 }
 
 /// Apply a settled gate using already-observed inputs, before checkpoint save.
@@ -89,6 +161,7 @@ pub(super) fn apply_route(progress: &mut NodeProgress, applied_route: Option<Gra
             &mut route.alias,
             &mut route.effort,
             &mut route.account,
+            &mut route.tier,
         ] {
             clean(value);
         }
@@ -143,6 +216,20 @@ pub(super) fn apply_attempt_observation(
     facts: ObservationFacts,
 ) -> Result<AppliedObservation, &'static str> {
     let node = &plan.nodes[node_index];
+    let writer_attempts: std::collections::BTreeSet<_> = plan
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| plans::writer(candidate))
+        .flat_map(|(index, _)| checkpoint.nodes[index].recorded_attempts())
+        .filter_map(|attempt| {
+            attempt
+                .attempt_ref
+                .as_deref()
+                .and_then(|reference| reference.rsplit('/').next())
+                .and_then(|id| provenant_core::AttemptId::parse(id).ok())
+        })
+        .collect();
     let ObservationFacts {
         route_index,
         usage,
@@ -198,10 +285,12 @@ pub(super) fn apply_attempt_observation(
         }
         match observation {
             AttemptObservation::Pending { attempt_ref } => {
+                progress.review_settlement = None;
                 apply_pending_observation(attempt, &mut progress.state, attempt_ref);
                 false
             }
             AttemptObservation::Unknown { attempt_ref } => {
+                progress.review_settlement = None;
                 apply_unknown_observation(attempt, &mut progress.state, attempt_ref);
                 false
             }
@@ -214,10 +303,14 @@ pub(super) fn apply_attempt_observation(
                 result_path,
                 branch,
                 commit,
+                stop,
+                settlement_reason,
             } => {
+                progress.review_settlement = None;
                 settled_result = result.clone();
                 attempt.usage = usage;
                 attempt.launched = launched;
+                attempt.stop = stop;
                 attempt.state = AttemptState::Terminal;
                 attempt.attempt_ref = attempt_ref;
                 // Provider success alone does not satisfy an explicit result contract.
@@ -278,7 +371,7 @@ pub(super) fn apply_attempt_observation(
                     && template::review_node(node)
                     && attempt.attempt_ref.is_some()
                 {
-                    match review_range {
+                    match &review_range {
                         ReviewRange::NoBase => {
                             outputs.warnings.truncate(MAX_WARNINGS.saturating_sub(1));
                             outputs
@@ -388,9 +481,30 @@ pub(super) fn apply_attempt_observation(
                         .iter()
                         .any(|warning| warning.starts_with(FINDINGS_INVALID))
                     && disposition_error.is_none();
+                // A writer that reports success with an unfinished handoff
+                // declared a stop; the one next-step decision answers it.
+                let handoff = result
+                    .as_ref()
+                    .and_then(|capture| capture.handoff.as_ref().ok())
+                    .and_then(Option::as_ref);
                 let outcome = if matches!(
                     outcome,
                     AttemptOutcome::Succeeded
+                        | AttemptOutcome::ReviewRequired
+                        | AttemptOutcome::DeclaredStop
+                        | AttemptOutcome::StoppedNoWork
+                ) && launched
+                    && node.access == AccessMode::WorktreeWrite
+                    && handoff.is_some_and(|handoff| handoff.unfinished())
+                {
+                    AttemptOutcome::DeclaredStop
+                } else {
+                    outcome
+                };
+                let outcome = if matches!(
+                    outcome,
+                    AttemptOutcome::Succeeded
+                        | AttemptOutcome::ReviewRequired
                         | AttemptOutcome::DeclaredStop
                         | AttemptOutcome::StoppedNoWork
                 ) && disposition_error.is_some()
@@ -408,15 +522,18 @@ pub(super) fn apply_attempt_observation(
                 {
                     // One rule for every writer stop, committed, clean or with
                     // uncommitted edits: restart in place on the retained
-                    // worktree, or return to the chair (see `no_work`).
+                    // worktree, or return to the chair (see `next_step`).
                     progress.advance_error_code = Some("stopped_no_work".into());
                     progress.advance_error = Some(
-                        if outcome == AttemptOutcome::StoppedNoWork {
-                            "writer stopped with no work: no new commit"
+                        if let Some(handoff) = handoff.filter(|handoff| {
+                            handoff.status == provenant_records::handoff::HandoffStatus::Blocked
+                        }) {
+                            bounded(&handoff.note, MAX_ADVANCE_ERROR_BYTES)
+                        } else if outcome == AttemptOutcome::StoppedNoWork {
+                            "writer stopped with no work: no new commit".into()
                         } else {
-                            "writer stopped before finishing"
-                        }
-                        .into(),
+                            "writer stopped before finishing".into()
+                        },
                     );
                     outcome
                 } else if warned || outcome == AttemptOutcome::DeclaredStop {
@@ -437,7 +554,11 @@ pub(super) fn apply_attempt_observation(
                 } else {
                     outcome
                 };
-                attempt.outcome = Some(outcome);
+                // An integrity or disposition failure is not the stop the
+                // owner sealed, so no restart answers it.
+                if warned || disposition_error.is_some() {
+                    attempt.stop = None;
+                }
                 if outcome == AttemptOutcome::TaskFailed
                     && let Some((code, reason)) = disposition_error
                 {
@@ -445,18 +566,143 @@ pub(super) fn apply_attempt_observation(
                     progress.advance_error = Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
                 }
                 if node.access == AccessMode::WorktreeWrite {
+                    progress.blocked = result.as_ref().is_some_and(|capture| {
+                        matches!(&capture.handoff, Ok(Some(handoff))
+                            if handoff.status == provenant_records::handoff::HandoffStatus::Blocked)
+                    });
+                    if progress.blocked {
+                        attempt.stop = Some(provenant_records::StopCause::Blocked);
+                    }
                     progress.handoff = result
                         .as_ref()
                         .and_then(|capture| capture.handoff.as_ref().ok())
                         .and_then(|handoff| handoff.as_ref())
                         .filter(|handoff| handoff.unfinished())
-                        .map(provenant_records::handoff::Handoff::fenced);
+                        .cloned();
                 }
                 compact_findings(&mut outputs, result.as_deref(), &upstream_findings);
                 progress.outputs = Some(outputs);
+                let node_outcome = settlement_reason
+                    .map(|reason| reason.node_outcome(attempt.stop))
+                    .unwrap_or(provenant_records::run::SettlementNodeOutcome::Failed);
+                let outcome = if matches!(
+                    outcome,
+                    AttemptOutcome::Succeeded | AttemptOutcome::ReviewRequired
+                ) && node_outcome
+                    == provenant_records::run::SettlementNodeOutcome::Failed
+                {
+                    AttemptOutcome::OtherFailure
+                } else {
+                    outcome
+                };
+                attempt.outcome = Some(outcome);
                 match outcome {
-                    AttemptOutcome::Succeeded => {
+                    AttemptOutcome::Succeeded | AttemptOutcome::ReviewRequired => {
                         progress.state = NodeState::Succeeded;
+                        if node.access == AccessMode::ReadOnly && template::review_node(node) {
+                            let head_oid = match &review_range {
+                                ReviewRange::Resolved { head, .. } => GitOid::parse(head).ok(),
+                                _ => None,
+                            }
+                            .or_else(|| {
+                                progress
+                                    .source_commit
+                                    .as_deref()
+                                    .and_then(|h| GitOid::parse(h).ok())
+                            });
+                            if let Some(head) = head_oid {
+                                let graph_review_base = checkpoint
+                                    .bases
+                                    .as_ref()
+                                    .and_then(|bases| bases.review)
+                                    .map(|base| base.to_string());
+                                let base_oid = match &review_range {
+                                    ReviewRange::Resolved { base, .. } => GitOid::parse(base).ok(),
+                                    _ => None,
+                                }
+                                .or_else(|| {
+                                    progress
+                                        .review_base
+                                        .as_deref()
+                                        .or(graph_review_base.as_deref())
+                                        .or_else(|| {
+                                            node.extra
+                                                .get("review_base")
+                                                .and_then(serde_json::Value::as_str)
+                                        })
+                                        .and_then(|b| GitOid::parse(b).ok())
+                                });
+                                let findings = progress
+                                    .outputs
+                                    .as_ref()
+                                    .map(|o| o.findings.as_slice())
+                                    .unwrap_or_default();
+                                if findings.is_empty() {
+                                    if let Ok(decision) = provenant_records::FindingDecision::new(
+                                        &node.id,
+                                        provenant_records::FindingDisposition::Act,
+                                        format!("review {} settled", node.id),
+                                        head,
+                                        base_oid,
+                                    ) {
+                                        progress.decisions = vec![decision];
+                                    }
+                                } else {
+                                    progress.decisions = findings
+                                        .iter()
+                                        .filter_map(|finding| {
+                                            let disposition = match finding.disposition.as_deref() {
+                                                Some("decline") => {
+                                                    provenant_records::FindingDisposition::Decline
+                                                }
+                                                Some("replace") => {
+                                                    provenant_records::FindingDisposition::Replace
+                                                }
+                                                _ => provenant_records::FindingDisposition::Act,
+                                            };
+                                            let reason = finding
+                                                .reason
+                                                .as_deref()
+                                                .unwrap_or("finding decision");
+                                            provenant_records::FindingDecision::new(
+                                                &finding.id,
+                                                disposition,
+                                                reason,
+                                                head,
+                                                base_oid,
+                                            )
+                                            .ok()
+                                        })
+                                        .collect();
+                                }
+                                if review_result {
+                                    let verdict = progress
+                                        .outputs
+                                        .as_ref()
+                                        .and_then(|outputs| outputs.verdict.as_deref())
+                                        .and_then(
+                                            provenant_records::workflow::ReviewVerdict::from_token,
+                                        );
+                                    let attempt_id = attempt
+                                        .attempt_ref
+                                        .as_deref()
+                                        .and_then(|reference| reference.rsplit('/').next())
+                                        .and_then(|id| provenant_core::AttemptId::parse(id).ok());
+                                    if let (Some(verdict), Some(attempt_id)) = (verdict, attempt_id)
+                                    {
+                                        let independent = node.continues.is_none()
+                                            && !writer_attempts.contains(&attempt_id);
+                                        progress.review_settlement = Some(ReviewSettlement {
+                                            attempt_id,
+                                            head,
+                                            base: base_oid,
+                                            verdict,
+                                            independent,
+                                        });
+                                    }
+                                }
+                            }
+                        }
                         false
                     }
                     AttemptOutcome::AuthRequired
@@ -470,7 +716,7 @@ pub(super) fn apply_attempt_observation(
                                 .filter(|attempt| attempt.review_substitution)
                                 .count()
                                 >= limits.review_substitutions;
-                        match settlement_fallback_decision(
+                        match next_step::settlement_fallback_decision(
                             node,
                             route_index,
                             outcome,
@@ -485,7 +731,7 @@ pub(super) fn apply_attempt_observation(
                         ) {
                             SettlementFallback::Continue => true,
                             SettlementFallback::Fail { code, message } => {
-                                fail_node(progress, code, message);
+                                fail_node(progress, code.map(str::to_owned), message);
                                 false
                             }
                         }
@@ -516,7 +762,6 @@ pub(super) fn apply_attempt_observation(
                     }
                     AttemptOutcome::TaskFailed
                     | AttemptOutcome::OtherFailure
-                    | AttemptOutcome::ReviewRequired
                     | AttemptOutcome::DeclaredStop
                     | AttemptOutcome::StoppedNoWork => {
                         progress.state = NodeState::Failed;
@@ -538,14 +783,12 @@ pub(super) fn initial_checkpoint(
     document: &GraphDocument,
     plan: &PlannedGraph,
     plan_digest: String,
-    bound_review_base: Option<String>,
-    bound_integration_base: Option<String>,
+    bases: Option<GraphBaseBinding>,
     instance_id: Option<String>,
     ask_actor: Option<String>,
 ) -> GraphCheckpoint {
     GraphCheckpoint {
-        bound_review_base: bound_review_base.map(|base| base.to_string()),
-        bound_integration_base: bound_integration_base.map(|base| base.to_string()),
+        bases,
         extra: Default::default(),
         expansions: Vec::new(),
         remaining: None,
@@ -557,12 +800,11 @@ pub(super) fn initial_checkpoint(
         delivery_required: document.delivery == Some(provenant_records::run::DeliveryMode::Pr),
         delivered: false,
         pull_request: None,
-        schema_version: 1,
+        schema_version: 2,
         cancelled: false,
         cancel_reason: None,
         integration_pin: None,
-        pause_reason: None,
-        pause_code: None,
+        pause: None,
         unknown_usage: Vec::new(),
         unknown_usage_omitted: 0,
         usage_events: Vec::new(),
@@ -576,7 +818,15 @@ pub(super) fn initial_checkpoint(
             .nodes
             .iter()
             .map(|node| NodeProgress {
-                extra: Default::default(),
+                extra: node
+                    .extra
+                    .get("removed_requirements")
+                    .map(|value| {
+                        [("removed_requirements".into(), value.clone())]
+                            .into_iter()
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 children: node.composite_members.clone(),
                 min_successful: node.composite.as_ref().and_then(|spec| spec.min_successful),
                 source_binding: node.source.clone(),
@@ -591,6 +841,9 @@ pub(super) fn initial_checkpoint(
                     && node.extra.contains_key("review_base"),
                 fragment: None,
                 handoff: None,
+                blocked: false,
+                decisions: Vec::new(),
+                review_settlement: None,
                 expansion_pause: None,
                 expansion_cause: None,
                 loop_pause: None,
@@ -605,9 +858,13 @@ pub(super) fn initial_checkpoint(
                 id: node.id.clone(),
                 title: Some(node.title.as_deref().unwrap_or(&node.id).to_owned()),
                 worktree: node.worktree.clone(),
-                state: NodeState::Pending,
+                state: if when::holds(&node.when) {
+                    NodeState::Pending
+                } else {
+                    NodeState::Skipped
+                },
                 cancelled_from: None,
-                skip_reason: None,
+                skip_reason: when::skip_reason(&node.when),
                 advance_error: None,
                 advance_error_code: None,
                 advance_owner_code: None,
@@ -713,7 +970,7 @@ pub(super) fn apply_source_commit(
 pub(super) enum Admission {
     Ready,
     WriterBusy,
-    SlotWait { changed: bool },
+    PolicyRefused { code: &'static str, detail: String },
     SaveAndWait,
 }
 
@@ -724,6 +981,7 @@ pub(super) fn admit_attempt(
     positions: &std::collections::BTreeMap<String, usize>,
     limits: &crate::config::GraphLimits,
     effective_budget: &crate::config::GraphBudget,
+    policy: &provenant_records::policy::Policy,
 ) -> Admission {
     let node = &plan.nodes[node_index];
     let cap = limits.node_prompt_bytes;
@@ -740,7 +998,7 @@ pub(super) fn admit_attempt(
     {
         return Admission::WriterBusy;
     }
-    if limits.concurrency.is_some_and(|cap| {
+    let over_concurrency_cap = limits.concurrency.is_some_and(|cap| {
         checkpoint
             .nodes
             .iter()
@@ -756,24 +1014,40 @@ pub(super) fn admit_attempt(
             })
             .count()
             >= cap
-    }) {
-        let changed = checkpoint.nodes[node_index]
-            .extra
-            .insert("slot_wait".into(), serde_json::Value::Bool(true))
-            .is_none();
-        return Admission::SlotWait { changed };
+    });
+    checkpoint.nodes[node_index]
+        .extra
+        .remove("concurrency_warning");
+    if over_concurrency_cap {
+        use provenant_records::policy::{Effect, Facts};
+        let effect = policy.check(
+            "GRAPH_CONCURRENCY_CAP",
+            Facts::violation("configured graph concurrency cap is occupied"),
+        );
+        match effect {
+            Effect::Proceed => {}
+            Effect::Warn(message) => {
+                checkpoint.nodes[node_index]
+                    .extra
+                    .insert("concurrency_warning".into(), message.into());
+            }
+            Effect::Refuse(diagnostic) => {
+                return Admission::PolicyRefused {
+                    code: "concurrency_cap",
+                    detail: diagnostic
+                        .detail
+                        .unwrap_or_else(|| "configured graph concurrency cap is occupied".into()),
+                };
+            }
+        }
     }
-    checkpoint.nodes[node_index].extra.remove("slot_wait");
     update_usage_warnings(checkpoint);
-    if let Some(reason) = checkpoint
-        .pause_reason
-        .clone()
-        .or_else(|| budget_reason(checkpoint, effective_budget))
+    if checkpoint.pause.is_none()
+        && let Some(reason) = budget_reason(checkpoint, effective_budget)
     {
-        checkpoint.pause_reason = Some(bounded(&reason, PAUSE_REASON_BYTES));
-        checkpoint
-            .pause_code
-            .get_or_insert_with(|| "budget_exceeded".into());
+        checkpoint.set_pause(PauseCause::BudgetExceeded, &reason);
+    }
+    if checkpoint.pause.is_some() {
         return Admission::SaveAndWait;
     }
     if let Some(missing) = required_input_unavailable(node, plan, checkpoint, positions) {
@@ -878,6 +1152,7 @@ pub(super) fn begin_attempt(
         key: key.clone(),
         route: route.clone(),
         state: AttemptState::Starting,
+        stop: None,
         attempt_ref: None,
         outcome: None,
         launched: true,
@@ -986,6 +1261,7 @@ pub(super) fn redraw_quota_alias(
     checkpoint: &mut GraphCheckpoint,
     node_index: usize,
     limits: &crate::config::GraphLimits,
+    worktree_layout: &provenant_config::WorktreeLayoutPort,
 ) -> Result<(), String> {
     // Same-alias redraw takes precedence over a different configured
     // route, and the retry patch requires the old execution settled.
@@ -1006,6 +1282,7 @@ pub(super) fn redraw_quota_alias(
             limits,
             scan: &patch::scan_for_secrets,
             journal: None,
+            worktree_layout: worktree_layout.clone(),
         },
     )
     .map_err(|error| error.to_string())?;
@@ -1245,8 +1522,7 @@ pub(super) fn apply_resume(
         }
     }
     checkpoint.deactivate_expansion_pauses();
-    checkpoint.pause_reason = None;
-    checkpoint.pause_code = None;
+    checkpoint.pause = None;
     Ok(())
 }
 
@@ -1289,8 +1565,7 @@ pub(super) fn refresh_structure_pause(
         })
     {
         checkpoint.activate_expansion_pause(index);
-        checkpoint.pause_reason = Some(reason);
-        checkpoint.pause_code = Some("invalid_plan_expansion".into());
+        checkpoint.set_pause(PauseCause::InvalidPlanExpansion, &reason);
     }
     let structural_pause = if checkpoint.nodes.iter().all(|node| node.state.settled()) {
         None
@@ -1299,27 +1574,10 @@ pub(super) fn refresh_structure_pause(
     };
     if let Some(reason) = &structural_pause {
         checkpoint.deactivate_expansion_pauses();
-        checkpoint.pause_reason = Some(bounded(reason, PAUSE_REASON_BYTES));
-        checkpoint.pause_code = Some("structural_limit".into());
+        checkpoint.set_pause(PauseCause::StructuralLimit, reason);
     }
 
     structural_pause
-}
-
-pub(super) fn reject_loop_decision(checkpoint: &mut GraphCheckpoint, node_id: &str, reason: &str) {
-    for ask in &mut checkpoint.asks {
-        if ask.node.as_deref() == Some(node_id) {
-            ask.resolved = true;
-            if let Some(answer) = ask.answer.as_mut() {
-                answer
-                    .rejection_code
-                    .get_or_insert_with(|| "invalid_loop_decision".into());
-                answer
-                    .rejected
-                    .get_or_insert_with(|| bounded(reason, MAX_ADVANCE_ERROR_BYTES));
-            }
-        }
-    }
 }
 
 pub(super) fn refresh_limit_notes(
@@ -1394,10 +1652,9 @@ pub(super) fn clear_settled_pause(checkpoint: &mut GraphCheckpoint) -> bool {
             .nodes
             .iter()
             .all(|node| node.expansion_pause.is_none())
-        && checkpoint.pause_reason.take().is_some()
+        && checkpoint.pause.take().is_some()
     {
         checkpoint.deactivate_expansion_pauses();
-        checkpoint.pause_code = None;
         return true;
     }
     false
@@ -1417,7 +1674,7 @@ pub(super) fn record_delivery(checkpoint: &mut GraphCheckpoint, url: String) -> 
 
 pub(super) fn graph_run(checkpoint: GraphCheckpoint) -> GraphRun {
     let all_settled = checkpoint.nodes.iter().all(|node| node.state.settled());
-    let status = if checkpoint.pause_reason.is_some() {
+    let status = if checkpoint.pause.is_some() {
         GraphStatus::Paused
     } else if all_settled && checkpoint.cancelled {
         GraphStatus::Cancelled
@@ -1566,6 +1823,13 @@ pub(super) fn attempt_key(
     route_index: usize,
 ) -> Result<AttemptKey, &'static str> {
     let node = &plan.nodes[node_index];
+    if let Some(attempt) = checkpoint.nodes[node_index]
+        .attempts
+        .last()
+        .filter(|attempt| attempt.state != AttemptState::Terminal)
+    {
+        return Ok(attempt.key.clone());
+    }
     let mut attempt_extra = provenant_records::ExtraFields::default();
     if let Some(generation) = checkpoint.nodes[node_index].extra.get("retry_generation") {
         attempt_extra.insert("retry_generation".into(), generation.clone());
@@ -1582,14 +1846,13 @@ pub(super) fn attempt_key(
         extra: attempt_extra,
         graph_id: plan.graph_id.clone(),
         node_id: node.id.clone(),
+        attempt: checkpoint.nodes[node_index]
+            .recorded_attempts()
+            .next_back()
+            .map_or(Some(1), |attempt| attempt.key.attempt.checked_add(1))
+            .ok_or("attempt number exhausted")?,
         route_index: u16::try_from(route_index).map_err(|_| "route count")?,
     };
-    let key = checkpoint.nodes[node_index]
-        .attempts
-        .last()
-        .filter(|attempt| attempt.state != AttemptState::Terminal)
-        .map_or(key, |attempt| attempt.key.clone());
-
     Ok(key)
 }
 
@@ -1666,9 +1929,9 @@ mod tests {
             (
                 AttemptOutcome::AuthRequired,
                 None,
-                NodeState::Running,
+                NodeState::Failed,
                 AttemptOutcome::AuthRequired,
-                true,
+                false,
             ),
             (
                 AttemptOutcome::DeadlineExceeded,
@@ -1703,6 +1966,8 @@ mod tests {
                     result_path: None,
                     branch: None,
                     commit: None,
+                    stop: None,
+                    settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
                 },
                 ObservationFacts {
                     route_index: 0,
@@ -1732,6 +1997,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn handoff_missing_classification_keeps_dependants_closed() {
+        let (plan, positions, mut checkpoint, limits) = fixture();
+        start(&plan, &positions, &mut checkpoint, &limits);
+        let applied = apply_attempt_observation(
+            &plan,
+            &mut checkpoint,
+            &positions,
+            0,
+            &limits,
+            AttemptObservation::Terminal {
+                attempt_ref: Some("host/handoff-missing".into()),
+                outcome: AttemptOutcome::ReviewRequired,
+                launched: true,
+                result: None,
+                result_warning: None,
+                result_path: None,
+                branch: None,
+                commit: None,
+                stop: Some(provenant_records::StopCause::HandoffMissing),
+                settlement_reason: Some(provenant_records::run::SettlementReason::HandoffMissing),
+            },
+            ObservationFacts {
+                route_index: 0,
+                usage: None,
+                fallback_evidence: None,
+                evidence_unreadable: false,
+                fallback_cause: None,
+                skipped_accounts: Vec::new(),
+                review_range: ReviewRange::Unknown,
+            },
+        )
+        .unwrap();
+        assert!(!applied.should_continue);
+        let progress = &checkpoint.nodes[0];
+        assert_eq!(progress.state, NodeState::Failed);
+        assert_eq!(
+            progress.attempts[0].outcome,
+            Some(AttemptOutcome::OtherFailure)
+        );
     }
 
     #[test]

@@ -1,13 +1,11 @@
 //! `land`: the existing CI watch and head-pinned merge, then local
 //! follow-up. No step forces: each one refuses and says why.
 use super::git::{Git, plain_ref};
-use super::{Result, merge, successful};
-use crate::{emit, emit_summarised, roots, worktrees};
+use super::{Result, successful};
+use crate::{roots, worktrees};
 use provenant_confinement::worktrees::{ObservedProcess, WorkerObserver};
 use provenant_core::GitOid;
-use provenant_records::{CommandError, CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -26,15 +24,6 @@ enum Status {
     Skipped,
     /// Left as it was because proceeding would be unsafe.
     Refused,
-}
-impl Status {
-    /// The name the JSON report and the text report both give the status.
-    fn name(self) -> String {
-        serde_json::to_value(self)
-            .ok()
-            .and_then(|value| value.as_str().map(str::to_owned))
-            .unwrap_or_default()
-    }
 }
 #[derive(Debug, Serialize)]
 struct Step {
@@ -91,12 +80,6 @@ fn from_rest(rest: super::RestPull) -> Pull {
         closed_at: rest.closed_at,
     }
 }
-fn read_pull(reader: &super::wait::Reader<'_>, number: &str) -> Result<Pull> {
-    Ok(from_rest(super::rest_pull(
-        &|argv| reader.read(argv),
-        number,
-    )?))
-}
 pub(super) fn pull(project: &Path, number: &str) -> Result<Pull> {
     Ok(from_rest(super::rest_pull(
         &|argv| super::execute(project, argv),
@@ -120,7 +103,8 @@ impl LandTracker {
             roots::Product::Optional,
         )?;
         let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-        let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
+        let runtime =
+            provenant_confinement::UtilityRuntime::read_only(git, resolved.roots.state.as_path())?;
         let location = runtime
             .project_location(
                 &provenant_os::exec::SystemExecutor::new(1)?,
@@ -749,6 +733,7 @@ pub(super) fn batch_follow_up(
         tracking.view.state == "MERGED"
             && (tracking.view.cross_repository || tracking.tracker.is_some())
     }) {
+        log_landed(globals, number, &tracking.view);
         let steps = follow_up(git, project, &tracking.view, head, globals, workers)?;
         return Ok(serde_json::to_value(steps)?);
     }
@@ -769,8 +754,30 @@ pub(super) fn batch_follow_up(
             super::contributions::warn(Some(number), &error);
         }
     }
+    log_landed(globals, number, &pull);
     let steps = follow_up(git, project, &pull, head, globals, workers)?;
     Ok(serde_json::to_value(steps)?)
+}
+
+/// Note a proven landing in the chair log. The merge is already durable, so
+/// logging is advisory and never changes the landing's result.
+fn log_landed(globals: &provenant_cli::Globals, number: u64, pull: &Pull) {
+    if pull.state != "MERGED" {
+        return;
+    }
+    let landed = pull
+        .merge_commit
+        .as_ref()
+        .zip(pull.merged_at.as_deref())
+        .and_then(|(commit, merged_at)| {
+            merged_at
+                .parse::<jiff::Timestamp>()
+                .ok()
+                .map(|at| (commit.oid.clone(), at.as_second()))
+        });
+    if let Some((commit, merged_at)) = landed {
+        let _ = append_land_log(globals, number, &pull.title, &commit, merged_at);
+    }
 }
 
 /// Whether the local branch named like the pull request's may be cleaned up.
@@ -1011,129 +1018,18 @@ fn delete_branch(
     )
 }
 
-/// One land's report, rendered but not yet printed.
-pub(crate) struct Landing {
-    pub(crate) report: CommandResult<serde_json::Value>,
-    text: String,
-    summary: provenant_cli::Summary,
-    globals: provenant_cli::Globals,
-}
-
-fn poll_setting(globals: &provenant_cli::Globals, poll: Option<u64>) -> (u64, &'static str) {
-    if let Some(poll) = poll {
-        return (poll, "--poll");
-    }
-    let config = roots::resolve(globals, roots::Workspace::Project, roots::Product::Required)
-        .ok()
-        .and_then(|resolved| {
-            provenant_config::read_with_domains(&resolved.roots, &provenant_cli::domains::SECTIONS)
-                .ok()
-        });
-    match config {
-        Some(config) if config.domains.pr.land.poll_seconds > 0 => {
-            let source = if matches!(
-                config.origins.get("domains.pr.land.poll_seconds"),
-                Some(provenant_config::Origin::User { .. })
-            ) {
-                "host config"
-            } else {
-                "compiled default"
-            };
-            (config.domains.pr.land.poll_seconds, source)
-        }
-        _ => (
-            provenant_cli::domains::DEFAULT_LAND_POLL_SECONDS,
-            "compiled default (configuration unavailable)",
-        ),
-    }
-}
-fn retry_command(
-    number: u64,
-    head: Option<GitOid>,
-    wait: Option<u64>,
-    poll: Option<u64>,
-    globals: &provenant_cli::Globals,
-) -> String {
-    let mut command = format!("provenant land {number}");
-    if let Some(head) = head {
-        command.push_str(&format!(" --head {head}"));
-    }
-    if let Some(wait) = wait {
-        command.push_str(&format!(" --wait={wait}s"));
-    }
-    if let Some(poll) = poll {
-        command.push_str(&format!(" --poll {poll}"));
-    }
-    for (flag, path) in [
-        ("--project", &globals.project),
-        ("--state-dir", &globals.state_dir),
-    ] {
-        if let Some(path) = path {
-            let value = path.to_string_lossy().replace('\'', "'\\''");
-            command.push_str(&format!(" {flag} '{value}'"));
-        }
-    }
-    if globals.json {
-        command.push_str(" --json");
-    }
-    if globals.full {
-        command.push_str(" --full");
-    }
-    command
-}
-
-pub(crate) fn run(
-    number: u64,
-    expected: Option<GitOid>,
-    wait: Option<u64>,
-    poll: Option<u64>,
-    explain: bool,
-    globals: &provenant_cli::Globals,
-    workers: &dyn WorkerObserver,
-) -> u8 {
-    if explain {
-        let (interval, source) = poll_setting(globals, poll);
-        let budget = wait.unwrap_or(60);
-        let budget_source = if wait.is_some() {
-            "--wait"
-        } else {
-            "compiled default"
-        };
-        let report = CommandResult::new(
-            "land",
-            Outcome::Ok,
-            json!({"poll_seconds": interval, "poll_source": source, "retry_budget_seconds": budget, "retry_budget_source": budget_source}),
-        );
-        return emit(
-            &report,
-            globals,
-            &format!("poll: {interval}s ({source}); retry budget: {budget}s ({budget_source})\n"),
-            true,
-        );
-    }
-    let landing = execute(number, expected, wait, poll, globals, workers);
-    emit_summarised(
-        &landing.report,
-        &landing.globals,
-        &landing.text,
-        false,
-        Some(&landing.summary),
-    )
-}
-
-/// Land a graph node's pull request: the same head-pinned merge and cleanup
-/// as `provenant land`, for the PR whose head is `branch`. Without `merge`,
-/// only observe whether the chair has merged it at `head` by hand.
+/// Land a graph node's pull request through the landing owner: the same
+/// pinned head, candidate gate, merge and clean-up as `provenant land`, for the
+/// PR whose head is `branch`. Without authority the owner only observes
+/// whether the chair merged the pinned head.
 pub(crate) fn graph_land(
     project: &Path,
     state: &Path,
-    branch: &str,
-    head: &str,
-    pull_request: Option<u64>,
-    merge: bool,
+    request: &provenant_fabric_runtime::graph::LandRequest<'_>,
     workers: &dyn WorkerObserver,
 ) -> provenant_fabric_runtime::graph::LandObservation {
     use provenant_fabric_runtime::graph::LandObservation;
+    let (branch, head) = (request.branch, request.head);
     let Ok(head) = head.parse::<GitOid>() else {
         return LandObservation::Refused {
             reason: format!("{head} is not a full commit ID"),
@@ -1144,7 +1040,7 @@ pub(crate) fn graph_land(
             reason: format!("{branch} is not a plain branch name"),
         };
     }
-    let Some(number) = pull_request else {
+    let Some(number) = request.pull_request else {
         return match super::pull_for_branch(project, branch, head) {
             Ok(pull) => LandObservation::Identified {
                 pull_request: pull.number,
@@ -1154,458 +1050,81 @@ pub(crate) fn graph_land(
             },
         };
     };
-    if !merge {
-        let pull =
-            match super::rest_pull(&|argv| super::execute(project, argv), &number.to_string()) {
-                Ok(pull) => pull,
-                Err(error) => {
-                    return LandObservation::Pending {
-                        reason: format!("could not read pull request #{number}: {error}"),
-                    };
-                }
-            };
-        let next = format!("next: provenant land {number} --head {head}");
-        return if pull.head.sha != head {
-            LandObservation::Refused {
-                reason: format!(
-                    "HEAD_MOVED: pull request #{number} head moved to {}",
-                    pull.head.sha
-                ),
-            }
-        } else if pull.merged_at.is_some() {
-            LandObservation::Merged {
-                pull_request: Some(number),
-                note: None,
-            }
-        } else if pull.state.eq_ignore_ascii_case("open") {
-            LandObservation::Pending {
-                reason: format!("pull request #{number} awaits the chair; {next}"),
-            }
-        } else {
-            LandObservation::Refused {
-                reason: format!(
-                    "PR_CLOSED: pull request #{number} is {} without merging",
-                    pull.state
-                ),
-            }
-        };
-    }
     let globals = provenant_cli::Globals {
         json: true,
         full: false,
         state_dir: Some(state.to_owned()),
         project: Some(project.to_owned()),
     };
-    observation(&execute(number, Some(head), None, None, &globals, workers).report)
+    let authority = match request.authority {
+        None => provenant_records::landing::Authority::Observe,
+        Some(provenant_fabric_runtime::graph::LandAuthority::Policy) => {
+            provenant_records::landing::Authority::Policy
+        }
+        Some(provenant_fabric_runtime::graph::LandAuthority::Chair { .. }) => {
+            provenant_records::landing::Authority::Chair
+        }
+    };
+    let land = provenant_records::landing::LandRequest {
+        members: vec![provenant_records::landing::LandMember {
+            pr: number,
+            head: Some(head.to_string()),
+            base: None,
+            // The landing policy reads the graph's typed exact-head review record.
+            review_proof: provenant_records::landing::ReviewProof::Policy,
+        }],
+        authority,
+        policy: provenant_records::landing::PolicyChoice::default(),
+        ..Default::default()
+    };
+    let submission = super::landing::prepare(&globals, None, None, None, None)
+        .and_then(|prepared| super::landing::submit(&prepared, land, false, &globals, workers));
+    let submission = match submission {
+        Ok(submission) => submission,
+        Err(error) => {
+            return LandObservation::Pending {
+                reason: format!("landing pull request #{number}: {error}"),
+            };
+        }
+    };
+    observation(
+        number,
+        submission
+            .record
+            .as_ref()
+            .and_then(|record| record.outcomes.get(&number)),
+        submission.failure.as_ref(),
+    )
 }
 
-/// What a graph land node makes of a land report. Only a merged PR succeeds;
-/// a state that can still change is observed again; the rest fail the node.
+/// What a graph land node makes of its member's landing outcome. Only a
+/// landed member succeeds; one that can still change is observed again.
 pub(crate) fn observation(
-    report: &CommandResult<serde_json::Value>,
+    number: u64,
+    outcome: Option<&provenant_records::landing::MemberOutcome>,
+    failure: Option<&super::landing::LandingError>,
 ) -> provenant_fabric_runtime::graph::LandObservation {
     use provenant_fabric_runtime::graph::LandObservation;
-    let data = &report.data;
-    let number = data["number"].as_u64();
-    if data["merged"].as_bool() == Some(true) {
-        return LandObservation::Merged {
-            pull_request: number,
-            note: data["merge_note"].as_str().map(str::to_owned),
-        };
-    }
-    let Some(error) = &report.error else {
-        return LandObservation::Pending {
-            reason: format!(
-                "pull request #{} is not merged yet ({})",
-                number.unwrap_or_default(),
-                data["state"].as_str().unwrap_or("unknown")
+    use provenant_records::landing::MemberOutcome;
+    match outcome {
+        Some(MemberOutcome::Landed { .. }) => LandObservation::Merged {
+            pull_request: Some(number),
+            note: None,
+        },
+        Some(MemberOutcome::Refused { reason }) => LandObservation::Refused {
+            reason: reason.clone(),
+        },
+        Some(MemberOutcome::Pending { reason } | MemberOutcome::Unknown { reason }) => {
+            LandObservation::Pending {
+                reason: reason.clone(),
+            }
+        }
+        None => LandObservation::Pending {
+            reason: failure.map_or_else(
+                || format!("pull request #{number} has no landing outcome yet"),
+                ToString::to_string,
             ),
-        };
-    };
-    let reason = match &error.repair {
-        Some(repair) => format!("{}: {}; next: {repair}", error.code, error.message),
-        None => format!("{}: {}", error.code, error.message),
-    };
-    match error.code.as_str() {
-        "CI_PENDING"
-        | "CI_UNAVAILABLE"
-        | "MERGE_STATE_UNKNOWN"
-        | "PR_UNAVAILABLE"
-        | "RATE_LIMITED" => LandObservation::Pending { reason },
-        _ => LandObservation::Refused { reason },
-    }
-}
-
-#[allow(clippy::disallowed_methods)]
-pub(crate) fn execute(
-    number: u64,
-    expected: Option<GitOid>,
-    wait: Option<u64>,
-    poll: Option<u64>,
-    globals: &provenant_cli::Globals,
-    workers: &dyn WorkerObserver,
-) -> Landing {
-    const LEAF: &str = "land";
-    let mut captured = expected;
-    let mut output_globals = provenant_cli::Globals {
-        json: globals.json,
-        full: globals.full,
-        state_dir: globals.state_dir.clone(),
-        project: globals.project.clone(),
-    };
-    let mut merged = false;
-    let mut merge_note: Option<String> = None;
-    let mut state = String::new();
-    let mut steps = Vec::new();
-    let mut failure_code = "PR_UNAVAILABLE";
-    let mut landed: Option<(String, String, i64)> = None;
-    let mut observed_repository: Option<String> = None;
-    let result = (|| -> Result<()> {
-        let project = roots::selected_project(globals.project.as_deref(), true)?;
-        let effective_poll = poll_setting(globals, poll).0;
-        let text = number.to_string();
-        let initial_retry = retry_command(number, expected, wait, poll, globals);
-        let mut reader = super::wait::Reader {
-            project: &project,
-            deadline: std::time::Instant::now()
-                + std::time::Duration::from_secs(wait.unwrap_or(60)),
-            retry_command: initial_retry,
-        };
-        let rest = super::rest_pull(&|argv| reader.read(argv), &text)?;
-        let current = rest.head.sha;
-        let repository = format!(
-            "repos/{}",
-            rest.base
-                .repo
-                .as_ref()
-                .ok_or("pull request has no base repository")?
-                .full_name
-        );
-        observed_repository = Some(
-            repository
-                .strip_prefix("repos/")
-                .unwrap_or(&repository)
-                .to_owned(),
-        );
-        let base = rest.base.branch.clone();
-        captured = Some(current);
-        reader.retry_command = retry_command(number, Some(current), wait, poll, globals);
-        if expected.is_some_and(|expected| current != expected) {
-            failure_code = "HEAD_MOVED";
-            return Err(format!("pull request head moved to {current}").into());
-        }
-        let stacked = rest.stack.is_some();
-        let view = from_rest(rest);
-        let attribution = std::cell::OnceCell::new();
-        if !view.cross_repository {
-            let binding = (|| -> Result<()> {
-                let tracker = attribution
-                    .get_or_init(|| {
-                        LandTracker::resolve(
-                            globals,
-                            repository.strip_prefix("repos/").unwrap_or(&repository),
-                        )
-                    })
-                    .as_ref()
-                    .map_err(|error| error.to_string())?;
-                attribute(tracker, &view, number, current, &reader)
-            })();
-            if let Err(error) = binding {
-                if error
-                    .downcast_ref::<super::wait::Failure>()
-                    .is_some_and(|failure| failure.code == "RATE_LIMITED")
-                {
-                    return Err(error);
-                }
-                super::contributions::warn(Some(number), &error);
-            }
-        }
-        // A retry after a successful merge only retries safe local cleanup.
-        // It must not wait for CI, merge again or depend on retained CI data.
-        let view = if view.state != "MERGED" {
-            if view.state == "CLOSED" {
-                failure_code = "PR_CLOSED";
-                return Err("pull request is closed without merging".into());
-            }
-            failure_code = "CI_UNAVAILABLE";
-            let state =
-                roots::resolve(globals, roots::Workspace::Project, roots::Product::Optional)?
-                    .roots
-                    .state;
-            super::wait::checks(
-                &reader,
-                state.as_path(),
-                number,
-                current,
-                &repository,
-                &base,
-                wait,
-                effective_poll,
-                globals.json,
-            )?;
-            failure_code = "MERGE_FAILED";
-            // A merge that errors or times out may still have taken effect, so
-            // the PR's own state decides the outcome, never the command's.
-            let merge_error = if stacked {
-                let mut forge = super::landing::adapters::GhForge::new(&project, state.as_path());
-                super::landing::publish::merge_member(
-                    &mut forge,
-                    number,
-                    &current.to_string(),
-                    provenant_cli::domains::MergeMethod::Merge,
-                )
-                .map(|_| ())
-                .map_err(|error| -> Box<dyn std::error::Error> {
-                    match error {
-                        super::landing::LandingError::PublicationUnknown => super::wait::failure(
-                            "MERGE_STATE_UNKNOWN",
-                            "asynchronous merge may still be in progress; rerun land to reconcile",
-                        ),
-                        other => Box::new(other),
-                    }
-                })
-                .err()
-            } else {
-                merge(&reader, &text, current).err()
-            };
-            let observed = if stacked {
-                super::rest_pull(&|argv| reader.read(argv), &text).and_then(|pull| {
-                    if pull.merged_at.is_some() && pull.head.sha != current {
-                        return Err(super::wait::failure(
-                            "HEAD_MOVED",
-                            "the merged pull request does not match the verified head",
-                        ));
-                    }
-                    Ok(from_rest(pull))
-                })
-            } else {
-                read_pull(&reader, &text)
-            };
-            match observed {
-                Ok(view) if view.state == "MERGED" => {
-                    merge_note = merge_error.map(|error| error.to_string());
-                    view
-                }
-                Ok(view) => match merge_error {
-                    Some(error) => return Err(error),
-                    None => view,
-                },
-                Err(error) => {
-                    // The merge may or may not have happened; rerunning land
-                    // is safe because a merged PR only retries cleanup.
-                    if let Some(failure) = error
-                        .downcast_ref::<super::wait::Failure>()
-                        .filter(|failure| failure.code == "RATE_LIMITED")
-                    {
-                        return Err(super::wait::failure(
-                            "RATE_LIMITED",
-                            format!("merge may have completed; {}", failure.message),
-                        ));
-                    }
-                    // Only a response GitHub refused outright proves no merge;
-                    // any other merge error leaves the outcome unknown.
-                    if let Some(merge_error) = merge_error {
-                        if merge_error
-                            .downcast_ref::<super::wait::Failure>()
-                            .is_some_and(|failure| {
-                                matches!(
-                                    failure.code,
-                                    "HEAD_MOVED" | "MERGE_NOT_ALLOWED" | "RATE_LIMITED"
-                                )
-                            })
-                        {
-                            return Err(merge_error);
-                        }
-                        if !merge_error.is::<super::TimedOut>() {
-                            return Err(super::wait::failure(
-                                "MERGE_STATE_UNKNOWN",
-                                format!(
-                                    "merge may have completed; the merge request failed ({merge_error}) and the pull request state cannot be confirmed: {error}"
-                                ),
-                            ));
-                        }
-                    }
-                    return Err(super::wait::failure(
-                        "MERGE_STATE_UNKNOWN",
-                        format!(
-                            "merge may have completed; cannot confirm the pull request state: {error}"
-                        ),
-                    ));
-                }
-            }
-        } else {
-            view
-        };
-        state = view.state.clone();
-        merged = view.state == "MERGED";
-        if merged {
-            landed = view
-                .merge_commit
-                .as_ref()
-                .zip(view.merged_at.as_deref())
-                .and_then(|(commit, merged_at)| {
-                    merged_at
-                        .parse::<jiff::Timestamp>()
-                        .ok()
-                        .map(|at| (view.title.clone(), commit.oid.clone(), at.as_second()))
-                });
-        }
-        if matches!(view.state.as_str(), "CLOSED" | "MERGED") && !view.cross_repository {
-            let closed = (|| -> Result<()> {
-                let tracker = attribution
-                    .get_or_init(|| {
-                        LandTracker::resolve(
-                            globals,
-                            repository.strip_prefix("repos/").unwrap_or(&repository),
-                        )
-                    })
-                    .as_ref()
-                    .map_err(|error| error.to_string())?;
-                tracker.close(number, &view)
-            })();
-            if let Err(error) = closed {
-                super::contributions::warn(Some(number), &error);
-            }
-        }
-        if merged {
-            let git = Git::new()?;
-            steps = follow_up(&git, &project, &view, current, &mut output_globals, workers)?;
-        }
-        Ok(())
-    })();
-    if merged && let Some((title, merge_commit, merged_at)) = landed {
-        // The merge is already durable. Progress logging is advisory and must
-        // never change the result of landing a pull request.
-        let _ = append_land_log(globals, number, &title, &merge_commit, merged_at);
-    }
-    let expected = captured
-        .map(|head| head.to_string())
-        .unwrap_or_else(|| "unknown".into());
-    let refused: Vec<&str> = steps
-        .iter()
-        .filter(|step| step.status == Status::Refused)
-        .map(|step| step.step)
-        .collect();
-    if let Some(error) = result
-        .as_ref()
-        .err()
-        .and_then(|error| error.downcast_ref::<super::wait::Failure>())
-    {
-        failure_code = error.code;
-    }
-    let cleanup_pending = merged && (result.is_err() || !refused.is_empty());
-    let pending = !merged && result.is_ok();
-    let outcome = if merged {
-        Outcome::Ok
-    } else if pending {
-        Outcome::Pending
-    } else if failure_code == "CI_TIMEOUT" {
-        Outcome::Timeout
-    } else if matches!(
-        failure_code,
-        "CI_PENDING"
-            | "CI_FAILED"
-            | "CI_CONFLICT"
-            | "CI_NOT_SCHEDULED"
-            | "HEAD_MOVED"
-            | "MERGE_NOT_ALLOWED"
-            | "PR_CLOSED"
-    ) {
-        Outcome::Refused
-    } else {
-        Outcome::Error
-    };
-    let mut report = CommandResult::new(
-        LEAF,
-        outcome,
-        json!({
-            "number": number,
-            "head": expected,
-            "result": if merged { "pass" } else if pending { "pending" } else { "fail" },
-            "merged": merged,
-            "reason": if cleanup_pending { "cleanup_pending" } else if merged { "landed" } else if pending { "merge_pending" } else { failure_code },
-            "merge_note": merge_note,
-            "cleanup_pending": cleanup_pending,
-            "cleanup_error": if merged { result.as_ref().err().map(ToString::to_string) } else { None },
-            "cleanup_refused": refused,
-            "state": state,
-            "steps": steps,
-        }),
-    );
-    report.data["lanes"] =
-        serde_json::json!(observed_repository.as_deref().and_then(|repository| {
-            super::contributions::projected_lanes(globals, &[number], repository)
-        }));
-    if let Err(error) = &result
-        && !merged
-    {
-        report.error = Some(CommandError {
-            diagnostic: None,
-            code: failure_code.into(),
-            message: format!("fail #{number} {expected}: {error}"),
-            cause: None,
-            repair: Some(match failure_code {
-                "RATE_LIMITED" => retry_command(number, captured, wait, poll, globals),
-                "CI_PENDING" | "CI_TIMEOUT" => {
-                    format!("provenant land {number} --head {expected} --wait")
-                }
-                // Landing again only retries cleanup if the merge did happen.
-                "MERGE_FAILED" | "MERGE_STATE_UNKNOWN" => {
-                    format!("provenant land {number} --head {expected}")
-                }
-                "CI_FAILED" | "CI_NOT_SCHEDULED" => format!("gh pr checks {number}"),
-                "CI_CONFLICT" => format!(
-                    "git rebase origin/<base> && git push --force-with-lease (PR #{number})"
-                ),
-                "HEAD_MOVED" => format!("provenant pr status {number} --full"),
-                "MERGE_NOT_ALLOWED" => format!("provenant pr status {number} --full"),
-                _ => "provenant help land".into(),
-            }),
-        });
-    }
-    let mut text = if merged {
-        format!("merged #{number} {expected}\n")
-    } else if pending {
-        format!("pending #{number} {expected} ({state})\n")
-    } else {
-        format!("fail #{number} {expected}\n")
-    };
-    if let Some(note) = &merge_note {
-        text.push_str(&format!(
-            "merge reported an error but the PR is merged: {note}\n"
-        ));
-    }
-    // A merged pull request is a success whatever cleanup remains; the sweep
-    // finishes it.
-    for step in &steps {
-        text.push_str(&format!(
-            "  {} {} {}\n",
-            step.step,
-            step.status.name(),
-            step.detail
-        ));
-    }
-    let next = if !merged {
-        format!("provenant pr status {number} --wait")
-    } else {
-        "provenant status".into()
-    };
-    // Compact shows the headline, any merge or cleanup note, then the steps
-    // that did not simply pass; --full shows every step.
-    let mut rows: Vec<String> = text.lines().skip(1).map(str::to_owned).collect();
-    if merged {
-        rows.retain(|row| !row.starts_with("  "));
-    }
-    let summary = provenant_cli::Summary::new(
-        text.lines().next().unwrap_or_default().to_owned(),
-        rows,
-        Some(next),
-    );
-    Landing {
-        report,
-        text,
-        summary,
-        globals: output_globals,
+        },
     }
 }
 
@@ -1639,8 +1158,7 @@ fn append_land_log(
     let Some(session) = session else {
         return Ok(());
     };
-    let config =
-        provenant_config::read_with_domains(&resolved.roots, &provenant_cli::domains::SECTIONS)?;
+    let config = provenant_cli::config_reads::read_for(&resolved.roots, "knobs")?;
     append_land_entry(
         &resolved.roots,
         LandEntry {
@@ -1855,11 +1373,12 @@ mod land_log_tests {
 #[cfg(test)]
 pub(crate) fn delete_after_check(
     project: &Path,
+    host_state: &Path,
     merged: GitOid,
     between: &[&str],
 ) -> Result<(String, String)> {
-    let git = Git::new()?;
-    let pull: Pull = serde_json::from_value(json!({
+    let git = Git::new(host_state)?;
+    let pull: Pull = serde_json::from_value(serde_json::json!({
         "state": "MERGED",
         "baseRefName": "main",
         "headRefName": "feat",
@@ -1877,7 +1396,11 @@ pub(crate) fn delete_after_check(
         }
     }
     let step = delete_branch(&git, project, "feat", "main", upstream, tip, false)?;
-    Ok((step.status.name(), step.detail))
+    let status = serde_json::to_value(step.status)?
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    Ok((status, step.detail))
 }
 
 #[cfg(test)]
@@ -1885,18 +1408,6 @@ pub(crate) fn delete_after_check(
 mod graph_land_tests {
     use super::*;
     use provenant_fabric_runtime::graph::LandObservation;
-
-    fn report(data: serde_json::Value, code: Option<&str>) -> CommandResult<serde_json::Value> {
-        let mut report = CommandResult::new("land", Outcome::Error, data);
-        report.error = code.map(|code| CommandError {
-            diagnostic: None,
-            code: code.into(),
-            message: "fail #7".into(),
-            cause: None,
-            repair: Some("provenant land 7".into()),
-        });
-        report
-    }
 
     #[test]
     fn graph_land_resolves_its_pull_request_via_rest() {
@@ -1914,10 +1425,15 @@ mod graph_land_tests {
             let observed = graph_land(
                 &project,
                 &project,
-                "feature",
-                HEAD,
-                None,
-                false,
+                &provenant_fabric_runtime::graph::LandRequest {
+                    graph_id: "g",
+                    node_id: "land",
+                    branch: "feature",
+                    head: HEAD,
+                    pull_request: None,
+                    tier: provenant_records::workflow::RiskTier::Routine,
+                    authority: None,
+                },
                 &provenant_confinement::worktrees::SystemWorkerObserver,
             );
             assert!(matches!(
@@ -1976,38 +1492,35 @@ esac
     }
 
     #[test]
-    fn a_land_report_maps_to_a_graph_observation() {
+    fn a_member_outcome_maps_to_a_graph_observation() {
+        use provenant_records::landing::MemberOutcome;
         assert_eq!(
-            observation(&report(
-                json!({"number":7, "merged":true, "cleanup_pending":true, "merge_note":null}),
-                None
-            )),
+            observation(7, Some(&MemberOutcome::Landed { commit: None }), None),
             LandObservation::Merged {
                 pull_request: Some(7),
                 note: None,
             }
         );
-        assert!(matches!(
-            observation(&report(json!({"number":7, "merged":false, "state":"OPEN"}), None)),
-            LandObservation::Pending { reason } if reason.contains("not merged yet (OPEN)")
-        ));
-        for code in [
-            "CI_PENDING",
-            "CI_UNAVAILABLE",
-            "MERGE_STATE_UNKNOWN",
-            "PR_UNAVAILABLE",
-            "RATE_LIMITED",
+        for outcome in [
+            MemberOutcome::Pending {
+                reason: "ci".into(),
+            },
+            MemberOutcome::Unknown {
+                reason: "lost".into(),
+            },
         ] {
             assert!(matches!(
-                observation(&report(json!({"number":7, "merged":false}), Some(code))),
+                observation(7, Some(&outcome), None),
                 LandObservation::Pending { .. }
             ));
         }
-        for code in ["CI_FAILED", "HEAD_MOVED", "PR_CLOSED", "MERGE_FAILED"] {
-            assert!(matches!(
-                observation(&report(json!({"number":7, "merged":false}), Some(code))),
-                LandObservation::Refused { reason } if reason.starts_with(code) && reason.contains("next: provenant land 7")
-            ));
-        }
+        assert!(matches!(
+            observation(7, Some(&MemberOutcome::Refused { reason: "HEAD_MOVED: x".into() }), None),
+            LandObservation::Refused { reason } if reason.starts_with("HEAD_MOVED")
+        ));
+        assert!(matches!(
+            observation(7, None, None),
+            LandObservation::Pending { .. }
+        ));
     }
 }

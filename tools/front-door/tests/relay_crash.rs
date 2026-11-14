@@ -16,6 +16,9 @@ struct Provider {
 }
 impl AttemptOwner for Provider {
     type Error = std::io::Error;
+    fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+        provenant_config::PortTable::builtin().worktree_layout
+    }
     fn actor(&self) -> String {
         "relay-fixture".into()
     }
@@ -44,6 +47,8 @@ impl AttemptOwner for Provider {
                 result_path: None,
                 branch: None,
                 commit: None,
+                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                stop: None,
             })
         } else {
             assert!(replay.stored_ref.is_none());
@@ -81,11 +86,10 @@ fn advance(
         json!({"schema_version":1,"graph_id":"relay-crash","template_library":{},"nodes":[{"id":"parent","access":"read_only","prompt":"Parent","route":{"alias":"senior"}}]}),
     )?;
     journal.bind(GraphExecution {
-        document: document.clone(),
-        directory: directory.to_path_buf(),
-        review_base: None,
-        integration_base: None,
         extra: Default::default(),
+        bases: None,
+        directory: directory.to_path_buf(),
+        document: document.clone(),
     })?;
     graph::advance_with_budget(
         &document,
@@ -114,7 +118,7 @@ fn relay_host_process() -> Result {
     let directory = root.join("project");
     advance(&context, attempt, recover, &directory)?;
     let marker = root.join("ready");
-    let _relay = provenant_fabric_mcp::lane::HostRelay::start_with_graph(
+    let _relay = provenant_fabric_runtime::relay::HostRelay::start_with_graph(
         provenant_providers::LaneRuntime::fabric_socket(attempt),
         provenant_records::Limits::CONFIG,
         |_, _, _| unreachable!("coordination not requested"),
@@ -124,12 +128,12 @@ fn relay_host_process() -> Result {
                 &context,
                 &attempt.to_string(),
                 arguments,
-                provenant_fabric_mcp::lane::host_budget(&clock, within)?,
+                provenant_fabric_runtime::relay::host_budget(&clock, within)?,
                 cancel,
                 &clock,
             )?;
             advance(&context, attempt, recover, &directory).map_err(|error| {
-                provenant_fabric_mcp::tools::ServiceError::Cli {
+                provenant_fabric_runtime::relay::ServiceError::Cli {
                     code: "fixture".into(),
                     message: error.to_string(),
                     data: Value::Null,
@@ -194,7 +198,7 @@ fn relay_host_crash_recovers_in_flight_child() -> Result {
     let host = start(&rig, attempt, false)?;
     let request = json!({"op":"add","id":"child","use":"task","brief":"Child work","idempotency_key":"child-once"});
     let send = |request| {
-        provenant_fabric_mcp::lane::graph(
+        provenant_fabric_runtime::relay::graph(
             &provenant_providers::LaneRuntime::fabric_socket(attempt),
             request,
             &CancelToken::new(),

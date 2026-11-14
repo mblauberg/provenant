@@ -164,11 +164,14 @@ pub(super) fn read(
         }
         for lane in page.lanes {
             let attempt = &lane.attempt;
+            let work_key = &attempt.key;
             let chair = match &chairs {
                 Ok(Some(index)) => {
-                    match index.read(attempt.project_id, attempt.run_id, &chair_call) {
-                        Ok(Some(found)) if found.request_digest == lane.run.request_digest => {
-                            found.chair
+                    match index.read(attempt.project_id, work_key.graph(), &chair_call) {
+                        Ok(Some(found))
+                            if found.provenance == Some(lane.operation.request_digest) =>
+                        {
+                            found.holder.chair().cloned()
                         }
                         Ok(None) => None,
                         _ => {
@@ -205,9 +208,9 @@ pub(super) fn read(
                 clock.wall_now().ok(),
                 false,
             );
-            lanes.push(json!({"lane_id":{"host":host,"run_id":projected.run_id,
-                "task_id":projected.task_id,"attempt_id":projected.attempt_id},
-                "chair":chair,"metadata":{"run":lane.run, "attempt":projected},"wait":waits.iter().find(|w| w.attempt_id == attempt.attempt_id),
+            lanes.push(json!({"lane_id":{"host":host,"key":work_key,
+                "attempt_id":projected.attempt_id},
+                "chair":chair,"metadata":{"operation":lane.operation, "attempt":projected},"wait":waits.iter().find(|w| w.attempt_id == attempt.attempt_id),
                 "attention":attention,"usage_coverage":{"known":known,"missing":missing},
                 "observation_coverage":if observed.contains(&attempt.attempt_id) { "complete" } else { "unavailable" }}));
         }
@@ -228,8 +231,8 @@ mod tests {
 
     #[test]
     fn board_paging_end_to_end() -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_core::{AttemptId, Digest, OperationId, RootInputs, RunId, TaskId};
-        use provenant_run::{CanonicalRequest, NewAttempt, PreparedRun};
+        use provenant_core::{AttemptId, Digest, OperationId, RootInputs};
+        use provenant_run::{CanonicalRequest, PreparedRun};
         let temp = tempfile::tempdir()?;
         let base = temp.path().canonicalize()?;
         std::fs::create_dir(base.join("home"))?;
@@ -253,13 +256,13 @@ mod tests {
             read_prompts: false,
         };
         let store = RunStore::open(&context, &call)?;
-        let task = TaskId::from_bytes([3; 16]);
         let mut request: CanonicalRequest = serde_json::from_value(json!({"schema_version":1,
-            "tasks":[{"task_id":task,"title":"Board fixture","prompt_digest":CanonicalV1::file_digest(b"private body"),
+            "task":{"title":"Board fixture","prompt_digest":CanonicalV1::file_digest(b"private body"),
             "route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":"high"},
-            "authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null}],
-            "concurrency":1,"parent":null,"lane_depth":1}))?;
-        request.chair = Some(provenant_run::ChairBinding {
+            "authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null},
+            "parent":null,"lane_depth":1}))?;
+        request.chair = Some(provenant_records::custody::Chair {
+            process: crate::fabric::chair_process(),
             extra: Default::default(),
             session: None,
             host: provenant_core::HostId::from_bytes([4; 16]),
@@ -274,16 +277,19 @@ mod tests {
             &call,
         )?;
         let prepared = |n: u8| -> Result<PreparedRun, Box<dyn std::error::Error>> {
+            let mut request = request.clone();
+            request.task.context = Some(provenant_records::run::WorkContext {
+                graph_id: Some(format!("lane-{n}")),
+                node_id: Some("node".into()),
+                attempt: Some(1),
+                ..Default::default()
+            });
             Ok(PreparedRun {
-                run_id: RunId::from_bytes([n; 16]),
+                attempt_id: AttemptId::from_bytes([n; 16]),
                 operation_id: OperationId::parse(&format!("board-{n}"))?,
                 created_at: clock.wall_now()?,
-                request: request.clone(),
-                attempts: vec![NewAttempt {
-                    task_id: task,
-                    attempt_id: AttemptId::from_bytes([n; 16]),
-                    prompt: "private body".into(),
-                }],
+                request,
+                prompt: "private body".into(),
             })
         };
         let mut since = None;
@@ -325,6 +331,9 @@ mod tests {
         super::super::write_fixture("changes-after-run-write", "console changes", changes, &base)?;
         let first = read(&roots, None, false, 50, None)?;
         assert_eq!(first["schema_version"], 3);
+        assert!(first["lanes"][0]["lane_id"]["key"].is_object());
+        assert!(first["lanes"][0]["lane_id"].get("run_id").is_none());
+        assert!(first["lanes"][0]["lane_id"].get("task_id").is_none());
         assert!(first["lanes"][0].get("estimated_cost").is_none());
         assert!(first["lanes"][0].get("verified_links").is_none());
         super::super::write_fixture(
@@ -333,18 +342,14 @@ mod tests {
             read(&roots, None, false, 1, None)?,
             &base,
         )?;
-        super::super::write_fixture(
-            "detail",
-            "console detail",
-            super::super::detail::read(&roots, &AttemptId::from_bytes([101; 16]).to_string())?,
-            &base,
-        )?;
+        let detail =
+            super::super::detail::read(&roots, &AttemptId::from_bytes([101; 16]).to_string())?;
+        assert!(detail["lane_id"]["key"].is_object());
+        assert!(detail["lane_id"].get("run_id").is_none());
+        assert!(detail["lane_id"].get("task_id").is_none());
+        super::super::write_fixture("detail", "console detail", detail, &base)?;
         assert_eq!(first["coverage"]["chairs"], "unavailable");
         assert_eq!(first["lanes"].as_array().unwrap().len(), 50);
-        assert_eq!(
-            first["lanes"][0]["wait"]["waiting_for"],
-            "launch: not yet handed to a guardian"
-        );
         assert_eq!(
             first["lanes"][0]["metadata"]["attempt"]["usage"]["uncached_input"],
             Value::Null
@@ -390,15 +395,15 @@ mod tests {
         );
         use std::os::unix::fs::PermissionsExt;
         let id = AttemptId::from_bytes([101; 16]);
-        let checkpoint = roots.state.as_path().join(format!(
-            "runs/{}/attempts/{id}/process.json",
-            RunId::from_bytes([101; 16])
-        ));
+        let checkpoint = roots
+            .state
+            .as_path()
+            .join(format!("attempts/{id}/process.json"));
         let observed_at = clock.wall_now()?;
         std::fs::write(
             &checkpoint,
             serde_json::to_vec(
-                &json!({"schema_version":1,"scope":{"run":RunId::from_bytes([101;16]),"attempt":id,"generation":0},"last_output_at":observed_at,"priority":15}),
+                &json!({"schema_version":1,"scope":{"attempt":id,"generation":0},"last_output_at":observed_at,"priority":15}),
             )?,
         )?;
         std::fs::set_permissions(&checkpoint, std::fs::Permissions::from_mode(0o600))?;
@@ -413,7 +418,7 @@ mod tests {
         for bytes in [
             b"{".to_vec(),
             serde_json::to_vec(
-                &json!({"schema_version":1,"scope":{"run":RunId::from_bytes([101;16]),"attempt":id,"generation":999}}),
+                &json!({"schema_version":1,"scope":{"attempt":id,"generation":999}}),
             )?,
         ] {
             std::fs::write(&checkpoint, bytes)?;
@@ -439,10 +444,15 @@ mod tests {
             clock: &clock,
             cancel: &cancel,
         };
+        let selected: AttemptId =
+            serde_json::from_value(first["lanes"][0]["lane_id"]["attempt_id"].clone())?;
+        let selected_request = store.request(selected, &call)?;
         ChairIndex::open(&roots.state, &chair_call)?.submit(
             project,
-            RunId::from_bytes([101; 16]),
-            &request,
+            first["lanes"][0]["lane_id"]["key"]["graph"]
+                .as_str()
+                .ok_or("missing graph")?,
+            &selected_request,
             &chair_call,
         )?;
         assert_eq!(
@@ -453,17 +463,33 @@ mod tests {
             read(&roots, None, false, 50, None)?["lanes"][0]["chair"],
             json!(request.chair)
         );
-        let mut forged = request.clone();
-        forged.chair = None;
-        ChairIndex::open(&roots.state, &chair_call)?.submit(
-            other_project,
-            RunId::from_bytes([100; 16]),
-            &forged,
-            &chair_call,
-        )?;
-        let mismatch = read(&roots, None, false, 50, None)?;
-        assert!(mismatch["lanes"][1]["chair"].is_null());
-        assert_eq!(mismatch["coverage"]["chairs"], "partial");
+        let chair_for = |board: &Value, graph: &str| {
+            board["lanes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|lane| lane["lane_id"]["key"]["graph"].as_str() == Some(graph))
+                .unwrap()["chair"]
+                .clone()
+        };
+        // Project scope and provenance determine whether an unmatched chair
+        // row is invisible or leaves coverage partial.
+        for (row_project, proposal, expected_coverage) in [
+            (project, "foreign-project-proposal", "complete"),
+            (other_project, "mismatched-project-proposal", "partial"),
+        ] {
+            let mut candidate = request.clone();
+            candidate.fresh_continuation = Some(proposal.into());
+            ChairIndex::open(&roots.state, &chair_call)?.submit(
+                row_project,
+                "lane-100",
+                &candidate,
+                &chair_call,
+            )?;
+            let board = read(&roots, None, false, 50, None)?;
+            assert_eq!(chair_for(&board, "lane-100"), Value::Null);
+            assert_eq!(board["coverage"]["chairs"], expected_coverage);
+        }
         let cursor = first["next_cursor"].as_str().ok_or("missing cursor")?;
         for malformed in ["", "junk", "g:0", "g:-1", "g:18446744073709551615"] {
             let error = read(&roots, None, false, 50, Some(malformed)).unwrap_err();

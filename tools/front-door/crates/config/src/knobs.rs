@@ -30,6 +30,7 @@ pub(crate) enum Kind {
     CensusIgnoreList,
     Enum,
     Int,
+    Fraction,
 }
 #[derive(Deserialize)]
 pub(crate) struct Spec {
@@ -90,14 +91,6 @@ impl<D> crate::ResolvedConfig<D> {
             .ok_or_else(|| invalid(name, "type"))
     }
 
-    /// Whether `fabric.mcp_server` opts the Fabric MCP server in. Off when unreadable.
-    pub fn fabric_mcp_server(&self) -> bool {
-        self.knobs
-            .get("fabric.mcp_server")
-            .and_then(|knob| knob.value.as_bool())
-            .unwrap_or(false)
-    }
-
     /// Host-owned process exceptions. Never read from a task/profile stamp.
     pub fn census_ignore_unreadable(
         &self,
@@ -148,23 +141,104 @@ impl<D> crate::ResolvedConfig<D> {
                 },
             );
         }
+        let launch_overrides: std::collections::BTreeSet<&str> = overrides
+            .iter()
+            .filter_map(|entry| entry.split_once('=').map(|(name, _)| name))
+            .collect();
+        // The layer that set each knob whose source a lane reports: its
+        // limits, its CI scope and its gh budget.
+        let knob_sources = SOURCED_KNOBS
+            .into_iter()
+            .filter_map(|name| {
+                let knob = knobs.get(name)?;
+                let source = match knob.source {
+                    KnobSource::Override if launch_overrides.contains(name) => "launch",
+                    KnobSource::Override => "host",
+                    KnobSource::Default | KnobSource::Profile => "default",
+                };
+                Some((name.to_owned(), Value::String(source.into())))
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let mut extra = provenant_records::ExtraFields::default();
+        extra.insert(KNOB_SOURCES.into(), Value::Object(knob_sources));
         Ok(provenant_records::run::HarnessProfile {
             name: profile_name(self.profile).into(),
+            // Sealed records carry no floats, so a fraction travels as its
+            // decimal text; readers parse it back.
             knobs: knobs
                 .into_iter()
-                .map(|(name, knob)| (name, knob.value))
+                .map(|(name, knob)| {
+                    let value = match knob.value {
+                        Value::Number(number)
+                            if registry
+                                .knobs
+                                .get(&name)
+                                .is_some_and(|spec| spec.kind == Kind::Fraction) =>
+                        {
+                            Value::String(number.to_string())
+                        }
+                        value => value,
+                    };
+                    (name, value)
+                })
                 .collect(),
             overrides: overrides.to_vec(),
+            extra,
             ..Default::default()
         })
     }
 }
 
+/// Profile field naming the layer (`launch`, `host` or `default`) that set
+/// each of [`SOURCED_KNOBS`].
+pub const KNOB_SOURCES: &str = "knob_sources";
+
+/// Knobs whose effective source a lane's receipt, status and preamble show.
+const SOURCED_KNOBS: [&str; 7] = [
+    "lanes.token_budget",
+    "lanes.budget_action",
+    "lanes.budget_grace",
+    "lanes.ci_scope",
+    "lanes.gh_budget",
+    "lanes.sandbox",
+    "lanes.sandbox_floor",
+];
+
 /// Parsed once; the embedded text is immutable.
 pub(crate) fn registry() -> Result<&'static Registry, ConfigError> {
     static PARSED: OnceLock<Option<Registry>> = OnceLock::new();
     PARSED
-        .get_or_init(|| serde_json::from_str(REGISTRY).ok())
+        .get_or_init(|| {
+            let mut registry: Registry = serde_json::from_str(REGISTRY).ok()?;
+            for rule in provenant_records::policy::table()
+                .iter()
+                .filter(|rule| rule.knob.is_some())
+            {
+                let values = rule
+                    .strengths()
+                    .into_iter()
+                    .map(|strength| match strength {
+                        provenant_records::policy::Strength::Refuse => "refuse".to_owned(),
+                        provenant_records::policy::Strength::Warn => "warn".to_owned(),
+                        provenant_records::policy::Strength::Off => "off".to_owned(),
+                    })
+                    .collect();
+                registry.knobs.insert(
+                    rule.knob.clone()?,
+                    Spec {
+                        kind: Kind::Enum,
+                        min: None,
+                        max: None,
+                        values,
+                        default: serde_json::to_value(rule.strength).ok()?,
+                        strict: false,
+                        safe: None,
+                        host_only: false,
+                    },
+                );
+            }
+            Some(registry)
+        })
         .as_ref()
         .ok_or(ConfigError::KnobRegistry)
 }
@@ -269,6 +343,17 @@ fn check(spec: &Spec, value: &Value) -> Result<(), &'static str> {
                 Ok(())
             }
         }
+        Value::Number(number) if spec.kind == Kind::Fraction => {
+            let value = number.as_f64().ok_or("type")?;
+            if !value.is_finite()
+                || spec.min.is_some_and(|min| value < min as f64)
+                || spec.max.is_some_and(|max| value > max as f64)
+            {
+                Err("outside_allowed_range")
+            } else {
+                Ok(())
+            }
+        }
         _ => Err("type"),
     }
 }
@@ -286,6 +371,9 @@ fn from_toml(item: &Item) -> Option<Value> {
             .collect::<Option<serde_json::Map<_, _>>>()
             .map(Value::Object),
         toml_edit::Value::Integer(n) => Some(Value::from(*n.value())),
+        toml_edit::Value::Float(n) => serde_json::Number::from_f64(*n.value())
+            .map(Value::Number)
+            .or(Some(Value::Null)),
         toml_edit::Value::String(s) => Some(Value::from(s.value().as_str())),
         _ => None,
     }
@@ -299,6 +387,12 @@ fn parse_cli(spec: &Spec, text: &str) -> Result<Value, &'static str> {
     }
     if spec.kind == Kind::Int {
         return text.parse::<i64>().map(Value::from).map_err(|_| "type");
+    }
+    if spec.kind == Kind::Fraction {
+        let value = text.parse::<f64>().map_err(|_| "type")?;
+        return serde_json::Number::from_f64(value)
+            .map(Value::Number)
+            .ok_or("type");
     }
     Ok(Value::from(text))
 }
@@ -472,6 +566,9 @@ fn apply(doc: &mut DocumentMut, edit: KnobEdit) -> Result<(), ConfigError> {
                     }
                     toml_edit::value(array)
                 }
+                Value::Number(n) if spec.kind == Kind::Fraction => {
+                    toml_edit::value(n.as_f64().ok_or_else(|| invalid(name, "type"))?)
+                }
                 Value::Number(n) => toml_edit::value(n.as_i64().unwrap_or_default()),
                 Value::String(s) => toml_edit::value(s.as_str()),
                 Value::Null | Value::Object(_) => return Err(invalid(name, "type")),
@@ -555,6 +652,29 @@ mod ceiling_tests {
         assert_eq!(
             registry["provider_updates"]["runtime_deadline_seconds"]["max"],
             provenant_core::MAX_LANE_RUNTIME_SECONDS
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod policy_action_tests {
+    use super::*;
+
+    #[test]
+    fn generated_policy_knobs_offer_only_supported_strengths() {
+        let registry = registry().unwrap();
+        assert_eq!(
+            registry.knobs["policy.PROCESS_CENSUS"].values,
+            ["warn", "off"]
+        );
+        assert_eq!(
+            registry.knobs["policy.ARGV_PROMPT"].values,
+            ["refuse", "warn", "off"]
+        );
+        assert_eq!(
+            registry.knobs["policy.ADMISSION_WRITERS"].values,
+            ["refuse", "warn", "off"]
         );
     }
 }

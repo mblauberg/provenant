@@ -1,19 +1,19 @@
-//! The one config editor every command uses: take the shared edit lock,
-//! compare the file revision, validate the complete edited configuration
-//! through the registered domains, publish `<state>/config.toml` atomically
+//! The one config editor every command uses: compare the file revision,
+//! validate the complete edited configuration
+//! through the registered domains, publish `<state>/config.toml` by atomic
+//! replacement
 //! (mode 0600), record the change in the history, and read it back.
 use crate::{
     ConfigError, ResolvedConfig,
     history::{FieldChange, HistoryEntry, HistoryLimits},
 };
-use provenant_core::{Clock, WaitBudget};
+use provenant_core::Clock;
 use provenant_os::fs::{Directory, PublishMode};
 use serde::Serialize;
 use std::{ffi::OsStr, io::Cursor};
 use toml_edit::DocumentMut;
 
 const MINIMAL: &str = "schema_version = 1\n";
-const LOCK_WAIT_SECONDS: u64 = 5;
 
 /// Who is editing, through what channel, and under which precondition.
 #[derive(Debug, Clone)]
@@ -126,25 +126,11 @@ pub(crate) fn edit_document<T>(
 where
     T: serde::de::DeserializeOwned + Serialize,
 {
-    // A dry run writes nothing, so it neither creates the state directory
-    // nor takes the lock.
-    let held = if options.dry_run {
+    // A dry run writes nothing, so it does not create the state directory.
+    let state = if options.dry_run {
         None
     } else {
-        let state = open_state(roots)?;
-        let clock = provenant_os::clock::SystemClock::new();
-        let budget = WaitBudget::cli(clock.mono_now(), LOCK_WAIT_SECONDS)
-            .map_err(|_| ConfigError::Locked)?;
-        let guard = state
-            .lock(
-                OsStr::new("config.lock"),
-                provenant_os::fs::LockMode::Exclusive,
-                budget,
-                &provenant_core::CancelToken::new(),
-                &clock,
-            )
-            .map_err(|_| ConfigError::Locked)?;
-        Some((state, guard))
+        Some(open_state(roots)?)
     };
 
     let text = current_text(roots)?;
@@ -182,7 +168,7 @@ where
     let changes = crate::history::changes(text.as_deref().unwrap_or(MINIMAL), &updated);
     let after_revision = revision_of(Some(&updated));
 
-    let Some((state, _guard)) = held else {
+    let Some(state) = state else {
         return Ok(Edited {
             config,
             before_revision,

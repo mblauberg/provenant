@@ -60,6 +60,8 @@ fn removal_preparation_allows_shared_launch_lock() -> Result<(), Box<dyn Error>>
         },
         &cancel(),
     )?;
+    let retirement = HostRetirementFixture::new(&test)?;
+    retirement.seed_lane(&context, &info)?;
     let artifact = info.path.join("target/artifact");
     fs::create_dir(info.path.join("target"))?;
     fs::write(&artifact, "output")?;
@@ -80,7 +82,7 @@ fn removal_preparation_allows_shared_launch_lock() -> Result<(), Box<dyn Error>>
         repository_held: Default::default(),
     };
     context.workers = &workers;
-    let result = remove_with_output(
+    let result = remove_with_retirement(
         &context,
         WorktreeRemove::Name {
             name: "removal-launch-lock".into(),
@@ -93,6 +95,8 @@ fn removal_preparation_allows_shared_launch_lock() -> Result<(), Box<dyn Error>>
             regenerable: vec!["target".into()],
             ..Default::default()
         },
+        &retirement,
+        retirement.actor,
     )?;
     assert_eq!(result.removed.len(), 1);
     assert!(
@@ -151,6 +155,8 @@ fn removal_refreshes_session_after_output_preparation() -> Result<(), Box<dyn Er
         },
         &cancel(),
     )?;
+    let retirement = HostRetirementFixture::new(&test)?;
+    retirement.seed_lane(&context, &info)?;
     let artifact = info.path.join("target/artifact");
     fs::create_dir(info.path.join("target"))?;
     fs::write(&artifact, "output")?;
@@ -161,7 +167,7 @@ fn removal_refreshes_session_after_output_preparation() -> Result<(), Box<dyn Er
     };
     let session = CensusSession::new(&observer, &test.clock);
     context.workers = &session;
-    let result = remove_with_output(
+    let result = remove_with_retirement(
         &context,
         WorktreeRemove::Name {
             name: "late-worker".into(),
@@ -174,6 +180,8 @@ fn removal_refreshes_session_after_output_preparation() -> Result<(), Box<dyn Er
             regenerable: vec!["target".into()],
             ..Default::default()
         },
+        &retirement,
+        retirement.actor,
     );
     assert!(
         matches!(
@@ -333,6 +341,8 @@ fn foreign_gc_session_requires_fresh_complete_census() -> Result<(), Box<dyn Err
         path.to_str().ok_or("path")?,
     ])?;
     let lanes = list(&context, &cancel())?;
+    let retirement = HostRetirementFixture::new(&test)?;
+    let evidence = gc_landing_evidence(&fixture, fixture.head()?)?;
     let observer = BecomingUnknown(Default::default());
     let session = CensusSession::new(&observer, &test.clock);
     assert_eq!(
@@ -344,7 +354,14 @@ fn foreign_gc_session_requires_fresh_complete_census() -> Result<(), Box<dyn Err
         &context,
         &lanes,
         &WorktreeGcPolicy {
-            foreign_merged_clean: true,
+            include_foreign: true,
+            retirement_port: Some(&retirement),
+            retirement_feeds: Some(&retirement),
+            mode: CollectionMode::Worktrees,
+            proof: Some(&evidence),
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
             upstream: Some(fixture.head()?),
             terminal: &|_| false,
             no_live_lanes: &|_| true,
@@ -355,7 +372,9 @@ fn foreign_gc_session_requires_fresh_complete_census() -> Result<(), Box<dyn Err
         },
         &cancel(),
     )?;
-    assert!(report.worktrees.removed.is_empty(), "{report:?}");
+    assert!(report.worktrees.retained.iter().any(|retained| {
+        retained.branch == "foreign-session" && retained.reason == RetainReason::UnknownWriter
+    }));
     assert!(path.is_dir());
     assert!(observer.0.load(std::sync::atomic::Ordering::SeqCst) >= 2);
     Ok(())
@@ -383,6 +402,9 @@ fn gc_session_detects_worker_after_preview() -> Result<(), Box<dyn Error>> {
     let test_context = TestContext::new(&fixture)?;
     let mut context = test_context.context();
     let lane = gc_merged_worktree(&fixture, &context, "gc-worker-appears")?;
+    let retirement = HostRetirementFixture::new(&test_context)?;
+    retirement.seed_lane(&context, &lane)?;
+    let evidence = gc_landing_evidence(&fixture, fixture.head()?)?;
     let observer = Appearing(Default::default());
     let session = CensusSession::new(&observer, &test_context.clock);
     assert_eq!(
@@ -394,7 +416,14 @@ fn gc_session_detects_worker_after_preview() -> Result<(), Box<dyn Error>> {
         &context,
         std::slice::from_ref(&lane),
         &WorktreeGcPolicy {
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement_port: Some(&retirement),
+            retirement_feeds: Some(&retirement),
+            mode: CollectionMode::Worktrees,
+            proof: Some(&evidence),
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
             upstream: Some(fixture.head()?),
             terminal: &|_| true,
             no_live_lanes: &|_| true,
@@ -405,7 +434,15 @@ fn gc_session_detects_worker_after_preview() -> Result<(), Box<dyn Error>> {
         },
         &cancel(),
     )?;
-    assert!(report.worktrees.removed.is_empty(), "{report:?}");
+    assert!(report.worktrees.retained.iter().any(|retained| {
+        retained.branch == "gc-worker-appears" && retained.reason == RetainReason::LiveWriter
+    }));
+    assert!(report.removals.iter().all(|removal| {
+        !matches!(
+            &removal.outcome,
+            provenant_records::custody::RemovalOutcome::Removed { .. }
+        )
+    }));
     assert!(lane.path.is_dir());
     assert!(observer.0.load(std::sync::atomic::Ordering::SeqCst) >= 2);
     Ok(())
@@ -422,12 +459,22 @@ fn gc_managed_removal_needs_a_fresh_free_census_under_custody() -> Result<(), Bo
         let mut context = test_context.context();
         let lane = gc_merged_worktree(&fixture, &context, "gc-census-flip")?;
         let upstream = fixture.head()?;
+        let retirement = HostRetirementFixture::new(&test_context)?;
+        retirement.seed_lane(&context, &lane)?;
+        let evidence = gc_landing_evidence(&fixture, upstream)?;
         let run = |context: &WorktreeContext<'_>| {
             collect(
                 context,
                 std::slice::from_ref(&lane),
                 &WorktreeGcPolicy {
-                    foreign_merged_clean: false,
+                    include_foreign: false,
+                    retirement_port: Some(&retirement),
+                    retirement_feeds: Some(&retirement),
+                    mode: CollectionMode::Worktrees,
+                    proof: Some(&evidence),
+                    upstream_reference: None,
+                    integration_patterns: &[],
+                    excluded_paths: &[],
                     upstream: Some(upstream),
                     terminal: &|_| true,
                     no_live_lanes: &|_| true,
@@ -447,7 +494,19 @@ fn gc_managed_removal_needs_a_fresh_free_census_under_custody() -> Result<(), Bo
             let session = CensusSession::new(&counting, &test_context.clock);
             context.workers = &session;
             let report = run(&context)?;
-            assert_eq!(report.worktrees.removed.len(), 1, "{report:?}");
+            let subject = provenant_records::custody::Subject::new(
+                provenant_records::custody::SubjectKind::Worktree,
+                lane.path.to_string_lossy(),
+            );
+            assert!(report.removals.iter().any(|removal| {
+                removal.subject == subject
+                    && matches!(
+                        &removal.outcome,
+                        provenant_records::custody::RemovalOutcome::Removed { .. }
+                    )
+            }));
+            assert!(!lane.path.exists());
+            assert!(!branch_exists(&fixture, "gc-census-flip"));
             total = counting.calls.load(std::sync::atomic::Ordering::SeqCst);
             // The removal censuses come after the one that listed the lane.
             assert!(total >= 2, "{total}");
@@ -460,15 +519,9 @@ fn gc_managed_removal_needs_a_fresh_free_census_under_custody() -> Result<(), Bo
         let session = CensusSession::new(&flipping, &test_context.clock);
         context.workers = &session;
         let report = run(&context)?;
-        assert!(report.worktrees.removed.is_empty(), "{report:?}");
-        assert_eq!(
-            report.worktrees.retained,
-            vec![RetainedBranch {
-                branch: "gc-census-flip".into(),
-                reason: RetainReason::UnknownWriter,
-                detail: Some("process 968: cwd unreadable; policy_condition=approved daemon directory required; configure confinement.census_ignore_unreadable; path=\"/Library/Developer/CoreSimulator/Resources/bin/simdiskimaged\", team_id=platform".into()),
-            }]
-        );
+        assert!(report.worktrees.retained.iter().any(|retained| {
+            retained.branch == "gc-census-flip" && retained.reason == RetainReason::UnknownWriter
+        }));
         assert!(lane.path.is_dir());
         assert!(branch_exists(&fixture, "gc-census-flip"));
     }
@@ -483,6 +536,9 @@ fn gc_preview_and_apply_both_retain_a_managed_tree_with_an_unknown_census()
         let test_context = TestContext::new(&fixture)?;
         let mut context = test_context.context();
         let lane = gc_merged_worktree(&fixture, &context, "gc-census-unknown")?;
+        let retirement = HostRetirementFixture::new(&test_context)?;
+        retirement.seed_lane(&context, &lane)?;
+        let evidence = gc_landing_evidence(&fixture, fixture.head()?)?;
         let unknown = FlippingWorkers {
             calls: Default::default(),
             unknown_from: 0,
@@ -492,7 +548,14 @@ fn gc_preview_and_apply_both_retain_a_managed_tree_with_an_unknown_census()
             &context,
             std::slice::from_ref(&lane),
             &WorktreeGcPolicy {
-                foreign_merged_clean: false,
+                include_foreign: false,
+                retirement_port: Some(&retirement),
+                retirement_feeds: Some(&retirement),
+                mode: CollectionMode::Worktrees,
+                proof: Some(&evidence),
+                upstream_reference: None,
+                integration_patterns: &[],
+                excluded_paths: &[],
                 upstream: Some(fixture.head()?),
                 terminal: &|_| true,
                 no_live_lanes: &|_| true,
@@ -503,16 +566,15 @@ fn gc_preview_and_apply_both_retain_a_managed_tree_with_an_unknown_census()
             },
             &cancel(),
         )?;
-        assert!(report.worktrees.removed.is_empty(), "{dry_run}: {report:?}");
-        assert_eq!(
-            report.worktrees.retained,
-            vec![RetainedBranch {
-                branch: "gc-census-unknown".into(),
-                reason: RetainReason::UnknownWriter,
-                detail: Some("process 968: cwd unreadable; policy_condition=approved daemon directory required; configure confinement.census_ignore_unreadable; path=\"/Library/Developer/CoreSimulator/Resources/bin/simdiskimaged\", team_id=platform".into()),
-            }],
-            "dry_run={dry_run}"
-        );
+        assert!(report.worktrees.retained.iter().any(|retained| {
+            retained.branch == "gc-census-unknown" && retained.reason == RetainReason::UnknownWriter
+        }));
+        assert!(report.removals.iter().all(|removal| {
+            !matches!(
+                &removal.outcome,
+                provenant_records::custody::RemovalOutcome::Removed { .. }
+            )
+        }));
         assert!(lane.path.is_dir());
     }
     Ok(())
@@ -528,7 +590,14 @@ fn gc_dry_run_retains_merged_worktree_with_unknown_writer() -> Result<(), Box<dy
         &context,
         &[lane],
         &WorktreeGcPolicy {
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement_port: None,
+            retirement_feeds: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
             upstream: Some(fixture.head()?),
             terminal: &|_| false,
             no_live_lanes: &|_| true,
@@ -566,7 +635,14 @@ fn gc_dry_run_retains_preview_dirty_worktree() -> Result<(), Box<dyn Error>> {
         &context,
         &[lane.clone()],
         &WorktreeGcPolicy {
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement_port: None,
+            retirement_feeds: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
             upstream: Some(fixture.head()?),
             terminal: &|_| true,
             no_live_lanes: &|_| true,
@@ -591,6 +667,10 @@ fn gc_settlement_error_retains_ref_and_continues() -> Result<(), Box<dyn Error>>
     let mut context = test_context.context();
     let first = gc_merged_worktree(&fixture, &context, "gc-settle-failed")?;
     let second = gc_merged_worktree(&fixture, &context, "gc-settle-next")?;
+    let retirement = HostRetirementFixture::new(&test_context)?;
+    retirement.seed_lane(&context, &first)?;
+    retirement.seed_lane(&context, &second)?;
+    let evidence = gc_landing_evidence(&fixture, fixture.head()?)?;
     let faulty = FailsFirstGcSettlement {
         executor: &fixture.executor,
         removed: std::sync::atomic::AtomicBool::new(false),
@@ -601,7 +681,14 @@ fn gc_settlement_error_retains_ref_and_continues() -> Result<(), Box<dyn Error>>
         &context,
         &[first.clone(), second.clone()],
         &WorktreeGcPolicy {
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement_port: Some(&retirement),
+            retirement_feeds: Some(&retirement),
+            mode: CollectionMode::Worktrees,
+            proof: Some(&evidence),
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
             upstream: Some(fixture.head()?),
             terminal: &|_| true,
             no_live_lanes: &|_| true,
@@ -612,19 +699,36 @@ fn gc_settlement_error_retains_ref_and_continues() -> Result<(), Box<dyn Error>>
         },
         &cancel(),
     )?;
-    assert_eq!(
-        report
-            .worktrees
-            .removed
-            .iter()
-            .map(|tree| &tree.path)
-            .collect::<Vec<_>>(),
-        vec![&first.path, &second.path]
-    );
-    assert_eq!(report.worktrees.retained.len(), 1);
-    assert_eq!(report.worktrees.retained[0].branch, "gc-settle-failed");
-    assert_eq!(report.worktrees.pruned_refs, vec!["gc-settle-next"]);
+    let worktree_subject = |lane: &WorktreeInfo| {
+        provenant_records::custody::Subject::new(
+            provenant_records::custody::SubjectKind::Worktree,
+            lane.path.to_string_lossy(),
+        )
+    };
+    assert!(report.removals.iter().any(|removal| {
+        removal.subject == worktree_subject(&first)
+            && matches!(
+                &removal.outcome,
+                provenant_records::custody::RemovalOutcome::Removed { .. }
+            )
+    }));
+    assert!(report.removals.iter().any(|removal| {
+        removal.subject == worktree_subject(&second)
+            && matches!(
+                &removal.outcome,
+                provenant_records::custody::RemovalOutcome::Removed { .. }
+            )
+    }));
+    assert!(report.removals.iter().any(|removal| {
+        matches!(
+            &removal.outcome,
+            provenant_records::custody::RemovalOutcome::Kept {
+                cause: provenant_records::custody::RemovalUncertainty::RetirementIncomplete
+            }
+        )
+    }));
     assert!(branch_exists(&fixture, "gc-settle-failed"));
+    assert!(!branch_exists(&fixture, "gc-settle-next"));
     assert!(!first.path.exists());
     assert!(!second.path.exists());
     Ok(())
@@ -653,7 +757,7 @@ fn timed_out_add_rolls_back_its_checkout_and_new_branch() -> Result<(), Box<dyn 
     assert!(
         !fixture
             .root
-            .join(WORKTREE_ROOT)
+            .join(".worktrees")
             .join("feature-slow")
             .exists()
     );
@@ -693,7 +797,7 @@ fn timed_out_add_keeps_a_branch_it_did_not_create() -> Result<(), Box<dyn Error>
     assert!(
         !fixture
             .root
-            .join(WORKTREE_ROOT)
+            .join(".worktrees")
             .join("feature-existing")
             .exists()
     );

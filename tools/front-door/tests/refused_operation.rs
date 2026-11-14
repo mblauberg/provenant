@@ -76,7 +76,6 @@ fn dirty_writer_refusal_is_durable_visible_and_notified_once() -> Result {
             "run",
             "--file",
             graph.to_str().ok_or("graph path")?,
-            "--wait=10s",
             "--json",
         ])?;
         let value: Value = serde_json::from_slice(&run.stdout.bytes)?;
@@ -127,30 +126,38 @@ fn dirty_writer_refusal_is_durable_visible_and_notified_once() -> Result {
         let wire = serde_json::to_string(refusal)?;
         assert!(!wire.contains("PROMPT_SENTINEL"));
         assert!(!wire.contains(rig.root.to_str().ok_or("fixture root")?));
-        let target = format!("operation:{}", refusal.operation_id);
-        let next = diagnostic.next.as_deref().ok_or("recovery action")?;
-        for args in [vec!["status", target.as_str()], vec!["status"]] {
-            let human = rig.command(&args)?;
-            let stdout = std::str::from_utf8(&human.stdout.bytes)?;
-            assert!(stdout.contains(next), "{stdout}");
-        }
-        let start = Instant::now();
-        let waited = rig.command(&["status", &target, "--wait=30s", "--json"])?;
-        assert_eq!(code(&waited), 1, "{waited:?}");
-        assert!(start.elapsed() < Duration::from_secs(2));
-        let observed: Value = serde_json::from_slice(&waited.stdout.bytes)?;
-        assert_eq!(
-            observed["data"]["operation"]["refusal"],
-            serde_json::to_value(diagnostic)?
+        // The refusal stays observable by the graph's name: its node reads as
+        // unsuccessful with a recorded reason, the listing carries the graph,
+        // and a wait returns at once instead of running to its deadline.
+        let status = rig.command(&["status", "dirty-writer", "--json"])?;
+        let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
+        let node = status["data"]["rows"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["kind"] == "node"))
+            .ok_or("node row")?;
+        assert!(
+            matches!(node["state"].as_str(), Some("failed" | "blocked")),
+            "{status}"
         );
-        let listed = rig.command(&["status", "--json"])?;
+        assert!(
+            node["reason"]
+                .as_str()
+                .is_some_and(|reason| !reason.is_empty()),
+            "{status}"
+        );
+        let start = Instant::now();
+        let waited = rig.command(&["wait", "dirty-writer", "--timeout", "30s", "--json"])?;
+        assert_ne!(code(&waited), 0, "{waited:?}");
+        assert_ne!(code(&waited), 124, "{waited:?}");
+        assert!(start.elapsed() < Duration::from_secs(2));
+        let observed = support::last_json_record(&waited.stdout.bytes)?;
+        assert_eq!(observed["data"]["timed_out"], false, "{observed}");
+        let listed = rig.command(&["status", "--all", "--json"])?;
         let listed: Value = serde_json::from_slice(&listed.stdout.bytes)?;
         assert!(
-            listed["data"]["refused_operations"]
+            listed["data"]["graphs"]
                 .as_array()
-                .is_some_and(|rows| rows
-                    .iter()
-                    .any(|row| row["operation_id"] == refusal.operation_id.as_str())),
+                .is_some_and(|rows| rows.iter().any(|row| row["name"] == "dirty-writer")),
             "{listed}"
         );
         // A repeat submission reattaches; the refusal and its notice stay singular.
@@ -158,10 +165,13 @@ fn dirty_writer_refusal_is_durable_visible_and_notified_once() -> Result {
             "run",
             "--file",
             graph.to_str().ok_or("graph path")?,
-            "--wait=10s",
             "--json",
         ])?;
-        assert_ne!(code(&repeated), 0, "{repeated:?}");
+        // The same input is the same launch: it finds its graph, exits 0 and
+        // starts nothing, so the refusal and its notice stay singular.
+        assert_eq!(code(&repeated), 0, "{repeated:?}");
+        let repeated: Value = serde_json::from_slice(&repeated.stdout.bytes)?;
+        assert_eq!(repeated["data"]["named"]["replayed"], true, "{repeated}");
         for _ in 0..2 {
             let reconciled = rig.command(&["reconcile", "--json"])?;
             assert_eq!(code(&reconciled), 0, "{reconciled:?}");

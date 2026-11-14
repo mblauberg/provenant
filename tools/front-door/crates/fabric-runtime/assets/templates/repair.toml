@@ -14,8 +14,8 @@ doc = "Registered worktree the fix writes in"
 
 [parameters.write_scope]
 type = "list"
-min = 1
-doc = "Relative paths the fix may write"
+default = []
+doc = "Optional advisory relative paths; empty means the writer may use its whole worktree"
 
 [parameters.lenses]
 type = "list"

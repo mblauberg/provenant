@@ -316,7 +316,7 @@ fn two_lanes_contend_for_integration_without_losing_either_head()
             .ok_or("destination")?;
     let first = fixture.prepare()?;
     let second_writer = WriterRequest {
-        extra: Default::default(),
+        extra: fixture.writer.extra.clone(),
         project: fixture.writer.project.clone(),
         worktree: fixture.root.join("second-lane"),
     };
@@ -852,13 +852,13 @@ fn a_late_host_limit_fails_the_receipt_at_its_stage_and_keeps_the_reason()
     };
     let store = RunStore::open(&execution, &call)?;
     let mut input = tests::input();
-    input.request.tasks[0].writer = Some(fixture.writer.clone());
-    input.request.tasks[0].deliver = Some(fixture.request.clone());
+    input.request.task.writer = Some(fixture.writer.clone());
+    input.request.task.deliver = Some(fixture.request.clone());
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let host = fixture.prepare()?;
     let head = host.head(&fixture.writer)?;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     artifacts::seal(
         &attempt,
         "writer-terminal.json",

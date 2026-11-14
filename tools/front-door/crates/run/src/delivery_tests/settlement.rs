@@ -86,13 +86,13 @@ fn review_delivery_requires_acceptance_and_exact_head()
     };
     let store = RunStore::open(&execution, &call)?;
     let mut input = tests::input();
-    input.request.tasks[0].writer = Some(fixture.writer.clone());
-    input.request.tasks[0].deliver = Some(fixture.request.clone());
+    input.request.task.writer = Some(fixture.writer.clone());
+    input.request.task.deliver = Some(fixture.request.clone());
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let host = fixture.prepare()?;
     let head = host.head(&fixture.writer)?;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     artifacts::seal(
         &attempt,
         "writer-terminal.json",
@@ -148,7 +148,7 @@ fn review_delivery_requires_acceptance_and_exact_head()
     let integration = receipt.integration.as_ref().ok_or("integration")?;
     assert_eq!(integration.previous, None);
     assert_eq!(integration.integrated, head);
-    let endpoint = provenant_confinement::worktrees::RefEndpoint::Remote {
+    let endpoint = provenant_records::custody::RefEndpoint::Remote {
         remote: integration.remote.clone(),
         push_url: integration.push_url.clone().ok_or("push URL")?,
     };
@@ -160,10 +160,7 @@ fn review_delivery_requires_acceptance_and_exact_head()
     let owned = ledger
         .load(&endpoint, &reference)?
         .ok_or("pushed ref not recorded")?;
-    assert_eq!(
-        owned.origin,
-        provenant_confinement::worktrees::RefOrigin::Created
-    );
+    assert_eq!(owned.origin, provenant_records::custody::RefOrigin::Created);
     assert_eq!(owned.attempt_id, Some(id));
     assert_eq!(owned.tip, head);
     assert_eq!(
@@ -262,12 +259,12 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
     };
     let store = RunStore::open(&execution, &call)?;
     let mut input = tests::input();
-    input.request.tasks[0].writer = Some(fixture.writer.clone());
+    input.request.task.writer = Some(fixture.writer.clone());
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let host = fixture.prepare()?;
     let head = host.head(&fixture.writer)?;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     artifacts::seal(
         &attempt,
         "writer-terminal.json",
@@ -315,9 +312,11 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
         ))?)
         .bytes(),
     );
+    // Simulate a crash after the current completion seal but before the
+    // mutable pickup pointer was published. Delivery should replay this seal.
     artifacts::seal(
         &attempt,
-        &format!("delivery-{key}.json"),
+        &format!("delivery-complete-{key}.json"),
         &db::bytes(&WriterDeliveryReceipt {
             extra: Default::default(),
             schema_version: 1,
@@ -325,9 +324,9 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
             branch: fixture.request.branch.clone(),
             head: Some(head),
             review_acceptance: None,
-            state: WriterDeliveryState::Failed {
+            state: WriterDeliveryState::Delivered {
                 extra: Default::default(),
-                stage: WriterDeliveryStage::Interrupted,
+                pull_request: None,
             },
             integration: None,
         })?,

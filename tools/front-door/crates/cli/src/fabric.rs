@@ -3,9 +3,11 @@ use crate::metadata::CatalogueArg;
 mod context;
 pub mod graph_relay;
 
-pub(crate) use context::private_dir;
-/// Shared identity/config setup for CLI leaves and the binary MCP transport.
-pub use context::{Context, PeerFailure, current_session, facade_outcome, in_lane, publish};
+/// Shared identity/config setup for CLI leaves and the binary's fabric edges.
+pub use context::{
+    Context, PeerFailure, acquire_custody, chair_process, checkout_branch, current_chair,
+    current_session, facade_outcome, in_lane, publish,
+};
 
 /// Trusted project and actor identity for sibling leaves such as workflow.
 pub(crate) fn identity(
@@ -23,21 +25,15 @@ pub(crate) fn identity(
 
 use crate::Globals;
 use clap::{Args, Subcommand, ValueEnum};
-use provenant_core::{ActorId, CancelToken, ClaimId, Clock, OperationId, WaitBudget};
+use provenant_core::{ActorId, CancelToken, Clock, OperationId, WaitBudget};
 use provenant_fabric_runtime::coordination::*;
 use provenant_records::{CommandError, CommandResult, Outcome};
 use serde::Serialize;
 use serde_json::Value;
-use std::{io, path::PathBuf, str::FromStr};
+use std::{io, path::PathBuf};
 
 #[derive(Debug, Subcommand)]
 pub enum Fabric {
-    /// Serve the Fabric MCP transport on standard input and output
-    Mcp {
-        /// Harness the client is
-        #[arg(long, value_parser = crate::install::harness_parser())]
-        client: Option<provenant_records::Harness>,
-    },
     /// Show this agent's project and inbox identity
     Identity,
     #[command(hide = true)]
@@ -64,12 +60,6 @@ pub struct Operation {
     /// Caller-chosen ID that makes retries idempotent
     #[arg(long)]
     pub operation_id: OperationId,
-}
-#[derive(Debug, Args)]
-pub struct Lease {
-    /// Lease duration in seconds (1 to 3600)
-    #[arg(long, default_value = "300", catalog_u64_range = 1..=3600)]
-    pub lease_seconds: u64,
 }
 #[derive(Debug, Args)]
 pub struct SequencePage {
@@ -125,32 +115,6 @@ pub enum Mail {
         operation: Operation,
     },
 }
-#[derive(Clone)]
-pub struct Token([u8; 16]);
-impl std::fmt::Debug for Token {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("[redacted]")
-    }
-}
-impl FromStr for Token {
-    type Err = &'static str;
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let bytes = provenant_core::unhex(value).ok_or("token must be 32 lowercase hex digits")?;
-        let bytes = bytes
-            .try_into()
-            .map_err(|_| "token must be 32 lowercase hex digits")?;
-        Ok(Self(bytes))
-    }
-}
-#[derive(Debug, Args)]
-pub struct Fence {
-    /// Fence generation
-    #[arg(long, catalog_u64_range = 1..)]
-    generation: u64,
-    /// Fence token (32 lowercase hex digits)
-    #[arg(long)]
-    token: Token,
-}
 #[derive(Debug, Subcommand)]
 pub enum Events {
     /// Read activity log entries
@@ -158,7 +122,7 @@ pub enum Events {
         #[command(flatten)]
         page: SequencePage,
         /// Wait up to this many seconds for new entries
-        #[arg(long, catalog_duration())]
+        #[arg(long, catalog_observation_wait())]
         wait: Option<u64>,
     },
     /// Add a note to the activity log
@@ -170,96 +134,32 @@ pub enum Events {
         operation: Operation,
     },
 }
-#[derive(Debug, Args)]
-#[group(id = "claim_scope", required = true, multiple = false)]
-pub struct Scope {
-    /// Claim an issue by key
-    #[arg(long)]
-    issue: Option<String>,
-    /// Claim this path (repeatable)
-    #[arg(long)]
-    path: Vec<PathBuf>,
-    /// Claim this worktree
-    #[arg(long)]
-    worktree: Option<PathBuf>,
-}
-impl Scope {
-    fn value(self) -> Result<WorkScope, EdgeError> {
-        if let Some(key) = self.issue {
-            return Ok(WorkScope::Issue {
-                extra: Default::default(),
-                key,
-            });
-        }
-        if let Some(path) = self.worktree {
-            return Ok(WorkScope::Worktree {
-                extra: Default::default(),
-                path: context::canonical(&path)?,
-            });
-        }
-        let paths = self
-            .path
-            .iter()
-            .map(|path| context::canonical(path))
-            .collect::<Result<_, _>>()?;
-        Ok(WorkScope::Paths {
-            extra: Default::default(),
-            paths,
-        })
-    }
-}
-#[derive(Debug, Args)]
-pub struct ClaimFence {
-    /// Claim ID
-    id: ClaimId,
-    #[command(flatten)]
-    fence: Fence,
-}
-impl ClaimFence {
-    fn proof(self) -> ClaimProof {
-        ClaimProof {
-            extra: Default::default(),
-            id: self.id,
-            generation: self.fence.generation,
-            token: self.fence.token.0,
-        }
-    }
-}
 #[derive(Debug, Subcommand)]
 pub enum Claim {
-    /// Acquire a work claim
+    /// Acquire durable advisory custody
     Acquire {
-        #[command(flatten)]
-        scope: Scope,
-        #[command(flatten)]
-        lease: Lease,
+        subject: Subject,
         #[command(flatten)]
         operation: Operation,
     },
-    /// Renew a work claim
+    /// Record activity without expiring or locking custody
     Renew {
-        #[command(flatten)]
-        fence: ClaimFence,
-        #[command(flatten)]
-        lease: Lease,
+        subject: Subject,
         #[command(flatten)]
         operation: Operation,
     },
-    /// Verify a work claim is still held
-    Verify(ClaimFence),
-    /// Release a work claim
+    /// Inspect custody
+    Verify { subject: Subject },
+    /// Release custody
     Release {
-        #[command(flatten)]
-        fence: ClaimFence,
+        subject: Subject,
         #[command(flatten)]
         operation: Operation,
     },
-    /// List work claims
+    /// List this project's custody ledger
     List {
-        /// Return claims after this ID
         #[arg(long)]
-        after: Option<ClaimId>,
-        /// Maximum claims (1 to 100)
+        after: Option<u64>,
         #[arg(long, default_value = "100", catalog_u64_range = 1..=100)]
         limit: u64,
     },
@@ -267,7 +167,7 @@ pub enum Claim {
 #[derive(Debug, thiserror::Error)]
 pub enum EdgeError {
     #[error(transparent)]
-    Relay(#[from] provenant_fabric_mcp::tools::ServiceError),
+    Relay(#[from] provenant_fabric_runtime::relay::ServiceError),
     #[error(transparent)]
     Exec(#[from] provenant_os::exec::ExecError),
     #[error(transparent)]
@@ -308,10 +208,10 @@ pub fn edge_diagnostic(error: &EdgeError) -> Option<provenant_records::diagnosti
             ))
         }
         EdgeError::Coordination(error) => Some(FacadeError::from(error).diagnostic()),
-        EdgeError::Relay(provenant_fabric_mcp::tools::ServiceError::Facade(error)) => {
+        EdgeError::Relay(provenant_fabric_runtime::relay::ServiceError::Facade(error)) => {
             Some(error.diagnostic())
         }
-        EdgeError::Relay(provenant_fabric_mcp::tools::ServiceError::Coordination(error)) => {
+        EdgeError::Relay(provenant_fabric_runtime::relay::ServiceError::Coordination(error)) => {
             Some(FacadeError::from(error).diagnostic())
         }
         _ => None,
@@ -334,7 +234,6 @@ fn recipient(value: &str, host: provenant_core::HostId) -> Result<ActorId, EdgeE
 impl Fabric {
     fn path(&self) -> String {
         let (domain, verb) = match self {
-            Self::Mcp { .. } => return "fabric mcp".into(),
             Self::Identity => return "fabric identity".into(),
             Self::Peer { .. } => return "fabric peer".into(),
             Self::PeerAgent => return "fabric peer-agent".into(),
@@ -358,7 +257,7 @@ impl Fabric {
                 match v {
                     Claim::Acquire { .. } => "acquire",
                     Claim::Renew { .. } => "renew",
-                    Claim::Verify(_) => "verify",
+                    Claim::Verify { .. } => "verify",
                     Claim::Release { .. } => "release",
                     Claim::List { .. } => "list",
                 },
@@ -378,7 +277,7 @@ impl Fabric {
             Self::Identity
                 | Self::Mail(Mail::Read { .. })
                 | Self::Events(Events::Read { .. })
-                | Self::Claim(Claim::Verify(_) | Claim::List { .. })
+                | Self::Claim(Claim::Verify { .. } | Claim::List { .. })
         )
     }
 }
@@ -395,7 +294,8 @@ fn execute(
     } else {
         Context::open(roots, home, cwd)?
     };
-    if ctx.in_lane && !cmd.read_only() {
+    let lane_mail_send = matches!(&cmd, Fabric::Mail(Mail::Send { .. }));
+    if ctx.in_lane && !cmd.read_only() && !lane_mail_send {
         return Err(CoordinationError::LaneMutation.into());
     }
     if matches!(cmd, Fabric::Identity) {
@@ -420,6 +320,7 @@ fn execute(
             store,
             ctx.identity.project,
             ctx.identity.inbox.actor,
+            ctx.local_observation.clone(),
             &clock,
             &backoff,
         )
@@ -428,6 +329,7 @@ fn execute(
             &ctx.roots.state,
             &ctx.identity,
             &ctx.config,
+            ctx.local_observation.clone(),
             &ctx.home,
             &ctx.cwd,
             &ctx.executor,
@@ -437,11 +339,25 @@ fn execute(
         )?
     };
     let mutate = |input, operation: Operation| {
+        if ctx.in_lane {
+            let Mutation::Mail(input @ MailInput::Send { .. }) = input else {
+                return Err(CoordinationError::LaneMutation.into());
+            };
+            let call = provenant_fabric_runtime::relay::ToolCall::Mail(
+                input,
+                Some(operation.operation_id),
+            );
+            return Ok(call.relay_within(
+                &ctx.lane_relay_socket()?,
+                &cancel,
+                std::time::Duration::from_micros(budget.remaining(clock.mono_now()).as_micros()),
+            )?);
+        }
         json(service.mutate(input, &operation.operation_id, budget, &cancel)?)
     };
     let observe = |input: Mutation| -> Result<Value, EdgeError> {
         if ctx.in_lane && ctx.remote_home() {
-            use provenant_fabric_mcp::tools::ToolCall;
+            use provenant_fabric_runtime::relay::ToolCall;
             let waiting = matches!(
                 &input,
                 Mutation::Events(EventsInput::Read {
@@ -451,8 +367,17 @@ fn execute(
             );
             loop {
                 let mut observation = input.clone();
-                let seconds =
-                    (budget.remaining(clock.mono_now()).as_micros() / 1_000_000).clamp(1, 55);
+                let seconds = if matches!(
+                    &input,
+                    Mutation::Events(EventsInput::Read {
+                        wait_seconds: Some(0),
+                        ..
+                    })
+                ) {
+                    0
+                } else {
+                    (budget.remaining(clock.mono_now()).as_micros() / 1_000_000).clamp(1, 55)
+                };
                 if let Mutation::Events(EventsInput::Read {
                     wait_seconds: Some(wait_seconds),
                     ..
@@ -487,7 +412,7 @@ fn execute(
         }
     };
     let value = match cmd {
-        Fabric::Identity | Fabric::Mcp { .. } | Fabric::Peer { .. } | Fabric::PeerAgent => {
+        Fabric::Identity | Fabric::Peer { .. } | Fabric::PeerAgent => {
             return Err(EdgeError::InvalidField("command"));
         }
         Fabric::Mail(Mail::Send {
@@ -565,38 +490,31 @@ fn execute(
                 operation,
             )?
         }
-        Fabric::Claim(Claim::Acquire {
-            scope,
-            lease,
-            operation,
-        }) => mutate(
+        Fabric::Claim(Claim::Acquire { subject, operation }) => mutate(
             Mutation::Claim(ClaimInput::Acquire {
                 extra: Default::default(),
-                scope: scope.value()?,
-                lease_seconds: ctx.lease(lease)?,
+                subject,
+                holder: Holder::Chair {
+                    chair: current_chair(&ctx),
+                },
             }),
             operation,
         )?,
-        Fabric::Claim(Claim::Renew {
-            fence,
-            lease,
-            operation,
-        }) => mutate(
+        Fabric::Claim(Claim::Renew { subject, operation }) => mutate(
             Mutation::Claim(ClaimInput::Renew {
                 extra: Default::default(),
-                proof: fence.proof(),
-                lease_seconds: ctx.lease(lease)?,
+                subject,
             }),
             operation,
         )?,
-        Fabric::Claim(Claim::Verify(fence)) => observe(Mutation::Claim(ClaimInput::Verify {
+        Fabric::Claim(Claim::Verify { subject }) => observe(Mutation::Claim(ClaimInput::Verify {
             extra: Default::default(),
-            proof: fence.proof(),
+            subject,
         }))?,
-        Fabric::Claim(Claim::Release { fence, operation }) => mutate(
+        Fabric::Claim(Claim::Release { subject, operation }) => mutate(
             Mutation::Claim(ClaimInput::Release {
                 extra: Default::default(),
-                proof: fence.proof(),
+                subject,
             }),
             operation,
         )?,

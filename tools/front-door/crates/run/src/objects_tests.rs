@@ -254,6 +254,7 @@ struct Fixture {
     _temp: tempfile::TempDir,
     root: PathBuf,
     home: PathBuf,
+    state: PathBuf,
     git: PathBuf,
     project: PathBuf,
     lane: PathBuf,
@@ -316,7 +317,8 @@ impl Fixture {
         let lane = root.join("lane");
         let source = root.join("private-objects");
         let staging = root.join("host-staging");
-        for path in [&home, &project, &source, &staging] {
+        let state = root.join("state");
+        for path in [&home, &project, &source, &staging, &state] {
             fs::create_dir(path)?;
         }
         fs::set_permissions(&home, fs::Permissions::from_mode(0o700))?;
@@ -344,9 +346,12 @@ impl Fixture {
         fs::create_dir(source.join("info"))?;
         fs::write(
             source.join("info/alternates"),
-            format!("{}\n", project.join(".git/objects").display()),
+            format!(
+                "{}\n",
+                super::quote_alternate(&project.join(".git/objects"))
+            ),
         )?;
-        let runtime = UtilityRuntime::new(&executable, &home)?;
+        let runtime = UtilityRuntime::new(&executable, &home, &state)?;
         let executor = SystemExecutor::new(1)?;
         let repo = runtime.open_repo(
             &executor,
@@ -366,6 +371,7 @@ impl Fixture {
             _temp: temp,
             root,
             home,
+            state,
             git: executable,
             project,
             lane,
@@ -1795,7 +1801,7 @@ fn read_only_preparation_materialises_split_index() -> TestResult {
             None,
             &["update-index", "--split-index"],
         )?;
-        let runtime = UtilityRuntime::new(&fixture.git, &fixture.home)?;
+        let runtime = UtilityRuntime::new(&fixture.git, &fixture.home, &fixture.state)?;
         let repo = runtime.open_read_repo(
             &SystemExecutor::new(1)?,
             &fixture.lane,
@@ -1868,7 +1874,7 @@ fn read_only_private_git_fetches_without_changing_linked_checkout() -> TestResul
         None,
         &["rev-parse", "HEAD"],
     )?)?;
-    let runtime = UtilityRuntime::new(&fixture.git, &fixture.home)?;
+    let runtime = UtilityRuntime::new(&fixture.git, &fixture.home, &fixture.state)?;
     let executor = SystemExecutor::new(1)?;
     let repo = runtime.open_read_repo(
         &executor,

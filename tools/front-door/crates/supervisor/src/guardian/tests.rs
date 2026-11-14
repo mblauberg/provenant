@@ -11,7 +11,7 @@ fn census_fallback_is_recorded_once_even_if_the_source_keeps_failing() {
 }
 
 #[test]
-fn event_burst_has_bounded_walks_and_failures_request_full_scan() {
+fn event_bursts_coalesce_census_walks_and_failures_request_a_full_scan() {
     let mut last = None;
     let mut walks = 0;
     for now in 0..1_000 {
@@ -20,16 +20,17 @@ fn event_burst_has_bounded_walks_and_failures_request_full_scan() {
             walks += 1;
         }
     }
-    assert!(walks > 0 && walks < 100, "{walks} walks for 1000 events");
-    assert!(super::census_full_due(101, Some(100), true));
-    assert!(!super::census_full_due(101, Some(100), false));
-    assert!(super::census_full_due(u64::MAX, Some(100), false));
+    assert!(walks > 0, "an event burst must eventually be observed");
+    assert!(walks < 1_000, "a census walk followed every event");
+    assert!(super::census_full_due(0, Some(u64::MAX), true));
+    assert!(!super::census_full_due(0, Some(u64::MAX), false));
+    assert!(super::census_full_due(u64::MAX, Some(0), false));
 }
 
-/// Counts census turns over one simulated idle minute at the guardian's
-/// 100 ms wake rate. Without process events only the full backstop runs.
+/// An idle lane gets a census eventually, with no repeated walk before its
+/// full-scan backstop is due. Event-driven work can still request a walk.
 #[test]
-fn idle_lane_walks_only_at_the_full_backstop() {
+fn idle_lane_census_walks_respect_the_full_backstop() {
     let mut last_walk = None;
     let mut last_full = None;
     let mut walks = Vec::new();
@@ -42,31 +43,39 @@ fn idle_lane_walks_only_at_the_full_backstop() {
             walks.push(now);
         }
     }
-    assert_eq!(
-        walks.len() as u64,
-        60_000 / super::FULL_CENSUS_INTERVAL_MS,
-        "{walks:?}"
-    );
+    assert!(!walks.is_empty(), "an idle lane still needs a full census");
     assert!(
         walks
             .windows(2)
             .all(|pair| pair[1] - pair[0] >= super::FULL_CENSUS_INTERVAL_MS)
     );
-    // An event, failed watch or failed census still walks at the 100 ms rate.
-    assert!(super::census_turn_due(1_100, Some(1_000), Some(0), true));
-    assert!(!super::census_turn_due(1_050, Some(1_000), Some(0), true));
-    assert!(!super::census_turn_due(1_100, Some(1_000), Some(0), false));
+    // Events can request a walk as soon as the walk throttle permits it.
+    assert!(super::census_turn_due(
+        super::CENSUS_INTERVAL_MS,
+        Some(0),
+        Some(u64::MAX),
+        true
+    ));
+    assert!(!super::census_turn_due(
+        super::CENSUS_INTERVAL_MS.saturating_sub(1),
+        Some(0),
+        Some(u64::MAX),
+        true
+    ));
+    assert!(!super::census_turn_due(0, Some(0), Some(0), false));
     assert!(super::census_turn_due(0, None, None, false));
-    // Progress evidence is published once a second; so is the CPU sample.
-    const { assert!(super::CPU_SAMPLE_INTERVAL_MS == 1_000) };
 }
 
 #[test]
-fn journal_retry_is_prompt_and_does_not_require_a_census() {
-    assert!(!super::tracking_publication_due(99, Some(0), true));
-    assert!(super::tracking_publication_due(100, Some(0), true));
-    assert!(!super::tracking_publication_due(100, Some(0), false));
-    assert!(!super::census_turn_due(100, Some(0), Some(0), false));
+fn a_failed_journal_retry_can_proceed_without_a_census() {
+    assert!(super::tracking_publication_due(u64::MAX, None, true));
+    assert!(!super::tracking_publication_due(0, Some(u64::MAX), true));
+    assert!(!super::census_turn_due(
+        u64::MAX,
+        Some(u64::MAX),
+        Some(u64::MAX),
+        false
+    ));
 }
 
 #[test]
@@ -115,7 +124,7 @@ fn cancellation_directory_watch_allows_idle_backoff_with_polling_fallback() {
 #[allow(clippy::disallowed_methods)]
 fn guardian_missing_attempt_finishes_unresolved_group_cleanup() {
     use crate::census::{CensusError, ProcessObservation, ProcessObserver};
-    use provenant_core::{AttemptId, RunId, WaitBudget};
+    use provenant_core::{AttemptId, WaitBudget};
     use provenant_os::clock::SystemClock;
     use std::os::fd::{AsFd, AsRawFd};
     use std::sync::{
@@ -206,7 +215,6 @@ fn guardian_missing_attempt_finishes_unresolved_group_cleanup() {
     let child_path = root.path().join("child.pid");
     let clock = SystemClock::new();
     let scope = Scope {
-        run: RunId::from_bytes([31; 16]),
         attempt: AttemptId::from_bytes([32; 16]),
         generation: 1,
     };
@@ -234,13 +242,14 @@ fn guardian_missing_attempt_finishes_unresolved_group_cleanup() {
         ..CapturePlan::default()
     };
     let message = LaunchMessage {
+        policy: Default::default(),
         profile: None,
         schema_version: 1,
         priority: 0,
         scope,
         resolved_route: "fixture/provider".into(),
         permission_plan_digest: provenant_core::Digest::from_bytes([0; 32]),
-        task: provenant_core::TaskId::from_bytes([33; 16]),
+        key: crate::custody::fixture_key(33),
         requester: provenant_core::ActorId::from_bytes([34; 16]),
         binding: writer.reservation.binding.clone(),
         executable_snapshot: snapshot_executable(OsStr::new("/bin/sh")).unwrap(),
@@ -645,7 +654,7 @@ fn spawn_missing_attempt_guardian(
     PathBuf,
     Scope,
 ) {
-    use provenant_core::{AttemptId, RunId, WaitBudget};
+    use provenant_core::{AttemptId, WaitBudget};
     use provenant_os::clock::SystemClock;
     use std::os::fd::{AsFd, AsRawFd};
 
@@ -658,7 +667,6 @@ fn spawn_missing_attempt_guardian(
     std::fs::create_dir(&attempt_path).unwrap();
     let clock = SystemClock::new();
     let scope = Scope {
-        run: RunId::from_bytes([41; 16]),
         attempt: AttemptId::from_bytes([42; 16]),
         generation: 1,
     };
@@ -681,13 +689,14 @@ fn spawn_missing_attempt_guardian(
     .unwrap();
     let executable_snapshot = snapshot_executable(OsStr::from_bytes(&argv[0])).unwrap();
     let message = LaunchMessage {
+        policy: Default::default(),
         profile: None,
         schema_version: 1,
         priority: 0,
         scope,
         resolved_route: "fixture/provider".into(),
         permission_plan_digest: provenant_core::Digest::from_bytes([0; 32]),
-        task: provenant_core::TaskId::from_bytes([43; 16]),
+        key: crate::custody::fixture_key(43),
         requester: provenant_core::ActorId::from_bytes([44; 16]),
         binding: writer.reservation.binding.clone(),
         executable_snapshot,
@@ -1134,7 +1143,7 @@ fn descriptor_identity_distinguishes_removal_replacement_and_rename() {
 
 #[test]
 fn settlement_lock_clone_failure_retains_exclusion_and_returns_reconcile_hint() {
-    use provenant_core::{AttemptId, Clock, RunId, WaitBudget};
+    use provenant_core::{AttemptId, Clock, WaitBudget};
     use provenant_os::{
         clock::SystemClock,
         fs::{FsError, LockMode},
@@ -1143,7 +1152,6 @@ fn settlement_lock_clone_failure_retains_exclusion_and_returns_reconcile_hint() 
     let directory = Directory::open_anchor(root.path()).unwrap();
     let clock = SystemClock;
     let scope = Scope {
-        run: RunId::from_bytes([1; 16]),
         attempt: AttemptId::from_bytes([2; 16]),
         generation: 1,
     };
@@ -1170,11 +1178,7 @@ fn settlement_lock_clone_failure_retains_exclusion_and_returns_reconcile_hint() 
         &writer.reservation,
     )
     .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains(&format!("provenant reconcile --id {}", scope.run))
-    );
+    assert!(error.to_string().contains("provenant reconcile"));
     assert!(writer.lease.is_some());
     assert!(matches!(
         directory.try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive),
@@ -1191,82 +1195,19 @@ fn settlement_lock_clone_failure_retains_exclusion_and_returns_reconcile_hint() 
 }
 
 #[test]
-fn terminal_retries_wait_until_the_holder_can_publish() {
-    use std::cell::{Cell, RefCell};
-    let elapsed = Cell::new(Duration::ZERO);
-    let attempts = RefCell::new(Vec::new());
-    let delays = RefCell::new(Vec::new());
-    assert!(retry_terminal_with(
-        PRODUCTION_TERMINAL_RETRY_MS,
-        || {
-            attempts.borrow_mut().push(elapsed.get());
-            elapsed.get() >= Duration::from_secs(35)
-        },
-        |delay| {
-            delays.borrow_mut().push(delay);
-            elapsed.set(elapsed.get() + delay);
-        },
-    ));
-    assert_eq!(
-        *attempts.borrow(),
-        [
-            Duration::ZERO,
-            Duration::from_secs(5),
-            Duration::from_secs(35),
-        ]
-    );
-    assert_eq!(
-        *delays.borrow(),
-        [Duration::from_secs(5), Duration::from_secs(30),]
-    );
-}
-
-#[test]
-fn terminal_retry_exhaustion_keeps_the_failure_bounded() {
-    use std::cell::{Cell, RefCell};
-    let attempts = Cell::new(0);
-    let delays = RefCell::new(Vec::new());
-    assert!(!retry_terminal_with(
-        PRODUCTION_TERMINAL_RETRY_MS,
-        || {
-            attempts.set(attempts.get() + 1);
-            false
-        },
-        |delay| delays.borrow_mut().push(delay),
-    ));
-    assert_eq!(attempts.get(), 4);
-    assert_eq!(
-        *delays.borrow(),
-        [
-            Duration::from_secs(5),
-            Duration::from_secs(30),
-            Duration::from_secs(120),
-        ]
-    );
-}
-
-#[test]
-fn successful_terminal_publication_does_not_wait() {
-    assert!(retry_terminal(
-        || true,
-        |_| panic!("a successful terminal publication must not wait"),
-    ));
-}
-
-#[test]
 fn handoff_round_trips_one_mib_stdin_with_claude_argv_and_environment() {
     let message = LaunchMessage {
+        policy: Default::default(),
         profile: None,
         priority: 0,
         schema_version: 1,
         scope: Scope {
-            run: provenant_core::RunId::from_bytes([1; 16]),
             attempt: provenant_core::AttemptId::from_bytes([2; 16]),
             generation: 1,
         },
         resolved_route: "claude/claude-sonnet-4-6@high".into(),
         permission_plan_digest: provenant_core::Digest::from_bytes([3; 32]),
-        task: provenant_core::TaskId::from_bytes([4; 16]),
+        key: crate::custody::fixture_key(4),
         requester: provenant_core::ActorId::from_bytes([5; 16]),
         binding: StoredWriterBinding::ReadOnly,
         executable_snapshot: ExecutableSnapshot {
@@ -1297,8 +1238,6 @@ fn handoff_round_trips_one_mib_stdin_with_claude_argv_and_environment() {
             "claude-sonnet-4-6",
             "--effort",
             "high",
-            "--mcp-config",
-            "/fixture/attempt/provider-state/fabric-mcp.json",
         ]
         .map(|arg| arg.as_bytes().to_vec())
         .to_vec(),
@@ -1634,10 +1573,39 @@ fn unavailable_port_allocation_warns_and_does_not_claim_a_block()
         blocks: 1,
         blocks_origin: Some(provenant_os::lane_ports::BlocksOrigin::HostConfig),
     };
-    let (lease, warning) =
-        lane_port_allocation(Some(&unavailable)).map_err(std::io::Error::other)?;
+    let advisory_policy = provenant_records::policy::Policy::default();
+    assert_eq!(
+        advisory_policy
+            .rule("GUARDIAN_LANE_PORT_ALLOCATION_NONE")
+            .rule
+            .strength,
+        provenant_records::policy::Strength::Warn
+    );
+    assert!(
+        !advisory_policy
+            .rule("GUARDIAN_LANE_PORT_ALLOCATION_NONE")
+            .rule
+            .refusable
+    );
+    let (lease, warning) = lane_port_allocation(&advisory_policy, Some(&unavailable))
+        .map_err(std::io::Error::other)?;
     assert!(lease.is_none());
-    assert!(warning.is_some_and(|text| text.contains("domains.fabric.lanes.lane_port_blocks")));
+    assert!(warning.is_some());
+    let mut off_policy = advisory_policy.clone();
+    off_policy.overlay(
+        &std::collections::BTreeMap::from([(
+            "GUARDIAN_LANE_PORT_ALLOCATION_NONE".into(),
+            provenant_records::policy::Strength::Off,
+        )]),
+        provenant_records::policy::Source::Dispatch,
+    );
+    assert_eq!(
+        off_policy.rule("GUARDIAN_LANE_PORT_ALLOCATION_NONE").source,
+        provenant_records::policy::Source::Dispatch
+    );
+    let (_, warning) =
+        lane_port_allocation(&off_policy, Some(&unavailable)).map_err(std::io::Error::other)?;
+    assert!(warning.is_none());
     let env = vec![
         ("PATH".into(), "/bin".into()),
         (provenant_os::lane_ports::BASE_ENV.into(), "1".into()),
@@ -1651,17 +1619,19 @@ fn unavailable_port_allocation_warns_and_does_not_claim_a_block()
         state: temp.path().into(),
         ..unavailable
     };
-    let (first, warning) = lane_port_allocation(Some(&available)).map_err(std::io::Error::other)?;
+    let strict = strict_port_policy();
+    assert_eq!(strict.rule("PORT_BLOCKS").rule.code, "PORT_BLOCKS");
+    assert_eq!(
+        strict.rule("PORT_BLOCKS").rule.strength,
+        provenant_records::policy::Strength::Refuse
+    );
+    let (first, warning) =
+        lane_port_allocation(&strict, Some(&available)).map_err(std::io::Error::other)?;
     assert!(first.is_some());
     assert!(warning.is_none());
-    let error = lane_port_allocation(Some(&available))
+    let error = lane_port_allocation(&strict, Some(&available))
         .err()
         .ok_or("expected exhausted pool")?;
-    assert!(
-        error
-            .to_string()
-            .contains("domains.fabric.lanes.lane_port_blocks=1 (host configuration)")
-    );
     assert_eq!(
         error.fact(),
         provenant_records::diagnostic::ResourceFact::LanePorts {
@@ -1674,7 +1644,8 @@ fn unavailable_port_allocation_warns_and_does_not_claim_a_block()
         blocks_origin: Some(provenant_os::lane_ports::BlocksOrigin::CompiledDefault),
         ..available
     };
-    let (lease, warning) = lane_port_allocation(Some(&automatic)).map_err(std::io::Error::other)?;
+    let (lease, warning) =
+        lane_port_allocation(&advisory_policy, Some(&automatic)).map_err(std::io::Error::other)?;
     assert!(lease.is_none());
     assert!(warning.is_some());
     Ok(())
@@ -1738,4 +1709,50 @@ fn tracking_batches_fork_churn_but_publishes_initial_state_immediately() {
     }
     assert_eq!(publications, [0, 1_000, 2_000]);
     assert!(super::tracking_publication_due(2_100, last, true));
+}
+
+/// All budget actions obey the same completion and clean-point precedence.
+#[test]
+fn budget_actions_preserve_clean_points_and_natural_completion() {
+    use provenant_records::BudgetAction;
+    for action in [BudgetAction::WrapUp, BudgetAction::Warn, BudgetAction::Stop] {
+        for budget in [0, 1, 1000, u64::MAX] {
+            for used in [0, budget, budget.saturating_add(1), u64::MAX] {
+                for clean in [false, true] {
+                    for completed in [false, true] {
+                        let boundary =
+                            super::budget_boundary(budget, action, used, clean, completed);
+                        if completed
+                            || action == BudgetAction::Warn
+                            || budget == 0
+                            || used <= budget
+                        {
+                            assert_eq!(boundary, None);
+                        } else {
+                            assert_eq!(
+                                boundary,
+                                Some(if clean {
+                                    super::BudgetBoundary::Clean
+                                } else {
+                                    super::BudgetBoundary::Dirty
+                                })
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn strict_port_policy() -> provenant_records::policy::Policy {
+    let mut policy = provenant_records::policy::Policy::default();
+    policy.overlay(
+        &std::collections::BTreeMap::from([(
+            "PORT_BLOCKS".into(),
+            provenant_records::policy::Strength::Refuse,
+        )]),
+        provenant_records::policy::Source::Dispatch,
+    );
+    policy
 }

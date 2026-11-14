@@ -1,73 +1,163 @@
 use super::*;
 
-pub(super) fn project_setup_runs_once_and_failure_retains_the_worktree() -> Result {
+pub(super) fn naming_and_post_create_ports_are_advisory_and_evidenced() -> Result {
     let rig = repository()?;
     let (roots, execution) = writer_context(&rig)?;
-    let config = rig.state.join("config.toml");
-    let marker_path = rig.state.join("setup-runs");
-    let setup = format!(
-        "pwd >> '{}'",
-        marker_path
-            .to_str()
-            .ok_or("marker path")?
-            .replace('\'', "'\"'\"'")
-    );
+    let marker_path = rig.state.join("post-create-runs");
+    let marker = marker_path.to_str().ok_or("marker path")?.to_owned();
+    let mut ports = provenant_config::PortTable::builtin();
+    ports.naming = provenant_config::Port {
+        source: provenant_config::PortSource::Project,
+        backend: provenant_config::PortBackend::Command {
+            command: provenant_config::PortCommand {
+                argv: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    r#"printf 'derived-%s\n' "$1""#.into(),
+                    "--".into(),
+                ],
+                exit_codes: provenant_config::CommandExitCodes {
+                    success: vec![0],
+                    unknown: vec![],
+                    other: provenant_config::ExitDisposition::Refused,
+                },
+            },
+        },
+    };
+    ports.post_create = provenant_config::Port {
+        source: provenant_config::PortSource::Project,
+        backend: provenant_config::PortBackend::Command {
+            command: provenant_config::PortCommand {
+                argv: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    r#"printf '%s\n' "$3" >> "$1""#.into(),
+                    "--".into(),
+                    marker.clone(),
+                ],
+                exit_codes: provenant_config::CommandExitCodes {
+                    success: vec![0],
+                    unknown: vec![],
+                    other: provenant_config::ExitDisposition::Refused,
+                },
+            },
+        },
+    };
+    fs::create_dir_all(rig.project.join(".provenant"))?;
     fs::write(
-        &config,
-        format!(
-            "schema_version = 1\n[worktrees]\nsetup = ['exit 42']\n[worktrees.projects.{}]\nsetup = [{}]\n",
-            execution.project_id,
-            serde_json::to_string(&setup)?
-        ),
+        rig.project.join(provenant_config::PORTS_CONFIG),
+        serde_json::to_vec(&ports)?,
     )?;
     let created = ok(
         &rig,
         &["worktree", "create", "setup", "--base", "HEAD", "--json"],
     )?;
-    let path = rig.project.join(".worktrees/setup");
-    let marker = fs::read(&marker_path)?;
+    let path = rig.project.join(".worktrees/derived-setup");
+    let marker_bytes = fs::read(&marker_path)?;
     assert_eq!(
-        fs::canonicalize(String::from_utf8(marker.clone())?.trim())?,
+        fs::canonicalize(String::from_utf8(marker_bytes.clone())?.trim())?,
         fs::canonicalize(&path)?
     );
     let context = provenant_cli::fabric::Context::open(roots, &rig.home, &rig.project)?;
     let clock = provenant_os::clock::SystemClock;
     let cancel = provenant_core::CancelToken::new();
-    // Writer provisioning reuses this checkout without executing setup again.
+    // Writer provisioning reuses this checkout without executing the hook again.
     provenant_cli::fabric::graph_relay::provision_writer(
         &context,
-        ".worktrees/setup",
-        "setup",
+        ".worktrees/derived-setup",
+        "derived-setup",
         created["data"]["head"].as_str().ok_or("created head")?,
         provenant_core::WaitBudget::cli(clock.mono_now(), 30)?,
         &cancel,
     )?;
-    assert_eq!(fs::read(&marker_path)?, marker);
+    assert_eq!(fs::read(&marker_path)?, marker_bytes);
+    let receipts = fs::read_dir(&rig.state)?
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("port-command-")
+        })
+        .map(|entry| -> Result<serde_json::Value> {
+            Ok(serde_json::from_slice(&fs::read(entry.path())?)?)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    assert!(receipts.iter().any(|receipt| {
+        receipt["owner"] == "naming"
+            && receipt["phase"] == "derive"
+            && receipt["source"] == "project"
+            && receipt["backend"] == "repository_command"
+            && receipt.get("argv").is_none()
+    }));
+    assert!(receipts.iter().any(|receipt| {
+        receipt["owner"] == "post_create"
+            && receipt["phase"] == "create"
+            && receipt["source"] == "project"
+            && receipt.get("argv").is_none()
+    }));
+
+    ports.naming.backend = provenant_config::PortBackend::Command {
+        command: provenant_config::PortCommand {
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf 'bad\\nbranch\\n'".into(),
+            ],
+            exit_codes: provenant_config::CommandExitCodes {
+                success: vec![0],
+                unknown: vec![],
+                other: provenant_config::ExitDisposition::Refused,
+            },
+        },
+    };
+    ports.post_create.backend = provenant_config::PortBackend::Command {
+        command: provenant_config::PortCommand {
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf 'port failure\n' >&2; exit 7".into(),
+            ],
+            exit_codes: provenant_config::CommandExitCodes {
+                success: vec![0],
+                unknown: vec![],
+                other: provenant_config::ExitDisposition::Refused,
+            },
+        },
+    };
     fs::write(
-        &config,
-        "schema_version = 1\n[worktrees]\nsetup = ['echo setup-tail >&2; exit 7', 'touch must-not-run']\n",
+        rig.project.join(provenant_config::PORTS_CONFIG),
+        serde_json::to_vec(&ports)?,
     )?;
-    let failed = ok(
+    // Omit --base to exercise the default-remote discovery re-entry.
+    let remote = rig
+        .project
+        .parent()
+        .ok_or("fixture parent")?
+        .join("naming-origin.git");
+    let remote_text = remote.to_str().ok_or("fixture remote path")?;
+    git(
         &rig,
-        &[
-            "worktree",
-            "create",
-            "setup-failure",
-            "--base",
-            "HEAD",
-            "--json",
-        ],
+        &["init", "--bare", "--initial-branch=main", remote_text],
     )?;
-    assert!(
-        failed["data"]["warnings"]
-            .as_array()
-            .is_some_and(|warnings| warnings.iter().any(|warning| warning
-                .as_str()
-                .is_some_and(|text| text.contains("setup-tail"))))
-    );
+    git(&rig, &["remote", "add", "origin", remote_text])?;
+    git(&rig, &["push", "-u", "origin", "main"])?;
+    let failed = ok(&rig, &["worktree", "create", "setup-failure", "--json"])?;
+    let warnings = failed["data"]["warnings"]
+        .as_array()
+        .ok_or("worktree warnings are not an array")?;
+    assert!(warnings.iter().any(|warning| {
+        warning
+            .as_str()
+            .is_some_and(|text| text.contains("naming hook returned an invalid derived branch"))
+    }));
+    assert!(warnings.iter().any(|warning| {
+        warning
+            .as_str()
+            .is_some_and(|text| text.contains("post-create command returned Refused"))
+    }));
     let retained = rig.project.join(".worktrees/setup-failure");
     assert!(retained.join(".git").is_file());
-    assert!(!retained.join("must-not-run").exists());
     assert!(
         !git(
             &rig,

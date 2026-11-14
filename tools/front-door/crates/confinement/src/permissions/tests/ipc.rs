@@ -86,7 +86,7 @@ fn database_profile(
         AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
             git_grants_digest: [7; 32],
             publishing: false,
-            common_git_dir: Some(root.join("git")),
+            common_git_dir: root.join("git"),
             cargo_cache: PathGrant {
                 path: scratch.join("cache"),
                 scope: PathScope::Subtree,

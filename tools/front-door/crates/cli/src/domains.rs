@@ -1,11 +1,15 @@
 //! The binary edge registers the closed aggregate of landed domain owners.
 use provenant_config::{DomainConfig, DomainSection, DomainSections, FieldMetadata, SectionError};
+use provenant_records::landing::STRATEGY_CHOICES;
+pub use provenant_records::landing::{Compose, GateKind, Strategy};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Domains {
+    #[serde(default)]
+    pub policy: provenant_config::policy::Settings,
     #[serde(default)]
     pub steward: crate::steward::Settings,
     #[serde(default)]
@@ -29,14 +33,23 @@ pub struct PrSettings {
 }
 pub const DEFAULT_LAND_POLL_SECONDS: u64 = 30;
 
+// Config reference: [domains.pr.land] selects one declared strategy. Optional
+// [domains.pr.land.compose] overrides plan dimensions; [[domains.pr.land.branches]]
+// selects the last matching target rule. Defaults < repository < host < project
+// < target rule < risk tier < run/CLI. Resolution and capability choices are stored.
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LandSettings {
     pub poll_seconds: u64,
-    pub integration: Integration,
+    pub strategy: Strategy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<provenant_records::landing::RepositoryCommand>,
+    pub compose: Compose,
+    pub branches: Vec<LandBranch>,
     pub batch_size: u64,
     pub batch_wait_seconds: u64,
-    pub approval: ApprovalSource,
+    pub approval_sources: Vec<ApprovalSource>,
     pub approval_tier: ApprovalTier,
     pub candidate_ref_prefix: String,
     pub max_rebuilds: u64,
@@ -59,13 +72,19 @@ pub struct LandOverride {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub poll_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub integration: Option<Integration>,
+    pub strategy: Option<Strategy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<provenant_records::landing::RepositoryCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compose: Option<Compose>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branches: Option<Vec<LandBranch>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch_size: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch_wait_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub approval: Option<ApprovalSource>,
+    pub approval_sources: Option<Vec<ApprovalSource>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval_tier: Option<ApprovalTier>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -90,6 +109,15 @@ pub struct LandOverride {
     pub budget: Option<BudgetOverride>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_gate: Option<LocalGateOverride>,
+}
+
+/// Last matching target pattern wins, after project and before tier overrides.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LandBranch {
+    pub target: String,
+    pub strategy: Option<Strategy>,
+    pub compose: Option<Compose>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -168,20 +196,17 @@ macro_rules! land_enum {
         pub enum $name { #[default] $default, $($variant),+ }
     };
 }
-land_enum!(Integration, Batch, Single, ForgeQueue);
+
 land_enum!(Publication, Auto, RestOrdered, FastForward);
 land_enum!(MergeMethod, Merge, Squash, Rebase);
 land_enum!(PrCiMode, Always, OptIn, Affected, None);
 land_enum!(LocalGateMode, Warn, Enforce, Off);
-land_enum!(GateKind, Checks, Commands);
 // What stands as a pull request's approval for batch landing: an approving
-// forge review at the head, or a Provenant review record that covers it.
-land_enum!(ApprovalSource, Forge, Receipt);
+// forge review or an independent Provenant review on the exact head.
+land_enum!(ApprovalSource, ProvenantReview, Forge);
 // What approval a pull request needs. `auto` is `none` for a pull request that
 // touches only tests, docs or review-exempt paths and `carry` otherwise.
-// `none`: CI only. `carry`: a review that still covers the head, a change
-// after it that touches no production code, or a review of the delta since.
-// `delta`: as `carry`, but every change after the review needs its own review.
+// `none`: CI only. `carry` and `delta` require approval on the exact head.
 land_enum!(ApprovalTier, Auto, None, Carry, Delta);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -276,10 +301,13 @@ impl Default for LandSettings {
     fn default() -> Self {
         Self {
             poll_seconds: DEFAULT_LAND_POLL_SECONDS,
-            integration: Integration::Batch,
+            strategy: Strategy::default(),
+            command: None,
+            compose: Compose::default(),
+            branches: Vec::new(),
             batch_size: 8,
-            batch_wait_seconds: 30,
-            approval: ApprovalSource::Forge,
+            batch_wait_seconds: 0,
+            approval_sources: vec![ApprovalSource::ProvenantReview, ApprovalSource::Forge],
             approval_tier: ApprovalTier::Auto,
             candidate_ref_prefix: "land/".into(),
             max_rebuilds: 3,
@@ -327,6 +355,13 @@ impl DomainConfig for PrSettings {
             }
         };
         let land = &self.land;
+        check(
+            land.command
+                .as_ref()
+                .is_some_and(|command| !command.valid()),
+            "land.command",
+            "invalid_command",
+        );
         check(
             land.post_merge.timeout_seconds == 0,
             "land.post_merge.timeout_seconds",
@@ -423,12 +458,15 @@ impl DomainConfig for PrSettings {
 }
 const TIERS: &[&str] = &["auto", "none", "carry", "delta"];
 const PR_SECTION: DomainSection = DomainSection::new::<PrSettings>("pr", |_| {
-    r#"[land]
+    static DEFAULTS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DEFAULTS
+        .get_or_init(|| {
+            r#"[land]
 poll_seconds = 30
-integration = "batch"
+strategy = "$strategy"
 batch_size = 8
-batch_wait_seconds = 30
-approval = "forge"
+batch_wait_seconds = 0
+approval_sources = ["provenant_review", "forge"]
 approval_tier = "auto"
 candidate_ref_prefix = "land/"
 max_rebuilds = 3
@@ -456,13 +494,29 @@ mode = "warn"
 commands = []
 timeout_seconds = 60
 "#
+            .replace("$strategy", Strategy::default().declaration().name)
+        })
+        .as_str()
 })
 .with_fields(&[
     FieldMetadata::int("land.poll_seconds", 1, i64::MAX),
-    FieldMetadata::enumeration("land.integration", &["batch", "single", "forge_queue"]),
+    FieldMetadata::enumeration("land.strategy", STRATEGY_CHOICES),
+    FieldMetadata::new("land.command.argv", "array"),
+    FieldMetadata::int("land.command.unknown_exit_code", 1, 255),
+    FieldMetadata::int("land.command.timeout_seconds", 1, i64::MAX),
+    FieldMetadata::new("land.compose", "table"),
+    FieldMetadata::new("land.branches", "array"),
+    FieldMetadata::new("land.compose.dependencies", "string"),
+    FieldMetadata::new("land.compose.candidate", "string"),
+    FieldMetadata::new("land.compose.schedule", "string"),
+    FieldMetadata::new("land.compose.publication", "string"),
+    FieldMetadata::new("land.compose.completion", "string"),
+    FieldMetadata::new("land.projects.{project}.compose", "table"),
+    FieldMetadata::new("land.projects.{project}.branches", "array"),
+    FieldMetadata::new("land.tiers.{tier}.compose", "table"),
     FieldMetadata::int("land.batch_size", 1, i64::MAX),
     FieldMetadata::new("land.batch_wait_seconds", "int"),
-    FieldMetadata::enumeration("land.approval", &["forge", "receipt"]),
+    FieldMetadata::new("land.approval_sources", "array"),
     FieldMetadata::enumeration("land.approval_tier", TIERS),
     FieldMetadata::new("land.candidate_ref_prefix", "string"),
     FieldMetadata::new("land.max_rebuilds", "int"),
@@ -494,20 +548,14 @@ timeout_seconds = 60
     FieldMetadata::int("land.local_gate.timeout_seconds", 1, i64::MAX),
     FieldMetadata::int("land.projects.{project}.poll_seconds", 1, i64::MAX),
     FieldMetadata::int("land.tiers.{tier}.poll_seconds", 1, i64::MAX),
-    FieldMetadata::enumeration(
-        "land.projects.{project}.integration",
-        &["batch", "single", "forge_queue"],
-    ),
-    FieldMetadata::enumeration(
-        "land.tiers.{tier}.integration",
-        &["batch", "single", "forge_queue"],
-    ),
+    FieldMetadata::enumeration("land.projects.{project}.strategy", STRATEGY_CHOICES),
+    FieldMetadata::enumeration("land.tiers.{tier}.strategy", STRATEGY_CHOICES),
     FieldMetadata::int("land.projects.{project}.batch_size", 1, i64::MAX),
     FieldMetadata::int("land.tiers.{tier}.batch_size", 1, i64::MAX),
     FieldMetadata::new("land.projects.{project}.batch_wait_seconds", "int"),
     FieldMetadata::new("land.tiers.{tier}.batch_wait_seconds", "int"),
-    FieldMetadata::enumeration("land.projects.{project}.approval", &["forge", "receipt"]),
-    FieldMetadata::enumeration("land.tiers.{tier}.approval", &["forge", "receipt"]),
+    FieldMetadata::new("land.projects.{project}.approval_sources", "array"),
+    FieldMetadata::new("land.tiers.{tier}.approval_sources", "array"),
     FieldMetadata::enumeration("land.projects.{project}.approval_tier", TIERS),
     FieldMetadata::enumeration("land.tiers.{tier}.approval_tier", TIERS),
     FieldMetadata::new("land.projects.{project}.candidate_ref_prefix", "string"),
@@ -669,7 +717,8 @@ const LANES_SECTION: DomainSection = DomainSection::new::<LanesSettings>(
     FieldMetadata::new("projects.{project}.exec_roots", "array"),
 ]);
 
-static ENTRIES: [DomainSection; 9] = [
+static ENTRIES: [DomainSection; 10] = [
+    provenant_config::policy::SECTION,
     crate::wait::SECTION,
     provenant_providers::accounts::SECTION,
     provenant_quota::SECTION,
@@ -747,7 +796,10 @@ mod tests {
         let roots = roots(&temp);
         std::fs::create_dir_all(roots.state.as_path()).unwrap();
         let default = provenant_config::read_with_domains(&roots, &SECTIONS).unwrap();
-        assert_eq!(default.domains.quota.login_expiry_warning_seconds, 3600);
+        assert_eq!(
+            default.domains.quota.login_expiry_warning_seconds,
+            10 * 24 * 60 * 60
+        );
         assert!(matches!(
             default.origins["domains.quota.login_expiry_warning_seconds"],
             provenant_config::Origin::Compiled { .. }
@@ -810,7 +862,7 @@ mod tests {
         let wait = field("domains.wait.timeout_seconds");
         assert_eq!(
             (wait.min, wait.max, &wait.default),
-            (Some(1), Some(14400), &json!(300))
+            (Some(1), Some(u32::MAX as i64), &json!(300))
         );
         let max_targets = field("domains.wait.max_targets");
         assert_eq!(
@@ -850,36 +902,6 @@ mod tests {
                 .fields
                 .iter()
                 .any(|field| field.path == "gc.projects.{project}.foreign_worktrees")
-        );
-    }
-
-    fn write_config(roots: &Roots, text: &str) -> std::path::PathBuf {
-        std::fs::create_dir_all(roots.state.as_path()).unwrap();
-        let path = roots.state.as_path().join("config.toml");
-        std::fs::write(&path, text).unwrap();
-        path
-    }
-
-    #[test]
-    fn migrate_refuses_a_conflicting_schedule_and_changes_nothing() {
-        let temp = tempfile::tempdir().unwrap();
-        let roots = roots(&temp);
-        let text = "schema_version = 1\n[domains.routing]\npacing_overrides = [{ provider = \"codex\", policy = \"pace\", expires_unix_seconds = 4102444800, schedule = { expires = \"2100-01-01T00:00:00Z\" } }]\n";
-        let path = write_config(&roots, text);
-        let error = provenant_config::migrate(&roots, &SECTIONS, false)
-            .err()
-            .unwrap()
-            .to_string();
-        assert!(error.contains("schedule.expires"), "{error}");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
-        assert!(
-            std::fs::read_dir(roots.state.as_path())
-                .unwrap()
-                .all(|entry| !entry
-                    .unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .contains(".bak-"))
         );
     }
 
@@ -1080,9 +1102,9 @@ mod tests {
     #[test]
     fn landing_settings_defaults_and_validation() {
         let mut settings = PrSettings::default();
-        assert_eq!(settings.land.integration, Integration::Batch);
+        assert_eq!(settings.land.strategy, Strategy::Batch);
         assert_eq!(settings.land.batch_size, 8);
-        assert_eq!(settings.land.batch_wait_seconds, 30);
+        assert_eq!(settings.land.batch_wait_seconds, 0);
         assert_eq!(settings.land.gate.checks, ["ci-status"]);
         assert_eq!(settings.land.publish, Publication::Auto);
         assert!(!settings.land.post_merge.revert_forward);
@@ -1144,16 +1166,13 @@ mod tests {
         let edited = edit(
             &roots,
             json!({
-                "domains.pr.land.integration": "single",
+                "domains.pr.land.strategy": "direct",
                 "domains.pr.land.batch_size": 4,
                 "domains.pr.land.gate.checks": ["test"],
             }),
         )
         .unwrap();
-        assert_eq!(
-            edited.config.domains.pr.land.integration,
-            Integration::Single
-        );
+        assert_eq!(edited.config.domains.pr.land.strategy, Strategy::Direct);
         assert_eq!(edited.config.domains.pr.land.gate.checks, ["test"]);
         assert!(matches!(
             edited.config.origins.get("domains.pr.land.batch_size"),

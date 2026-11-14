@@ -256,7 +256,7 @@ fn home_rename_with_flag_or_config_bin_preserves_old_paths() -> Result {
     ] {
         let mut rig = TestRig::in_directory(fixture_root)?;
         if state_in_home {
-            rig.state = rig.home.join(".local/share/provenant/v1");
+            rig.state = rig.home.join(provenant_core::DEFAULT_STATE_SUFFIX);
         }
         rig.env.retain(|(key, _)| {
             !matches!(key.to_str(), Some("CODEX_HOME" | "CLAUDE_CONFIG_DIR"))
@@ -281,7 +281,6 @@ fn home_rename_with_flag_or_config_bin_preserves_old_paths() -> Result {
         } else {
             install_args.extend(["--bin-dir".into(), bin_dir.into_os_string()]);
         }
-        enable_fabric_mcp(&rig)?;
         let binary = Path::new(env!("CARGO_BIN_EXE_provenant"));
         let installed = rig.execute_os(binary, &install_args, None)?;
         assert_eq!(
@@ -321,7 +320,8 @@ fn home_rename_with_flag_or_config_bin_preserves_old_paths() -> Result {
             }
         }
         let old_release_binary = old_home
-            .join(".local/share/provenant/v1/releases")
+            .join(provenant_core::DEFAULT_STATE_SUFFIX)
+            .join("releases")
             .join(receipt.source_digest.to_string())
             .join("bin/provenant");
         if state_in_home {
@@ -330,7 +330,7 @@ fn home_rename_with_flag_or_config_bin_preserves_old_paths() -> Result {
         }
         rig.home = moved_home.clone();
         if state_in_home {
-            rig.state = moved_home.join(".local/share/provenant/v1");
+            rig.state = moved_home.join(provenant_core::DEFAULT_STATE_SUFFIX);
         }
         // Doctor receives unresolved HOME and does not load install config.
         let alias = rig.root.join("home-alias");
@@ -340,9 +340,6 @@ fn home_rename_with_flag_or_config_bin_preserves_old_paths() -> Result {
                 *value = alias.clone().into_os_string();
             }
         }
-        let old_mcp = old_home.join(".codex/config.toml");
-        let mcp_bytes = fs::read(&old_mcp)?;
-        fs::write(&old_mcp, b"invalid TOML\0")?;
         let checked = rig.execute(binary, &["check", "install", "--json"], None)?;
         let checked: serde_json::Value = serde_json::from_slice(&checked.stdout.bytes)?;
         assert!(checked["error"].is_null(), "{bin_setting}: {checked}");
@@ -354,7 +351,6 @@ fn home_rename_with_flag_or_config_bin_preserves_old_paths() -> Result {
                 .any(|row| row["rule"] == "install.invalid"),
             "{bin_setting}: {checked}"
         );
-        fs::write(&old_mcp, mcp_bytes)?;
         // Uninstall has no --bin-dir flag; the config path still names old HOME.
         let uninstall_args = if state_in_home {
             vec!["uninstall", "--harness", "codex", "--json"]
@@ -503,7 +499,6 @@ fn real_install_check_uninstall_use_only_the_isolated_home() -> Result {
     let human_stdout = String::from_utf8_lossy(&human.stdout.bytes);
     assert!(human_stdout.contains("links"));
     assert!(human_stdout.contains("hooks"));
-    assert!(human_stdout.contains("MCP"));
     assert!(!human_stdout.contains("findings"));
     assert!(!human_stdout.trim_start().starts_with('{'));
     assert!(!String::from_utf8_lossy(&human.stderr.bytes).contains("\"kind\":\"actions\""));
@@ -511,7 +506,7 @@ fn real_install_check_uninstall_use_only_the_isolated_home() -> Result {
     fs::write(
         rig.state.join("config.toml"),
         // Sections other commands write must not block installation.
-        "schema_version=1\n[domains.fabric]\nclient_label=\"install-fixture\"\n[domains.accounts]\n[knobs]\n'fabric.mcp_server'=true\n",
+        "schema_version=1\n[domains.fabric]\nclient_label=\"install-fixture\"\n[domains.accounts]\n",
     )?;
     let installed = rig.execute_os(binary, &args(&stage, false), None)?;
     assert_eq!(
@@ -537,12 +532,9 @@ fn real_install_check_uninstall_use_only_the_isolated_home() -> Result {
     assert_eq!(code(&human_reapply), 0);
     let human_reapply = String::from_utf8_lossy(&human_reapply.stdout.bytes);
     assert!(
-        human_reapply.contains("0 changes (0 links, 0 hooks, 0 MCP)"),
+        human_reapply.contains("0 changes (0 links, 0 hooks)"),
         "{human_reapply}"
     );
-    let config = rig.root.join("codex/config.toml");
-    let text = fs::read_to_string(&config)?;
-    assert!(text.contains("--state-dir"));
     let removed = rig.command(&["uninstall", "--harness", "codex", "--json"])?;
     assert_eq!(
         code(&removed),
@@ -552,13 +544,6 @@ fn real_install_check_uninstall_use_only_the_isolated_home() -> Result {
     );
     assert!(!rig.root.join("codex/skills/example").exists());
     assert!(rig.home.join(".local/bin/provenant").is_symlink());
-    let config: serde_json::Value = toml_edit::de::from_str(&fs::read_to_string(config)?)?;
-    assert!(
-        config
-            .get("mcp_servers")
-            .and_then(|v| v.get("fabric"))
-            .is_none()
-    );
     rig.assert_legacy_unchanged()
 }
 
@@ -570,7 +555,6 @@ fn external_claude_config_without_home_move_keeps_ownership() -> Result {
     let second = staged_named(&rig, "new-release", b"new release")?;
     let config = rig.root.join("claude");
     assert!(!config.starts_with(&rig.home));
-    enable_fabric_mcp(&rig)?;
     for (stage, hooks) in [(&first, true), (&second, false)] {
         let mut args = vec![
             "install",
@@ -598,15 +582,12 @@ fn external_claude_config_without_home_move_keeps_ownership() -> Result {
             fs::read(rig.state.join("install/receipt.json"))?.as_slice(),
             provenant_records::Limits::CONFIG,
         )?;
-        for selector in ["skill", "json:/mcpServers/fabric", "hook:"] {
+        for selector in ["skill", "hook:"] {
             assert!(receipt.entries.iter().any(|entry| {
                 entry.harness == Some(provenant_records::Harness::Claude)
                     && entry.selector.starts_with(selector)
             }));
         }
-        let mcp: serde_json::Value =
-            serde_json::from_slice(&fs::read(config.join(".claude.json"))?)?;
-        assert!(mcp["mcpServers"]["fabric"].is_object());
         assert!(config.join("skills/example").is_symlink());
         assert!(fs::read_to_string(config.join("settings.json"))?.contains("'hook' 'claude'"));
     }
@@ -615,8 +596,6 @@ fn external_claude_config_without_home_move_keeps_ownership() -> Result {
     let report: serde_json::Value = serde_json::from_slice(&removed.stdout.bytes)?;
     assert_eq!(report["data"]["outcome"]["findings"], serde_json::json!([]));
     assert!(fs::symlink_metadata(config.join("skills/example")).is_err());
-    let mcp: serde_json::Value = serde_json::from_slice(&fs::read(config.join(".claude.json"))?)?;
-    assert!(mcp["mcpServers"]["fabric"].is_null());
     assert!(!fs::read_to_string(config.join("settings.json"))?.contains("'hook' 'claude'"));
     rig.assert_legacy_unchanged()
 }
@@ -819,7 +798,7 @@ fn bare_install_detects_clis_and_claude_directories_then_replays_receipt() -> Re
     let dry = install(&first, true)?;
     assert_eq!(code(&dry), 0, "{dry:?}");
     assert!(!rig.state.exists());
-    let conflict = rig.home.join(".codex/config.toml");
+    let conflict = rig.home.join(".config/opencode/opencode.jsonc");
     fs::create_dir_all(conflict.parent().ok_or("config parent")?)?;
     std::os::unix::fs::symlink(rig.home.join("foreign-config"), &conflict)?;
     let refused = install(&first, false)?;
@@ -1356,7 +1335,7 @@ esac
     fs::remove_dir_all(retained)?;
     fs::write(
         &plutil,
-        "#!/bin/sh\ncase \"$1\" in -replace) printf '%s' \"$4\" > \"$5\" ;; -extract) cat \"$6\" ;; esac\n",
+        "#!/bin/sh\ncase \"$1:$2\" in -replace:ProgramArguments) : > \"$4\" ;; -insert:ProgramArguments.0) printf '%s' \"$4\" > \"$5\" ;; -extract:ProgramArguments.0) cat \"$6\" ;; *) exit 1 ;; esac\n",
     )?;
     fs::write(&launchctl, "#!/bin/sh\nexit 0\n")?;
     // A retained legacy bundle must not look like an active wrapper stage.
@@ -1606,7 +1585,7 @@ chmod +x "$2/bin/provenant"
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh");
     let mut args = vec![
         script.into_os_string(),
-        "--from-source".into(),
+        "--source".into(),
         source.into_os_string(),
     ];
     let declined = rig.execute_os(Path::new("/bin/sh"), &args, None)?;
@@ -1636,227 +1615,6 @@ chmod +x "$2/bin/provenant"
 }
 
 #[test]
-fn upgrade_preflight_preserves_old_checkpoint_and_names_the_drain_step() -> Result {
-    let rig = TestRig::new()?;
-    let project = "11111111111111111111111111111111";
-    let directory = rig.state.join(format!("fabric/graphs/{project}"));
-    fs::create_dir_all(&directory)?;
-    for path in [
-        rig.state.join("fabric"),
-        rig.state.join("fabric/graphs"),
-        directory.clone(),
-    ] {
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    }
-    let checkpoint = include_bytes!("fixtures/install/old-pending-checkpoint.json");
-    // Verify the hand-built old envelope itself, without serialising new graph types.
-    let old: serde_json::Value = serde_json::from_slice(checkpoint)?;
-    let seal = provenant_records::CanonicalV1::record_digest(
-        "fabric-graph-checkpoint",
-        2,
-        &(&old["checkpoint"], &old["execution"]),
-    )?;
-    assert_eq!(old["digest"], seal.to_string());
-    let path = directory.join("graph-old-pending-fixture.json");
-    fs::write(&path, checkpoint)?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-    let result = rig.command(&[
-        "install",
-        "--source",
-        rig.root.to_str().ok_or("fixture source")?,
-        "--upgrade-preflight",
-    ])?;
-    assert_eq!(code(&result), 2, "{result:?}");
-    let output = String::from_utf8(result.stdout.bytes)?;
-    assert!(output.contains(&format!(
-        "Pending graph {project}/old-pending-fixture: finish or cancel it with the previous release before upgrading"
-    )), "{output}");
-    assert_eq!(fs::read(&path)?, checkpoint);
-    // An older installer can ignore the preflight refusal under --yes. The
-    // new binary must still refuse before launching a provider or graph.
-    let launch = rig.command(&["run", "New work", "--json"])?;
-    let refusal: serde_json::Value = serde_json::from_slice(&launch.stdout.bytes)?;
-    assert_eq!(refusal["error"]["code"], "UPGRADE_DRAIN_REQUIRED");
-    assert!(
-        refusal["error"]["message"]
-            .as_str()
-            .ok_or("refusal message")?
-            .contains(&format!("Pending graph {project}/old-pending-fixture"))
-    );
-    assert_eq!(fs::read(path)?, checkpoint);
-    fs::write(
-        rig.state.join("graph-template-cutover-complete"),
-        b"complete\n",
-    )?;
-    let preflight = rig.command(&[
-        "install",
-        "--source",
-        rig.root.to_str().ok_or("fixture source")?,
-        "--upgrade-preflight",
-    ])?;
-    assert_eq!(code(&preflight), 2, "{preflight:?}");
-    assert!(String::from_utf8(preflight.stdout.bytes)?.contains("old-pending-fixture"));
-    let presets = rig.project.join(".provenant/presets");
-    fs::create_dir_all(&presets)?;
-    let preset = presets.join("local.toml");
-    fs::write(&preset, "synthetic preset")?;
-    let result = rig.command(&[
-        "install",
-        "--source",
-        rig.root.to_str().ok_or("fixture source")?,
-        "--upgrade-preflight",
-    ])?;
-    assert!(
-        String::from_utf8(result.stdout.bytes)?.contains(preset.to_str().ok_or("preset path")?)
-    );
-    Ok(())
-}
-
-#[test]
-fn upgrade_preflight_blocks_legacy_live_lane_on_matching_version() -> Result {
-    let rig = TestRig::new()?;
-    let stage = staged(&rig)?;
-    let installed = rig.execute_os(
-        Path::new(env!("CARGO_BIN_EXE_provenant")),
-        &args(&stage, false),
-        None,
-    )?;
-    assert_eq!(code(&installed), 0, "{installed:?}");
-    let db_path = rig.state.join("run.sqlite3");
-    let db = rusqlite::Connection::open(&db_path)?;
-    db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER); INSERT INTO attempts VALUES ('proj-warn','run-warn','lane-warn',X'7b7d',0);")?;
-    drop(db);
-    let attempt = rig.state.join("runs/run-warn/attempts/lane-warn");
-    fs::create_dir_all(&attempt)?;
-    let directory = provenant_os::fs::Directory::open_anchor(&attempt)?;
-    let _lock = directory.try_lock(
-        std::ffi::OsStr::new("custody.lock"),
-        provenant_os::fs::LockMode::Exclusive,
-    )?;
-
-    let result = rig.command(&[
-        "install",
-        "--source",
-        rig.root.to_str().ok_or("fixture source")?,
-        "--upgrade-preflight",
-    ])?;
-    assert_eq!(code(&result), 2, "{result:?}");
-    let output = String::from_utf8(result.stdout.bytes)?;
-    assert!(
-        output.contains("Live lane proj-warn/run-warn/lane-warn"),
-        "{output}"
-    );
-    assert!(
-        !output.contains("Warning: Live lane proj-warn/run-warn/lane-warn"),
-        "{output}"
-    );
-    Ok(())
-}
-
-#[test]
-fn upgrade_preflight_blocks_on_pending_work_when_declared_break_and_yes_overrides() -> Result {
-    let mut rig = TestRig::new()?;
-    let stage = staged(&rig)?;
-    let installed = rig.execute_os(
-        Path::new(env!("CARGO_BIN_EXE_provenant")),
-        &args(&stage, false),
-        None,
-    )?;
-    assert_eq!(code(&installed), 0, "{installed:?}");
-    let receipt_path = rig.state.join("install/receipt.json");
-    let mut receipt: serde_json::Value = serde_json::from_slice(&fs::read(&receipt_path)?)?;
-    receipt
-        .as_object_mut()
-        .ok_or("receipt object")?
-        .remove("state_format_version");
-    let old_receipt: provenant_records::InstallReceipt = serde_json::from_value(receipt.clone())?;
-    assert_eq!(old_receipt.state_format_version, 1);
-    assert_ne!(old_receipt.state_format_version, 2); // A release declaring version 2 sees a break.
-    receipt["state_format_version"] = 0.into();
-    fs::write(&receipt_path, serde_json::to_vec(&receipt)?)?;
-    let db_path = rig.state.join("run.sqlite3");
-    let db = rusqlite::Connection::open(&db_path)?;
-    db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER); INSERT INTO attempts VALUES ('proj-block','run-block','lane-block',X'7b7d',0);")?;
-    drop(db);
-    let attempt = rig.state.join("runs/run-block/attempts/lane-block");
-    fs::create_dir_all(&attempt)?;
-    let directory = provenant_os::fs::Directory::open_anchor(&attempt)?;
-    let _lock = directory.try_lock(
-        std::ffi::OsStr::new("custody.lock"),
-        provenant_os::fs::LockMode::Exclusive,
-    )?;
-
-    // Declare a break between installed and target releases.
-
-    let result = rig.command(&[
-        "install",
-        "--source",
-        rig.root.to_str().ok_or("fixture source")?,
-        "--upgrade-preflight",
-    ])?;
-    assert_eq!(code(&result), 2, "{result:?}");
-    let output = String::from_utf8(result.stdout.bytes)?;
-    assert!(
-        output.contains("Live lane proj-block/run-block/lane-block"),
-        "{output}"
-    );
-    assert!(output.contains("Finish or cancel pending graphs, drain lanes and port presets by hand; rerun with --yes to proceed anyway."), "{output}");
-
-    let source = rig.root.join("source");
-    fs::create_dir_all(source.join("tools/front-door"))?;
-    fs::write(
-        source.join("tools/front-door/rust-toolchain.toml"),
-        "[toolchain]\nchannel = \"fixture\"\n",
-    )?;
-    let fake_bin = rig.root.join("fake-bin");
-    fs::create_dir_all(&fake_bin)?;
-    for (name, content) in [
-        ("rustup", "#!/bin/sh\nexit 0\n".to_owned()),
-        (
-            "cargo",
-            format!(
-                "#!/bin/sh\n[ \"$1\" = run ] || exit 0\nwhile [ \"$1\" != --out ]; do shift; done\ncp -Rp '{}/.' \"$2\"\n",
-                stage.display()
-            ),
-        ),
-    ] {
-        let path = fake_bin.join(name);
-        fs::write(&path, content)?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
-    }
-    for (key, value) in &mut rig.env {
-        if key == "PATH" {
-            *value = format!("{}:/usr/bin:/bin", fake_bin.display()).into();
-        }
-    }
-
-    // Rerunning install with --yes overrides preflight stopping.
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh");
-    rig.env
-        .push(("PROVENANT_TEST_MISSING_APPS".into(), "1".into()));
-    let forced = rig.execute_os(
-        Path::new("/bin/sh"),
-        &[
-            script.into_os_string(),
-            "--upgrade".into(),
-            "--yes".into(),
-            "--state-dir".into(),
-            rig.state.clone().into_os_string(),
-            "--source".into(),
-            source.into_os_string(),
-        ],
-        None,
-    )?;
-    assert_eq!(code(&forced), 0, "{forced:?}");
-    let forced_output = String::from_utf8_lossy(&forced.stderr.bytes);
-    assert!(
-        forced_output.contains("Proceeding despite upgrade preflight findings (--yes)."),
-        "{forced_output}"
-    );
-    Ok(())
-}
-
-#[test]
 fn upgrade_requires_a_receipt_before_download_or_build() -> Result {
     let rig = TestRig::new()?.without_state()?;
     let result = rig.command(&["upgrade", "--json"])?;
@@ -1868,179 +1626,147 @@ fn upgrade_requires_a_receipt_before_download_or_build() -> Result {
     Ok(())
 }
 
-#[test]
-fn upgrade_pins_one_release_replays_settings_and_reports_peer_failure() -> Result {
-    let mut rig = TestRig::new()?;
-    let first = staged(&rig)?;
-    let second = staged_named(&rig, "next-release", b"upgraded release")?;
-    let installed = rig.command(&[
-        "install",
-        "--source",
-        first.to_str().ok_or("stage")?,
-        "--harness",
-        "codex",
-        "--json",
-    ])?;
-    assert_eq!(code(&installed), 0);
-    let archive = rig.root.join("package.tar.gz");
+/// Archives `dir` as a gzip tarball at `archive` and returns its sha256.
+fn tar_digest(rig: &TestRig, dir: PathBuf, archive: &Path) -> Result<String> {
     let tar = rig.execute_os(
         Path::new("/usr/bin/tar"),
         &[
             "-czf".into(),
-            archive.clone().into(),
+            archive.into(),
             "-C".into(),
-            second.into(),
+            dir.into(),
             ".".into(),
         ],
         None,
     )?;
     assert_eq!(code(&tar), 0);
+    file_digest(rig, archive)
+}
+
+fn file_digest(rig: &TestRig, file: &Path) -> Result<String> {
     let hash = rig.execute_os(
         Path::new("/usr/bin/shasum"),
-        &["-a".into(), "256".into(), archive.clone().into()],
+        &["-a".into(), "256".into(), file.into()],
         None,
     )?;
-    let digest = String::from_utf8(hash.stdout.bytes)?
+    Ok(String::from_utf8(hash.stdout.bytes)?
         .split_whitespace()
         .next()
         .ok_or("digest")?
-        .to_owned();
-    let apps = rig.root.join("apps");
-    for binary in APP_EXECUTABLES {
-        let path = apps.join("Provenant Console.app").join(binary);
-        fs::create_dir_all(path.parent().ok_or("app executable parent")?)?;
-        fs::write(&path, APP_FIXTURE)?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
-    }
-    let apps_archive = rig.root.join("apps.tar.gz");
-    let tar = rig.execute_os(
-        Path::new("/usr/bin/tar"),
-        &[
-            "-czf".into(),
-            apps_archive.clone().into(),
-            "-C".into(),
-            apps.into(),
-            ".".into(),
-        ],
-        None,
-    )?;
-    assert_eq!(code(&tar), 0);
-    let hash = rig.execute_os(
-        Path::new("/usr/bin/shasum"),
-        &["-a".into(), "256".into(), apps_archive.clone().into()],
-        None,
-    )?;
-    let apps_digest = String::from_utf8(hash.stdout.bytes)?
-        .split_whitespace()
-        .next()
-        .ok_or("apps digest")?
-        .to_owned();
-    let invalid_apps_archive = rig.root.join("invalid-apps.tar.gz");
-    fs::write(&invalid_apps_archive, b"not a gzip archive")?;
-    let hash = rig.execute_os(
-        Path::new("/usr/bin/shasum"),
-        &[
-            "-a".into(),
-            "256".into(),
-            invalid_apps_archive.clone().into(),
-        ],
-        None,
-    )?;
-    let invalid_apps_digest = String::from_utf8(hash.stdout.bytes)?
-        .split_whitespace()
-        .next()
-        .ok_or("invalid archive digest")?
-        .to_owned();
-    let incomplete_apps = rig.root.join("incomplete-apps");
-    let incomplete_binary =
-        incomplete_apps.join("Provenant Console.app/Contents/MacOS/provenant-console");
-    fs::create_dir_all(incomplete_binary.parent().ok_or("incomplete app parent")?)?;
-    fs::write(&incomplete_binary, "#!/bin/sh\nexit 0\n")?;
-    fs::set_permissions(&incomplete_binary, fs::Permissions::from_mode(0o755))?;
-    let incomplete_apps_archive = rig.root.join("incomplete-apps.tar.gz");
-    let tar = rig.execute_os(
-        Path::new("/usr/bin/tar"),
-        &[
-            "-czf".into(),
-            incomplete_apps_archive.clone().into(),
-            "-C".into(),
-            incomplete_apps.into(),
-            ".".into(),
-        ],
-        None,
-    )?;
-    assert_eq!(code(&tar), 0);
-    let hash = rig.execute_os(
-        Path::new("/usr/bin/shasum"),
-        &[
-            "-a".into(),
-            "256".into(),
-            incomplete_apps_archive.clone().into(),
-        ],
-        None,
-    )?;
-    let incomplete_apps_digest = String::from_utf8(hash.stdout.bytes)?
-        .split_whitespace()
-        .next()
-        .ok_or("incomplete app digest")?
-        .to_owned();
-    let invalid_apps_archive_path = invalid_apps_archive.display().to_string();
-    let incomplete_apps_archive_path = incomplete_apps_archive.display().to_string();
-    let home = rig
-        .env
-        .iter()
-        .find(|(key, _)| key == "HOME")
-        .ok_or("HOME")?
-        .1
-        .clone();
-    let home = PathBuf::from(home);
-    let installed_app = home.join("Applications/Provenant Console.app");
-    fs::create_dir_all(&installed_app)?;
-    fs::write(installed_app.join("old-build"), "stale")?;
-    let agent = home.join("Library/LaunchAgents/dev.provenant.quota-menubar.plist");
-    fs::create_dir_all(agent.parent().ok_or("agent parent")?)?;
-    if cfg!(target_os = "macos") {
+        .to_owned())
+}
+
+/// One installed release plus fake network, launchd and peer tools. Each
+/// upgrade scenario builds its own, so scenarios run in parallel and never
+/// inherit each other's state.
+struct UpgradeRig {
+    rig: TestRig,
+    first: PathBuf,
+    home: PathBuf,
+    installed_app: PathBuf,
+    agent: PathBuf,
+    fake_bin: PathBuf,
+    launch_log: PathBuf,
+    curl_log: PathBuf,
+    ssh_args: PathBuf,
+}
+
+impl UpgradeRig {
+    fn new() -> Result<Self> {
+        let mut rig = TestRig::new()?;
+        let first = staged(&rig)?;
+        let second = staged_named(&rig, "next-release", b"upgraded release")?;
+        let installed = rig.command(&[
+            "install",
+            "--source",
+            first.to_str().ok_or("stage")?,
+            "--harness",
+            "codex",
+            "--json",
+        ])?;
+        assert_eq!(code(&installed), 0);
+        let archive = rig.root.join("package.tar.gz");
+        let digest = tar_digest(&rig, second, &archive)?;
+        let apps = rig.root.join("apps");
+        for binary in APP_EXECUTABLES {
+            let path = apps.join("Provenant Console.app").join(binary);
+            fs::create_dir_all(path.parent().ok_or("app executable parent")?)?;
+            fs::write(&path, APP_FIXTURE)?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+        }
+        let apps_archive = rig.root.join("apps.tar.gz");
+        let apps_digest = tar_digest(&rig, apps, &apps_archive)?;
+        let invalid_apps_archive = rig.root.join("invalid-apps.tar.gz");
+        fs::write(&invalid_apps_archive, b"not a gzip archive")?;
+        let invalid_apps_digest = file_digest(&rig, &invalid_apps_archive)?;
+        let incomplete_apps = rig.root.join("incomplete-apps");
+        let incomplete_binary =
+            incomplete_apps.join("Provenant Console.app/Contents/MacOS/provenant-console");
+        fs::create_dir_all(incomplete_binary.parent().ok_or("incomplete app parent")?)?;
+        fs::write(&incomplete_binary, "#!/bin/sh\nexit 0\n")?;
+        fs::set_permissions(&incomplete_binary, fs::Permissions::from_mode(0o755))?;
+        let incomplete_apps_archive = rig.root.join("incomplete-apps.tar.gz");
+        let incomplete_apps_digest = tar_digest(&rig, incomplete_apps, &incomplete_apps_archive)?;
+        let invalid_apps_archive_path = invalid_apps_archive.display().to_string();
+        let incomplete_apps_archive_path = incomplete_apps_archive.display().to_string();
+        let home = rig
+            .env
+            .iter()
+            .find(|(key, _)| key == "HOME")
+            .ok_or("HOME")?
+            .1
+            .clone();
+        let home = PathBuf::from(home);
+        let installed_app = home.join("Applications/Provenant Console.app");
+        fs::create_dir_all(&installed_app)?;
+        fs::write(installed_app.join("old-build"), "stale")?;
+        let agent = home.join("Library/LaunchAgents/dev.provenant.quota-menubar.plist");
+        fs::create_dir_all(agent.parent().ok_or("agent parent")?)?;
+        if cfg!(target_os = "macos") {
+            let old_arguments = "<string>/old/build/quota-menubar</string>".repeat(32);
+            fs::write(
+                &agent,
+                format!(
+                    r#"<?xml version="1.0"?><plist version="1.0"><dict><key>Label</key><string>dev.provenant.quota-menubar</string><key>ProgramArguments</key><array>{old_arguments}<string>--kept</string></array></dict></plist>"#
+                ),
+            )?;
+        }
+        let fake_bin = rig.root.join("fake-bin");
+        fs::create_dir(&fake_bin)?;
+        let launch_log = rig.root.join("launchctl-log");
+        let launchctl = fake_bin.join("launchctl");
         fs::write(
-            &agent,
-            r#"<?xml version="1.0"?><plist version="1.0"><dict><key>Label</key><string>dev.provenant.quota-menubar</string><key>ProgramArguments</key><array><string>/old/build/quota-menubar</string><string>--kept</string></array></dict></plist>"#,
+            &launchctl,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{0}'\nif [ \"$1\" = bootstrap ] && [ -n \"${{PROVENANT_TEST_BOOTSTRAP_FAIL:-}}\" ]; then exit 5; fi\nif [ \"$1\" = bootstrap ] && [ ! -f '{0}.bootstrapped' ]; then touch '{0}.bootstrapped'; exit 5; fi\n",
+                launch_log.display(),
+            ),
         )?;
-    }
-    let fake_bin = rig.root.join("fake-bin");
-    fs::create_dir(&fake_bin)?;
-    let launch_log = rig.root.join("launchctl-log");
-    let launchctl = fake_bin.join("launchctl");
-    fs::write(
-        &launchctl,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{0}'\nif [ \"$1\" = bootstrap ] && [ -n \"${{PROVENANT_TEST_BOOTSTRAP_FAIL:-}}\" ]; then exit 5; fi\nif [ \"$1\" = bootstrap ] && [ ! -f '{0}.bootstrapped' ]; then touch '{0}.bootstrapped'; exit 5; fi\n",
-            launch_log.display(),
-        ),
-    )?;
-    fs::set_permissions(launchctl, fs::Permissions::from_mode(0o755))?;
-    let ssh = fake_bin.join("ssh");
-    let ssh_args = rig.root.join("ssh-args");
-    fs::write(
-        &ssh,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ncat >/dev/null\nexit 17\n",
-            ssh_args.display()
-        ),
-    )?;
-    fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755))?;
-    fs::write(
-        rig.state.join("config.toml"),
-        format!(
-            "schema_version=1\n[domains.fabric]\nssh_executable={:?}\n[domains.fabric.peers.worker]\nhost='{}'\ndestination='worker.example'\n",
-            ssh.to_str().ok_or("ssh")?,
-            provenant_core::HostId::from_bytes([1; 16])
-        ),
-    )?;
-    let curl = fake_bin.join("curl");
-    let curl_log = rig.root.join("curl-log");
-    fs::write(
-        &curl,
-        format!(
-            r#"#!/bin/sh
+        fs::set_permissions(launchctl, fs::Permissions::from_mode(0o755))?;
+        let ssh = fake_bin.join("ssh");
+        let ssh_args = rig.root.join("ssh-args");
+        fs::write(
+            &ssh,
+            format!(
+                "#!/bin/sh\nprintf '%s\n' \"$@\" > '{}'\ncat >/dev/null\ncase \"$*\" in *--preflight-only*) [ -z \"${{PROVENANT_TEST_PEER_REFUSE:-}}\" ] && exit 0 ;; esac\nexit 17\n",
+                ssh_args.display()
+            ),
+        )?;
+        fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755))?;
+        fs::write(
+            rig.state.join("config.toml"),
+            format!(
+                "schema_version=1\n[domains.fabric]\nssh_executable={:?}\n[domains.fabric.peers.worker]\nhost='{}'\ndestination='worker.example'\n",
+                ssh.to_str().ok_or("ssh")?,
+                provenant_core::HostId::from_bytes([1; 16])
+            ),
+        )?;
+        let curl = fake_bin.join("curl");
+        let curl_log = rig.root.join("curl-log");
+        fs::write(
+            &curl,
+            format!(
+                r#"#!/bin/sh
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o) out=$2; shift 2 ;;
@@ -2069,140 +1795,143 @@ case "$url" in
   *) exit 99 ;;
 esac
 "#,
-            apps_archive.display(),
-            archive.display(),
-            curl_log.display()
-        ),
-    )?;
-    fs::set_permissions(curl, fs::Permissions::from_mode(0o755))?;
-    fake_supported_uname(&fake_bin)?;
-    for (key, value) in &mut rig.env {
-        if key == "PATH" {
-            *value = format!("{}:/usr/bin:/bin", fake_bin.display()).into();
+                apps_archive.display(),
+                archive.display(),
+                curl_log.display()
+            ),
+        )?;
+        fs::set_permissions(curl, fs::Permissions::from_mode(0o755))?;
+        fake_supported_uname(&fake_bin)?;
+        for (key, value) in &mut rig.env {
+            if key == "PATH" {
+                *value = format!("{}:/usr/bin:/bin", fake_bin.display()).into();
+            }
         }
+        Ok(Self {
+            rig,
+            first,
+            home,
+            installed_app,
+            agent,
+            fake_bin,
+            launch_log,
+            curl_log,
+            ssh_args,
+        })
     }
-    rig.env
-        .push(("PROVENANT_TEST_CHECKSUM".into(), "0".repeat(64).into()));
-    let rejected = rig.command(&["upgrade", "--hosts", "all", "--json"])?;
-    let rejected_value: serde_json::Value = serde_json::from_slice(&rejected.stdout.bytes)?;
-    assert_ne!(code(&rejected), 0, "{rejected_value}");
-    assert_eq!(
-        rejected_value["data"][0]["success"], false,
-        "{rejected_value}"
-    );
-    assert!(
-        rejected_value["data"][0]["output"]
-            .as_str()
-            .ok_or("output")?
-            .contains("Release checksum mismatch"),
-        "{rejected_value}"
-    );
-    let before: provenant_records::InstallReceipt = provenant_records::decode_v1(
-        fs::read(rig.state.join("install/receipt.json"))?.as_slice(),
-        provenant_records::Limits::CONFIG,
-    )?;
-    assert_eq!(
-        before.source_digest,
-        Release::read(&first, env!("PROVENANT_TARGET_TRIPLE"))?
-            .manifest()
-            .source_digest
-    );
-    rig.env.retain(|(key, _)| key != "PROVENANT_TEST_CHECKSUM");
-    rig.env
-        .push(("PROVENANT_TEST_APPS_CHECKSUM".into(), "0".repeat(64).into()));
-    let rejected = rig.command(&["upgrade", "--json"])?;
-    let rejected_value: serde_json::Value = serde_json::from_slice(&rejected.stdout.bytes)?;
-    assert_eq!(rejected_value["data"][0]["success"], false);
-    assert!(
-        rejected_value["data"][0]["output"]
-            .as_str()
-            .ok_or("output")?
-            .contains("Bundled app checksum mismatch")
-    );
-    assert!(installed_app.join("old-build").exists());
-    assert!(!launch_log.exists());
-    rig.env
-        .retain(|(key, _)| key != "PROVENANT_TEST_APPS_CHECKSUM");
-    rig.env
-        .push(("PROVENANT_TEST_APPS_STATUS".into(), "503".into()));
-    let unavailable = rig.command(&["upgrade", "--json"])?;
-    let unavailable_value: serde_json::Value = serde_json::from_slice(&unavailable.stdout.bytes)?;
-    assert_eq!(unavailable_value["data"][0]["success"], false);
-    assert!(
-        unavailable_value["data"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("HTTP 503")
-    );
-    assert!(installed_app.join("old-build").exists());
-    rig.env
-        .retain(|(key, _)| key != "PROVENANT_TEST_APPS_STATUS");
-    rig.env
-        .push(("PROVENANT_TEST_APPS_CHECKSUM_FAIL".into(), "1".into()));
-    let checksum_failure = rig.command(&["upgrade", "--json"])?;
-    let checksum_failure_value: serde_json::Value =
-        serde_json::from_slice(&checksum_failure.stdout.bytes)?;
-    assert_eq!(checksum_failure_value["data"][0]["success"], false);
-    assert!(
-        checksum_failure_value["data"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("Cannot download bundled app checksum")
-    );
-    assert!(installed_app.join("old-build").exists());
-    rig.env
-        .retain(|(key, _)| key != "PROVENANT_TEST_APPS_CHECKSUM_FAIL");
-    rig.env
-        .push(("PROVENANT_TEST_APPS_BAD_TAR".into(), "1".into()));
-    let bad_tar = rig.command(&["upgrade", "--json"])?;
-    let bad_tar_value: serde_json::Value = serde_json::from_slice(&bad_tar.stdout.bytes)?;
-    assert_eq!(bad_tar_value["data"][0]["success"], false);
-    assert!(
-        bad_tar_value["data"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("Cannot unpack bundled app archive")
-    );
-    assert!(installed_app.join("old-build").exists());
-    rig.env
-        .retain(|(key, _)| key != "PROVENANT_TEST_APPS_BAD_TAR");
-    rig.env
-        .push(("PROVENANT_TEST_APPS_INCOMPLETE".into(), "1".into()));
-    let incomplete = rig.command(&["upgrade", "--json"])?;
-    let incomplete_value: serde_json::Value = serde_json::from_slice(&incomplete.stdout.bytes)?;
-    assert_eq!(incomplete_value["data"][0]["success"], false);
-    assert!(
-        incomplete_value["data"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("executable is missing")
-    );
-    assert!(installed_app.join("old-build").exists());
-    rig.env
-        .retain(|(key, _)| key != "PROVENANT_TEST_APPS_INCOMPLETE");
-    let mv = fake_bin.join("mv");
+
+    fn set_env(&mut self, key: &str, value: &str) {
+        self.rig.env.push((key.into(), value.into()));
+    }
+
+    /// Runs `provenant upgrade` and decodes its JSON report.
+    fn upgrade(
+        &self,
+        args: &[&str],
+    ) -> Result<(provenant_os::exec::ExecOutcome, serde_json::Value)> {
+        let mut argv = vec!["upgrade"];
+        argv.extend_from_slice(args);
+        argv.push("--json");
+        let outcome = self.rig.command(&argv)?;
+        let value = serde_json::from_slice(&outcome.stdout.bytes)?;
+        Ok((outcome, value))
+    }
+
+    fn receipt(&self) -> Result<provenant_records::InstallReceipt> {
+        Ok(provenant_records::decode_v1(
+            fs::read(self.rig.state.join("install/receipt.json"))?.as_slice(),
+            provenant_records::Limits::CONFIG,
+        )?)
+    }
+
+    /// Whether the committed receipt still names the originally installed release.
+    fn receipt_is_first_release(&self) -> Result<bool> {
+        let first = Release::read(&self.first, env!("PROVENANT_TARGET_TRIPLE"))?;
+        Ok(self.receipt()?.source_digest == first.manifest().source_digest)
+    }
+
+    fn fetched_artifacts(&self) -> Result<Vec<String>> {
+        Ok(fs::read_to_string(&self.curl_log)?
+            .lines()
+            .filter(|url| url.contains("/download/"))
+            .map(str::to_owned)
+            .collect())
+    }
+
+    fn assert_old_app_untouched(&self) {
+        assert!(self.installed_app.join("old-build").exists());
+        assert!(!self.installed_app.join(MENU_EXECUTABLE).exists());
+    }
+}
+
+#[test]
+fn upgrade_rejects_release_checksum_mismatch_and_keeps_the_installed_release() -> Result {
+    let mut rig = UpgradeRig::new()?;
+    rig.set_env("PROVENANT_TEST_CHECKSUM", &"0".repeat(64));
+    let (outcome, value) = rig.upgrade(&["--hosts", "all"])?;
+    assert_ne!(code(&outcome), 0, "{value}");
+    assert_eq!(value["data"][0]["success"], false, "{value}");
+    assert!(rig.receipt_is_first_release()?);
+    rig.assert_old_app_untouched();
+    Ok(())
+}
+
+/// A bundled-app failure must leave the installed app and launch agent alone.
+fn assert_app_fetch_failure_keeps_installed_app(key: &str, value: &str) -> Result {
+    let mut rig = UpgradeRig::new()?;
+    rig.set_env(key, value);
+    let (outcome, report) = rig.upgrade(&[])?;
+    assert_ne!(code(&outcome), 0, "{report}");
+    assert_eq!(report["data"][0]["success"], false, "{report}");
+    rig.assert_old_app_untouched();
+    assert!(!rig.launch_log.exists());
+    Ok(())
+}
+
+#[test]
+fn upgrade_app_checksum_mismatch_keeps_installed_app() -> Result {
+    assert_app_fetch_failure_keeps_installed_app("PROVENANT_TEST_APPS_CHECKSUM", &"0".repeat(64))
+}
+
+#[test]
+fn upgrade_app_unavailable_keeps_installed_app() -> Result {
+    assert_app_fetch_failure_keeps_installed_app("PROVENANT_TEST_APPS_STATUS", "503")
+}
+
+#[test]
+fn upgrade_app_checksum_download_failure_keeps_installed_app() -> Result {
+    assert_app_fetch_failure_keeps_installed_app("PROVENANT_TEST_APPS_CHECKSUM_FAIL", "1")
+}
+
+#[test]
+fn upgrade_app_bad_archive_keeps_installed_app() -> Result {
+    assert_app_fetch_failure_keeps_installed_app("PROVENANT_TEST_APPS_BAD_TAR", "1")
+}
+
+#[test]
+fn upgrade_app_missing_executable_keeps_installed_app() -> Result {
+    assert_app_fetch_failure_keeps_installed_app("PROVENANT_TEST_APPS_INCOMPLETE", "1")
+}
+
+#[test]
+fn upgrade_failed_app_swap_keeps_installed_app_and_leaves_no_retained_copy() -> Result {
+    let rig = UpgradeRig::new()?;
+    let mv = rig.fake_bin.join("mv");
     fs::write(
         &mv,
         format!(
             "#!/bin/sh\ncase \"$1\" in */.provenant-retained.*/*) if [ ! -f '{0}' ]; then touch '{0}'; exit 1; fi ;; esac\nexec /bin/mv \"$@\"\n",
-            rig.root.join("mv-failed-once").display()
+            rig.rig.root.join("mv-failed-once").display()
         ),
     )?;
     fs::set_permissions(&mv, fs::Permissions::from_mode(0o755))?;
-    let failed_swap = rig.command(&["upgrade", "--json"])?;
-    let failed_swap_value: serde_json::Value = serde_json::from_slice(&failed_swap.stdout.bytes)?;
-    assert_eq!(failed_swap_value["data"][0]["success"], false);
-    assert!(installed_app.join("old-build").exists());
-    let committed_after_app_failure: provenant_records::InstallReceipt =
-        provenant_records::decode_v1(
-            fs::read(rig.state.join("install/receipt.json"))?.as_slice(),
-            provenant_records::Limits::CONFIG,
-        )?;
-    assert_ne!(
-        committed_after_app_failure.source_digest,
-        before.source_digest
-    );
-    assert!(fs::read_dir(home.join("Applications"))?.all(|entry| {
+    let (outcome, value) = rig.upgrade(&[])?;
+    assert_ne!(code(&outcome), 0, "{value}");
+    assert_eq!(value["data"][0]["success"], false, "{value}");
+    rig.assert_old_app_untouched();
+    // The release itself was applied; only the app swap failed.
+    assert!(!rig.receipt_is_first_release()?);
+    assert!(fs::read_dir(rig.home.join("Applications"))?.all(|entry| {
         entry.is_ok_and(|entry| {
             !entry
                 .file_name()
@@ -2210,178 +1939,95 @@ esac
                 .starts_with(".provenant-retained.")
         })
     }));
-    fs::remove_file(mv)?;
-    if cfg!(target_os = "macos") {
-        // A failed agent restart rolls back both the app and the migrated agent plist.
-        let before_plist = fs::read_to_string(&agent)?;
-        rig.env
-            .push(("PROVENANT_TEST_BOOTSTRAP_FAIL".into(), "1".into()));
-        let failed = rig.command(&["upgrade", "--json"])?;
-        let failed_value: serde_json::Value = serde_json::from_slice(&failed.stdout.bytes)?;
-        assert_eq!(failed_value["data"][0]["success"], false, "{failed_value}");
-        rig.env
-            .retain(|(key, _)| key != "PROVENANT_TEST_BOOTSTRAP_FAIL");
-        assert_eq!(fs::read_to_string(&agent)?, before_plist);
-        assert!(installed_app.join("old-build").exists());
-        assert!(!installed_app.join(MENU_EXECUTABLE).exists());
+    Ok(())
+}
+
+#[test]
+fn upgrade_failed_agent_restart_rolls_back_app_and_agent() -> Result {
+    if !cfg!(target_os = "macos") {
+        return Ok(());
     }
-    // Both entry points inspect the state with the staged release before replacing it.
-    rig.env
-        .push(("PROVENANT_TEST_MISSING_APPS".into(), "1".into()));
-    let project = "11111111111111111111111111111111";
-    let markers = rig.state.join(format!("fabric/graphs/{project}/pending"));
-    fs::create_dir_all(&markers)?;
-    for path in [
-        rig.state.join("fabric"),
-        rig.state.join("fabric/graphs"),
-        rig.state.join(format!("fabric/graphs/{project}")),
-        markers.clone(),
-    ] {
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    }
-    fs::write(markers.join("complete"), "")?;
-    let old_checkpoint = include_bytes!("fixtures/install/old-pending-checkpoint.json");
-    let checkpoint_path = markers
-        .parent()
-        .ok_or("graph directory")?
-        .join("graph-old-pending-fixture.json");
-    fs::write(&checkpoint_path, old_checkpoint)?;
-    fs::set_permissions(&checkpoint_path, fs::Permissions::from_mode(0o600))?;
-    fs::write(markers.join("old-pending-fixture.pending"), "")?;
-    let db_path = rig.state.join("run.sqlite3");
-    let db = rusqlite::Connection::open(&db_path)?;
-    db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER); INSERT INTO attempts VALUES ('project-one','run-one','lane-one',X'7b7d',0);")?;
-    drop(db);
-    let attempt = rig.state.join("runs/run-one/attempts/lane-one");
-    fs::create_dir_all(&attempt)?;
-    let directory = provenant_os::fs::Directory::open_anchor(&attempt)?;
-    let _lock = directory.try_lock(
-        std::ffi::OsStr::new("custody.lock"),
-        provenant_os::fs::LockMode::Exclusive,
-    )?;
-    let child_store = rig.state.join("children/child-one");
-    fs::create_dir_all(&child_store)?;
-    let child_db = rusqlite::Connection::open(child_store.join("run.sqlite3"))?;
-    child_db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER); INSERT INTO attempts VALUES ('project-two','run-two','child-lane',X'7b7d',0);")?;
-    drop(child_db);
-    let preset = rig.root.join("config/provenant/presets/custom.toml");
-    fs::create_dir_all(preset.parent().ok_or("preset parent")?)?;
-    fs::write(&preset, "name = 'custom'\n")?;
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh");
-    // First cutover calls the new installer directly, without --yes: an older
-    // installed CLI may forward --yes itself and bypass the drain refusal.
-    let direct = rig.execute_os(
-        Path::new("/bin/sh"),
-        &[
-            script.into_os_string(),
-            "--upgrade".into(),
-            "--state-dir".into(),
-            rig.state.clone().into_os_string(),
-            "--tag".into(),
-            "v9.8.7".into(),
-        ],
-        None,
-    )?;
-    assert_eq!(code(&direct), 2, "{direct:?}");
-    assert_eq!(fs::read(&checkpoint_path)?, old_checkpoint);
-    let output = String::from_utf8(direct.stdout.bytes)?;
-    assert!(!output.contains("child-lane"), "{output}");
-    for expected in [
-        "old-pending-fixture",
-        "finish or cancel it with the previous release before upgrading",
-        "lane-one",
-        "custom.toml",
-    ] {
-        assert!(output.contains(expected), "{output}");
-    }
-    let stopped = rig.command(&["upgrade", "--json"])?;
-    let stopped_value: serde_json::Value = serde_json::from_slice(&stopped.stdout.bytes)?;
-    assert!(!stopped_value.to_string().contains("child-lane"));
-    assert_eq!(
-        stopped_value["data"][0]["success"], false,
-        "{stopped_value}"
-    );
-    assert_eq!(stopped_value["data"].as_array().unwrap().len(), 1);
-    for expected in [
-        "old-pending-fixture",
-        "finish or cancel it with the previous release before upgrading",
-        "lane-one",
-        "custom.toml",
-    ] {
-        assert!(
-            stopped_value.to_string().contains(expected),
-            "{stopped_value}"
-        );
-    }
-    let forced = rig.command(&["upgrade", "--yes", "--json"])?;
-    let forced_value: serde_json::Value = serde_json::from_slice(&forced.stdout.bytes)?;
-    assert_eq!(forced_value["data"][0]["success"], true, "{forced_value}");
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh");
-    let direct_forced = rig.execute_os(
-        Path::new("/bin/sh"),
-        &[
-            script.into_os_string(),
-            "--upgrade".into(),
-            "--yes".into(),
-            "--state-dir".into(),
-            rig.state.clone().into_os_string(),
-            "--tag".into(),
-            "v9.8.7".into(),
-        ],
-        None,
-    )?;
-    assert_eq!(code(&direct_forced), 0, "{direct_forced:?}");
-    rig.env
-        .retain(|(key, _)| key != "PROVENANT_TEST_MISSING_APPS");
-    fs::remove_dir_all(rig.state.join("fabric/graphs"))?;
-    fs::remove_dir_all(rig.state.join("children"))?;
-    fs::remove_file(db_path)?;
-    fs::remove_file(preset)?;
-    fs::write(&curl_log, "")?;
-    let result = rig.command(&["upgrade", "--hosts", "all", "--json"])?;
-    let value: serde_json::Value = serde_json::from_slice(&result.stdout.bytes)?;
+    let mut rig = UpgradeRig::new()?;
+    let before_plist = fs::read_to_string(&rig.agent)?;
+    rig.set_env("PROVENANT_TEST_BOOTSTRAP_FAIL", "1");
+    let (outcome, value) = rig.upgrade(&[])?;
+    assert_ne!(code(&outcome), 0, "{value}");
+    assert_eq!(value["data"][0]["success"], false, "{value}");
+    assert_eq!(fs::read_to_string(&rig.agent)?, before_plist);
+    rig.assert_old_app_untouched();
+    Ok(())
+}
+
+#[test]
+fn upgrade_peer_preflight_refusal_changes_nothing() -> Result {
+    let mut rig = UpgradeRig::new()?;
+    rig.set_env("PROVENANT_TEST_PEER_REFUSE", "1");
+    let before = snapshot(&rig.rig.state)?;
+    let (outcome, value) = rig.upgrade(&["--hosts", "all"])?;
+    assert_eq!(value["data"][0]["host"], "worker", "{value}");
+    assert_eq!(value["data"][0]["success"], false, "{value}");
+    assert_ne!(code(&outcome), 0);
+    assert_eq!(snapshot(&rig.rig.state)?, before);
+    assert!(rig.receipt_is_first_release()?);
+    rig.assert_old_app_untouched();
+    Ok(())
+}
+
+#[test]
+fn upgrade_pins_one_release_replays_settings_and_reports_peer_failure() -> Result {
+    let rig = UpgradeRig::new()?;
+    let (outcome, value) = rig.upgrade(&["--hosts", "all"])?;
     assert_eq!(value["data"][0]["host"], "local", "{value}");
     assert_eq!(value["data"][0]["success"], true, "{value}");
-    assert_eq!(value["data"][1]["host"], "worker");
-    assert_eq!(value["data"][1]["success"], false);
-    assert_ne!(code(&result), 0);
-    let arguments = fs::read_to_string(ssh_args)?;
+    assert_eq!(value["data"][1]["host"], "worker", "{value}");
+    assert_eq!(value["data"][1]["success"], false, "{value}");
+    assert_ne!(code(&outcome), 0);
+    let arguments = fs::read_to_string(&rig.ssh_args)?;
     assert!(arguments.contains("worker.example\n"));
     assert!(arguments.contains("'--tag' 'v9.8.7'"));
     assert!(arguments.contains("-oBatchMode=yes"));
-    let downloads = fs::read_to_string(&curl_log)?;
-    assert_eq!(
-        downloads
-            .matches("provenant-apps-aarch64-apple-darwin.tar.gz\n")
-            .count(),
-        1
-    );
-    assert_eq!(
-        downloads
-            .matches("provenant-apps-aarch64-apple-darwin.tar.gz.sha256\n")
-            .count(),
-        1
-    );
-    assert!(!installed_app.join("old-build").exists());
+    // Preflight and apply may each fetch artifacts. Every fetch must stay
+    // pinned, and the app archive must always have its checksum available.
+    let artifacts = rig.fetched_artifacts()?;
+    assert!(!artifacts.is_empty());
     assert!(
-        installed_app
+        artifacts
+            .iter()
+            .all(|url| url.contains("/download/v9.8.7/"))
+    );
+    for artifact in [
+        "provenant-apps-aarch64-apple-darwin.tar.gz",
+        "provenant-apps-aarch64-apple-darwin.tar.gz.sha256",
+    ] {
+        assert!(artifacts.iter().any(|url| url.ends_with(artifact)));
+    }
+    assert!(!rig.installed_app.join("old-build").exists());
+    assert!(
+        rig.installed_app
             .join("Contents/MacOS/provenant-console")
             .is_file()
     );
-    assert!(installed_app.join(MENU_EXECUTABLE).is_file());
+    assert!(rig.installed_app.join(MENU_EXECUTABLE).is_file());
     if cfg!(target_os = "macos") {
-        let plist = fs::read_to_string(&agent)?;
-        let agent_path = agent.to_str().ok_or("agent")?;
-        assert!(
-            plist.contains(
-                installed_app
-                    .join(MENU_EXECUTABLE)
-                    .to_str()
-                    .ok_or("agent path")?
-            )
-        );
-        assert!(plist.contains("--kept"));
-        let launches = fs::read_to_string(&launch_log)?;
+        let agent_path = rig.agent.to_str().ok_or("agent")?;
+        let helper_executable = rig.installed_app.join(MENU_EXECUTABLE);
+        let helper_path = helper_executable.to_str().ok_or("agent path")?;
+        let arguments = rig.rig.execute_os(
+            Path::new("/usr/bin/plutil"),
+            &[
+                "-extract".into(),
+                "ProgramArguments".into(),
+                "json".into(),
+                "-o".into(),
+                "-".into(),
+                agent_path.into(),
+            ],
+            None,
+        )?;
+        assert_eq!(code(&arguments), 0);
+        let arguments: Vec<String> = serde_json::from_slice(&arguments.stdout.bytes)?;
+        assert_eq!(arguments, vec![helper_path]);
+        let launches = fs::read_to_string(&rig.launch_log)?;
         assert!(launches.contains("bootout gui/"));
         assert!(launches.contains("bootstrap gui/"));
         assert!(
@@ -2394,35 +2040,33 @@ esac
         assert!(launches.contains("kickstart -k gui/"));
         assert!(launches.contains(agent_path));
     }
-    rig.env
-        .push(("PROVENANT_TEST_MISSING_APPS".into(), "1".into()));
-    let older = rig.command(&["upgrade", "--json"])?;
-    let older_value: serde_json::Value = serde_json::from_slice(&older.stdout.bytes)?;
-    assert_eq!(older_value["data"][0]["success"], true, "{older_value}");
-    assert!(String::from_utf8_lossy(&older.stdout.bytes).contains("no bundled app archive"));
-    assert!(installed_app.join(MENU_EXECUTABLE).is_file());
-    if cfg!(target_os = "macos") {
-        // A repeated upgrade leaves the already-migrated agent pointing at the same helper.
-        let again = fs::read_to_string(&agent)?;
-        assert_eq!(again.matches(MENU_EXECUTABLE).count(), 1, "{again}");
-    }
-    rig.env
-        .retain(|(key, _)| key != "PROVENANT_TEST_MISSING_APPS");
-    let receipt: provenant_records::InstallReceipt = provenant_records::decode_v1(
-        fs::read(rig.state.join("install/receipt.json"))?.as_slice(),
-        provenant_records::Limits::CONFIG,
-    )?;
+    let receipt = rig.receipt()?;
     assert_eq!(receipt.harnesses, vec![provenant_records::Harness::Codex]);
     assert_eq!(
         receipt.harness_targets[0].skills_dir.to_path_buf()?,
-        rig.root.join("codex/skills")
+        rig.rig.root.join("codex/skills")
     );
-    assert_ne!(
-        receipt.source_digest,
-        provenant_config::Release::read(&first, env!("PROVENANT_TARGET_TRIPLE"))?
-            .manifest()
-            .source_digest
-    );
+    assert!(!rig.receipt_is_first_release()?);
+    Ok(())
+}
+
+#[test]
+fn upgrade_to_a_release_without_an_app_archive_keeps_the_migrated_app_and_agent() -> Result {
+    let mut rig = UpgradeRig::new()?;
+    // The configured peer is upgraded too and fails by design, so judge the local host.
+    let (_, value) = rig.upgrade(&[])?;
+    assert_eq!(value["data"][0]["host"], "local", "{value}");
+    assert_eq!(value["data"][0]["success"], true, "{value}");
+    rig.set_env("PROVENANT_TEST_MISSING_APPS", "1");
+    let (_, older_value) = rig.upgrade(&[])?;
+    assert_eq!(older_value["data"][0]["host"], "local", "{older_value}");
+    assert_eq!(older_value["data"][0]["success"], true, "{older_value}");
+    assert!(rig.installed_app.join(MENU_EXECUTABLE).is_file());
+    if cfg!(target_os = "macos") {
+        // A repeated upgrade leaves the already-migrated agent pointing at the same helper.
+        let again = fs::read_to_string(&rig.agent)?;
+        assert_eq!(again.matches(MENU_EXECUTABLE).count(), 1, "{again}");
+    }
     Ok(())
 }
 
@@ -2690,7 +2334,6 @@ fn install_and_upgrade_leave_every_registered_account_identical() -> Result {
     support::register_account(&rig, "claude", "work", "work-key", &claude[1])?;
     support::register_account(&rig, "claude", "pro", "pro-key", &claude[2])?;
     support::register_account(&rig, "codex", "alt", "alt-key", &codex[1])?;
-    enable_fabric_mcp(&rig)?;
     // User-owned content and credentials sit beside the managed entries.
     fs::write(
         claude[2].join("settings.json"),
@@ -2718,13 +2361,9 @@ fn install_and_upgrade_leave_every_registered_account_identical() -> Result {
             let link = fs::read_link(directory.join("skills/example"))?;
             assert!(link.starts_with(release), "{directory:?}: {link:?}");
             assert_eq!(managed_hooks(&directory.join("settings.json"))?, reference);
-            let mcp: serde_json::Value =
-                serde_json::from_slice(&fs::read(directory.join(".claude.json"))?)?;
-            assert_eq!(mcp["mcpServers"]["fabric"]["type"], "stdio");
         }
         for directory in &codex {
             assert!(fs::read_link(directory.join("skills/example"))?.starts_with(release));
-            assert!(fs::read_to_string(directory.join("config.toml"))?.contains("fabric"));
         }
         Ok(())
     };
@@ -2957,19 +2596,6 @@ fn registering_an_account_installs_managed_content_when_an_install_exists() -> R
     Ok(())
 }
 
-/// Opt the Fabric MCP server in, keeping whatever the config already holds.
-fn enable_fabric_mcp(rig: &TestRig) -> Result {
-    fs::create_dir_all(&rig.state)?;
-    let config = rig.state.join("config.toml");
-    let mut doc: toml_edit::DocumentMut = match fs::read_to_string(&config) {
-        Ok(text) => text.parse()?,
-        Err(_) => "schema_version = 1\n".parse()?,
-    };
-    doc["knobs"]["fabric.mcp_server"] = toml_edit::value(true);
-    fs::write(config, doc.to_string())?;
-    Ok(())
-}
-
 fn write_accounts_section(rig: &TestRig, edit: impl FnOnce(&mut toml_edit::Table)) -> Result {
     let config = rig.state.join("config.toml");
     let mut doc: toml_edit::DocumentMut = fs::read_to_string(&config)?.parse()?;
@@ -3003,7 +2629,6 @@ fn shared_settings_sync_conflict_adopt_force_and_refusal() -> Result {
     }
     support::register_account(&rig, "claude", "work", "work-key", &work)?;
     support::register_account(&rig, "claude", "pro", "pro-key", &pro)?;
-    enable_fabric_mcp(&rig)?;
     let source = rig.root.join("source-settings.json");
     let write_source = |style: &str| -> Result {
         fs::write(
@@ -3048,10 +2673,8 @@ fn shared_settings_sync_conflict_adopt_force_and_refusal() -> Result {
             "unlisted keys are not synced"
         );
     }
-    // Only the MCP entry is added to `.claude.json`.
-    let identity: serde_json::Value = serde_json::from_slice(&fs::read(pro.join(".claude.json"))?)?;
-    assert_eq!(identity["oauthAccount"]["emailAddress"], "x@example.test");
-    assert_ne!(fs::read(pro.join(".claude.json"))?, identity_before);
+    // Identity fields are never synced: `.claude.json` is left as it was.
+    assert_eq!(fs::read(pro.join(".claude.json"))?, identity_before);
     let (status, checked) = run_json(&rig, &["check", "install"])?;
     assert_eq!(status, 0, "{checked}");
 
@@ -3148,14 +2771,12 @@ fn shared_settings_sync_conflict_adopt_force_and_refusal() -> Result {
         keys.push("apiKeyHelper");
         accounts["shared_settings"]["keys"] = toml_edit::value(keys);
     })?;
-    let removed = rig.command(&["uninstall", "--harness", "claude"])?;
-    assert_eq!(code(&removed), 0, "{removed:?}");
-    // `CLAUDE_CONFIG_DIR` selects the one matching recorded target.
+    let (status, removed) = run_json(&rig, &["uninstall", "--harness", "claude"])?;
+    assert_eq!(status, 0, "{removed}");
+    assert_eq!(removed["status"], "ok");
+    // Removal succeeds despite invalid sync configuration and selects the
+    // matching recorded target via CLAUDE_CONFIG_DIR.
     assert!(fs::symlink_metadata(rig.root.join("claude/skills/example")).is_err());
-    assert!(
-        String::from_utf8_lossy(&removed.stdout.bytes).contains("configuration ignored")
-            || String::from_utf8_lossy(&removed.stderr.bytes).contains("configuration ignored")
-    );
     Ok(())
 }
 
@@ -3223,4 +2844,78 @@ fn finding_details_for_path(value: &serde_json::Value, rule: &str) -> usize {
         .flatten()
         .filter(|finding| finding["rule"] == rule)
         .count()
+}
+
+fn snapshot(root: &Path) -> Result<std::collections::BTreeMap<PathBuf, Vec<u8>>> {
+    let mut files = std::collections::BTreeMap::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.file_name().is_some_and(|name| name != "usage.jsonl") {
+                // usage.jsonl is the per-command telemetry every verb appends to.
+                files.insert(path.clone(), fs::read(&path)?);
+            }
+        }
+    }
+    Ok(files)
+}
+
+#[test]
+fn first_install_at_a_fresh_root_copies_only_1x_configuration() -> Result {
+    let mut rig = TestRig::new()?;
+    rig.state = rig.home.join(provenant_core::DEFAULT_STATE_SUFFIX);
+    rig.env.retain(|(key, _)| key != "PROVENANT_STATE_DIR");
+    let legacy = rig.home.join(provenant_core::LEGACY_V1_STATE_SUFFIX);
+    fs::create_dir_all(legacy.join("runs/run-from-1x"))?;
+    fs::write(
+        legacy.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='1B'\n",
+    )?;
+    fs::write(legacy.join("host-id"), [b'a'; 32])?;
+    fs::set_permissions(legacy.join("host-id"), fs::Permissions::from_mode(0o600))?;
+    fs::write(legacy.join("run.sqlite3"), b"1.x run state")?;
+    fs::write(legacy.join("runs/run-from-1x/result.md"), b"1.x result")?;
+    let before = snapshot(&legacy)?;
+    let stage = staged(&rig)?;
+    let binary = Path::new(env!("CARGO_BIN_EXE_provenant"));
+    let install = |dry| -> Result<serde_json::Value> {
+        let output = rig.execute_os(binary, &args(&stage, dry), None)?;
+        assert_eq!(code(&output), 0, "{output:?}");
+        Ok(serde_json::from_slice(&output.stdout.bytes)?)
+    };
+
+    // A dry run names the copy and writes nothing.
+    let preview = install(true)?;
+    assert_eq!(preview["data"]["state_copy"]["copied"], false);
+    assert!(!rig.state.exists());
+
+    let installed = install(false)?;
+    let copy = &installed["data"]["state_copy"];
+    assert_eq!(copy["copied"], true);
+    assert_eq!(copy["from"], legacy.to_str().ok_or("legacy path")?);
+    assert_eq!(copy["to"], rig.state.to_str().ok_or("state path")?);
+    assert_eq!(
+        fs::read(rig.state.join("host-id"))?,
+        fs::read(legacy.join("host-id"))?
+    );
+    assert!(rig.state.join("config.toml").is_file());
+    // Run state never crosses, and the 1.x root is byte-identical.
+    assert!(!rig.state.join("runs/run-from-1x").exists());
+    assert_ne!(
+        fs::read(rig.state.join("run.sqlite3")).ok().as_deref(),
+        Some(&b"1.x run state"[..])
+    );
+    assert_eq!(snapshot(&legacy)?, before);
+
+    // An existing root is left alone: a later install copies nothing.
+    let edited = "schema_version=1\n[gc]\nfree_floor='2B'\n";
+    fs::write(rig.state.join("config.toml"), edited)?;
+    let again = install(false)?;
+    assert!(again["data"]["state_copy"].is_null());
+    assert_eq!(fs::read_to_string(rig.state.join("config.toml"))?, edited);
+    assert_eq!(snapshot(&legacy)?, before);
+    Ok(())
 }

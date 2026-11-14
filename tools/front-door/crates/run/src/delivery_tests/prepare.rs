@@ -181,8 +181,15 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
             lane.to_str().ok_or("lane")?,
         ],
     )?;
+    let store_root = root.join("store");
+    let custody_project = registered_writer_project_id(
+        &project,
+        &store_root.join("home"),
+        &store_root.join("checkout"),
+        &store_root.join("state"),
+    )?;
     let writer = WriterRequest {
-        extra: Default::default(),
+        extra: writer_custody_extra(custody_project),
         project,
         worktree: lane.clone(),
     };
@@ -221,17 +228,17 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
     std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700))?;
     let head = GitOid::parse(&git(&lane, &["rev-parse", "HEAD"])?)?;
     let head_text = head.to_string();
-    let fixture = root.join("store");
-    std::fs::create_dir(&fixture)?;
+    let fixture = store_root;
+    std::fs::create_dir_all(&fixture)?;
     let (clock, cancel) = (tests::clock(), provenant_core::CancelToken::new());
     let call = tests::call(&clock, &cancel);
     let store = RunStore::open(&tests::context(&fixture)?, &call)?;
     let mut input = tests::input();
-    input.request.tasks[0].writer = Some(writer.clone());
-    input.request.tasks[0].deliver = Some(request.clone());
+    input.request.task.writer = Some(writer.clone());
+    input.request.task.deliver = Some(request.clone());
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let id = input.attempt_id;
+    let attempt = store.attempt_dir(id, false)?;
     // A lane that rewrites the stored destination after launch cannot steer
     // the host's push: the destination bound at prepare wins.
     let rewritten = WriterDeliveryRequest {
@@ -295,7 +302,7 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
         ],
     )?;
     let idle_writer = WriterRequest {
-        extra: Default::default(),
+        extra: writer.extra.clone(),
         project: writer.project.clone(),
         worktree: idle_lane.clone(),
     };
@@ -306,13 +313,14 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
     let idle_host =
         HostDeliveryContext::new(environment.clone()).prepare(&idle_writer, &idle_request)?;
     let mut idle = tests::input();
-    idle.run_id = provenant_core::RunId::from_bytes([17; 16]);
+    idle.attempt_id = provenant_core::AttemptId::from_bytes([17; 16]);
     idle.operation_id = provenant_core::OperationId::parse("idle-delivery")?;
-    idle.attempts[0].attempt_id = provenant_core::AttemptId::from_bytes([18; 16]);
-    idle.request.tasks[0].writer = Some(idle_writer.clone());
-    idle.request.tasks[0].deliver = Some(idle_request.clone());
+    idle.attempt_id = provenant_core::AttemptId::from_bytes([18; 16]);
+    crate::tests::rekey(&mut idle);
+    idle.request.task.writer = Some(idle_writer.clone());
+    idle.request.task.deliver = Some(idle_request.clone());
     store.create(&idle, &call)?;
-    let idle_attempt = store.attempt_dir(idle.run_id, idle.attempts[0].attempt_id, false)?;
+    let idle_attempt = store.attempt_dir(idle.attempt_id, false)?;
     let idle_receipt = deliver_once(
         &idle_host,
         &idle_writer,
@@ -330,17 +338,18 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
     assert!(git(&lane, &["ls-remote", "origin", "refs/heads/published/idle"])?.is_empty());
     // An interrupted delivery is recorded during terminal recovery, with no push.
     let mut interrupted = tests::input();
-    interrupted.run_id = provenant_core::RunId::from_bytes([14; 16]);
+    interrupted.attempt_id = provenant_core::AttemptId::from_bytes([14; 16]);
     interrupted.operation_id = provenant_core::OperationId::parse("interrupted-delivery")?;
-    interrupted.attempts[0].attempt_id = provenant_core::AttemptId::from_bytes([16; 16]);
-    interrupted.request.tasks[0].writer = Some(writer);
-    interrupted.request.tasks[0].deliver = Some(WriterDeliveryRequest {
+    interrupted.attempt_id = provenant_core::AttemptId::from_bytes([16; 16]);
+    crate::tests::rekey(&mut interrupted);
+    interrupted.request.task.writer = Some(writer);
+    interrupted.request.task.deliver = Some(WriterDeliveryRequest {
         branch: "interrupted".into(),
         ..request
     });
     store.create(&interrupted, &call)?;
-    let id = interrupted.attempts[0].attempt_id;
-    let attempt = store.attempt_dir(interrupted.run_id, id, false)?;
+    let id = interrupted.attempt_id;
+    let attempt = store.attempt_dir(id, false)?;
     let pending = WriterDeliveryReceipt {
         branch: "interrupted".into(),
         state: WriterDeliveryState::Failed {
@@ -356,7 +365,7 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
         RECORD_LIMIT,
     )?;
     let mut exit = tests::exit();
-    exit.scope.run = interrupted.run_id;
+    exit.scope.attempt = interrupted.attempt_id;
     exit.scope.attempt = id;
     dispatch_tests::seal_exit(&store, &exit)?;
     artifacts::seal(
@@ -626,9 +635,9 @@ fn publication_cleanup_never_removes_another_import_pin()
     let call = tests::call(&clock, &cancel);
     let store = RunStore::open(&execution, &call)?;
     let mut input = tests::input();
-    input.request.tasks[0].writer = Some(fixture.writer.clone());
+    input.request.task.writer = Some(fixture.writer.clone());
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     dispatch_tests::seal_exit(&store, &tests::exit())?;
     let record = store.publish_terminal(id, 1, &tests::publication(), &tests::exit(), &call)?;
     let head = fixture.prepare()?.head(&fixture.writer)?;
@@ -642,7 +651,6 @@ fn publication_cleanup_never_removes_another_import_pin()
         attempt: provenant_core::AttemptId::from_bytes([99; 16]),
         // A live lease never has generation 0; the record's own scope does.
         generation: 1,
-        ..RunStore::scope(&record)
     };
     let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
         directory,
@@ -654,7 +662,7 @@ fn publication_cleanup_never_removes_another_import_pin()
     )?;
     let reference = format!("refs/provenant/import/{head}");
     fixture.git(&["update-ref", &reference, &head.to_string()])?;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let mut driver = crate::settlement::Guard::claim(&attempt, RunStore::scope(&record), &clock)?
         .ok_or("old driver")?;
     driver.set_head(head)?;
@@ -737,8 +745,15 @@ fn host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch()
             "HEAD~1",
         ],
     )?;
+    let store_root = root.join("store");
+    let custody_project = registered_writer_project_id(
+        &project,
+        &store_root.join("home"),
+        &store_root.join("checkout"),
+        &store_root.join("state"),
+    )?;
     let writer = WriterRequest {
-        extra: Default::default(),
+        extra: writer_custody_extra(custody_project),
         project,
         worktree: lane.clone(),
     };
@@ -754,16 +769,16 @@ fn host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch()
     std::fs::write(lane.join("change"), "a repair on a stale base")?;
     git(&lane, &["add", "change"])?;
     git(&lane, &["commit", "-qm", "Repair"])?;
-    let fixture = root.join("store");
-    std::fs::create_dir(&fixture)?;
+    let fixture = store_root;
+    std::fs::create_dir_all(&fixture)?;
     let (clock, cancel) = (tests::clock(), provenant_core::CancelToken::new());
     let call = tests::call(&clock, &cancel);
     let store = RunStore::open(&tests::context(&fixture)?, &call)?;
     let mut input = tests::input();
-    input.request.tasks[0].writer = Some(writer.clone());
-    input.request.tasks[0].deliver = Some(request.clone());
+    input.request.task.writer = Some(writer.clone());
+    input.request.task.deliver = Some(request.clone());
     store.create(&input, &call)?;
-    let attempt = store.attempt_dir(input.run_id, input.attempts[0].attempt_id, false)?;
+    let attempt = store.attempt_dir(input.attempt_id, false)?;
     assert!(matches!(
         deliver_once(&host, &writer, &request, &attempt, "fixture receipt"),
         Err(RunError::Delivery(WriterDeliveryStage::Push))

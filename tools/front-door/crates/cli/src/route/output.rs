@@ -37,6 +37,7 @@ pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<S
         "local-preview",
         &[],
         false,
+        None,
         |context, records, policies, _| {
             let request = resolve_request(&query, context)?;
             let rules = effective_exclusion_rules(exclude, roots)?;
@@ -91,10 +92,7 @@ pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<S
                         availability_ref: "preview".into(),
                         expires_unix_seconds: now + 60,
                     };
-                    match admission.check_with_partial_headroom(
-                        &probe,
-                        context.config.allow_unknown_partial_headroom,
-                    ) {
+                    match admission.check(&probe) {
                         Ok(()) if !spent(record, now) => return Ok(None),
                         Ok(()) => member.push("allowance exhausted".to_owned()),
                         Err(error) => member.push(error.to_string()),
@@ -205,12 +203,49 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
                 let details = receipt
                     .candidates
                     .iter()
-                    .flat_map(|candidate| {
-                        candidate
+                    .map(|candidate| {
+                        let prior = candidate.extra.get("outcome_prior");
+                        let evidence = prior.and_then(|prior| prior.get("evidence"));
+                        let evidence_count = prior
+                            .and_then(|prior| prior.get("evidence_count"))
+                            .and_then(|count| count.as_u64())
+                            .unwrap_or_default();
+                        let factor = prior
+                            .and_then(|prior| prior.get("factor_basis_points"))
+                            .and_then(|factor| factor.as_u64())
+                            .unwrap_or(10_000);
+                        let successes = evidence
+                            .and_then(|evidence| evidence.get("successes"))
+                            .and_then(|count| count.as_u64())
+                            .unwrap_or_default();
+                        let failures = evidence
+                            .and_then(|evidence| evidence.get("failures"))
+                            .and_then(|count| count.as_u64())
+                            .unwrap_or_default();
+                        let source = prior
+                            .and_then(|prior| prior.get("source"))
+                            .and_then(|source| source.as_str())
+                            .unwrap_or("unavailable");
+                        let capability = candidate.extra.get("capability_preference");
+                        let capability_weight = capability
+                            .and_then(|preference| preference.get("weight"))
+                            .and_then(|weight| weight.as_u64())
+                            .unwrap_or(1);
+                        let capability_source = capability
+                            .and_then(|preference| preference.get("source"))
+                            .and_then(|source| source.as_str())
+                            .unwrap_or("unavailable");
+                        let ranking = format!(
+                            "\n  {}: prior={factor}/10000 successes={successes} failures={failures} evidence_count={evidence_count} source={source} capability_weight={capability_weight} capability_source={capability_source}",
+                            candidate.model
+                        );
+                        let diagnostics = candidate
                             .exclusion
                             .iter()
                             .chain(candidate.pacing_detail.iter())
                             .map(|detail| format!("\n  {}: {detail}", candidate.model))
+                            .collect::<String>();
+                        format!("{ranking}{diagnostics}")
                     })
                     .collect::<String>();
                 format!(
@@ -220,6 +255,12 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
             }),
         diagnostics
     );
+    if let Some(warning) = route.extra.get("effort_warning") {
+        text.push_str(&format!(
+            "warning: effort {} for {} dropped; source={}\n",
+            warning["requested"], warning["model"], warning["source"]
+        ));
+    }
     for record in &preview.recorded_readiness {
         text.push_str(&format!(
             "recorded readiness {} [{}] for {}: {}\n",

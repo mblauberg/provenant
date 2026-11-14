@@ -156,6 +156,32 @@ pub struct PatchRecord {
     /// unjournaled record (a planner fragment) is journaled at save instead.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub journaled: bool,
+    /// Present when the host restarted a stopped node: the stop it answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart: Option<Restart>,
+}
+
+/// The stop a host restart answered and the step it took. Restarts count
+/// against the graph-wide `limits.continuations`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Restart {
+    pub node: String,
+    pub cause: provenant_records::StopCause,
+    #[serde(flatten)]
+    pub step: provenant_records::NextStep,
+    /// The routing ladder's choice, when a depleted stop was handed off by it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ladder: Option<LadderChoice>,
+}
+
+/// The rung, target and tier the depletion ladder chose for a restart.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LadderChoice {
+    pub rung: provenant_routing::Rung,
+    /// `adapter/model` with its account, or `host-native/name`.
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
 }
 
 /// The node field naming the parent node whose patch added a node.
@@ -225,6 +251,8 @@ pub struct PatchContext<'a> {
     /// before the admission is committed, so a failed write admits nothing.
     pub journal: Option<&'a PatchJournal<'a>>,
     pub limits: &'a crate::config::GraphLimits,
+    /// The project's declared worktree layout used for generated child paths.
+    pub worktree_layout: provenant_config::WorktreeLayoutPort,
 }
 
 /// The confinement secret scan, as submission applies it.
@@ -298,11 +326,13 @@ fn admit_patch_for_retry(
             };
         }
         if revision(graph.checkpoint) != 0
-            || graph
-                .checkpoint
-                .nodes
-                .iter()
-                .any(|node| node.state != NodeState::Pending || !node.attempts.is_empty())
+            || graph.checkpoint.nodes.iter().any(|node| {
+                // A row a `when` condition skipped at submission has not started.
+                let skipped_at_submission =
+                    node.state == NodeState::Skipped && node.skip_reason.is_some();
+                (node.state != NodeState::Pending && !skipped_at_submission)
+                    || !node.attempts.is_empty()
+            })
         {
             return Err(PatchError::new(
                 "started",
@@ -351,6 +381,7 @@ fn admit_patch_for_retry(
             skipped: Vec::new(),
             replaced: Vec::new(),
             journaled: false,
+            restart: None,
         };
         if let Some(journal) = context.journal {
             journal(&record).map_err(|reason| PatchError::new("journal", reason))?;
@@ -359,7 +390,6 @@ fn admit_patch_for_retry(
         graph.checkpoint.expansions.push(Expansion {
             extra: Default::default(),
             source: String::new(),
-            continuation: false,
             nodes: Vec::new(),
             uses,
             patch: Some(record),
@@ -456,34 +486,27 @@ pub fn retry_node(
     retry_node_scope(graph, id, brief, context, false, None, None)
 }
 
-/// Host continuation uses the same checked, journalled reset as an explicit retry.
-pub(super) fn continue_no_work(
+/// A host restart after a stop uses the same checked, journalled reset as an
+/// explicit retry, and records the stop it answered.
+pub(super) fn restart_stopped(
     graph: &mut LiveGraph<'_>,
     id: &str,
-    brief: &str,
+    brief: Option<&str>,
     routes: &[GraphRoute],
+    restart: Restart,
     context: &PatchContext<'_>,
 ) -> Result<Admitted, PatchError> {
+    let reason = format!("restart node {id} after a {} stop", restart.cause);
+    debug_assert_eq!(restart.node, id);
     retry_node_scope(
         graph,
         id,
-        Some(brief),
+        brief,
         context,
         false,
-        Some(&no_work_reason(id)),
+        Some((&reason, Some(restart))),
         Some(routes),
     )
-}
-
-pub(super) fn no_work_reason(id: &str) -> String {
-    format!("continue node {id} after stop with no work")
-}
-
-pub(super) fn is_no_work_continuation(record: &PatchRecord) -> bool {
-    record
-        .replaced
-        .iter()
-        .any(|node| record.reason.as_deref() == Some(no_work_reason(&node.id).as_str()))
 }
 
 fn retry_node_scope(
@@ -492,7 +515,7 @@ fn retry_node_scope(
     brief: Option<&str>,
     context: &PatchContext<'_>,
     dependants: bool,
-    reason: Option<&str>,
+    reason: Option<(&str, Option<Restart>)>,
     replacement_routes: Option<&[GraphRoute]>,
 ) -> Result<Admitted, PatchError> {
     let expanded = plans::expand(
@@ -716,7 +739,8 @@ fn retry_node_scope(
         expected_revision: Some(revision(graph.checkpoint)),
         reason: Some(
             reason
-                .map(str::to_owned)
+                .as_ref()
+                .map(|(reason, _)| (*reason).to_owned())
                 .unwrap_or_else(|| format!("retry node {id}")),
         ),
         replace: vec![serde_json::to_value(node).map_err(|e| PatchError::invalid(e.to_string()))?],
@@ -732,6 +756,14 @@ fn retry_node_scope(
         context,
         Some(id),
     )?;
+    if let Some((_, Some(restart))) = reason
+        && let Some(record) = candidate
+            .expansions
+            .last_mut()
+            .and_then(|expansion| expansion.patch.as_mut())
+    {
+        record.restart = Some(restart);
+    }
     asks::refresh_wake(&mut candidate);
     *graph.checkpoint = candidate;
     Ok(admitted)
@@ -844,6 +876,7 @@ pub fn submission(
     document: &mut GraphDocument,
     key: &str,
     limits: &crate::config::GraphLimits,
+    worktree_layout: provenant_config::WorktreeLayoutPort,
 ) -> Result<(), PatchError> {
     for node in &mut document.nodes {
         node.extra
@@ -866,10 +899,12 @@ pub fn submission(
         .unwrap_or_default();
     for (index, node) in document.nodes.iter().enumerate() {
         let mut raw = serde_json::to_value(node).map_err(|e| PatchError::invalid(e.to_string()))?;
-        // Snapshot compiled nodes without inheriting dotted template behaviour
-        // a second time. Explicit extensions retain their provenance.
+        // Snapshot compiled nodes without inheriting template behaviour a
+        // second time. Bare implement also inserts a sizing plan, which must
+        // not run again after the original brief has already been compiled.
+        // Explicit extensions retain their provenance.
         let original = raw.get("template").and_then(Value::as_str).unwrap_or("raw");
-        let name = if original.contains('.') {
+        let name = if original == "implement" || original.contains('.') {
             format!("submission-node-{index}")
         } else {
             original.to_owned()
@@ -917,6 +952,7 @@ pub fn submission(
         scan: &scan_for_secrets,
         journal: None,
         limits,
+        worktree_layout,
     };
     let compiled = submit(
         &document.graph_id,
@@ -1147,13 +1183,32 @@ pub(super) fn prepare(
         .with(Layer::Repository, &catalogue)
         .and_then(|library| library.with(Layer::Inline, &patch.templates))
         .map_err(PatchError::invalid)?;
+    let mut resolvers = context.resolvers.clone();
+    if matches!(mode, Preparation::FinalFragment)
+        && parent.is_some_and(|node| {
+            node.plan.is_some()
+                || node
+                    .extra
+                    .get(template::TEMPLATE_FIELD)
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| name == "plan" || name.starts_with("plan."))
+        })
+    {
+        resolvers.insert(template::BOUNDED_IMPLEMENTATION.into(), vec!["true".into()]);
+    }
     let compiler = Compiler {
         library: &library,
-        resolvers: context.resolvers,
+        resolvers: &resolvers,
+    };
+    let scoped = compiler.scoped_plan_sources(&patch.nodes);
+    let compiler = Compiler {
+        resolvers: &scoped,
+        ..compiler
     };
     let mut local = Vec::with_capacity(patch.nodes.len());
     let mut uses = Vec::new();
-    for raw in &patch.nodes {
+    let authored = compiler.bounded_plan_consumers(&patch.nodes);
+    for raw in &authored {
         let mut node = compiler.compile(raw)?;
         let used = raw.get("use").and_then(Value::as_str);
         let trusted = used.is_some_and(|name| {
@@ -1229,6 +1284,7 @@ pub(super) fn prepare(
             planner.map(|(_, spec)| spec),
             expanded,
             checkpoint,
+            &context.worktree_layout,
         )
         .map_err(classify)?
     };
@@ -1355,7 +1411,6 @@ pub(super) fn prepare(
     let mut expansion = Expansion {
         extra: Default::default(),
         source: parent.map(|node| node.id.clone()).unwrap_or_default(),
-        continuation: false,
         nodes: std::mem::take(&mut nodes),
         uses,
         patch: Some(PatchRecord {
@@ -1368,6 +1423,7 @@ pub(super) fn prepare(
             skipped: patch.skip.clone(),
             replaced,
             journaled: false,
+            restart: None,
         }),
     };
     if matches!(mode, Preparation::FinalFragment) {
@@ -1492,7 +1548,7 @@ pub(super) fn correct_review_verdict(
         Some(brief),
         context,
         false,
-        Some(&format!("correct review verdict {id}")),
+        Some((&format!("correct review verdict {id}"), None)),
         None,
     )
 }

@@ -7,10 +7,11 @@ on:
 
 permissions: {}
 
-# One writer updates one bot comment on the documentation epic.
+# One writer updates one bot comment on the documentation epic. A newer run
+# supersedes an older one, whose report would be stale.
 concurrency:
   group: docs-drift
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   report:
@@ -20,6 +21,7 @@ jobs:
       contents: read
       issues: write
     env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
       CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
       PROVENANT_ROOT: ${{ github.workspace }}
     steps:
@@ -33,7 +35,8 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: tools/front-door
-          shared-key: front-door-ci
+          shared-key: front-door-ci-dev-default
+          add-job-id-key: false
           save-if: false
       - name: Build the worktree CLI
         working-directory: tools/front-door

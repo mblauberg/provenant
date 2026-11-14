@@ -97,7 +97,7 @@ pub(crate) type GraphRead = dyn Fn(
         serde_json::Value,
         &provenant_core::CancelToken,
         std::time::Duration,
-    ) -> Result<serde_json::Value, provenant_fabric_mcp::tools::ServiceError>
+    ) -> Result<serde_json::Value, provenant_fabric_runtime::relay::ServiceError>
     + Send
     + Sync;
 
@@ -109,7 +109,7 @@ pub struct HostHolder<'a> {
     graph_read: Option<Arc<GraphRead>>,
     stdout_frames: QuotaFrames,
     stderr_frames: QuotaFrames,
-    fabric_relay: Mutex<Option<provenant_fabric_mcp::lane::HostRelay>>,
+    fabric_relay: Mutex<Option<provenant_fabric_runtime::relay::HostRelay>>,
     fabric: OnceLock<BoundFabric>,
     settled: Mutex<Option<run::HolderContext>>,
 }
@@ -135,7 +135,7 @@ impl HolderFabric {
             context.roots.checkout.clone(),
         );
         inputs.state_dir = Some(launch.configuration_root.clone());
-        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let roots = provenant_os::fs::bind_roots(&inputs)?;
         let directory = launch.graph_directory.as_deref().unwrap_or(&launch.cwd);
         let mut ctx = crate::fabric::Context::open(roots, &context.roots.home, directory)?;
         if ctx.identity.project != context.project_id {
@@ -189,7 +189,8 @@ impl<'a> HostHolder<'a> {
             serde_json::Value,
             &provenant_core::CancelToken,
             std::time::Duration,
-        ) -> Result<serde_json::Value, provenant_fabric_mcp::tools::ServiceError>
+        )
+            -> Result<serde_json::Value, provenant_fabric_runtime::relay::ServiceError>
         + Send
         + Sync
         + 'static,
@@ -364,6 +365,56 @@ impl Holder for HostHolder<'_> {
         );
         Ok(())
     }
+    fn budget_warning(&self, context: &[u8], tokens: u64, budget: u64) -> custody::Result<()> {
+        self.inner.budget_warning(context, tokens, budget)
+    }
+    fn budget_clean_point(&self, context: &[u8]) -> custody::Result<bool> {
+        self.inner.budget_clean_point(context)
+    }
+    fn budget_crossed(&self, context: &[u8], tokens: u64, budget: u64) -> custody::Result<()> {
+        self.inner.budget_crossed(context, tokens, budget)?;
+        let notify = || -> Result<(), Box<dyn std::error::Error>> {
+            let (holder, runs) = run::HolderContext::open(context)?;
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = run::Request {
+                clock: &clock,
+                cancel: &cancel,
+            };
+            let request = runs.request(holder.attempt_id, &call)?;
+            let Some(chair) = request.chair else {
+                return Ok(());
+            };
+            let Some(fabric) = self.fabric(context)? else {
+                return Ok(());
+            };
+            let record = runs.record(holder.attempt_id, &call)?;
+            let digest = provenant_records::CanonicalV1::record_digest(
+                "budget-overrun-notice",
+                1,
+                &holder.attempt_id,
+            )?;
+            let mut id = [0; 16];
+            id.copy_from_slice(&digest.as_bytes()[..16]);
+            let inbox_call = provenant_fabric_store::Request {
+                clock: &clock,
+                cancel: &cancel,
+            };
+            let inbox =
+                provenant_fabric_store::Store::open(&fabric.context.roots.state, &inbox_call)?;
+            inbox.send(&provenant_fabric_store::Message {
+                extra: Default::default(), header: provenant_records::RecordHeader::V1,
+                project: holder.project_id, id: provenant_core::MessageId::from_bytes(id),
+                sender: holder.actor_id, recipients: vec![chair.actor], conversation: None,
+                kind: provenant_fabric_store::MessageKind::Note,
+                body: format!("Writer {} crossed its token target: {tokens} fresh tokens, budget {budget}. Its configured budget action applies; status records the overrun.", holder.attempt_id),
+                artifacts: Vec::new(), reply_to: None, created_at: record.queued_at,
+            }, &inbox_call)?;
+            Ok(())
+        };
+        notify()
+            .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error.to_string())))
+    }
     fn provider_exited(&self, context: &[u8], reason: Option<StopReason>) -> custody::Result<()> {
         self.inner.provider_exited(context, reason)?;
         self.stop()
@@ -390,7 +441,7 @@ impl Holder for HostHolder<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_core::{ActorId, Digest, OperationId, ProjectId, RootInputs, RunId, TaskId};
+    use provenant_core::{ActorId, Digest, OperationId, ProjectId, RootInputs};
     use provenant_records::CanonicalV1;
 
     #[test]
@@ -427,10 +478,13 @@ mod tests {
             assert_eq!(output.termination, Termination::Exit(0), "{output:?}");
             let path = state.join("quota/key/opencode.json");
             let before = std::fs::read(&path)?;
-            let provider_state = state.join("runs/run/attempts/attempt/provider-state");
+            let provider_state = state.join("attempts/attempt/provider-state");
             let route = quota_test_route();
             let decoded = run::Providers::decode_captures(
-                &Registry::default(),
+                &Registry {
+                    state_root: Some(&state),
+                    ..Default::default()
+                },
                 &route,
                 b"",
                 b"",
@@ -444,7 +498,7 @@ mod tests {
             assert_eq!(record[0].refusals.len(), 1);
             return Ok(());
         };
-        let attempt_path = state.join("runs/run/attempts/attempt");
+        let attempt_path = state.join("attempts/attempt");
         std::fs::create_dir_all(&attempt_path)?;
         let registration = &provenant_providers::opencode::REGISTRATION;
         let frames = QuotaFrames {
@@ -471,7 +525,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir()?;
         let state = temp.path().join("state");
-        let attempt = state.join("runs/run/attempts/attempt");
+        let attempt = state.join("attempts/attempt");
         std::fs::create_dir_all(&attempt)?;
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
         let observed = SystemClock::new().unix_seconds();
@@ -487,7 +541,10 @@ mod tests {
         let route = quota_test_route();
         let decode = || {
             run::Providers::decode_captures(
-                &Registry::default(),
+                &Registry {
+                    state_root: Some(&state),
+                    ..Default::default()
+                },
                 &route,
                 b"",
                 b"",
@@ -516,7 +573,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir()?;
         let state = temp.path().join("state");
-        let attempt = state.join("runs/run/attempts/attempt");
+        let attempt = state.join("attempts/attempt");
         std::fs::create_dir_all(&attempt)?;
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
         let observed = SystemClock::new().unix_seconds();
@@ -530,7 +587,10 @@ mod tests {
         .write(&Directory::open_anchor(&attempt)?)?;
         let route = quota_test_route();
         let decoded = run::Providers::decode_captures(
-            &Registry::default(),
+            &Registry {
+                state_root: Some(&state),
+                ..Default::default()
+            },
             &route,
             b"",
             b"",
@@ -571,7 +631,6 @@ mod tests {
     #[test]
     fn busy_quota_cache_preserves_terminal_and_sealed_evidence()
     -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_core::WaitBudget;
         use provenant_os::{
             capture::{FrameDecoder, FrameEvent},
             fs::LockMode,
@@ -580,22 +639,14 @@ mod tests {
 
         let temp = tempfile::tempdir()?;
         let state = temp.path().join("state");
-        let attempt = state.join("runs/run/attempts/attempt");
+        let attempt = state.join("attempts/attempt");
         let quota = state.join("quota");
         std::fs::create_dir_all(&attempt)?;
         std::fs::create_dir(&quota)?;
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
         std::fs::set_permissions(&quota, std::fs::Permissions::from_mode(0o700))?;
-        let clock = SystemClock::new();
-        let cancel = CancelToken::new();
         let directory = Directory::open_anchor(&quota)?;
-        let lock = directory.lock(
-            OsStr::new("quota.lock"),
-            LockMode::Exclusive,
-            WaitBudget::cli(clock.mono_now(), 5)?,
-            &cancel,
-            &clock,
-        )?;
+        let lock = directory.try_lock(OsStr::new("quota.lock"), LockMode::Exclusive)?;
         let registration = &provenant_providers::opencode::REGISTRATION;
         let frames = QuotaFrames {
             decoder: Mutex::new(registration.stdout_decoder),
@@ -622,7 +673,10 @@ mod tests {
         let provider_state = attempt.join("provider-state");
         for _ in 0..2 {
             let decoded = run::Providers::decode_captures(
-                &Registry::default(),
+                &Registry {
+                    state_root: Some(&state),
+                    ..Default::default()
+                },
                 &quota_test_route(),
                 b"",
                 b"",
@@ -680,7 +734,6 @@ mod tests {
             },
             project_id: project,
             actor_id: ActorId::from_bytes([2; 16]),
-            run_id: RunId::from_bytes([3; 16]),
             attempt_id: AttemptId::from_bytes([4; 16]),
             host_delivery: None,
             sealed: None,
@@ -716,13 +769,12 @@ mod tests {
         let budget = provenant_core::WaitBudget::cli(clock.mono_now(), 5)?;
         let mut journal = FileJournal::open(state, project, "custody", budget, &cancel, &clock)?;
         let document: GraphDocument = serde_json::from_value(json!({
-            "schema_version":2,"graph_id":"custody","integration_branch":"main",
+            "schema_version":2,"graph_id":"custody",
             "nodes":[{"id":"parent","access":"read_only","prompt":"Go","route":{"alias":"senior"}}]
         }))?;
         journal.bind(GraphExecution {
-            review_base: None,
             extra: Default::default(),
-            integration_base: None,
+            bases: None,
             directory: temp.path().to_path_buf(),
             document,
         })?;
@@ -737,7 +789,7 @@ mod tests {
             let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
                 "schema_version":1,"graph_id":"custody","plan_digest":"fixture",
                 "nodes":[{"id":"parent","state":"succeeded","attempts":[{
-                    "launched":true,"key":{"graph_id":"custody","node_id":"parent","route_index":0},
+                    "launched":true,"key":{"graph_id":"custody","node_id":"parent","route_index":0, "attempt": 1},
                     "route":{"alias":"senior"},"state":"terminal","attempt_ref":reference,
                     "outcome":null,"launch_actor":"fixture"
                 }]}, {"id":"parent--child--grandchild","state":status,"attempts":[]},
@@ -780,12 +832,12 @@ mod tests {
     }
 
     #[test]
-    fn launch_seal_records_root_network_and_legacy_defaults_restrictively()
+    fn launch_seal_records_root_network_and_refuses_an_incomplete_seal()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_confinement::permissions::NetworkAccess;
         let temp = tempfile::tempdir()?;
         let (_, child) = child_fixture(temp.path(), &SystemClock::new())?;
-        let mut task = child.request.tasks[0].clone();
+        let mut task = child.request.task.clone();
         assert_eq!(
             seal_launch_task(child.request.digest()?, &task).effective_network,
             NetworkAccess::Open
@@ -805,25 +857,22 @@ mod tests {
             let restored: run::SealedTask = serde_json::from_value(serde_json::to_value(sealed)?)?;
             assert_eq!(restored.effective_database_ipc, database);
         }
-        let mut json = serde_json::to_value(seal_launch_task(child.request.digest()?, &task))?;
-        json.as_object_mut()
-            .ok_or("sealed task")?
-            .remove("effective_network");
-        json.as_object_mut()
-            .ok_or("sealed task")?
-            .remove("effective_database_ipc");
-        let old: run::SealedTask = serde_json::from_value(json.clone())?;
-        assert_eq!(old.effective_network, NetworkAccess::Provider);
-        assert!(!old.effective_database_ipc);
-        old.apply_access(&mut task);
-        assert!(!task.access.database_ipc);
-        json["effective_database_ipc"] = serde_json::Value::Null;
-        assert!(serde_json::from_value::<run::SealedTask>(json.clone()).is_err());
-        json.as_object_mut()
-            .ok_or("sealed task")?
-            .remove("effective_database_ipc");
-        json["effective_network"] = serde_json::Value::Null;
-        assert!(serde_json::from_value::<run::SealedTask>(json).is_err());
+        // A seal missing either effective bound is refused, never defaulted.
+        let json = serde_json::to_value(seal_launch_task(child.request.digest()?, &task))?;
+        for field in ["effective_network", "effective_database_ipc"] {
+            let mut missing = json.clone();
+            missing.as_object_mut().ok_or("sealed task")?.remove(field);
+            assert!(
+                serde_json::from_value::<run::SealedTask>(missing).is_err(),
+                "{field}"
+            );
+            let mut null = json.clone();
+            null[field] = serde_json::Value::Null;
+            assert!(
+                serde_json::from_value::<run::SealedTask>(null).is_err(),
+                "{field}"
+            );
+        }
         Ok(())
     }
 
@@ -844,20 +893,23 @@ mod tests {
             actor_id: ActorId::from_bytes([2; 16]),
             read_prompts: true,
         };
-        let task_id = TaskId::from_bytes([3; 16]);
         let id = AttemptId::from_bytes([6; 16]);
         let child = run::PreparedRun {
-            run_id: RunId::from_bytes([4; 16]),
+            attempt_id: id,
             operation_id: OperationId::parse("deferred-child")?,
             created_at: clock.wall_now()?,
             request: run::CanonicalRequest {
                 extra: Default::default(),
-                child_attempt_id_version: None,
                 chair: None,
                 fresh_continuation: None,
                 schema_version: 1,
-                tasks: vec![run::TaskRequest {
-                    context: None,
+                task: run::TaskRequest {
+                    context: Some(provenant_records::run::WorkContext {
+                        graph_id: Some(format!("lane-{id}")),
+                        node_id: Some("node".into()),
+                        attempt: Some(1),
+                        ..Default::default()
+                    }),
                     extra: Default::default(),
                     build_heavy: false,
                     title: None,
@@ -865,7 +917,6 @@ mod tests {
                     head: None,
                     source_head: None,
                     base_ref: None,
-                    task_id,
                     prompt_digest: CanonicalV1::file_digest(b"child"),
                     route: run::RequestedRoute::Model {
                         extra: Default::default(),
@@ -881,17 +932,12 @@ mod tests {
                     delivery_id: None,
                     deliver: None,
                     access: Default::default(),
-                }],
-                concurrency: 1,
+                },
                 parent: None,
                 lane_depth: Some(2),
                 parent_attempt: Some(AttemptId::from_bytes([9; 16])),
             },
-            attempts: vec![run::NewAttempt {
-                task_id,
-                attempt_id: id,
-                prompt: "child".into(),
-            }],
+            prompt: "child".into(),
         };
         Ok((context, child))
     }

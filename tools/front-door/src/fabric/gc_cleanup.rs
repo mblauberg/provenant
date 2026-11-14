@@ -68,23 +68,265 @@ pub(crate) fn run(
     collect_owned_worktree(&settled, &roots, workers, delivery.as_ref())
 }
 
-// Keep lock-contention regression tests deterministic without a two-minute sleep.
-#[cfg(test)]
-thread_local! {
-    pub(crate) static COLLECTION_WAIT_SECONDS: std::cell::Cell<u64> = const { std::cell::Cell::new(120) };
+/// Exact integration ref and pinned tip supplied by an applied GC sweep.
+pub(crate) enum Collection {
+    Settlement,
+    Sweep {
+        upstream: Option<(String, provenant_core::GitOid)>,
+    },
 }
 
-/// How an owner-bound collection gets the GC collection lock.
-pub(crate) enum Collection<'a> {
-    /// Settlement's detached worker takes the lock, waiting a bounded time.
-    Acquire,
-    /// The `provenant gc` sweep already holds the lock. `upstream` is the
-    /// default-branch tip that sweep fetched; with no delivery receipt, the
-    /// lane lands against it or falls back to the owner's base when upstream is None.
-    Held {
-        _lock: &'a provenant_os::fs::LockGuard,
-        upstream: Option<provenant_core::GitOid>,
-    },
+#[derive(Default)]
+pub(crate) struct UnsettledCollection {
+    pub(crate) removed: Vec<PathBuf>,
+    pub(crate) removals: Vec<provenant_records::custody::RemovalRecord>,
+}
+
+fn landed_evidence(
+    reference: String,
+    commit: provenant_core::GitOid,
+) -> provenant_records::custody::LandedEvidence {
+    provenant_records::custody::LandedEvidence {
+        predicate: provenant_records::custody::LandingPredicate::Landed,
+        source: provenant_records::custody::LandingSource::IntegrationTarget { reference, commit },
+    }
+}
+
+fn retained_ref_evidence(
+    reference: String,
+    commit: provenant_core::GitOid,
+) -> provenant_records::custody::LandedEvidence {
+    provenant_records::custody::LandedEvidence {
+        predicate: provenant_records::custody::LandingPredicate::Subsumed,
+        source: provenant_records::custody::LandingSource::RetainedRef { reference, commit },
+    }
+}
+
+fn is_integration_evidence(evidence: &provenant_records::custody::LandedEvidence) -> bool {
+    matches!(
+        (&evidence.predicate, &evidence.source),
+        (
+            provenant_records::custody::LandingPredicate::Landed,
+            provenant_records::custody::LandingSource::IntegrationTarget { .. }
+        )
+    )
+}
+
+fn delivered_removal_evidence(
+    request: Option<&provenant_records::run::WriterDeliveryRequest>,
+    receipt: Option<&provenant_run::WriterDeliveryReceipt>,
+    reference: &str,
+    head: provenant_core::GitOid,
+    pinned: provenant_core::GitOid,
+) -> provenant_records::custody::LandedEvidence {
+    let integration_matches = request.zip(receipt).is_some_and(|(request, receipt)| {
+        use provenant_records::run::{DeliveryMode, WriterDeliveryState};
+        if !matches!(request.mode, DeliveryMode::Integrate(_)) {
+            return false;
+        }
+        if !matches!(receipt.state, WriterDeliveryState::Delivered { .. })
+            || receipt.head != Some(head)
+            || receipt.remote != request.remote
+            || receipt.branch != request.branch
+        {
+            return false;
+        }
+        let Ok(Some(destination)) =
+            provenant_run::HostDeliveryContext::destination(request.mode.clone(), &request.branch)
+        else {
+            return false;
+        };
+        let remote = destination.remote;
+        let branch = destination.branch;
+        let target_ref = format!("refs/heads/{branch}");
+        let expected_reference = if remote.is_empty() {
+            target_ref.clone()
+        } else {
+            format!("refs/remotes/{remote}/{branch}")
+        };
+        request.remote == remote
+            && request.branch == branch
+            && reference == expected_reference
+            && receipt.integration.as_ref().is_some_and(|integration| {
+                integration.remote == remote && integration.target == target_ref
+            })
+    });
+    if integration_matches {
+        landed_evidence(reference.to_owned(), pinned)
+    } else {
+        retained_ref_evidence(reference.to_owned(), pinned)
+    }
+}
+
+fn kept_unproven_worktree(
+    project: provenant_core::ProjectId,
+    path: &Path,
+    tip: provenant_core::GitOid,
+) -> provenant_records::custody::RemovalRecord {
+    provenant_records::custody::RemovalRecord {
+        project,
+        subject: provenant_records::custody::Subject::new(
+            provenant_records::custody::SubjectKind::Worktree,
+            path.to_string_lossy(),
+        ),
+        tip,
+        outcome: provenant_records::custody::RemovalOutcome::Kept {
+            cause: provenant_records::custody::RemovalUncertainty::UnprovenLanding,
+        },
+    }
+}
+
+/// Resume from the existing operation receipt by following its durable owner.
+/// The receipt only locates the retirement; only that record projects removals.
+fn retirement_records_for_receipt(
+    context: &provenant_confinement::worktrees::WorktreeContext<'_>,
+    port: &dyn provenant_confinement::worktrees::RetirementPort,
+    project: provenant_core::ProjectId,
+    path: &Path,
+    receipt: &serde_json::Value,
+    cancel: &provenant_core::CancelToken,
+) -> Result<Vec<provenant_records::custody::RemovalRecord>, Box<dyn std::error::Error>> {
+    use provenant_records::custody::{Subject, SubjectKind};
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+        Ok(_) => return Err("worktree removal is not confirmed".into()),
+    }
+    let id = receipt["retirement_id"]
+        .as_str()
+        .ok_or("pruning receipt has no retirement id")?;
+    let subject: Subject = serde_json::from_value(
+        receipt
+            .get("retirement_subject")
+            .cloned()
+            .ok_or("pruning receipt has no retirement subject")?,
+    )?;
+    let expected_tip: provenant_core::GitOid = serde_json::from_value(
+        receipt
+            .get("retirement_tip")
+            .cloned()
+            .ok_or("pruning receipt has no expected tip")?,
+    )?;
+    let worktree = Subject::new(
+        SubjectKind::Worktree,
+        path.to_str().ok_or("worktree path is not valid UTF-8")?,
+    );
+    if context.binding.project_id() != project || subject.kind != SubjectKind::Ref {
+        return Err("pruning receipt has an invalid reference anchor".into());
+    }
+    let recovered =
+        provenant_confinement::worktrees::resume_pending_retirements(context, port, cancel)?;
+    let retirement = match recovered.into_iter().find(|record| record.id == id) {
+        Some(record) => Some(record),
+        None => port.retirement_for_subject(project, &worktree)?,
+    };
+    let Some(retirement) = retirement else {
+        return Err("pruning receipt has no custody retirement owner".into());
+    };
+    if retirement.id != id
+        || retirement.project != project
+        || retirement.subject != subject
+        || retirement.reference.custody_subject()? != subject
+        || retirement.expected_tip != expected_tip
+        || !retirement.related_subjects.contains(&worktree)
+        || !retirement.owns_subject(&worktree)
+        || !retirement.valid_evidence()
+    {
+        return Err("pruning receipt does not match its durable retirement".into());
+    }
+    let records = retirement.removals();
+    if !records.iter().any(|record| {
+        record.subject == worktree
+            && matches!(
+                &record.outcome,
+                provenant_records::custody::RemovalOutcome::Removed {
+                    retirement_id,
+                    ..
+                } if retirement_id == &retirement.id
+            )
+    }) {
+        return Err("durable retirement has no completed worktree projection".into());
+    }
+    Ok(records)
+}
+
+fn release_settled_cache(
+    settled: &provenant_run::HolderContext,
+    roots: &provenant_core::Roots,
+    workers: &dyn WorkerObserver,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::worktrees;
+    let clock = SystemClock;
+    let cancel = CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let execution = provenant_run::ExecutionContext {
+        state_root: roots.state.clone(),
+        project_id: settled.project_id,
+        actor_id: settled.actor_id,
+        read_prompts: false,
+    };
+    let store = provenant_run::RunStore::open(&execution, &call)?
+        .with_writer_registry(roots.state.as_path());
+    let record = store.record(settled.attempt_id, &call)?;
+    if !matches!(record.state, provenant_run::AttemptState::Terminal { .. }) {
+        return Ok(());
+    }
+    let Some(writer) = store.request(record.attempt_id, &call)?.task.writer else {
+        return Ok(());
+    };
+    // Private output belongs to a settled lane, not to the lifetime of its
+    // worktree. A continuation can recreate it; shared download links are
+    // unlinked without traversing their targets. Busy/unknown is retried by GC.
+    if let Err(error) = crate::worktrees::with_context_using_facts(
+        roots,
+        &settled.roots.home,
+        &writer.project,
+        std::time::Duration::ZERO,
+        workers,
+        store.repo_facts(),
+        |context, _| {
+            provenant_confinement::cache::gc_worktree_cargo_caches_with_writer_guard(
+                &settled.roots.home,
+                &provenant_confinement::cache::CacheGcPolicy {
+                    idle_before_ns: Some(i128::MAX),
+                    project_owners: [writer.worktree.clone()].into(),
+                    selected_only: true,
+                    ..Default::default()
+                },
+                |path| {
+                    let guard = worktrees::cache_writer_guard(context.project_state, path)?;
+                    let state = crate::gc_support::lane_states(
+                        roots,
+                        &settled.roots.home,
+                        &settled.roots.checkout,
+                        settled.project_id,
+                    )
+                    .map_err(|error| {
+                        worktrees::Occupancy::custody_unknown(path.to_owned(), error.to_string())
+                    })?;
+                    if state.get(path) != Some(&true) || !state.no_live_lanes(path) {
+                        return Err(worktrees::Occupancy::custody_unknown(
+                            path.to_owned(),
+                            "settlement custody is not free",
+                        ));
+                    }
+                    Ok(Some(guard))
+                },
+            )
+            .map_err(|error| crate::worktrees::Error::Permissions(*error.source))
+        },
+    ) {
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "warning: private cache release for {}: {error}",
+            writer.worktree.display()
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn collect_owned_worktree(
@@ -93,31 +335,39 @@ pub(crate) fn collect_owned_worktree(
     workers: &dyn WorkerObserver,
     delivery_override: Option<&provenant_run::WriterDeliveryReceipt>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    collect_owned_worktree_with(
-        settled,
-        roots,
-        workers,
-        delivery_override,
-        Collection::Acquire,
-    )
+    for class in
+        provenant_config::retention_schedule(provenant_config::RetentionTrigger::Settlement)
+    {
+        match class.class {
+            provenant_config::RetentionKind::LaneCargoCaches => {
+                release_settled_cache(settled, roots, workers)?
+            }
+            provenant_config::RetentionKind::GitWorktrees => collect_owned_worktree_with(
+                settled,
+                roots,
+                workers,
+                delivery_override,
+                Collection::Settlement,
+                None,
+            )?,
+            _ => {} // Other classes are owned by RunStore's terminal transaction.
+        }
+    }
+    Ok(())
 }
 
 /// The sweep's half of completion cleanup. Settlement makes one detached
-/// attempt and leaves a receipt that is not final until it succeeds. For each
-/// settled lane whose receipt is still deferred, retryable or mid-prune and
-/// whose worktree still exists, run the same owner-bound collection under the
-/// lock the sweep holds, landing against the fetched default branch or falling
-/// back to the owner's base when upstream is None. That receipt is the only
-/// marker: nothing else is recorded. Returns the worktrees this removed.
+/// attempt and leaves a receipt that is not final until it succeeds. The
+/// applied sweep records exact removal evidence in the same receipt before
+/// mutation, then lifts confirmed removals into its report.
 pub(crate) fn collect_unsettled(
     roots: &provenant_core::Roots,
     home: &Path,
     checkout: &Path,
     project_id: provenant_core::ProjectId,
-    lock: &provenant_os::fs::LockGuard,
-    upstream: Option<provenant_core::GitOid>,
+    upstream: Option<(String, provenant_core::GitOid)>,
     workers: &dyn WorkerObserver,
-) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+) -> Result<UnsettledCollection, Box<dyn std::error::Error>> {
     let clock = SystemClock;
     let cancel = CancelToken::new();
     let call = provenant_run::Request {
@@ -131,7 +381,7 @@ pub(crate) fn collect_unsettled(
         read_prompts: false,
     };
     let Some(store) = provenant_run::RunStore::open_disk_read_only(&context, &call)? else {
-        return Ok(Vec::new());
+        return Ok(UnsettledCollection::default());
     };
     let mut pending = Vec::new();
     let mut query = provenant_run::LaneQuery {
@@ -151,33 +401,25 @@ pub(crate) fn collect_unsettled(
             {
                 continue;
             }
-            let Some(writer) = store
-                .request(attempt.run_id, &call)?
-                .tasks
-                .into_iter()
-                .find(|task| task.task_id == attempt.task_id)
-                .and_then(|task| task.writer)
-            else {
+            let Some(writer) = store.request(attempt.attempt_id, &call)?.task.writer else {
                 continue;
             };
-            if std::fs::symlink_metadata(&writer.worktree).is_err() {
+            let receipt = store.worktree_settlement(attempt.attempt_id, &call)?;
+            let exists = std::fs::symlink_metadata(&writer.worktree).is_ok();
+            let recovering_prune = receipt
+                .as_ref()
+                .is_some_and(|receipt| receipt["state"] == "pruning");
+            if !exists && !recovering_prune {
                 continue;
             }
-            let unsettled = store
-                .worktree_settlement(attempt.attempt_id, &call)?
-                .is_some_and(|receipt| {
-                    receipt["cleanup_deferred"] == true
-                        || receipt["retryable"] == true
-                        || receipt["state"] == "pruning"
-                });
+            let unsettled = receipt.is_some_and(|receipt| {
+                receipt["cleanup_deferred"] == true
+                    || receipt["retryable"] == true
+                    || receipt["state"] == "pruning"
+            });
             if unsettled {
-                let actor_id = store.run(attempt.run_id, &call)?.actor_id;
-                pending.push((
-                    attempt.run_id,
-                    attempt.attempt_id,
-                    actor_id,
-                    writer.worktree,
-                ));
+                let actor_id = store.attempt_operation(attempt.attempt_id, &call)?.actor_id;
+                pending.push((attempt.attempt_id, actor_id, writer.worktree));
             }
         }
         match page.next {
@@ -186,8 +428,8 @@ pub(crate) fn collect_unsettled(
         }
     }
     drop(store);
-    let mut removed = Vec::new();
-    for (run_id, attempt_id, actor_id, worktree) in pending {
+    let mut collection = UnsettledCollection::default();
+    for (attempt_id, actor_id, worktree) in pending {
         let settled = provenant_run::HolderContext {
             schema_version: 1,
             roots: provenant_run::RootSeed {
@@ -197,7 +439,6 @@ pub(crate) fn collect_unsettled(
             },
             project_id,
             actor_id,
-            run_id,
             attempt_id,
             host_delivery: None,
             launch: None,
@@ -209,10 +450,10 @@ pub(crate) fn collect_unsettled(
             roots,
             workers,
             None,
-            Collection::Held {
-                _lock: lock,
-                upstream,
+            Collection::Sweep {
+                upstream: upstream.clone(),
             },
+            Some(&mut collection.removals),
         );
         if let Err(error) = collected {
             use std::io::Write;
@@ -221,11 +462,12 @@ pub(crate) fn collect_unsettled(
                 "warning: settled lane collection failed for {}: {error}",
                 worktree.display()
             );
-        } else if std::fs::symlink_metadata(&worktree).is_err() {
-            removed.push(worktree);
+        }
+        if std::fs::symlink_metadata(&worktree).is_err() {
+            collection.removed.push(worktree);
         }
     }
-    Ok(removed)
+    Ok(collection)
 }
 
 fn collect_owned_worktree_with(
@@ -233,7 +475,8 @@ fn collect_owned_worktree_with(
     roots: &provenant_core::Roots,
     workers: &dyn WorkerObserver,
     delivery_override: Option<&provenant_run::WriterDeliveryReceipt>,
-    collection: Collection<'_>,
+    collection: Collection,
+    mut removal_records: Option<&mut Vec<provenant_records::custody::RemovalRecord>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::worktrees::{self, WorktreeGcPolicy, WorktreeOrigin};
     let clock = SystemClock;
@@ -261,12 +504,7 @@ fn collect_owned_worktree_with(
         )?;
         return Ok(());
     }
-    let task = store
-        .request(record.run_id, &call)?
-        .tasks
-        .into_iter()
-        .find(|task| task.task_id == record.task_id)
-        .ok_or("settled task missing")?;
+    let task = store.request(record.attempt_id, &call)?.task;
     let Some(writer) = task.writer else {
         record_worktree_settlement(
             &store,
@@ -277,6 +515,19 @@ fn collect_owned_worktree_with(
         )?;
         return Ok(());
     };
+    let authority =
+        provenant_cli::fabric::Context::open(roots.clone(), &settled.roots.home, &writer.project)?;
+    if authority.identity.project != settled.project_id {
+        return Err("worktree retirement project identity changed".into());
+    }
+    let chair = provenant_cli::fabric::current_chair(&authority);
+    let retirement = crate::custody::RetirementWriter::open(
+        roots,
+        settled.project_id,
+        chair.clone(),
+        &clock,
+        &cancel,
+    )?;
     // Recover an interrupted prune before classifying an absent worktree.
     let prior = store.worktree_settlement(record.attempt_id, &call)?;
     if replay_worktree_settlement(prior.as_ref(), &writer.worktree)?.is_none() {
@@ -301,9 +552,13 @@ fn collect_owned_worktree_with(
         && record.delivery.is_none()
         && store.delivered(record.attempt_id, &call)?.is_none()
     {
-        let graph_member = matching_graph_hint(&roots.state, settled.project_id, &record).is_some();
+        let operation = store
+            .attempt_operation(record.attempt_id, &call)?
+            .operation_id;
+        let graph_member =
+            matching_graph_hint(&roots.state, settled.project_id, &record, &operation).is_some();
         // An unmatched graph operation retains custody without scanning other graphs.
-        if graph_member || record.operation_id.as_str().starts_with("graph-") {
+        if graph_member || operation.as_str().starts_with("graph-") {
             let reason = if graph_member {
                 "graph writer worktree retained for continuation, later rounds and explicit delivery"
             } else {
@@ -318,7 +573,7 @@ fn collect_owned_worktree_with(
         }
     }
     let facts = store.repo_facts();
-    // Refresh before taking the collection lock and before the prune budget starts.
+    // Refresh before item custody and before the prune budget starts.
     // Explicit worktrees have no owner record, so use their verified HEAD.
     let mut tracking_ref_warning = None;
     let mut lane_owned = false;
@@ -367,35 +622,11 @@ fn collect_owned_worktree_with(
     if !lane_owned {
         tracking_ref_warning = None;
     }
-    #[cfg(test)]
-    let collection_wait = COLLECTION_WAIT_SECONDS.get();
-    #[cfg(not(test))]
-    let collection_wait = 120;
-    let sweep_upstream = match collection {
-        Collection::Held { upstream, .. } => upstream,
-        Collection::Acquire => None,
+    let sweep_upstream = match &collection {
+        Collection::Sweep { upstream } => upstream.as_ref(),
+        Collection::Settlement => None,
     };
-    let _collection = match matches!(collection, Collection::Acquire)
-        .then(|| crate::worktrees::collection_lock_for(roots, Some(collection_wait)))
-        .transpose()
-    {
-        Ok(lock) => lock,
-        // A long-running collector still owns the pass. Leave a visible
-        // receipt rather than skipping silently; replay ignores retained ones.
-        Err(crate::worktrees::Error::Fs(provenant_os::fs::FsError::LockTimeout { .. })) => {
-            let receipt = serde_json::json!({"schema_version":1, "state":"retained", "worktree":writer.worktree, "reason":crate::worktrees::COLLECTION_BUSY, "retryable":true});
-            // Never replace a receipt that already settled or began pruning.
-            store.record_worktree_settlement_if(
-                record.attempt_id,
-                &receipt,
-                |current| current.is_none_or(|receipt| receipt["cleanup_deferred"] == true),
-                &call,
-            )?;
-            return Ok(());
-        }
-        Err(error) => return Err(error.into()),
-    };
-    let replayed = replay_worktree_settlement(
+    let mut replayed = replay_worktree_settlement(
         store
             .worktree_settlement(record.attempt_id, &call)?
             .as_ref(),
@@ -415,10 +646,7 @@ fn collect_owned_worktree_with(
     let collection_error = std::cell::RefCell::new(None::<String>);
     let final_reason = std::cell::Cell::new(retention_reason);
     let result = (|| -> Result<_, Box<dyn std::error::Error>> {
-        if replayed.is_some() {
-            return Ok(None);
-        }
-        let config = provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)?;
+        let config = provenant_cli::config_reads::read_for(roots, "gc")?;
         let settings = config
             .gc
             .projects
@@ -433,6 +661,33 @@ fn collect_owned_worktree_with(
             workers,
             facts,
             |context, cancel| {
+                if let Some(replayed_receipt) = replayed.as_mut() {
+                    if replayed_receipt["state"] == "pruned"
+                        || replayed_receipt["recovered_from_intent"] == true
+                    {
+                        if replayed_receipt["schema_version"] != 2 {
+                            return Err(
+                                "pruning receipt has an unsupported retirement schema".into()
+                            );
+                        }
+                        let confirmed = retirement_records_for_receipt(
+                            context,
+                            &retirement,
+                            settled.project_id,
+                            &writer.worktree,
+                            replayed_receipt,
+                            cancel,
+                        )?;
+                        if let Some(records) = removal_records.as_deref_mut() {
+                            records.extend(confirmed.iter().cloned());
+                        }
+                        replayed_receipt["removal_records"] = serde_json::to_value(&confirmed)?;
+                        if let Some(object) = replayed_receipt.as_object_mut() {
+                            object.remove("recovered_from_intent");
+                        }
+                    }
+                    return Ok(None);
+                }
                 let tree = provenant_confinement::verify_worktree(context.repo, &writer.worktree)
                     .map_err(worktrees::WorktreeError::from)?;
                 let Some(owner) = worktrees::load_owner(&tree)? else {
@@ -470,17 +725,24 @@ fn collect_owned_worktree_with(
                     |path: &Path| states().is_some_and(|snapshot| snapshot.no_live_lanes(path));
                 let output_policy = WorktreeGcPolicy {
                     upstream: None,
+                    mode: worktrees::CollectionMode::Outputs,
+                    proof: None,
+                    upstream_reference: None,
                     terminal: &terminal,
                     no_live_lanes: &no_live,
                     regenerable: &settings.regenerable,
                     keep: &settings.keep,
                     written_before_ns: i128::MAX,
-                    foreign_merged_clean: false,
+                    include_foreign: false,
+                    retirement_port: None,
+                    retirement_feeds: None,
+                    integration_patterns: &[],
+                    excluded_paths: &[],
                     dry_run: false,
                 };
                 // A failed pre-prune step must not replace a retained lane's
                 // real reason, so record it and carry on.
-                let pre_prune = || -> Result<(), Box<dyn std::error::Error>> {
+                let pre_prune = |evidence: &provenant_records::custody::LandedEvidence| -> Result<(), Box<dyn std::error::Error>> {
                     let lane = worktrees::list_for_gc_matching(context, cancel, |path, _| {
                         path == writer.worktree
                     })?
@@ -493,7 +755,7 @@ fn collect_owned_worktree_with(
                     {
                         return Err("completion cleanup awaits free terminal writer custody".into());
                     }
-                    let output = worktrees::collect_lazy(
+                    let output = worktrees::collect(
                         context,
                         std::slice::from_ref(&lane),
                         &output_policy,
@@ -509,47 +771,9 @@ fn collect_owned_worktree_with(
                             "completion output cleanup failed; the next gc sweep retries it".into(),
                         );
                     }
-                    // Retained lanes can resume with fresh caches. Restrict this
-                    // pass to their owner, including detached remnants, and prove
-                    // terminal state again while acquiring writer exclusion.
-                    if lane.occupancy.is_available() {
-                        let report = provenant_confinement::cache::gc_worktree_cargo_caches_with_writer_guard(
-                            &settled.roots.home,
-                            &provenant_confinement::cache::CacheGcPolicy {
-                                idle_before_ns: Some(i128::MAX),
-                                project_owners: [writer.worktree.clone()].into(),
-                                selected_only: true,
-                                ..Default::default()
-                            },
-                            |path| {
-                                let guard =
-                                    worktrees::cache_writer_guard(context.project_state, path)?;
-                                if !terminal(path) || !no_live(path) {
-                                    return Err(worktrees::Occupancy::custody_unknown(
-                                        path.to_path_buf(),
-                                        "lane settlement could not be verified",
-                                    ));
-                                }
-                                Ok(Some(guard))
-                            },
-                        )
-                        .map_err(|error| crate::worktrees::Error::Permissions(*error.source))?;
-                        if !report.kept.is_empty() {
-                            return Err(
-                                "completion cache cleanup retained busy or unobserved output"
-                                    .into(),
-                            );
-                        }
-                    }
                     Ok(())
                 };
-                if let Err(error) = pre_prune() {
-                    *collection_error.borrow_mut() = Some(error.to_string());
-                }
-                if retention_reason.is_some() {
-                    return Ok(None);
-                }
-                let upstream = delivery
+                let delivered_ref = delivery
                     .filter(|receipt| {
                         matches!(
                             receipt.state,
@@ -563,11 +787,6 @@ fn collect_owned_worktree_with(
                             format!("refs/remotes/{}/{}", receipt.remote, receipt.branch)
                         }
                     });
-                let pinned = match (upstream, sweep_upstream) {
-                    (Some(upstream), _) => worktrees::resolve_base(context, &upstream, cancel)?,
-                    (None, Some(fetched)) => fetched,
-                    (None, None) => worktrees::resolve_base(context, &owner.base, cancel)?,
-                };
                 let Some(head) = record.head.or_else(|| {
                     (record.provider_launched == Some(false))
                         .then(|| owner.base.parse().ok())
@@ -575,26 +794,59 @@ fn collect_owned_worktree_with(
                 }) else {
                     return Err(worktrees::WorktreeError::InvalidOutput.into());
                 };
+                let has_delivered_ref = delivered_ref.is_some();
+                let (proof_reference, pinned) = match (delivered_ref, sweep_upstream) {
+                    (Some(reference), _) => {
+                        let pinned = worktrees::resolve_base(context, &reference, cancel)?;
+                        (reference, pinned)
+                    }
+                    (None, Some((reference, fetched))) => (reference.clone(), *fetched),
+                    (None, None) => {
+                        if let Some(records) = removal_records.as_deref_mut() {
+                            records.push(kept_unproven_worktree(
+                                settled.project_id,
+                                &writer.worktree,
+                                head,
+                            ));
+                        }
+                        return Err("no exact ref is available for removal evidence".into());
+                    }
+                };
+                let evidence = if has_delivered_ref {
+                    delivered_removal_evidence(
+                        delivery_request,
+                        delivery,
+                        &proof_reference,
+                        head,
+                        pinned,
+                    )
+                } else {
+                    landed_evidence(proof_reference.clone(), pinned)
+                };
+                if let Err(error) = pre_prune(&evidence) {
+                    *collection_error.borrow_mut() = Some(error.to_string());
+                }
+                if retention_reason.is_some() {
+                    return Ok(None);
+                }
+                let target = worktrees::LandingTarget {
+                    reference: Some(
+                        provenant_confinement::repo::GitRefName::new(&proof_reference)
+                            .map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
+                    ),
+                    tip: pinned,
+                };
                 if delivery.is_none()
                     && delivery_request.is_none()
-                    && !worktrees::landing_in_repo(
-                        context,
-                        head,
-                        &worktrees::LandingTarget {
-                            reference: None,
-                            tip: pinned,
-                        },
-                        &[],
-                        cancel,
-                    )?
-                    .is_landed()
+                    && !worktrees::landing_in_repo(context, head, &target, &[], cancel)?.is_landed()
                 {
                     final_reason.set(Some("not landed on base and no delivery requested"));
                     return Ok(None);
                 }
                 let policy = WorktreeGcPolicy {
-                    // A push or open PR has not landed the branch. Only an
-                    // integration receipt grants local branch cleanup.
+                    proof: Some(&evidence),
+                    // Retained lane refs prove subsumption, but only an exact
+                    // integration target permits deleting the local branch.
                     upstream: delivery_request
                         .filter(|request| {
                             matches!(
@@ -602,28 +854,55 @@ fn collect_owned_worktree_with(
                                 provenant_records::run::DeliveryMode::Integrate(_)
                             )
                         })
+                        .filter(|_| is_integration_evidence(&evidence))
                         .map(|_| pinned),
                     ..output_policy
                 };
-                let mut intent = serde_json::json!({
-                    "schema_version":1, "state":"pruning", "worktree":writer.worktree,
-                    "branch":format!("refs/heads/{}", owner.branch)
-                });
-                if let Some(warning) = tracking_ref_warning.as_ref() {
-                    intent["tracking_ref_warning"] = serde_json::json!(warning);
-                }
-                record_worktree_settlement(&store, record.attempt_id, &intent)
-                    .map_err(|_| worktrees::WorktreeError::RegistrationUnconfirmed)?;
-                pruning_intent = Some(intent);
-                Ok(Some(worktrees::prune_owned(
+                let branch = provenant_confinement::repo::GitRefName::branch(&owner.branch)
+                    .map_err(|_| worktrees::WorktreeError::InvalidRequest)?;
+                let decision = provenant_records::custody::RetirementDecision::Discard {
+                    authority: chair.actor,
+                    evidence: provenant_records::custody::RemovalEvidence::Landing {
+                        evidence: evidence.clone(),
+                    },
+                };
+                let (outcome, updated_retirement) = worktrees::prune_owned(
                     context,
                     &writer.worktree,
                     owner_attempt,
                     head,
                     pinned,
                     &policy,
+                    &retirement,
+                    decision,
+                    |retirement_record| {
+                        let mut intent = serde_json::json!({
+                            "schema_version":2,
+                            "state":"pruning",
+                            "worktree":writer.worktree,
+                            "branch":branch.as_str(),
+                            "retirement_id":retirement_record.id,
+                            "retirement_subject":retirement_record.subject,
+                            "retirement_tip":retirement_record.expected_tip
+                        });
+                        if let Some(warning) = tracking_ref_warning.as_ref() {
+                            intent["tracking_ref_warning"] = serde_json::json!(warning);
+                        }
+                        record_worktree_settlement(&store, record.attempt_id, &intent)
+                            .map_err(|_| worktrees::WorktreeError::RegistrationUnconfirmed)?;
+                        pruning_intent = Some(intent);
+                        Ok(())
+                    },
                     cancel,
-                )?))
+                )?;
+                let receipt_id = pruning_intent
+                    .as_ref()
+                    .and_then(|intent| intent["retirement_id"].as_str())
+                    .ok_or(worktrees::WorktreeError::RegistrationUnconfirmed)?;
+                if updated_retirement.id != receipt_id {
+                    return Err(worktrees::WorktreeError::IdentityChanged);
+                }
+                Ok(Some(outcome))
             },
         )?)
     })();
@@ -651,7 +930,25 @@ fn collect_owned_worktree_with(
             }
             Ok(Some(result)) => {
                 let artefacts = worktrees::ArtefactOutcome::from_remove(&result);
-                serde_json::json!({"schema_version":1, "state":"pruned", "worktree": writer.worktree, "result":result, "artefacts":artefacts})
+                let intent = pruning_intent
+                    .as_ref()
+                    .ok_or("pruned worktree is missing its retirement receipt")?;
+                let retirement_id = intent["retirement_id"]
+                    .as_str()
+                    .ok_or("pruned worktree has no canonical retirement id")?;
+                let records = retirement_records_for_receipt(
+                    context,
+                    &retirement,
+                    settled.project_id,
+                    &writer.worktree,
+                    intent,
+                    cancel,
+                )?;
+                if let Some(sink) = removal_records.as_deref_mut() {
+                    sink.extend(records.iter().cloned());
+                }
+                let receipt = serde_json::json!({"schema_version":2, "state":"pruned", "worktree": writer.worktree, "result":result, "artefacts":artefacts, "removal_records":records, "retirement_id":retirement_id});
+                receipt
             }
             Err(error) => {
                 if let Some(mut pruned) =
@@ -678,11 +975,20 @@ fn collect_owned_worktree_with(
             }
         }
     };
-    if let Some(branch) = pruning_intent
-        .as_ref()
-        .and_then(|intent| intent.get("branch"))
-    {
-        receipt["branch"] = branch.clone();
+    if let Some(intent) = pruning_intent.as_ref() {
+        for field in [
+            "branch",
+            "retirement_id",
+            "retirement_subject",
+            "retirement_tip",
+        ] {
+            if let Some(value) = intent.get(field) {
+                receipt[field] = value.clone();
+            }
+        }
+    }
+    if receipt["state"] == "pruned" && !receipt["removal_records"].is_array() {
+        return Err("pruned GC receipt is missing required removal evidence".into());
     }
     // Retry remote removal even when an earlier worker already pruned the tree.
     if receipt["state"] == "pruned" {
@@ -718,7 +1024,14 @@ fn collect_owned_worktree_with(
             .and_then(|branch| provenant_confinement::repo::GitRefName::new(branch).ok())
     {
         {
-            let sweep = crate::lane_cleanup::Sweep::new(false);
+            let retention_config = provenant_cli::config_reads::read_for(roots, "gc")?;
+            let settings = retention_config
+                .gc
+                .project_settings(&settled.project_id.to_string(), &writer.project);
+            let retention_owner =
+                crate::retention_owner::Owner::new(roots, &settled.roots.home, &writer.project);
+            let sweep =
+                crate::lane_cleanup::Sweep::new(false).with_retention(&retention_owner, &settings);
             let outcomes = crate::worktrees::with_context_using_facts(
                 roots,
                 &settled.roots.home,
@@ -728,7 +1041,12 @@ fn collect_owned_worktree_with(
                 facts,
                 |context, cancel| {
                     Ok(crate::lane_cleanup::settle_integrated(
-                        context, &branch, delivered, &sweep, cancel,
+                        context,
+                        &branch,
+                        delivered,
+                        &sweep,
+                        &retirement,
+                        cancel,
                     ))
                 },
             );
@@ -752,6 +1070,17 @@ fn collect_owned_worktree_with(
                                 .iter()
                                 .filter_map(|outcome| serde_json::to_value(outcome).ok()),
                         );
+                    let removals: Vec<_> = outcomes
+                        .iter()
+                        .filter_map(|outcome| outcome.removal.clone())
+                        .collect();
+                    if let Some(sink) = removal_records.as_deref_mut() {
+                        sink.extend(removals.iter().cloned());
+                    }
+                    receipt["removal_records"]
+                        .as_array_mut()
+                        .ok_or("missing removal_records")?
+                        .extend(serde_json::to_value(removals)?);
                 }
                 (Ok(_), false) => {}
                 (Err(error), _) => {
@@ -765,4 +1094,114 @@ fn collect_owned_worktree_with(
     // budget after it so a completed prune can always publish its receipt.
     record_worktree_settlement(&store, record.attempt_id, &receipt)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod removal_tests {
+    use super::*;
+
+    #[test]
+    fn delivery_removal_evidence_distinguishes_retained_refs_from_integration_targets() {
+        use provenant_records::run::{
+            DeliveryMode, WriterDeliveryRequest, WriterDeliveryState, WriterIntegration,
+        };
+        let head = provenant_core::GitOid::parse(&"a1".repeat(20)).unwrap();
+        let target = provenant_core::GitOid::parse(&"b2".repeat(20)).unwrap();
+        let make_request = |mode, remote: &str, branch: &str, open_pr| WriterDeliveryRequest {
+            extra: Default::default(),
+            mode,
+            remote: remote.into(),
+            branch: branch.into(),
+            open_pr,
+            fast_forward_only: false,
+        };
+        let make_receipt =
+            |remote: &str, branch: &str, integration| provenant_run::WriterDeliveryReceipt {
+                extra: Default::default(),
+                schema_version: 1,
+                remote: remote.into(),
+                branch: branch.into(),
+                head: Some(head),
+                review_acceptance: None,
+                state: WriterDeliveryState::Delivered {
+                    extra: Default::default(),
+                    pull_request: None,
+                },
+                integration,
+            };
+        let lane_integration = Some(WriterIntegration {
+            extra: Default::default(),
+            remote: "origin".into(),
+            push_url: Some("https://example.invalid/repo".into()),
+            target: "refs/heads/topic".into(),
+            previous: None,
+            integrated: head,
+        });
+        for (mode, open_pr) in [(DeliveryMode::Push, false), (DeliveryMode::Pr, true)] {
+            let request = make_request(mode, "origin", "topic", open_pr);
+            let receipt = make_receipt("origin", "topic", lane_integration.clone());
+            let evidence = delivered_removal_evidence(
+                Some(&request),
+                Some(&receipt),
+                "refs/remotes/origin/topic",
+                head,
+                head,
+            );
+            assert_eq!(
+                evidence,
+                retained_ref_evidence("refs/remotes/origin/topic".into(), head)
+            );
+            assert!(!is_integration_evidence(&evidence));
+        }
+
+        let request = make_request(
+            DeliveryMode::Integrate("origin/main".into()),
+            "origin",
+            "main",
+            false,
+        );
+        let receipt = make_receipt(
+            "origin",
+            "main",
+            Some(WriterIntegration {
+                extra: Default::default(),
+                remote: "origin".into(),
+                push_url: Some("https://example.invalid/repo".into()),
+                target: "refs/heads/main".into(),
+                previous: Some(target),
+                integrated: target,
+            }),
+        );
+        let evidence = delivered_removal_evidence(
+            Some(&request),
+            Some(&receipt),
+            "refs/remotes/origin/main",
+            head,
+            target,
+        );
+        assert_eq!(
+            evidence,
+            landed_evidence("refs/remotes/origin/main".into(), target)
+        );
+        assert!(is_integration_evidence(&evidence));
+
+        let mismatched = make_request(
+            DeliveryMode::Integrate("origin/other".into()),
+            "origin",
+            "main",
+            false,
+        );
+        let evidence = delivered_removal_evidence(
+            Some(&mismatched),
+            Some(&receipt),
+            "refs/remotes/origin/main",
+            head,
+            target,
+        );
+        assert_eq!(
+            evidence,
+            retained_ref_evidence("refs/remotes/origin/main".into(), target)
+        );
+        assert!(!is_integration_evidence(&evidence));
+    }
 }

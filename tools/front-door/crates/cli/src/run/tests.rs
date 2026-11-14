@@ -1,5 +1,6 @@
 use super::*;
 use crate::Mode;
+use provenant_records::CanonicalV1;
 
 pub(super) fn reexec_test_in_lane(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
     if !crate::fabric::in_lane() {
@@ -118,19 +119,23 @@ pub(super) fn trace_run(
     parent_attempt: AttemptId,
     created_at: WallTime,
 ) -> Result<run::PreparedRun, Box<dyn std::error::Error>> {
-    let task_id = TaskId::from_bytes([n; 16]);
+    let attempt_id = AttemptId::from_bytes([n + 2; 16]);
     Ok(run::PreparedRun {
-        run_id: RunId::from_bytes([n + 1; 16]),
+        attempt_id,
         operation_id: OperationId::parse(&format!("trace-{n}"))?,
         created_at,
         request: run::CanonicalRequest {
             extra: Default::default(),
-            child_attempt_id_version: None,
             chair: None,
             fresh_continuation: None,
             schema_version: 1,
-            tasks: vec![run::TaskRequest {
-                context: None,
+            task: run::TaskRequest {
+                context: Some(provenant_records::run::WorkContext {
+                    graph_id: Some(format!("lane-{attempt_id}")),
+                    node_id: Some("node".into()),
+                    attempt: Some(1),
+                    ..Default::default()
+                }),
                 extra: Default::default(),
                 build_heavy: false,
                 title: None,
@@ -138,7 +143,6 @@ pub(super) fn trace_run(
                 head: None,
                 source_head: None,
                 base_ref: None,
-                task_id,
                 prompt_digest: CanonicalV1::file_digest(b"p"),
                 route: run::RequestedRoute::Model {
                     extra: Default::default(),
@@ -154,17 +158,12 @@ pub(super) fn trace_run(
                 delivery_id: None,
                 deliver: None,
                 access: Default::default(),
-            }],
-            concurrency: 1,
+            },
             parent: None,
             lane_depth: Some(1),
             parent_attempt: Some(parent_attempt),
         },
-        attempts: vec![run::NewAttempt {
-            task_id,
-            attempt_id: AttemptId::from_bytes([n + 2; 16]),
-            prompt: "p".into(),
-        }],
+        prompt: "p".into(),
     })
 }
 
@@ -186,55 +185,10 @@ fn trace_store(
     Ok(run::RunStore::open(&context, call)?)
 }
 
-fn render_lanes_without_cooldowns(
-    lanes: &[run::AttemptRecord],
-    waits: &[run::LaneWait],
-    next: Option<u64>,
-    root: &Path,
-) -> (Value, String) {
-    render_lanes(lanes, waits, next, root, None)
-}
-
-/// A lane for the lane-view tests: queued until a test sets its state.
-fn lane_fixture(
-    attempt: u8,
-    task: u8,
-    state: run::AttemptState,
-) -> Result<run::AttemptRecord, Box<dyn std::error::Error>> {
-    let now = WallTime::from_micros(100)?;
-    let mut lane: run::AttemptRecord = serde_json::from_value(json!({
-        "schema_version": 1,
-        "attempt_id": AttemptId::from_bytes([attempt; 16]),
-        "run_id": RunId::from_bytes([9; 16]),
-        "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
-        "task_id": TaskId::from_bytes([task; 16]),
-        "operation_id": format!("lane-{attempt}"),
-        "attempt_number": attempt,
-        "revision": 1,
-        "generation": 0,
-        "requested_route": {"kind":"model","provider":"claude","model":"claude/claude-sonnet-5"},
-        "applied_route": null,
-        "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
-        "queued_at": now,
-        "state": {"state":"queued"},
-        "usage": {},
-        "prompt": {
-            "path": {"encoding":"utf8","path":"prompt.txt"},
-            "digest": CanonicalV1::file_digest(b""),
-            "bytes": 0,
-            "complete": true,
-            "redacted": false
-        }
-    }))?;
-    lane.state = state;
-    Ok(lane)
-}
-
 pub(super) fn clean_exit() -> ExitObservation {
     ExitObservation {
         publication: PublicationState::Durable,
         scope: Scope {
-            run: RunId::from_bytes([1; 16]),
             attempt: AttemptId::from_bytes([2; 16]),
             generation: 1,
         },
@@ -269,8 +223,8 @@ fn seed_opencode_session(
 ) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(data)?;
     let db = rusqlite::Connection::open(data.join("opencode.db"))?;
-    db.execute_batch("CREATE TABLE session (id TEXT PRIMARY KEY); CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT)")?;
-    db.execute("INSERT INTO session VALUES (?1)", [session])?;
+    db.execute_batch("CREATE TABLE session_v2 (id TEXT PRIMARY KEY); CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT)")?;
+    db.execute("INSERT INTO session_v2 VALUES (?1)", [session])?;
     db.execute(
         "INSERT INTO session_message VALUES (?1, 'assistant', ?2)",
         (
@@ -301,7 +255,6 @@ fn opencode_decode_holder_context(
         },
         project_id: provenant_core::ProjectId::from_bytes([1; 16]),
         actor_id: ActorId::from_bytes([2; 16]),
-        run_id: RunId::from_bytes([3; 16]),
         attempt_id: AttemptId::from_bytes([4; 16]),
         host_delivery: None,
         launch: None,
@@ -309,59 +262,6 @@ fn opencode_decode_holder_context(
     })
 }
 
-#[test]
-fn admission_window_deadline_is_preserved_on_restart() -> Result<(), Box<dyn std::error::Error>> {
-    if reexec_test_in_lane("run::tests::admission_window_deadline_is_preserved_on_restart")? {
-        return Ok(());
-    }
-    let fixture = linked_fixture()?;
-    with_edge(
-        &fixture.root,
-        &fixture.tree,
-        |edge| -> Result<(), Box<dyn std::error::Error>> {
-            crate::fabric::private_dir(edge.roots.state.as_path(), edge.roots.state.as_path())?;
-            provenant_config::bind_project(
-                edge.roots,
-                provenant_config::ProjectLocation::new(fixture.project.join(".git"))?,
-            )?;
-            provenant_config::bind_host(edge.roots)?;
-
-            let clock = SystemClock::new();
-            let cancel = CancelToken::new();
-            let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
-            let session = open(edge, &call).map_err(|fail| fail.message)?;
-
-            let op: OperationId = "test-restart-op".parse().unwrap();
-            let t0 = WallTime::from_micros(10_000_000).unwrap();
-            let initial_window = run::AdmissionWindow {
-                deadline: t0,
-                wake_at: None,
-            };
-            let saved = session
-                .store
-                .save_admission_window(&op, initial_window, &call)?;
-            assert_eq!(saved.deadline, t0);
-            assert_eq!(saved.wake_at, None);
-
-            // Later restart attempts to set a later deadline (t1) and a wake_at
-            let t1 = WallTime::from_micros(20_000_000).unwrap();
-            let wake = WallTime::from_micros(12_000_000).unwrap();
-            let restarted_window = run::AdmissionWindow {
-                deadline: t1,
-                wake_at: Some(wake),
-            };
-            let reloaded = session
-                .store
-                .save_admission_window(&op, restarted_window, &call)?;
-            // The deadline MUST NOT be renewed: it must remain t0!
-            assert_eq!(reloaded.deadline, t0);
-            // wake_at was updated
-            assert_eq!(reloaded.wake_at, Some(wake));
-            Ok(())
-        },
-    )??;
-    Ok(())
-}
 #[test]
 fn invalid_sealed_root_never_writes_to_registry_root() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
@@ -406,7 +306,6 @@ fn invalid_sealed_root_never_writes_to_registry_root() -> Result<(), Box<dyn std
         },
         project_id: provenant_core::ProjectId::from_bytes([1; 16]),
         actor_id: ActorId::from_bytes([2; 16]),
-        run_id: RunId::from_bytes([3; 16]),
         attempt_id: AttemptId::from_bytes([4; 16]),
         host_delivery: None,
         launch: None,
@@ -637,7 +536,8 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
         assets: &cwd,
         cwd: &cwd,
     };
-    let chair = Some(run::ChairBinding {
+    let chair = Some(provenant_records::custody::Chair {
+        process: None,
         extra: Default::default(),
         session: None,
         host: provenant_core::HostId::from_bytes([4; 16]),
@@ -646,13 +546,17 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
     let submission = |base: &str| Submission {
         chair: chair.clone(),
         operation_id: OperationId::parse("context-ref-replay").unwrap(),
-        tasks: vec![Submitted {
+        task: Submitted {
             attempt: Default::default(),
             require_skill_location: true,
             settlement_retry_limit: None,
-            context: None,
+            context: Some(provenant_records::run::WorkContext {
+                graph_id: Some("context-ref".into()),
+                node_id: Some("node".into()),
+                attempt: Some(1),
+                ..Default::default()
+            }),
             title: None,
-            task_id: TaskId::from_bytes([3; 16]),
             prompt: "review".into(),
             base: Some(base.into()),
             pinned_base: None,
@@ -669,8 +573,7 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
             deliver: None,
             worktree: None,
             access: Default::default(),
-        }],
-        concurrency: Some(1),
+        },
         knobs: vec![],
     };
     // The fake adapter refuses preparation after admission. Keep the durable
@@ -678,32 +581,41 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
     let initial = submit(&session, &edge, submission("context-base"), &call)
         .err()
         .ok_or("unknown fixture adapter must refuse its initial launch")?;
-    assert_eq!(initial.status, Status::Refused);
-    assert_eq!(initial.kind, ErrorKind::Refused);
+    assert_eq!(initial.status, Status::Refused, "{initial:?}");
+    assert_eq!(initial.kind, ErrorKind::Refused, "{initial:?}");
     let operation = session
         .store
         .operation(&OperationId::parse("context-ref-replay")?, &call)?
         .ok_or("refused launch lost its admitted operation")?;
     assert_eq!(operation.state, run::OperationState::Terminal);
-    let first = session.store.run(operation.run_id, &call)?;
+    let first = session
+        .store
+        .operation_attempt(&OperationId::parse("context-ref-replay")?, &call)?;
+    let graph = session.store.work_key(first, &call)?.graph().to_owned();
+    assert_eq!(graph, "context-ref");
     assert!(
-        session.store.request(first.run_id, &call)?.tasks[0]
+        session
+            .store
+            .request(first, &call)?
+            .task
             .profile
             .require_skill_location
     );
     with_chair_index(&roots, &call, |index, index_call| {
         let binding = index
-            .read(session.context.project_id, first.run_id, index_call)?
+            .read(session.context.project_id, &graph, index_call)?
             .unwrap();
-        assert_eq!(binding.chair, chair);
+        assert_eq!(binding.holder.chair().cloned(), chair);
         assert_eq!(
-            binding.request_digest,
-            session
-                .store
-                .request(first.run_id, &call)
-                .unwrap()
-                .digest()
-                .unwrap()
+            binding.provenance,
+            Some(
+                session
+                    .store
+                    .request(first, &call)
+                    .unwrap()
+                    .digest()
+                    .unwrap()
+            )
         );
         Ok(())
     })
@@ -712,33 +624,18 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
         roots.state.as_path().join("fabric/host.sqlite3"),
         roots.state.as_path().join("fabric/interrupted.sqlite3"),
     )?;
-    let mut forged = session.store.request(first.run_id, &call)?;
-    forged.concurrency = 2;
-    with_chair_index(&roots, &call, |index, c| {
-        index.submit(session.context.project_id, first.run_id, &forged, c)
-    })
-    .map_err(|f| f.message)?;
-    assert_eq!(
-        launch(&session, first.run_id, &edge, &call)
-            .unwrap_err()
-            .status,
-        Status::Refused
-    );
-    std::fs::rename(
-        roots.state.as_path().join("fabric/host.sqlite3"),
-        roots.state.as_path().join("fabric/forged.sqlite3"),
-    )?;
     // Reusing an operation from another chair cannot rebind even a missing
     // host index row. Repair must use the immutable original request.
     let mut replay = submission("context-base");
-    replay.chair = Some(run::ChairBinding {
+    replay.chair = Some(provenant_records::custody::Chair {
+        process: None,
         extra: Default::default(),
         session: None,
         host: provenant_core::HostId::from_bytes([6; 16]),
         actor: ActorId::from_bytes([7; 16]),
     });
     let (replayed, _) = submit(&session, &edge, replay, &call).map_err(|f| f.message)?;
-    assert_eq!(replayed.run_id, first.run_id);
+    assert_eq!(replayed.attempt_id, first);
     let stopped = CancelToken::new();
     stopped.cancel();
     let cancelled = run::Request {
@@ -750,9 +647,11 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
     with_chair_index(&roots, &call, |index, call| {
         assert_eq!(
             index
-                .read(session.context.project_id, first.run_id, call)?
+                .read(session.context.project_id, &graph, call)?
                 .unwrap()
-                .chair,
+                .holder
+                .chair()
+                .cloned(),
             chair
         );
         Ok(())
@@ -766,143 +665,15 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
         }
         let (replayed, _) =
             submit(&session, &edge, submission("context-base"), &call).map_err(|f| f.message)?;
-        assert_eq!(replayed.run_id, first.run_id);
+        assert_eq!(replayed.attempt_id, first);
         assert_eq!(
-            session.store.request(first.run_id, &call)?.tasks[0]
-                .base
-                .as_deref(),
+            session.store.request(first, &call)?.task.base.as_deref(),
             Some(original_base.as_str())
         );
     }
     assert!(
         matches!(submit(&session, &edge, submission("HEAD"), &call), Err(fail) if fail.kind == ErrorKind::OperationConflict)
     );
-    Ok(())
-}
-#[test]
-fn reconcile_lists_reservation_issues_from_a_selected_project()
--> Result<(), Box<dyn std::error::Error>> {
-    if reexec_test_in_lane(
-        "run::tests::reconcile_lists_reservation_issues_from_a_selected_project",
-    )? {
-        return Ok(());
-    }
-    let fixture = linked_fixture()?;
-    let other = fixture.root.join("other-project");
-    std::fs::create_dir(&other)?;
-    provenant_os::fixture::run_git(&other, &["init", "-q", "-b", "fixture-base"])?;
-    provenant_os::fixture::run_git(&other, &["commit", "--allow-empty", "-qm", "base"])?;
-    with_edge(
-        &fixture.root,
-        &fixture.project,
-        |edge| -> Result<(), Box<dyn std::error::Error>> {
-            let clock = SystemClock::new();
-            let cancel = CancelToken::new();
-            let call = run::Request {
-                clock: &clock,
-                cancel: &cancel,
-            };
-            let current = open(edge, &call).map_err(|fail| fail.message)?;
-            let other_edge = Edge {
-                cwd: &other,
-                ..*edge
-            };
-            let selected = open(&other_edge, &call).map_err(|fail| fail.message)?;
-            assert_ne!(current.context.project_id, selected.context.project_id);
-            let mut input = trace_run(61, AttemptId::from_bytes([60; 16]), clock.wall_now()?)?;
-            input.request.parent_attempt = None;
-            input.request.lane_depth = None;
-            selected.store.create(&input, &call)?;
-            let id = input.attempts[0].attempt_id;
-            selected.store.cancel(id, "fixture settled", &call)?;
-            // This read-only task never launched a provider. Seed completed
-            // no-effect receipts so only the unrelated orphan needs recovery.
-            let generation = selected.store.record(id, &call)?.generation;
-            for effect in [
-                run::SettlementEffect::GitImport,
-                run::SettlementEffect::ManifestConflict,
-                run::SettlementEffect::CleanupCustodyRelease,
-                run::SettlementEffect::Delivery,
-            ] {
-                selected.store.record_effect(
-                    id,
-                    generation,
-                    effect,
-                    run::EffectDisposition::Done,
-                    &call,
-                )?;
-            }
-            selected
-                .store
-                .drain_reactions(input.run_id, &clock, &cancel, &mut |reaction, _| {
-                    reaction.graph_done = true;
-                    reaction.notice_done = true;
-                    reaction.log_done = true;
-                    reaction.ledger_done = true;
-                    Ok(())
-                })?;
-            let baseline = selected
-                .store
-                .reconcile(input.run_id, &Registry::default(), &call);
-            assert!(baseline.is_ok(), "{baseline:?}");
-            let slot = selected
-                .context
-                .state_root
-                .as_path()
-                .join("worktrees")
-                .join(selected.context.project_id.to_string())
-                .join("orphan");
-            std::fs::create_dir_all(&slot)?;
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&slot, std::fs::Permissions::from_mode(0o700))?;
-            let path = slot.join("reservation.json");
-            std::fs::write(&path, b"malformed other-project reservation")?;
-            let target = || Target {
-                selection: None,
-                run: Some(input.run_id),
-                task: None,
-                attempt: None,
-            };
-            let reply = reconcile(
-                Reconcile {
-                    id: vec![target(), target()],
-                    abandon: None,
-                    reason: None,
-                },
-                edge,
-            );
-            assert_eq!(reply.result.status, Status::Failed, "{}", reply.human);
-            assert_eq!(
-                reply.result.error.as_ref().ok_or("missing error")?.code,
-                "RECONCILE_INCOMPLETE"
-            );
-            let rows = reply.result.data["runs"].as_array().ok_or("runs")?;
-            assert!(!rows.is_empty());
-            assert!(
-                rows.iter()
-                    .all(|row| row["run_id"] == json!(input.run_id) && row.get("error").is_none()),
-                "{}",
-                reply.result.data
-            );
-            let issues = reply.result.data["writer_reservation_errors"]
-                .as_array()
-                .ok_or("issues")?;
-            assert_eq!(issues.len(), 1);
-            assert_eq!(issues[0]["reservation"], json!(path));
-            assert_eq!(
-                std::fs::read(&path)?,
-                b"malformed other-project reservation"
-            );
-            assert!(matches!(
-                selected.store.record(id, &call)?.state,
-                run::AttemptState::Terminal {
-                    outcome: run::Outcome::Cancelled,
-                    ..
-                }
-            ));
-            Ok(())
-        },
-    )??;
     Ok(())
 }
 #[test]
@@ -929,12 +700,15 @@ fn reconcile_reports_orphan_reservation_issues() -> Result<(), Box<dyn std::erro
                 .join("worktrees")
                 .join(session.context.project_id.to_string())
                 .join("orphan");
-            std::fs::create_dir_all(&slot)?;
-            let path = slot.join("reservation.json");
+            // Recovery evidence is attempt-scoped inside the slot; a malformed
+            // reservation there is reported and retained, never discarded.
+            let attempt = slot.join(AttemptId::from_bytes([7; 16]).to_string());
+            std::fs::create_dir_all(&attempt)?;
+            let path = attempt.join("reservation.json");
             std::fs::write(&path, b"malformed retained reservation")?;
             let reply = reconcile(
                 Reconcile {
-                    id: Vec::new(),
+                    targets: Vec::new(),
                     abandon: None,
                     reason: None,
                 },
@@ -951,60 +725,58 @@ fn reconcile_reports_orphan_reservation_issues() -> Result<(), Box<dyn std::erro
                 json!(path)
             );
             assert_eq!(std::fs::read(&path)?, b"malformed retained reservation");
-            // A valid orphan whose destination cannot be published reports the
-            // storage failure too, rather than only a generic retained fence.
-            use provenant_supervisor::custody::{self, Scope};
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::remove_file(&path)?;
-            let directory = provenant_os::fs::Directory::open_anchor(&slot)?;
-            let scope = Scope {
-                run: RunId::from_bytes([6; 16]),
-                attempt: AttemptId::from_bytes([7; 16]),
-                generation: 1,
-            };
-            drop(custody::acquire_reader(
-                directory.try_clone()?,
-                scope,
-                provenant_core::WaitBudget::nonblocking(clock.mono_now()),
-                &cancel,
-                &clock,
-            )?);
-            let child_path = slot.join(scope.attempt.to_string());
-            let child = child_path.join("reservation.json");
-            let mut retained: Value = serde_json::from_slice(&std::fs::read(&child)?)?;
-            let anchor = directory.metadata()?;
-            retained["reservation_device"] = anchor.device.into();
-            retained["reservation_inode"] = anchor.inode.into();
-            std::fs::write(&path, serde_json::to_vec(&retained)?)?;
-            std::fs::remove_file(&child)?;
-            std::fs::set_permissions(&child_path, std::fs::Permissions::from_mode(0o500))?;
-            let reply = reconcile(
-                Reconcile {
-                    id: Vec::new(),
-                    abandon: None,
-                    reason: None,
-                },
-                edge,
-            );
-            std::fs::set_permissions(&child_path, std::fs::Permissions::from_mode(0o700))?;
-            assert_eq!(reply.result.status, Status::Failed, "{}", reply.human);
-            assert!(
-                reply.result.data["writer_reservation_errors"]
-                    .as_array()
-                    .ok_or("issues")?
-                    .iter()
-                    .any(|issue| issue["reason"]
-                        .as_str()
-                        .is_some_and(|reason| reason.contains("cut over writer reservations")))
-            );
-            assert_eq!(
-                serde_json::from_slice::<Value>(&std::fs::read(&path)?)?,
-                retained
-            );
-            assert!(!child.exists());
             Ok(())
         },
     )??;
+    Ok(())
+}
+/// Give the fixture's one task the work key `graph/node#1` and save the
+/// graph's checkpoint with that attempt, so `NAME[/NODE[#N]]` targets resolve.
+#[cfg(feature = "fixture")]
+fn keyed(
+    edge: &Edge<'_>,
+    project: provenant_core::ProjectId,
+    prepared: &mut run::PreparedRun,
+    (graph, node): (&str, &str),
+) -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_fabric_runtime::graph::{
+        FileJournal, GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
+    };
+    prepared.request.task.context = Some(provenant_records::run::WorkContext {
+        graph_id: Some(graph.into()),
+        node_id: Some(node.into()),
+        attempt: Some(1),
+        ..Default::default()
+    });
+    let reference = format!(
+        "{}/{}",
+        provenant_core::HostId::from_bytes([1; 16]),
+        prepared.attempt_id
+    );
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = provenant_core::WaitBudget::cli(clock.mono_now(), 5)?;
+    let mut journal =
+        FileJournal::open(&edge.roots.state, project, graph, budget, &cancel, &clock)?;
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":2, "graph_id":graph,
+        "nodes":[{"id":node, "access":"read_only", "prompt":"Go", "route":{"alias":"senior"}}]
+    }))?;
+    journal.bind(GraphExecution {
+        extra: Default::default(),
+        bases: None,
+        directory: edge.cwd.to_path_buf(),
+        document,
+    })?;
+    let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+        "schema_version":1, "graph_id":graph, "plan_digest":"fixture",
+        "nodes":[{"id":node, "state":"running", "attempts":[{
+            "launched":true, "key":{"graph_id":graph, "node_id":node, "route_index":0, "attempt": 1},
+            "route":{"alias":"senior"}, "state":"running", "attempt_ref":reference,
+            "outcome":null, "launch_actor":"fixture"
+        }]}]
+    }))?;
+    journal.save(&checkpoint)?;
     Ok(())
 }
 #[cfg(feature = "fixture")]
@@ -1043,28 +815,29 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                 let mut input = trace_run(30, AttemptId::from_bytes([9; 16]), clock.wall_now()?)?;
                 input.request.parent_attempt = None;
                 input.request.lane_depth = None;
-                input.request.tasks[0].writer = Some(run::WriterRequest {
-                    extra: Default::default(),
+                input.request.task.writer = Some(run::WriterRequest {
+                    extra: [("custody_project".into(), json!(session.context.project_id))].into(),
                     project: fixture.project.clone(),
                     worktree: fixture.tree.clone(),
                 });
+                keyed(
+                    edge,
+                    session.context.project_id,
+                    &mut input,
+                    ("fence", "writer"),
+                )?;
                 session.store.create(&input, &call)?;
-                let id = input.attempts[0].attempt_id;
+                let id = input.attempt_id;
                 let record = session.store.mark_starting_for_fixture(
                     id,
                     &run::RouteRecord::default(),
                     &call,
                 )?;
                 let scope = Scope {
-                    run: input.run_id,
                     attempt: id,
                     generation: record.generation,
                 };
-                let attempt_path = edge
-                    .roots
-                    .state
-                    .as_path()
-                    .join(format!("runs/{}/attempts/{id}", input.run_id));
+                let attempt_path = edge.roots.state.as_path().join(format!("attempts/{id}"));
                 let attempt = Directory::open_anchor(&attempt_path)?;
                 let slot_path = edge.roots.state.as_path().join(format!(
                     "worktrees/{}/abandon-fixture",
@@ -1117,6 +890,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                     id,
                     session.store.record(id, &call)?.revision,
                     &run::TerminalPublication {
+                        handoff: None,
                         terminal_cause: None,
                         terminal_note: None,
                         outcome: run::Outcome::Unsettled,
@@ -1199,11 +973,10 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                         )?
                         .require_durable()?;
                     drop(recovery);
-                    let found = session.store.reconcile_for_fixture(
-                        input.run_id,
-                        &Registry::default(),
-                        &call,
-                    )?;
+                    let found =
+                        session
+                            .store
+                            .reconcile_for_fixture(id, &Registry::default(), &call)?;
                     let record = session.store.record(id, &call)?;
                     // Settlement appends the work-location note to the blocker. This
                     // fixture's private Git holds no refs, so the note says the files
@@ -1230,25 +1003,20 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                             }
                             None => panic!("unexpected git_import disposition: {record:?}"),
                         };
-                    for command in ["status", "output"] {
+                    {
                         let crate::ParseOutcome::Invocation(inv) = crate::parse(
-                            [command.to_owned(), id.to_string(), "--full".into()]
+                            ["output", "fence/writer", "--full"]
                                 .into_iter()
                                 .map(std::ffi::OsString::from),
                         ) else {
-                            return Err("parse lane read".into());
+                            return Err("parse output".into());
                         };
-                        let reply = match inv.command {
-                            crate::Command::Status(command) => status(command, true, edge),
-                            crate::Command::Output(command) => output(command, edge),
-                            _ => return Err("lane read command".into()),
+                        let crate::Command::Output(command) = inv.command else {
+                            return Err("output command".into());
                         };
+                        let reply = output_from_session(command, edge, &session, id, &call);
                         assert_eq!(reply.result.status, Status::Ok, "{}", reply.human);
-                        let row = if command == "status" {
-                            &reply.result.data["rows"][0]
-                        } else {
-                            &reply.result.data
-                        };
+                        let row = &reply.result.data;
                         assert_eq!(row["state"], "failed");
                         assert_eq!(row["git_import_failure"]["reason"], expected_reason);
                         assert_eq!(row["git_import_failure"]["head"], "a".repeat(40));
@@ -1274,19 +1042,17 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                             &mut rendered,
                         )?;
                         let rendered = String::from_utf8(rendered)?;
-                        if command == "output" {
-                            assert_eq!(
-                                reply.result.data["bytes"]["data"],
-                                "retained provider evidence"
-                            );
-                        }
+                        assert_eq!(
+                            reply.result.data["bytes"]["data"],
+                            "retained provider evidence"
+                        );
                         for text in [&reply.human, &summary, &rendered] {
                             assert!(
                                 text.contains("commits may not have reached its branch"),
-                                "{command}: {text}"
+                                "{text}"
                             );
-                            assert!(text.contains(&"a".repeat(40)), "{command}: {text}");
-                            assert!(text.contains("git-objects"), "{command}: {text}");
+                            assert!(text.contains(&"a".repeat(40)), "{text}");
+                            assert!(text.contains("git-objects"), "{text}");
                         }
                     }
                     assert_eq!(
@@ -1297,22 +1063,16 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                         std::fs::read(attempt_path.join("tmp/candidate-0/git-common/evidence"))?,
                         b"private objects"
                     );
-                    session.store.drain_reactions(
-                        input.run_id,
-                        &clock,
-                        &cancel,
-                        &mut |receipt, _| {
+                    session
+                        .store
+                        .drain_reactions(id, &clock, &cancel, &mut |receipt, _| {
                             receipt.graph_done = true;
                             receipt.notice_done = true;
                             receipt.log_done = true;
                             receipt.ledger_done = true;
                             Ok(())
-                        },
-                    )?;
-                    let reported = reconcile(
-                        parse(&["reconcile", "--id", &input.run_id.to_string(), "--json"])?,
-                        edge,
-                    );
+                        })?;
+                    let reported = reconcile(parse(&["reconcile", "fence", "--json"])?, edge);
                     assert_eq!(reported.result.status, Status::Ok, "{}", reported.human);
                     assert!(
                         reported.result.data["runs"][0]["attempts"]
@@ -1323,8 +1083,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                 }
                 let driver =
                     attempt.try_lock(OsStr::new("settlement-driver.lock"), LockMode::Exclusive)?;
-                let run_id = input.run_id.to_string();
-                let reported = reconcile(parse(&["reconcile", "--id", &run_id, "--json"])?, edge);
+                let reported = reconcile(parse(&["reconcile", "fence", "--json"])?, edge);
                 let json = serde_json::to_value(&reported.result)?;
                 if !import_done {
                     assert_eq!(
@@ -1337,16 +1096,15 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                     );
                     assert!(reported.human.contains("lane Git import failed"));
                 }
-                let selection = format!("{run_id}/{id}");
-                assert!(parse(&["reconcile", "--abandon", &selection]).is_err());
+                let selection = "fence/writer#1";
+                assert!(parse(&["reconcile", "--abandon", selection]).is_err());
                 assert!(parse(&["reconcile", "--reason", "missing attempt"]).is_err());
                 assert!(
                     parse(&[
                         "reconcile",
-                        "--id",
-                        &run_id,
+                        "fence",
                         "--abandon",
-                        &selection,
+                        selection,
                         "--reason",
                         "ambiguous action"
                     ])
@@ -1355,7 +1113,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                 let args = [
                     "reconcile",
                     "--abandon",
-                    &selection,
+                    selection,
                     "--reason",
                     reason.as_str(),
                     "--json",
@@ -1384,7 +1142,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                 assert!(session.store.writer_fences()?.is_empty());
                 session
                     .store
-                    .reconcile_for_fixture(input.run_id, &Registry::default(), &call)?;
+                    .reconcile_for_fixture(id, &Registry::default(), &call)?;
                 assert_eq!(
                     session
                         .store
@@ -1408,7 +1166,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                     Status::Ok,
                     "same reason is idempotent"
                 );
-                reconcile(parse(&["reconcile", "--id", &run_id, "--json"])?, edge);
+                reconcile(parse(&["reconcile", "fence", "--json"])?, edge);
                 assert!(
                     attempt_path
                         .join("tmp/candidate-0/git-common/evidence")
@@ -1417,7 +1175,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                 let different = [
                     "reconcile",
                     "--abandon",
-                    &selection,
+                    selection,
                     "--reason",
                     "different explanation",
                     "--json",
@@ -1447,134 +1205,6 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
             },
         )??;
     }
-    Ok(())
-}
-#[test]
-#[allow(clippy::disallowed_methods)] // The wait command has a real-time deadline.
-fn wait_handles_a_stale_default_cursor() -> Result<(), Box<dyn std::error::Error>> {
-    if reexec_test_in_lane("run::tests::wait_handles_a_stale_default_cursor")? {
-        return Ok(());
-    }
-    let temp = tempfile::tempdir()?;
-    let root = temp.path().canonicalize()?;
-    let home = root.join("home");
-    let project = root.join("checkout");
-    std::fs::create_dir_all(&home)?;
-    std::fs::create_dir_all(&project)?;
-    std::fs::create_dir_all(root.join("state"))?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(root.join("state"), std::fs::Permissions::from_mode(0o700))?;
-    let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
-    inputs.state_dir = Some(root.join("state"));
-    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    let edge = Edge {
-        roots: &roots,
-        home: &home,
-        assets: &project,
-        cwd: &project,
-    };
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let call = request(&clock, &cancel).map_err(|e| e.message)?;
-    let session = open(&edge, &call).map_err(|e| e.message)?;
-    let make = |n: u64| -> Result<run::PreparedRun, Box<dyn std::error::Error>> {
-        let mut prepared = trace_run(1, AttemptId::from_bytes([9; 16]), clock.wall_now()?)?;
-        let mut bytes = [0; 16];
-        bytes[8..].copy_from_slice(&n.to_be_bytes());
-        prepared.run_id = RunId::from_bytes(bytes);
-        bytes[0] = 1;
-        let task = TaskId::from_bytes(bytes);
-        bytes[0] = 2;
-        prepared.operation_id = OperationId::parse(&format!("backlog-{n}"))?;
-        prepared.request.tasks[0].task_id = task;
-        prepared.attempts[0].task_id = task;
-        prepared.attempts[0].attempt_id = AttemptId::from_bytes(bytes);
-        Ok(prepared)
-    };
-    let seed = make(1)?;
-    session.store.create(&seed, &call)?;
-    session.store.withdraw(
-        seed.attempts[0].attempt_id,
-        run::AttemptState::Queued {
-            extra: Default::default(),
-        },
-        run::Outcome::Cancelled,
-        "fixture",
-        clock.wall_now()?,
-        &call,
-    )?;
-    let cursor = session
-        .store
-        .last_event_sequence(seed.attempts[0].attempt_id, &call)?;
-    session.store.ack_seen("default", cursor, &call)?;
-    let active = make(2)?;
-    session.store.create(&active, &call)?;
-    let id = active.attempts[0].attempt_id;
-    struct FetchHookGuard;
-    impl Drop for FetchHookGuard {
-        fn drop(&mut self) {
-            wait::AFTER_FIRST_FETCH.with(|hook| *hook.borrow_mut() = None);
-        }
-    }
-    let _hook_guard = FetchHookGuard;
-    let context = session.context.clone();
-    wait::AFTER_FIRST_FETCH.with(|hook| {
-        *hook.borrow_mut() = Some(Box::new(move || {
-            let clock = SystemClock::new();
-            let cancel = CancelToken::new();
-            let call = run::Request {
-                clock: &clock,
-                cancel: &cancel,
-            };
-            let store = run::RunStore::open(&context, &call).unwrap();
-            store
-                .withdraw(
-                    id,
-                    run::AttemptState::Queued {
-                        extra: Default::default(),
-                    },
-                    run::Outcome::Cancelled,
-                    "fixture",
-                    clock.wall_now().unwrap(),
-                    &call,
-                )
-                .unwrap();
-        }));
-    });
-    let picks = Picks {
-        targets: &[],
-        owner: session.context.actor_id,
-        label: None,
-        since: None,
-    };
-    let (data, _, timed_out) = wait_command(
-        &session,
-        &picks,
-        Condition::Any,
-        Instant::now() + Duration::from_secs(5),
-        clock.wall_now()?,
-        &edge,
-    )
-    .map_err(|e| e.message)?;
-    assert!(!timed_out);
-    assert!(
-        data["lanes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|lane| lane["attempt_id"] == json!(id))
-    );
-    let (next, _, _) = wait_command(
-        &session,
-        &picks,
-        Condition::Any,
-        Instant::now() + Duration::from_secs(5),
-        clock.wall_now()?,
-        &edge,
-    )
-    .map_err(|e| e.message)?;
-    assert!(next["lanes"].as_array().unwrap().is_empty());
-    assert!(next.get("settled_backlog").is_none());
     Ok(())
 }
 

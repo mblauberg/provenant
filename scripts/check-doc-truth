@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Check provenant commands, long flags, repo paths and ADRs against the CLI.
 
-Unknown commands and flags in runbooks fail, inline or in fenced `provenant`
-lines; in other documents, and for paths and ADRs, they are advisory warnings.
+Unknown commands and flags in runbooks, skills and ambient instructions fail,
+inline or in fenced `provenant` lines; in other documents, and for paths and
+ADRs, they are advisory warnings.
 Deleted commands, research index omissions and projection mismatches fail;
 strict options enforce inventory, Anchor paths, diagram metadata and explicit
 test citations. Runtime absolute paths and templates are excluded. Commands
@@ -182,15 +183,25 @@ def resolves_path(root, document, reference, gone):
     return False
 
 
+AMBIENT_DOCS = ("AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md", "MAINTAINING.md")
+
+
+def is_strict(root, document):
+    """Runbooks, skills and ambient instructions must name only real commands and flags."""
+    return (document.parent == root / "docs/runbooks"
+            or (root / "skills") in document.parents
+            or (document.parent == root and document.name in AMBIENT_DOCS))
+
+
 def check_references(root, document, commands, adrs, gone):
     """Report unresolved references; return the number that fail the check."""
     display = document.relative_to(root)
     text = document.read_text()
-    runbook = document.parent == root / "docs/runbooks"
-    level = "error" if runbook else "warning"
+    strict = is_strict(root, document)
+    level = "error" if strict else "warning"
     failures = 0
     references = list(inline_code(text))
-    if runbook:
+    if strict:
         references += list(fenced_commands(text))
     for line, reference, context in references:
         if RETIRED.search(context):
@@ -198,16 +209,18 @@ def check_references(root, document, commands, adrs, gone):
         scopes, missing = command_scope(reference, commands) if commands else (None, None)
         if missing and missing not in HIDDEN:
             warn(display, line, "command", missing, level)
-            failures += runbook
+            failures += strict
         if commands and scopes:
             known_flags = (set().union(*(flags(commands[scope]) for scope in scopes))
                            | flags(commands["provenant"]))
             if re.match(r"^(?:\$ )?provenant help\b", reference):
                 known_flags.add("--all")
-            for flag in dict.fromkeys(re.findall(r"(?<![\w-])--[a-z][a-z0-9-]*", reference)):
+            # Flags inside a shell substitution belong to another command.
+            own = re.sub(r"\$\((?:[^()]|\([^()]*\))*\)", "", reference)
+            for flag in dict.fromkeys(re.findall(r"(?<![\w-])--[a-z][a-z0-9-]*", own)):
                 if flag not in known_flags:
                     warn(display, line, "flag", flag, level)
-                    failures += runbook
+                    failures += strict
         for number in dict.fromkeys(re.findall(r"\bADR[ -]+(\d{1,4})\b", reference, re.I)):
             if int(number) not in adrs:
                 warn(display, line, "ADR", f"ADR {number}")
@@ -444,83 +457,161 @@ def check_projections(root):
 # Cutover surfaces are explicit so archived ADRs, release notes and source-symbol
 # citations remain usable evidence. These are the maintained command guides.
 COMMAND_GUIDES = (
-    "README.md", "docs/worktrees.md",
-    "tools/front-door/crates/run/README.md", "docs/runbooks/ci.md",
+    "README.md", "AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md", "MAINTAINING.md",
+    "docs/worktrees.md", "docs/ARCHITECTURE.md", "docs/glossary.md",
+    "config/harness-knobs.json", "tools/front-door/crates/run/README.md",
 )
-DELETED_VERBS = r"(?:dispatch|review|lanes|resume|cancel|preset|fabric_graph)"
+# Bare verb names in code spans are read as removed commands only here; elsewhere
+# (skills, other runbooks) a span such as `review set` is ordinary prose.
+SHORTHAND_GUIDES = (
+    "README.md", "docs/worktrees.md", "tools/front-door/crates/run/README.md",
+    "docs/runbooks/ci.md",
+)
+# Directories whose Markdown (or template) files are command guides too.
+COMMAND_GUIDE_GLOBS = (
+    "docs/runbooks/*.md", "docs/specs/*.md", "skills/**/*.md",
+    "tools/front-door/crates/fabric-runtime/assets/templates/*.toml",
+)
 GLOBAL_SWITCHES = {"--json", "--full", "--help", "--version", "-h", "-V"}
 GLOBAL_VALUES = {"--project", "--state-dir"}
+# The one source of removed spellings is the CLI's own REMOVED table.
+REMOVED_SOURCE = "tools/front-door/crates/config/src/removed.rs"
 
 
-def deleted_command(reference):
-    """Read only the command path, consuming global option values as shell words."""
-    lexer = shlex.shlex(reference.split("`", 1)[0], posix=True)
-    lexer.whitespace_split = True
-    lexer.commenters = ""
-    words = iter(lexer)
+def removed_table(source):
+    """Read (command words, flag or None, replacement) from the CLI's REMOVED table."""
+    text = source.read_text()
+    block = text.split("pub const REMOVED", 1)[1].split("\n];", 1)[0]
+    entries = []
+    for match in re.finditer(
+            r"\b(verb|flag)\(\s*&\[([^\]]*)\]\s*,\s*(?:\"([^\"]+)\"\s*,\s*)?\"([^\"]+)\"", block):
+        words = tuple(re.findall(r'"([^"]+)"', match[2]))
+        flag = match[3] if match[1] == "flag" else None
+        entries.append((words, flag, match[4]))
+    if not entries or len(entries) != len(re.findall(r"\b(?:verb|flag)\(", block)):
+        raise ValueError(f"{source}: cannot read every REMOVED entry")
+    return entries
+
+
+def command_words(text):
+    """Command words and long flags of one command, after `provenant`, up to a shell operator."""
+    segment = re.split(r"\|\||&&|[|;]|\s>|\s2>|`", text, maxsplit=1)[0]
     try:
-        for word in words:
-            option, equal, _ = word.partition("=")
-            if option in GLOBAL_VALUES:
-                if not equal:
-                    next(words)  # A quoted path is one value, even if it names a verb.
-                continue
-            if option in GLOBAL_SWITCHES:
-                continue
-            if word == "help":
-                continue
-            verb = word.rstrip(".,;:)")
-            if re.fullmatch(DELETED_VERBS, verb):
-                return "provenant " + verb
-            if verb == "fabric":
-                child = next(words).rstrip(".,;:)")
-                if child in ("graph", "dispatch"):
-                    return "provenant fabric " + child
-            return None
-    except (ValueError, StopIteration):
-        # Malformed examples remain visible to the advisory reference check.
-        pass
+        tokens = shlex.split(segment)
+    except ValueError:
+        tokens = segment.split()
+    words, flags, tokens = [], [], iter(tokens)
+    for token in tokens:
+        token = token.strip("[]").rstrip(".,;:)")
+        option, equal, _ = token.partition("=")
+        if option in GLOBAL_VALUES:
+            if not equal:
+                next(tokens, None)  # A quoted path is one value, even if it names a verb.
+        elif option in GLOBAL_SWITCHES or not token:
+            continue
+        elif option.startswith("--"):
+            flags.append(option[2:])
+        elif not token.startswith("-") and token != "help":
+            words.append(token)
+    return words, flags
+
+
+def removed_use(text, table):
+    """The table entry a command uses (as the CLI's own parser matches it), or None."""
+    words, flags = command_words(text)
+    for entry in table:
+        path, flag, _ = entry
+        if (words[:len(path)] == list(path)) and (flag is None or flag in flags):
+            return entry
     return None
 
 
+def spelling(entry):
+    path, flag, _ = entry
+    return "provenant " + " ".join(path) + (f" --{flag}" if flag else "")
+
+
+def command_guides(root):
+    found = {root / name for name in COMMAND_GUIDES}
+    for pattern in COMMAND_GUIDE_GLOBS:
+        found |= set(root.glob(pattern))
+    return sorted(path for path in found if path.is_file())
+
+
 def check_deleted_commands(root):
-    """Fail on command uses, keeping template names, wire fields and prose valid."""
+    """Fail on removed command and flag uses, keeping template names, wire fields and prose valid."""
+    try:
+        table = removed_table(Path(__file__).resolve().parent.parent / REMOVED_SOURCE)
+    except (OSError, IndexError, ValueError) as error:
+        print(f"check-doc-truth: error: cannot read the CLI's removed spellings: {error}")
+        return 1
+    verbs = sorted({path[0] for path, flag, _ in table if flag is None and len(path) == 1})
+    verb_pattern = "(?:" + "|".join(re.escape(verb) for verb in verbs) + ")"
+    # A bare code span such as `output --trace` names its command by its first
+    # word, so only a removed flag of that command is read from it.
+    flagged = {path[0] for path, flag, _ in table if flag}
     count = 0
-    for relative in sorted(set(COMMAND_GUIDES) |
-                           {str(path.relative_to(root)) for path in (root / "docs/specs").glob("*.md")}):
-        document = root / relative
-        if not document.exists():
-            continue
+    for document in command_guides(root):
+        relative = document.relative_to(root)
         text = document.read_text()
         findings = {}
-        # Explicit commands include fenced shell examples and table cells.
+        # A section headed as removed or retired lists old spellings on purpose.
+        retired_lines, heading = set(), ""
         for number, line in enumerate(text.splitlines(), 1):
-            if RETIRED.search(line):
+            if match := re.match(r"^#{1,6}\s+(.*)", line):
+                heading = match[1]
+            if RETIRED.search(heading):
+                retired_lines.add(number)
+        # Explicit commands include fenced shell examples and table cells; a
+        # command continued with a trailing backslash is one command.
+        joined, pending = [], None
+        for number, line in enumerate(text.splitlines(), 1):
+            if pending:
+                pending = (pending[0], pending[1] + " " + line.strip())
+            else:
+                pending = (number, line)
+            if pending[1].rstrip().endswith("\\"):
+                pending = (pending[0], pending[1].rstrip()[:-1])
+                continue
+            joined.append(pending)
+            pending = None
+        if pending:
+            joined.append(pending)
+        for number, line in joined:
+            if RETIRED.search(line) or number in retired_lines:
                 continue
             for match in re.finditer(r"\bprovenant\s+", line):
-                if command := deleted_command(line[match.end():]):
-                    findings.setdefault(number, set()).add(command)
+                if entry := removed_use(line[match.end():], table):
+                    findings.setdefault(number, {})[spelling(entry)] = entry[2]
         for number, reference, context in inline_code(text):
-            if RETIRED.search(context):
+            if RETIRED.search(context) or number in retired_lines:
+                continue
+            if re.match(r"(?:\$ )?provenant\s", reference):
+                continue  # Read above, on its own line.
+            if (reference.split(" ", 1)[0] in flagged
+                    and (entry := removed_use(reference, table)) and entry[1]):
+                findings.setdefault(number, {})[spelling(entry)] = entry[2]
+                continue
+            if relative.as_posix() not in SHORTHAND_GUIDES and relative.parent.as_posix() != "docs/specs":
                 continue
             # Bare names may be template names or structured field values. A
             # following argument, or an explicit command/tool label, makes the
             # command intent unambiguous. Symbols and file paths do not match.
             shorthand = re.match(
                 r"^(?:fabric\s+graph|graph\s+(?:resume|cancel))(?=\s|$)"
-                r"|^fabric_graph$|^" + DELETED_VERBS + r"\s+\S", reference,
+                r"|^fabric_graph$|^" + verb_pattern + r"\s+\S", reference,
             )
-            labelled = (re.fullmatch(DELETED_VERBS, reference)
+            labelled = (re.fullmatch(verb_pattern, reference)
                         and re.search(
                             r"(?:\b(?:command|verb|tool|run|use|invoke|call)\s+`"
                             + re.escape(reference) + r"`(?!\s+(?:template|field|parameter)\b)"
                             r"|`" + re.escape(reference) + r"`\s+(?:command|verb|tool)\b)",
                             context, re.I))
             if shorthand or labelled:
-                findings.setdefault(number, set()).add(reference)
+                findings.setdefault(number, {})[reference] = "the graph CLI"
         for number, references in sorted(findings.items()):
-            for reference in sorted(references):
-                print(f"{relative}:{number}: error: deleted command `{reference}`; use the graph CLI")
+            for reference, replacement in sorted(references.items()):
+                print(f"{relative}:{number}: error: deleted command `{reference}`; use {replacement}")
                 count += 1
     return count
 
@@ -572,8 +663,9 @@ def main():
     projection_errors = check_projections(root)
     reference_errors = 0
     if not args.inventory_only:
-        agents = [root / name for name in ("AGENTS.md", "GLOBAL-AGENTS.md")]
-        for document in [path for path in agents if path.exists()] + documents + maintained + adr_documents:
+        ambient = [root / name for name in AMBIENT_DOCS]
+        skills = sorted((root / "skills").rglob("*.md"))
+        for document in [path for path in ambient if path.exists()] + skills + documents + maintained + adr_documents:
             reference_errors += check_references(root, document, commands, adrs, gone)
     return int(bool(command_errors) or bool(projection_errors) or bool(reference_errors) or (args.strict_inventory and bool(missing)) or (args.strict_citations and bool(citations)))
 

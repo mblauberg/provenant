@@ -1,4 +1,6 @@
-//! Version-one command transport facts, shared by CLI and MCP edges.
+//! Version-one command transport facts, shared by CLI edges.
+
+use crate::wire::ENVELOPE_VERSION;
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,7 +55,7 @@ pub struct CommandResult<T> {
 impl<T> CommandResult<T> {
     pub fn new(command: impl Into<String>, status: Outcome, data: T) -> Self {
         Self {
-            schema_version: 1,
+            schema_version: ENVELOPE_VERSION,
             command: command.into(),
             status,
             data,
@@ -80,6 +82,10 @@ pub struct HelpErrorCode {
 pub struct HelpCommand {
     pub command: String,
     pub description: Option<String>,
+    /// Direct public subcommands, including commands omitted from compact help.
+    pub subcommands: Vec<String>,
+    /// Configuration domains consumed by this command.
+    pub config_domains: Vec<String>,
     pub arguments: Vec<HelpArgument>,
     pub groups: Vec<HelpGroup>,
     pub constraints: Vec<String>,
@@ -104,5 +110,7 @@ pub struct HelpArgument {
     pub values: Vec<String>,
     pub conflicts: Vec<String>,
     pub requires: Vec<String>,
+    /// Arguments whose presence makes this argument optional.
+    pub required_unless: Vec<String>,
     pub bounds: Option<(u64, u64)>,
 }

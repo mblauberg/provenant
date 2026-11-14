@@ -1,6 +1,7 @@
 use super::*;
+use crate::usage::AccountIdentity;
 use crate::{BillingKind, ConfiguredModel, ConfiguredPrices, Hosts, Rates, validate_prices};
-use provenant_core::{HostId, OperationId};
+use provenant_core::HostId;
 use provenant_records::RouteFact;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -39,11 +40,19 @@ fn fact(number: u64, input: Option<u64>) -> AttemptFact {
     AttemptFact {
         context: None,
         attempt_id: AttemptId::from_bytes(u128::from(number).to_be_bytes()),
-        task_id: TaskId::from_bytes([1; 16]),
+        key: provenant_records::WorkKey::new(
+            ProjectId::from_bytes([2; 16]),
+            "g",
+            "n",
+            u32::try_from(number).unwrap(),
+        )
+        .unwrap(),
         attempt_number: number,
-        operation_id: OperationId::parse("test-operation").unwrap(),
         project_id: ProjectId::from_bytes([2; 16]),
         terminal_state: AttemptOutcome::Succeeded,
+        cause_source: provenant_records::run::CauseSource::Provider,
+        settlement_reason: None,
+        account_identity: provenant_records::AccountIdentity::unknown(),
         exit_code: Some(0),
         queued_at: WallTime::from_micros(0).unwrap(),
         started_at: Some(WallTime::from_micros(0).unwrap()),
@@ -54,6 +63,7 @@ fn fact(number: u64, input: Option<u64>) -> AttemptFact {
             model: Some("m".into()),
             effort: Some("high".into()),
             account_label: Some("account".into()),
+            account_key: None,
         }),
         usage: Usage {
             uncached_input: input,
@@ -94,7 +104,7 @@ fn detail() -> Window {
 
 #[test]
 fn quota_usage_separates_accounts_projects_and_chairs_from_lane_tokens() {
-    use crate::usage::ChairSession;
+    use crate::usage::{AccountIdentity, ChairSession};
     let mut first = fact(1, Some(100));
     first.usage.cache_read = Some(900);
     first.usage.cache_write = None;
@@ -107,7 +117,7 @@ fn quota_usage_separates_accounts_projects_and_chairs_from_lane_tokens() {
     unknown.resolved_route = None;
     let chair = || ChairSession {
         adapter: "p".into(),
-        account: "account".into(),
+        account_identity: AccountIdentity::known("p", "account", "fixture-epoch"),
         session: "session".into(),
         project: Some(project),
         config: None,
@@ -391,7 +401,9 @@ fn selection_uses_finished_time_half_open_bounds_and_project() {
     backwards.finished_at = WallTime::from_micros(-1).unwrap();
     let invalid = TelemetryError::InvalidFact("time order or zero attempt number");
     assert_eq!(reduce([backwards], None).unwrap_err(), invalid);
-    assert_eq!(reduce([fact(0, None)], None).unwrap_err(), invalid);
+    let mut zero_number = fact(1, None);
+    zero_number.attempt_number = 0;
+    assert_eq!(reduce([zero_number], None).unwrap_err(), invalid);
 }
 
 #[test]
@@ -471,6 +483,7 @@ fn retained_key_byte_limit_counts_route_and_daily_keys() {
         model: Some("x".repeat(MAX_KEY_BYTES)),
         effort: None,
         account_label: None,
+        account_key: None,
     });
     let too_large = TelemetryError::TooLarge("1 MiB of group keys");
     assert!(reduce([input.clone()], None).is_ok());
@@ -515,6 +528,7 @@ fn bundled_toml_uses_exact_rates_and_unknowns_without_aliases() {
         model: Some(model.model.clone()),
         effort: None,
         account_label: None,
+        account_key: None,
     });
     let report = stats([input.clone()], &table, Window::default()).unwrap();
     assert_eq!(report.prices.reviewed_at, config.reviewed_at);
@@ -719,6 +733,7 @@ fn claude_attempt_with_cache_usage_reports_all_four_categories() {
         model: Some("claude-sonnet-5".into()),
         effort: None,
         account_label: Some("default".into()),
+        account_key: None,
     });
     attempt.usage = Usage {
         uncached_input: Some(10),
@@ -767,7 +782,7 @@ fn cache_read_share_is_reported_per_model_account_provider_and_source() {
     other_account.resolved_route.as_mut().unwrap().account_label = Some("other".into());
     let chair = ChairSession {
         adapter: "p".into(),
-        account: "account".into(),
+        account_identity: AccountIdentity::known("p", "account", "fixture-epoch"),
         session: "s".into(),
         project: None,
         config: None,
@@ -836,7 +851,7 @@ fn chair_usage_is_priced_by_the_adapter_qualified_model() {
     let table = validate_prices(&config).unwrap();
     let chair = ChairSession {
         adapter: "claude".into(),
-        account: "work".into(),
+        account_identity: AccountIdentity::known("claude", "work", "fixture-epoch"),
         session: "s".into(),
         project: None,
         config: None,
@@ -889,7 +904,7 @@ fn unread_chair_sessions_are_counted_not_dropped() {
     use crate::usage::ChairSession;
     let chair = |session: &str, unread| ChairSession {
         adapter: "claude".into(),
-        account: crate::usage::UNATTRIBUTED.into(),
+        account_identity: AccountIdentity::unknown(),
         session: session.into(),
         project: None,
         config: None,
@@ -919,7 +934,7 @@ fn chair_cost_is_complete_only_when_every_session_is_read() {
     use crate::usage::ChairSession;
     let chair = |session: &str, unread| ChairSession {
         adapter: "claude".into(),
-        account: crate::usage::UNATTRIBUTED.into(),
+        account_identity: AccountIdentity::unknown(),
         session: session.into(),
         project: None,
         config: None,
@@ -1023,6 +1038,7 @@ fn route_context_group_counts_toward_shared_one_mib_key_budget() {
             model: Some("m".repeat(bytes)),
             effort: None,
             account_label: None,
+            account_key: None,
         });
         input
     };
@@ -1173,13 +1189,13 @@ fn zero_weight_external_rows_leave_the_share_unknown() {
 
 #[test]
 fn fractional_tokens_and_cost_remainders_reconcile_by_sorted_key() {
-    let mut fact = fact(1, Some(1));
+    let mut base_fact = fact(1, Some(1));
     // One input token at a rate of one microdollar per million tokens leaves
     // a fractional numerator that must be divided without losing its unit.
-    fact.usage.cache_read = Some(1_000_000);
+    base_fact.usage.cache_read = Some(1_000_000);
     let mut labels = BTreeMap::new();
     labels.insert(
-        fact.attempt_id,
+        base_fact.attempt_id,
         vec![
             ExternalGroup {
                 value: "b".into(),
@@ -1192,7 +1208,7 @@ fn fractional_tokens_and_cost_remainders_reconcile_by_sorted_key() {
         ],
     );
     let report =
-        stats_by_external_key([fact], &prices(Some(1)), Window::default(), &labels).unwrap();
+        stats_by_external_key([base_fact], &prices(Some(1)), Window::default(), &labels).unwrap();
     let groups = report.context_groups.unwrap();
     assert_eq!(groups[0].value.as_deref(), Some("a"));
     assert_eq!(groups[0].totals.usage.uncached_input.known, 1);
@@ -1218,6 +1234,38 @@ fn fractional_tokens_and_cost_remainders_reconcile_by_sorted_key() {
         grouped_cost,
         report.totals.cost.known_lower_bound.unwrap().microdollars
     );
+
+    // Merged from context_cost_rounding_uses_largest_fractional_remainders:
+    for (inputs, expected) in [
+        ([100_000, 400_000, 300_000], [0, 1, 0]),
+        ([600_000, 900_000, 700_000], [0, 1, 1]),
+        ([1_100_000, 1_400_000, 1_300_000], [1, 2, 1]),
+    ] {
+        let facts = inputs.into_iter().enumerate().map(|(index, input)| {
+            let mut fact = fact(index as u64 + 10, Some(input));
+            fact.context = Some(provenant_records::run::WorkContext {
+                node_id: Some(format!("node-{index}")),
+                ..Default::default()
+            });
+            fact
+        });
+        let report = stats_by_context(
+            facts,
+            &prices(Some(1)),
+            Window::default(),
+            ContextKey::NodeId,
+        )
+        .unwrap();
+        let total = report.totals.cost.complete.unwrap().microdollars;
+        let costs = report
+            .context_groups
+            .unwrap()
+            .iter()
+            .map(|group| group.totals.cost.complete.as_ref().unwrap().microdollars)
+            .collect::<Vec<_>>();
+        assert_eq!(costs, expected, "input numerators: {inputs:?}");
+        assert_eq!(costs.iter().sum::<u64>(), total);
+    }
 }
 
 #[test]
@@ -1278,40 +1326,6 @@ fn context_cost_rounding_skips_unknown_and_zero_cost_groups() {
 }
 
 #[test]
-fn context_cost_rounding_uses_largest_fractional_remainders() {
-    for (inputs, expected) in [
-        ([100_000, 400_000, 300_000], [0, 1, 0]),
-        ([600_000, 900_000, 700_000], [0, 1, 1]),
-        ([1_100_000, 1_400_000, 1_300_000], [1, 2, 1]),
-    ] {
-        let facts = inputs.into_iter().enumerate().map(|(index, input)| {
-            let mut fact = fact(index as u64 + 1, Some(input));
-            fact.context = Some(provenant_records::run::WorkContext {
-                node_id: Some(format!("node-{index}")),
-                ..Default::default()
-            });
-            fact
-        });
-        let report = stats_by_context(
-            facts,
-            &prices(Some(1)),
-            Window::default(),
-            ContextKey::NodeId,
-        )
-        .unwrap();
-        let total = report.totals.cost.complete.unwrap().microdollars;
-        let costs = report
-            .context_groups
-            .unwrap()
-            .iter()
-            .map(|group| group.totals.cost.complete.as_ref().unwrap().microdollars)
-            .collect::<Vec<_>>();
-        assert_eq!(costs, expected, "input numerators: {inputs:?}");
-        assert_eq!(costs.iter().sum::<u64>(), total);
-    }
-}
-
-#[test]
 fn review_older_than_the_configured_age_is_stale() {
     let mut config = configured(Some(1));
     config.max_review_age_days = Some(90);
@@ -1358,7 +1372,17 @@ fn route_outcomes_report_success_time_access_effort_and_assignment() {
     let mut failed = fact(4, Some(1_000_000));
     failed.terminal_state = AttemptOutcome::Failed;
     failed.provider_ms = Some(100);
+    let mut host_failure = fact(5, Some(1_000_000));
+    host_failure.terminal_state = AttemptOutcome::Failed;
+    host_failure.cause_source = provenant_records::run::CauseSource::Host;
+    host_failure.provider_ms = Some(900);
     let rows = report(vec![
+        Evidence {
+            fact: host_failure,
+            access: Some("worktree-write".into()),
+            pool: Some("senior".into()),
+            partial: false,
+        },
         Evidence {
             fact: failed,
             access: Some("worktree-write".into()),
@@ -1472,7 +1496,6 @@ fn lane_context_fixture_joins_existing_chair_and_graph() -> Result<(), Box<dyn s
     // Real persisted trace wire format; every value and identity is invented.
     lane.trace = serde_json::from_value(json!({
         "attempt": lane.attempt_id,
-        "run": "11111111111111111111111111111111",
         "telemetry_context": {
             "provenant_version": {"value": "0.0.1", "source": "compiled_package", "effective_at": "1970-01-01T00:00:00.000000Z", "scope": "provenant-run package"},
             "provenant_digest": {"value": {"sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bytes": 400}, "source": "current_exe", "effective_at": "1970-01-01T00:00:00.000000Z", "scope": "complete host executable bytes"},
@@ -1491,10 +1514,7 @@ fn lane_context_fixture_joins_existing_chair_and_graph() -> Result<(), Box<dyn s
         TelemetryContext::from_trace(&restored),
         TelemetryContext::from_trace(&lane.trace)
     );
-    let chairs = BTreeMap::from([(
-        lane.trace.run.ok_or("fixture run")?,
-        "fixture-chair".to_owned(),
-    )]);
+    let chairs = BTreeMap::from([("fixture-graph".to_owned(), "fixture-chair".to_owned())]);
     let report = crate::context::report(&[&lane], &chairs, &prices(Some(1_000_000)))?;
     assert_eq!(report.attempts[0].attempt, lane.attempt_id);
     assert_eq!(
@@ -1518,9 +1538,9 @@ fn lane_context_fixture_joins_existing_chair_and_graph() -> Result<(), Box<dyn s
     assert_eq!(report.coverage["harness_version"].known, 1);
     assert_eq!(report.coverage["system_prompt"].unknown, 1);
     assert_eq!(lane.usage.uncached_input, Some(42));
-    // A pre-enrichment pending trace still decodes, without backfilling history.
-    let legacy: provenant_records::Trace = serde_json::from_str("{}")?;
-    lane.trace = legacy;
+    // Unobserved trace context cannot invent cost or provenance.
+    lane.trace = provenant_records::Trace::default();
+    lane.context = None;
     let historical = crate::context::report(&[&lane], &chairs, &prices(None))?;
     assert!(historical.attempts[0].lane.cost.complete.is_none());
     assert_eq!(historical.attempts[0].lane.cost.missing_attempts, 1);
@@ -1536,8 +1556,8 @@ fn context_bands_price_each_reply_by_the_context_it_sent() {
     config.models[0].model = "p/m".into();
     let prices = validate_prices(&config).unwrap();
     let row = |source, cache_read, uncached_input| crate::ingest::Row {
-        schema_version: 1,
-        account: "a".into(),
+        schema_version: crate::ingest::ROW_SCHEMA_VERSION,
+        identity: AccountIdentity::unknown(),
         provider: "p".into(),
         model: "m".into(),
         effort: None,
@@ -1585,4 +1605,129 @@ fn context_bands_price_each_reply_by_the_context_it_sent() {
             (Source::Lane, 200_000, Some(400_000), 2, Some(510_030)),
         ]
     );
+}
+
+#[test]
+fn route_priors_count_only_attributed_comparable_quality_outcomes() {
+    use crate::route_outcomes::{Evidence, priors};
+    let evidence =
+        |number, outcome, pool: Option<&str>, role: Option<&str>, partial, known: bool| {
+            let mut fact = fact(number, None);
+            fact.terminal_state = outcome;
+            fact.tier = Some("senior".into());
+            fact.context = Some(provenant_records::run::WorkContext {
+                role: role.map(str::to_owned),
+                ..Default::default()
+            });
+            Evidence {
+                fact,
+                pool: pool.map(str::to_owned),
+                partial,
+                access: known.then(|| "stored_launch".into()),
+            }
+        };
+    let mut host_failure = evidence(
+        9,
+        AttemptOutcome::Failed,
+        Some("senior"),
+        Some("review"),
+        false,
+        true,
+    );
+    host_failure.fact.cause_source = provenant_records::run::CauseSource::Host;
+    let mut completed_before_budget = evidence(
+        10,
+        AttemptOutcome::Succeeded,
+        Some("senior"),
+        Some("review"),
+        false,
+        true,
+    );
+    completed_before_budget.fact.cause_source = provenant_records::run::CauseSource::Host;
+    completed_before_budget.fact.settlement_reason =
+        Some(provenant_records::run::SettlementReason::CompletedBeforeBudget);
+    let identity_only = evidence(
+        11,
+        AttemptOutcome::Succeeded,
+        Some("senior"),
+        Some("review"),
+        crate::route_outcomes::provider_work_incomplete(&[
+            provenant_records::run::PartialSignal::IdentityUnobserved,
+        ]),
+        true,
+    );
+    let rows = priors([
+        host_failure,
+        completed_before_budget,
+        identity_only,
+        evidence(
+            1,
+            AttemptOutcome::Succeeded,
+            Some("senior"),
+            Some("review"),
+            false,
+            true,
+        ),
+        evidence(
+            2,
+            AttemptOutcome::Succeeded,
+            Some("senior"),
+            Some("review"),
+            true,
+            true,
+        ),
+        evidence(
+            3,
+            AttemptOutcome::Failed,
+            Some("senior"),
+            Some("review"),
+            false,
+            true,
+        ),
+        evidence(
+            4,
+            AttemptOutcome::QuotaLimited,
+            Some("senior"),
+            Some("review"),
+            false,
+            true,
+        ),
+        evidence(
+            5,
+            AttemptOutcome::Succeeded,
+            None,
+            Some("review"),
+            false,
+            true,
+        ),
+        evidence(
+            6,
+            AttemptOutcome::Succeeded,
+            Some("junior"),
+            Some("review"),
+            false,
+            true,
+        ),
+        evidence(
+            7,
+            AttemptOutcome::Succeeded,
+            Some("senior"),
+            None,
+            false,
+            true,
+        ),
+        evidence(
+            8,
+            AttemptOutcome::Succeeded,
+            Some("senior"),
+            Some("review"),
+            false,
+            false,
+        ),
+    ])
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].successes, rows[0].failures), (3, 2));
+    assert_eq!(rows[0].role, "review");
+    assert!(!rows[0].source.is_empty());
 }

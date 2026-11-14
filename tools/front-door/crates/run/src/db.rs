@@ -18,8 +18,6 @@ pub struct ExecutionContext {
     pub actor_id: ActorId,
     pub read_prompts: bool,
 }
-/// How long a launch waits for its guardian to acknowledge custody.
-const GUARDIAN_HANDSHAKE_MICROS: u64 = 30_000_000;
 pub struct Request<'a> {
     pub clock: &'a dyn Clock,
     pub cancel: &'a CancelToken,
@@ -30,13 +28,10 @@ impl Request<'_> {
     pub fn lock_budget(&self) -> WaitBudget {
         provenant_sqlite::lock_budget(self.clock.mono_now())
     }
-    /// The wait for a guardian's launch handshake that starts now. It is not
-    /// store contention, so the store busy timeout never shortens it.
+    /// Custody ACK uses one bounded store-integrity allowance, without a
+    /// separate launch retry window. Missing proof still refuses the transfer.
     pub fn handshake_budget(&self) -> WaitBudget {
-        WaitBudget::up_to(
-            self.clock.mono_now(),
-            provenant_core::DurationMicros::from_micros(GUARDIAN_HANDSHAKE_MICROS),
-        )
+        self.lock_budget()
     }
     pub(crate) fn check(&self) -> Result<()> {
         if self.cancel.is_cancelled() {
@@ -92,6 +87,22 @@ impl RunStore {
     /// reads, which is not its own directory inside a nested lane.
     pub fn writer_registry(&self) -> &std::path::Path {
         &self.writer_registry
+    }
+
+    /// SQLite and the post-commit host hint files that signal committed run changes.
+    /// Subscribers register all paths before reading records; a hint may be skipped
+    /// under contention, so the database companions remain in the observed set.
+    pub fn observation_paths(&self) -> Vec<std::path::PathBuf> {
+        let database = self.context.state_root.as_path().join("run.sqlite3");
+        vec![
+            database.clone(),
+            database.with_file_name("run.sqlite3-wal"),
+            database.with_file_name("run.sqlite3-journal"),
+            self.context
+                .state_root
+                .as_path()
+                .join(provenant_os::changes::FILE_NAME),
+        ]
     }
     /// Opens an existing, initialised store without changing durable state.
     /// SQLite may create or update WAL/shared-memory companions.
@@ -152,9 +163,10 @@ impl RunStore {
         }
         let path = context.state_root.as_path().join("run.sqlite3");
         let db = provenant_sqlite::open_connection(&path, true)?;
-        if version(&db)? == 0 {
+        if provenant_sqlite::stored_version(&db)? == 0 {
             return Ok(None);
         }
+        provenant_sqlite::check_version(&db, SCHEMA)?;
         Ok(Some(Self {
             db,
             root,
@@ -172,8 +184,8 @@ impl RunStore {
         request.check()?;
         let (root, db, _initialisation) =
             open_database(context.state_root.as_path(), "run.sqlite3", request)?;
-        let schema_version = version(&db)?;
-        let store = Self {
+        provenant_sqlite::ensure_schema(&db, SCHEMA)?;
+        Ok(Self {
             db,
             root,
             context: context.clone(),
@@ -183,96 +195,22 @@ impl RunStore {
             sealed_parent_network: None,
             host: None,
             _owner: PhantomData,
-        };
-        if schema_version < SCHEMA_VERSION {
-            // Read legacy paths once, outside the migration transaction. The
-            // initialisation lock serialises migrations. Unreadable paths and
-            // in-flight attempts keep the conservative retained default.
-            let absent_temporary = if (1..4).contains(&schema_version) {
-                store.terminal_without_temporary(request)?
-            } else {
-                Vec::new()
-            };
-            // Rebuilding the attempts table requires foreign keys off on this
-            // private connection. Check them inside the transaction before
-            // commit, then restore enforcement even if migration fails.
-            store.db.execute_batch("PRAGMA foreign_keys=OFF;")?;
-            let migration = store.write(request, |tx| {
-                let current = version(tx)?;
-                let start = usize::try_from(current).map_err(|_| RunError::Version(current))?;
-                provenant_sqlite::migrate(
-                    tx,
-                    &SCHEMA_STEPS,
-                    start,
-                    || {
-                        // The write reservation excludes commits through the snapshot and upgrade.
-                        let stamp = request
-                            .clock
-                            .wall_now()
-                            .map_err(|_| RunError::Validation("wall clock"))?
-                            .as_micros();
-                        provenant_sqlite::snapshot_database(
-                            &store.root,
-                            context.state_root.as_path(),
-                            "run.sqlite3",
-                            stamp,
-                        )?;
-                        Ok::<(), RunError>(())
-                    },
-                    |index, db| {
-                        if index == 3 {
-                            for id in &absent_temporary {
-                                db.execute("UPDATE attempts SET tmp_retained=0 WHERE id=?1", [id])?;
-                            }
-                        }
-                        Ok(())
-                    },
-                )?;
-                let violations: i64 =
-                    tx.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
-                        row.get(0)
-                    })?;
-                if violations != 0 {
-                    return Err(RunError::Validation("migration foreign key integrity"));
-                }
-                Ok(())
-            });
-            let restore = store.db.execute_batch("PRAGMA foreign_keys=ON;");
-            migration?;
-            restore?;
-        }
-        Ok(store)
+        })
     }
 
-    fn terminal_without_temporary(&self, request: &Request<'_>) -> Result<Vec<String>> {
-        let mut query = self
-            .db
-            .prepare("SELECT run,id FROM attempts WHERE terminal=1")?;
-        let candidates: Vec<(String, String)> = query
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-            .collect::<std::result::Result<_, _>>()?;
-        let mut absent = Vec::new();
-        for (run, id) in candidates {
-            request.check()?;
-            let run = provenant_core::RunId::parse(&run)
-                .map_err(|_| RunError::Validation("run index ID"))?;
-            let attempt = provenant_core::AttemptId::parse(&id)
-                .map_err(|_| RunError::Validation("attempt index ID"))?;
-            let remaining = self
-                .attempt_dir(run, attempt, false)
-                .and_then(|dir| Ok(dir.metadata_at(OsStr::new("tmp"), false)?));
-            if matches!(remaining, Err(RunError::Filesystem(ref error)) if error.is_not_found()) {
-                absent.push(id);
-            }
-        }
-        Ok(absent)
-    }
     pub(crate) fn write<T>(
         &self,
         request: &Request<'_>,
         action: impl Fn(&Connection) -> Result<T>,
     ) -> Result<T> {
-        immediate(&self.db, request, action)
+        let committed = immediate(&self.db, request, action)?;
+        // A host hint follows every successful SQLite commit, so observers can
+        // distinguish a durable commit from early WAL/journal activity.
+        provenant_os::changes::hint(
+            self.context.state_root.as_path(),
+            &[provenant_os::changes::Scope::Board],
+        );
+        Ok(committed)
     }
 }
 /// One immediate transaction. BEGIN IMMEDIATE waits up to the busy timeout.
@@ -353,26 +291,12 @@ pub(crate) fn open_database(
     }
     Ok((root, db, initialisation))
 }
-/// Ordered run-store migrations. A step's index is the version it upgrades from,
-/// so the current version follows from this list and a new step cannot be missed
-/// when an existing store opens.
-const SCHEMA_STEPS: [&str; 10] = [
-    include_str!("schema.sql"),
-    include_str!("schema_v2.sql"),
-    include_str!("schema_v3.sql"),
-    include_str!("schema_v4.sql"),
-    include_str!("schema_v5.sql"),
-    include_str!("schema_v6.sql"),
-    include_str!("schema_v7.sql"),
-    include_str!("schema_v8.sql"),
-    include_str!("schema_v9.sql"),
-    include_str!("schema_v10.sql"),
-];
-const SCHEMA_VERSION: i64 = SCHEMA_STEPS.len() as i64;
+/// The run store's only schema.
+pub(crate) const SCHEMA: provenant_sqlite::Schema = provenant_sqlite::Schema {
+    sql: include_str!("schema.sql"),
+    version: 12,
+};
 
-fn version(db: &Connection) -> Result<i64> {
-    Ok(provenant_sqlite::read_version(db, SCHEMA_STEPS.len())? as i64)
-}
 pub(crate) fn private(directory: &Directory) -> Result<()> {
     let m = directory.metadata()?;
     if let Some(check) = PathCheck::directory(m) {
@@ -419,7 +343,9 @@ pub(crate) fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> 
     )?)
 }
 
-pub(crate) fn decode_unversioned<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+/// Decode a record stored in its own column. The column fixes its shape, so the
+/// bytes carry no `schema_version` header.
+pub(crate) fn decode_column<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     Ok(provenant_records::decode(
         bytes,
         provenant_records::Limits {

@@ -1,5 +1,31 @@
-//! Best-effort, private Cargo registry seed for writer lanes.
+//! Best-effort private target seeds from host-built generations.
+use provenant_core::{Clock, Deadline, DurationMicros, WaitBudget};
+use provenant_os::clock::SystemClock;
 use std::path::Path;
+
+/// The filesystem preparation edge samples time through the shared clock.
+/// Carry one clock and deadline through selection, cloning and cleanup.
+struct SeedBudget {
+    clock: SystemClock,
+    deadline: Deadline,
+}
+impl SeedBudget {
+    fn new() -> Self {
+        let clock = SystemClock::new();
+        let deadline =
+            WaitBudget::up_to(clock.mono_now(), DurationMicros::from_micros(2_000_000)).deadline();
+        Self { clock, deadline }
+    }
+    fn expired(&self) -> bool {
+        self.deadline.is_expired(self.clock.mono_now())
+    }
+    #[cfg(test)]
+    fn exhausted() -> Self {
+        let clock = SystemClock::new();
+        let deadline = WaitBudget::nonblocking(provenant_core::MonoTime::from_micros(0)).deadline();
+        Self { clock, deadline }
+    }
+}
 
 /// Every `detail` a toolchain-verification refusal can report in
 /// `cargo-target-setup.json`. One list, so a typo cannot invent a code and a
@@ -16,10 +42,8 @@ macro_rules! detail_codes {
     };
 }
 detail_codes! {
-    WORKTREE_LAYOUT_UNEXPECTED = "worktree_layout_unexpected",
-    CARGO_HOME_ENV_MISSING = "cargo_home_env_missing",
-    CARGO_HOME_ENV_UNEXPECTED = "cargo_home_env_unexpected",
-    CARGO_HOME_CONFIG_PRESENT = "cargo_home_config_present",
+    CARGO_WORKSPACE_UNREADABLE = "cargo_workspace_unreadable",
+    CARGO_WORKSPACE_MISSING = "cargo_workspace_missing",
     CARGO_CONFIG_UNREADABLE = "cargo_config_unreadable",
     CARGO_CONFIG_TOO_LARGE = "cargo_config_too_large",
     CARGO_CONFIG_INVALID = "cargo_config_invalid",
@@ -109,51 +133,6 @@ impl Outcome {
     }
 }
 
-pub(crate) fn seed_registry(
-    enabled: bool,
-    home: &Path,
-    cache: &Path,
-    cancel: &provenant_core::CancelToken,
-) -> Outcome {
-    if !enabled {
-        return Outcome::skipped("disabled");
-    }
-    #[cfg(unix)]
-    {
-        seed_store_cancellable(home, cache, "registry", Some(cancel), |source, dest| {
-            clone_registry(source, dest, cancel)
-        })
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (home, cache, cancel);
-        Outcome::skipped("unsupported_platform")
-    }
-}
-
-/// Seed the Git store independently of the registry.
-pub(crate) fn seed_git(
-    enabled: bool,
-    home: &Path,
-    cache: &Path,
-    cancel: &provenant_core::CancelToken,
-) -> Outcome {
-    if !enabled {
-        return Outcome::skipped("disabled");
-    }
-    #[cfg(unix)]
-    {
-        seed_store_cancellable(home, cache, "git", Some(cancel), |source, dest| {
-            clone_git(source, dest, cancel)
-        })
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (home, cache, cancel);
-        Outcome::skipped("unsupported_platform")
-    }
-}
-
 pub(crate) fn seed_target(
     enabled: bool,
     state: &Path,
@@ -183,7 +162,7 @@ pub(crate) fn seed_target(
             &version,
             &triple,
             Some(cancel),
-            |source, dest| clone_target(source, dest, cancel),
+            |source, dest, deadline| clone_target_until(source, dest, cancel, deadline),
         )
     }
     #[cfg(not(unix))]
@@ -201,7 +180,9 @@ fn seed_target_with(
     triple: &str,
     clone: impl FnOnce(&Path, &provenant_os::fs::Directory) -> Result<(), &'static str>,
 ) -> Outcome {
-    seed_target_cancellable(state, cache, version, triple, None, clone)
+    seed_target_cancellable(state, cache, version, triple, None, |source, dest, _| {
+        clone(source, dest)
+    })
 }
 
 #[cfg(any(unix, test))]
@@ -211,8 +192,10 @@ fn seed_target_cancellable(
     version: &str,
     triple: &str,
     cancel: Option<&provenant_core::CancelToken>,
-    clone: impl FnOnce(&Path, &provenant_os::fs::Directory) -> Result<(), &'static str>,
+    clone: impl FnOnce(&Path, &provenant_os::fs::Directory, &SeedBudget) -> Result<(), &'static str>,
 ) -> Outcome {
+    let budget = SeedBudget::new();
+    let deadline = &budget;
     use provenant_os::fs::{Directory, temporary_name};
     use std::ffi::{OsStr, OsString};
     let Ok(cache_dir) = Directory::open_anchor(cache) else {
@@ -233,6 +216,9 @@ fn seed_target_cancellable(
         return Outcome::fallback("staging_cleanup_failed");
     };
     for stage in stages {
+        if deadline.expired() {
+            return Outcome::fallback("seed_budget_exhausted");
+        }
         if cancel.is_some_and(|token| token.is_cancelled()) {
             return Outcome::fallback("cancelled");
         }
@@ -240,9 +226,17 @@ fn seed_target_cancellable(
             return Outcome::fallback("staging_cleanup_failed");
         };
         if stage.to_string_lossy().starts_with(".target-seed-") {
-            match remove_seed_tree(&cache_dir, &stage, cancel) {
+            match remove_seed_tree(&cache_dir, &stage, cancel, deadline) {
                 Ok(true) => {}
-                Ok(false) => return Outcome::fallback("cancelled"),
+                Ok(false) => {
+                    return Outcome::fallback(
+                        if cancel.is_some_and(|token| token.is_cancelled()) {
+                            "cancelled"
+                        } else {
+                            "seed_budget_exhausted"
+                        },
+                    );
+                }
                 Err(_) => return Outcome::fallback("staging_cleanup_failed"),
             }
         }
@@ -258,6 +252,9 @@ fn seed_target_cancellable(
     let mut saw_entry = false;
     let mut selected = None;
     for entry in entries {
+        if deadline.expired() {
+            return Outcome::fallback("seed_budget_exhausted");
+        }
         if cancel.is_some_and(|token| token.is_cancelled()) {
             return Outcome::fallback("cancelled");
         }
@@ -317,8 +314,11 @@ fn seed_target_cancellable(
         let staging = cache_dir
             .open_verified_directory(&stage)
             .map_err(|_| "staging_unavailable")?;
-        clone(&source, &staging)?;
-        // As for the registry: durable before the rename can be.
+        clone(&source, &staging, deadline)?;
+        if deadline.expired() {
+            return Err("seed_budget_exhausted");
+        }
+        // Publish only a complete private target.
         staging.sync().map_err(|_| "staging_sync_failed")?;
         cache_dir
             .rename_noreplace(&stage, &cache_dir, OsStr::new("target"))
@@ -335,11 +335,19 @@ fn seed_target_cancellable(
             },
             detail: None,
         },
-        Err("cancelled") => Outcome::fallback("cancelled"),
+        Err(reason @ ("cancelled" | "seed_budget_exhausted")) => Outcome::fallback(reason),
         Err(reason) => {
-            match remove_seed_tree(&cache_dir, &stage, cancel) {
+            match remove_seed_tree(&cache_dir, &stage, cancel, deadline) {
                 Ok(true) => {}
-                Ok(false) => return Outcome::fallback("cancelled"),
+                Ok(false) => {
+                    return Outcome::fallback(
+                        if cancel.is_some_and(|token| token.is_cancelled()) {
+                            "cancelled"
+                        } else {
+                            "seed_budget_exhausted"
+                        },
+                    );
+                }
                 Err(_) => return Outcome::fallback("staging_cleanup_failed"),
             }
             Outcome::fallback(reason)
@@ -347,11 +355,21 @@ fn seed_target_cancellable(
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(target_os = "macos", test))]
 fn clone_target(
     source: &Path,
     destination: &provenant_os::fs::Directory,
     cancel: &provenant_core::CancelToken,
+) -> Result<(), &'static str> {
+    clone_target_until(source, destination, cancel, &SeedBudget::new())
+}
+
+#[cfg(unix)]
+fn clone_target_until(
+    source: &Path,
+    destination: &provenant_os::fs::Directory,
+    cancel: &provenant_core::CancelToken,
+    deadline: &SeedBudget,
 ) -> Result<(), &'static str> {
     // The seed can be read-only; make each clone writable without changing the seed.
     clone_tree(
@@ -363,167 +381,21 @@ fn clone_target(
             too_deep: "target_too_deep",
             unsupported: "target_contains_unsupported_entry",
             writable_files: true,
+            deadline,
         },
         cancel,
     )
 }
 
-#[cfg(test)]
-pub(crate) fn seed_with(
-    home: &Path,
-    cache: &Path,
-    clone: impl FnOnce(&Path, &provenant_os::fs::Directory) -> Result<(), &'static str>,
-) -> Outcome {
-    seed_store_with(home, cache, "registry", clone)
-}
-
-#[cfg(test)]
-fn seed_store_with(
-    home: &Path,
-    cache: &Path,
-    store: &'static str,
-    clone: impl FnOnce(&Path, &provenant_os::fs::Directory) -> Result<(), &'static str>,
-) -> Outcome {
-    seed_store_cancellable(home, cache, store, None, clone)
-}
-
-#[cfg(any(unix, test))]
-fn seed_store_cancellable(
-    home: &Path,
-    cache: &Path,
-    store: &'static str,
-    cancel: Option<&provenant_core::CancelToken>,
-    clone: impl FnOnce(&Path, &provenant_os::fs::Directory) -> Result<(), &'static str>,
-) -> Outcome {
-    use provenant_os::fs::{Directory, LockMode, temporary_name};
-    use std::ffi::{OsStr, OsString};
-    let Ok(cache_dir) = Directory::open_anchor(cache) else {
-        return Outcome::fallback("cache_unavailable");
-    };
-    let cargo_name = OsStr::new("cargo-home");
-    if let Err(error) = cache_dir.mkdir(cargo_name, 0o700)
-        && !error.is_exists()
-    {
-        return Outcome::fallback("cargo_home_unavailable");
-    }
-    let Ok(cargo_dir) = cache_dir.open_verified_directory(cargo_name) else {
-        return Outcome::fallback("cargo_home_unavailable");
-    };
-    if cargo_dir.make_private().is_err() {
-        return Outcome::fallback("cargo_home_not_private");
-    }
-    // Serialise staging and recovery, including across interrupted attempts.
-    let lock_name = format!("{store}-seed.lock");
-    let stage_prefix = format!(".{store}-seed-");
-    let Ok(_lock) = cargo_dir.try_lock(OsStr::new(&lock_name), LockMode::Exclusive) else {
-        return Outcome::fallback("seed_lock_unavailable");
-    };
-    let destination = OsStr::new(store);
-    match cargo_dir.metadata_at(destination, false) {
-        Ok(_) => {
-            return Outcome::skipped(if store == "registry" {
-                "existing_registry"
-            } else {
-                "existing_git"
-            });
-        }
-        Err(error) if error.is_not_found() => {}
-        Err(_) => {
-            return Outcome::fallback(if store == "registry" {
-                "registry_unavailable"
-            } else {
-                "git_unavailable"
-            });
-        }
-    }
-    let Ok(entries) = cargo_dir.entries() else {
-        return Outcome::fallback("staging_cleanup_failed");
-    };
-    for entry in entries {
-        let Ok(name) = entry else {
-            return Outcome::fallback("staging_cleanup_failed");
-        };
-        if cancel.is_some_and(|token| token.is_cancelled()) {
-            return Outcome::fallback("cancelled");
-        }
-        if name.to_string_lossy().starts_with(&stage_prefix) {
-            match remove_seed_tree(&cargo_dir, &name, cancel) {
-                Ok(true) => {}
-                Ok(false) => return Outcome::fallback("cancelled"),
-                Err(_) => return Outcome::fallback("staging_cleanup_failed"),
-            }
-        }
-    }
-    let mut stage = None;
-    for _ in 0..16 {
-        let Ok(random) = temporary_name() else {
-            return Outcome::fallback("staging_unavailable");
-        };
-        let mut name = OsString::from(&stage_prefix);
-        name.push(random);
-        match cargo_dir.mkdir(&name, 0o700) {
-            Ok(()) => {
-                stage = Some(name);
-                break;
-            }
-            Err(error) if error.is_exists() => continue,
-            Err(_) => return Outcome::fallback("staging_unavailable"),
-        }
-    }
-    let Some(stage_name) = stage else {
-        return Outcome::fallback("staging_unavailable");
-    };
-    let result = (|| {
-        let staging = cargo_dir
-            .open_verified_directory(&stage_name)
-            .map_err(|_| "staging_unavailable")?;
-        clone(&home.join(".cargo").join(store), &staging)?;
-        // A clone writes no file data, and APFS commits metadata in order, so
-        // flushing here makes the tree durable before the rename can be.
-        staging.sync().map_err(|_| "staging_sync_failed")?;
-        match cargo_dir.rename_noreplace(&stage_name, &cargo_dir, destination) {
-            Ok(()) => {}
-            Err(error) if error.is_exists() => return Err("publish_raced"),
-            Err(_) => return Err("publish_failed"),
-        }
-        Ok(())
-    })();
-    match result {
-        Ok(()) => Outcome {
-            status: "seeded",
-            reason: if cargo_dir.sync().is_ok() {
-                "cloned"
-            } else {
-                "durability_unconfirmed"
-            },
-            detail: None,
-        },
-        Err("cancelled") => Outcome::fallback("cancelled"),
-        Err(reason) => {
-            match remove_seed_tree(&cargo_dir, &stage_name, cancel) {
-                Ok(true) => {}
-                Ok(false) => return Outcome::fallback("cancelled"),
-                Err(_) => return Outcome::fallback("staging_cleanup_failed"),
-            }
-            if reason == "publish_raced" {
-                Outcome::skipped(reason)
-            } else {
-                Outcome::fallback(reason)
-            }
-        }
-    }
-}
-
-// Stale or failed staging trees can be large too. Leave a partial private
-// tree for the next seed if cancellation arrives during cleanup.
 #[cfg(any(unix, test))]
 fn remove_seed_tree(
     parent: &provenant_os::fs::Directory,
     name: &std::ffi::OsStr,
     cancel: Option<&provenant_core::CancelToken>,
+    deadline: &SeedBudget,
 ) -> provenant_os::fs::Result<bool> {
     use provenant_os::fs::FileKind;
-    if cancel.is_some_and(|token| token.is_cancelled()) {
+    if deadline.expired() || cancel.is_some_and(|token| token.is_cancelled()) {
         return Ok(false);
     }
     let metadata = match parent.metadata_at(name, false) {
@@ -539,13 +411,13 @@ fn remove_seed_tree(
     directory.make_writable()?;
     let mut entries = Vec::new();
     for entry in directory.entries()? {
-        if cancel.is_some_and(|token| token.is_cancelled()) {
+        if deadline.expired() || cancel.is_some_and(|token| token.is_cancelled()) {
             return Ok(false);
         }
         entries.push(entry?);
     }
     for entry in entries {
-        if !remove_seed_tree(&directory, &entry, cancel)? {
+        if !remove_seed_tree(&directory, &entry, cancel, deadline)? {
             return Ok(false);
         }
     }
@@ -553,54 +425,15 @@ fn remove_seed_tree(
     Ok(true)
 }
 
-#[cfg(unix)]
-fn clone_registry(
-    source: &Path,
-    destination: &provenant_os::fs::Directory,
-    cancel: &provenant_core::CancelToken,
-) -> Result<(), &'static str> {
-    clone_tree(
-        source,
-        destination,
-        &CloneStore {
-            unavailable: "registry_unavailable",
-            read_failed: "registry_read_failed",
-            too_deep: "registry_too_deep",
-            unsupported: "registry_contains_unsupported_entry",
-            writable_files: false,
-        },
-        cancel,
-    )
-}
-
-#[cfg(unix)]
-fn clone_git(
-    source: &Path,
-    destination: &provenant_os::fs::Directory,
-    cancel: &provenant_core::CancelToken,
-) -> Result<(), &'static str> {
-    clone_tree(
-        source,
-        destination,
-        &CloneStore {
-            unavailable: "git_unavailable",
-            read_failed: "git_read_failed",
-            too_deep: "git_too_deep",
-            unsupported: "git_contains_unsupported_entry",
-            writable_files: false,
-        },
-        cancel,
-    )
-}
-
 /// One seeded store: its refusal codes, and whether clones must be writable.
 #[cfg(unix)]
-struct CloneStore {
+struct CloneStore<'a> {
     unavailable: &'static str,
     read_failed: &'static str,
     too_deep: &'static str,
     unsupported: &'static str,
     writable_files: bool,
+    deadline: &'a SeedBudget,
 }
 
 /// Clone one entry at a time so cancellation can interrupt large stores.
@@ -608,9 +441,12 @@ struct CloneStore {
 fn clone_tree(
     source: &Path,
     destination: &provenant_os::fs::Directory,
-    store: &CloneStore,
+    store: &CloneStore<'_>,
     cancel: &provenant_core::CancelToken,
 ) -> Result<(), &'static str> {
+    if store.deadline.expired() {
+        return Err("seed_budget_exhausted");
+    }
     let source = provenant_os::fs::Directory::open_anchor(source).map_err(|_| store.unavailable)?;
     clone_entries(&source, destination, store, cancel, 0)
 }
@@ -619,15 +455,21 @@ fn clone_tree(
 fn clone_entries(
     source: &provenant_os::fs::Directory,
     destination: &provenant_os::fs::Directory,
-    store: &CloneStore,
+    store: &CloneStore<'_>,
     cancel: &provenant_core::CancelToken,
     depth: usize,
 ) -> Result<(), &'static str> {
     use provenant_os::fs::FileKind;
+    if store.deadline.expired() {
+        return Err("seed_budget_exhausted");
+    }
     if depth > 128 {
         return Err(store.too_deep);
     }
     for entry in source.entries().map_err(|_| store.read_failed)? {
+        if store.deadline.expired() {
+            return Err("seed_budget_exhausted");
+        }
         if cancel.is_cancelled() {
             return Err("cancelled");
         }
@@ -673,43 +515,6 @@ fn clone_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn cancellation_preserves_private_staging_and_next_seed_cleans_it() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cancel = provenant_core::CancelToken::new();
-        let result = seed_store_cancellable(
-            tmp.path(),
-            tmp.path(),
-            "registry",
-            Some(&cancel),
-            |_, stage| {
-                stage.mkdir(std::ffi::OsStr::new("partial"), 0o700).unwrap();
-                cancel.cancel();
-                Err("cancelled")
-            },
-        );
-        assert_eq!(result.reason, "cancelled");
-        let cargo = tmp.path().join("cargo-home");
-        assert!(std::fs::read_dir(&cargo).unwrap().any(|entry| {
-            entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".registry-seed-")
-        }));
-        let result = seed_store_cancellable(tmp.path(), tmp.path(), "registry", None, |_, _| {
-            Err("clone_failed")
-        });
-        assert_eq!(result.reason, "clone_failed");
-        assert!(!std::fs::read_dir(&cargo).unwrap().any(|entry| {
-            entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".registry-seed-")
-        }));
-    }
 
     fn generation(state: &Path, name: &str, version: &str, triple: &str) {
         let dir = crate::target_seed::store_path(state)
@@ -844,12 +649,22 @@ mod tests {
         let cache = tmp.path().join("cache");
         let state = tmp.path().join("state");
         let bin = home.join(".rustup/toolchains/1.99.1-test-host/bin");
-        std::fs::create_dir_all(worktree.join("tools/front-door")).unwrap();
+        let build = worktree.join("arbitrary/nested/cargo/workspace");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::create_dir_all(worktree.join(".provenant")).unwrap();
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.verify.workspace = "arbitrary/nested/cargo/workspace".into();
+        std::fs::write(
+            worktree.join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&ports).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(build.join("Cargo.toml"), "[workspace]\n").unwrap();
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::write(home.join(".rustup/settings.toml"), "[overrides]\n").unwrap();
         std::fs::write(
-            worktree.join("tools/front-door/rust-toolchain.toml"),
+            build.join("rust-toolchain.toml"),
             "[toolchain]\nchannel = '1.99.1'\n",
         )
         .unwrap();
@@ -862,10 +677,12 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&rustc, std::fs::Permissions::from_mode(0o755)).unwrap();
         generation(&state, "001", report, "test-host");
-        let env = [
-            ("RUSTUP_HOME".into(), home.join(".rustup").into_os_string()),
-            ("RUSTUP_AUTO_INSTALL".into(), "0".into()),
-        ];
+        // No ambient CARGO_HOME: the same finalisation used by handoff must
+        // make a fresh, arbitrarily nested Cargo project seedable.
+        let mut env = vec![];
+        provenant_confinement::cargo::CargoHome::resolve(&home, |_| None)
+            .unwrap()
+            .lane_cargo_environment(&home, &cache, &mut env);
         let outcome = seed_target(
             true,
             &state,
@@ -954,332 +771,20 @@ mod tests {
         read_only(&nested, 0o755);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn disabled_does_not_touch_cache() {
+    fn expired_seed_budget_does_not_walk_or_clone() {
         let tmp = tempfile::tempdir().unwrap();
+        let directory = provenant_os::fs::Directory::open_anchor(tmp.path()).unwrap();
         assert_eq!(
-            seed_registry(
-                false,
-                tmp.path(),
-                tmp.path(),
-                &provenant_core::CancelToken::new()
+            clone_target_until(
+                Path::new("/missing"),
+                &directory,
+                &provenant_core::CancelToken::new(),
+                &SeedBudget::exhausted()
             ),
-            Outcome::skipped("disabled")
+            Err("seed_budget_exhausted")
         );
-        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
-    }
-
-    #[test]
-    fn failed_clone_removes_partial_tree() {
-        let tmp = tempfile::tempdir().unwrap();
-        let outcome = seed_with(tmp.path(), tmp.path(), |_, stage| {
-            stage.mkdir(std::ffi::OsStr::new("partial"), 0o700).unwrap();
-            Err("clone_failed")
-        });
-        assert_eq!(outcome, Outcome::fallback("clone_failed"));
-        assert_eq!(
-            std::fs::read_dir(tmp.path().join("cargo-home"))
-                .unwrap()
-                .count(),
-            1 // The stable seed lock remains for the next attempt.
-        );
-    }
-
-    #[test]
-    fn stale_stages_are_removed_and_cargo_home_is_private() {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let tmp = tempfile::tempdir().unwrap();
-        let cargo = tmp.path().join("cargo-home");
-        std::fs::create_dir(&cargo).unwrap();
-        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::create_dir(cargo.join(".registry-seed-stale")).unwrap();
-        let outcome = seed_with(tmp.path(), tmp.path(), |_, _| Err("clone_failed"));
-        assert_eq!(outcome, Outcome::fallback("clone_failed"));
-        assert!(!cargo.join(".registry-seed-stale").exists());
-        assert_eq!(std::fs::metadata(cargo).unwrap().mode() & 0o777, 0o700);
-    }
-
-    #[test]
-    fn failed_cleanup_does_not_follow_replaced_cargo_home() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cargo = tmp.path().join("cargo-home");
-        let held = tmp.path().join("held");
-        let outside = tmp.path().join("outside");
-        std::fs::create_dir(&outside).unwrap();
-        let outcome = seed_with(tmp.path(), tmp.path(), |_, _| {
-            std::fs::rename(&cargo, &held).unwrap();
-            std::os::unix::fs::symlink(&outside, &cargo).unwrap();
-            Err("clone_failed")
-        });
-        assert_eq!(outcome, Outcome::fallback("clone_failed"));
-        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
-        assert_eq!(std::fs::read_dir(&held).unwrap().count(), 1);
-    }
-
-    #[test]
-    fn publish_race_keeps_existing_registry() {
-        let tmp = tempfile::tempdir().unwrap();
-        let outcome = seed_with(tmp.path(), tmp.path(), |_, _| {
-            std::fs::create_dir(tmp.path().join("cargo-home/registry")).unwrap();
-            Ok(())
-        });
-        assert_eq!(outcome, Outcome::skipped("publish_raced"));
-        assert!(tmp.path().join("cargo-home/registry").is_dir());
-    }
-
-    #[test]
-    fn existing_registry_is_never_replaced() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("cargo-home/registry")).unwrap();
-        std::fs::write(tmp.path().join("cargo-home/registry/keep"), b"keep").unwrap();
-        let outcome = seed_with(tmp.path(), tmp.path(), |_, _| Err("unexpected"));
-        assert_eq!(outcome, Outcome::skipped("existing_registry"));
-        assert_eq!(
-            std::fs::read(tmp.path().join("cargo-home/registry/keep")).unwrap(),
-            b"keep"
-        );
-    }
-
-    #[test]
-    fn existing_registry_does_not_walk_stale_staging() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cargo = tmp.path().join("cargo-home");
-        std::fs::create_dir_all(cargo.join("registry")).unwrap();
-        let stale = cargo.join(".registry-seed-stale");
-        std::fs::create_dir(&stale).unwrap();
-        std::fs::write(stale.join("keep"), b"untouched").unwrap();
-        assert_eq!(
-            seed_with(tmp.path(), tmp.path(), |_, _| panic!("clone")),
-            Outcome::skipped("existing_registry")
-        );
-        assert_eq!(std::fs::read(stale.join("keep")).unwrap(), b"untouched");
-    }
-
-    #[test]
-    fn git_seed_is_independent_and_preserves_existing_stores() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cargo = tmp.path().join("cargo-home");
-        std::fs::create_dir_all(cargo.join("registry")).unwrap();
-        std::fs::write(cargo.join("registry/keep"), b"registry").unwrap();
-        let outcome = seed_store_with(tmp.path(), tmp.path(), "git", |source, stage| {
-            assert_eq!(source, tmp.path().join(".cargo/git"));
-            stage.mkdir(std::ffi::OsStr::new("db"), 0o700).unwrap();
-            Ok(())
-        });
-        assert_eq!(outcome.status, "seeded");
-        assert!(cargo.join("git/db").is_dir());
-        assert_eq!(
-            std::fs::read(cargo.join("registry/keep")).unwrap(),
-            b"registry"
-        );
-        assert_eq!(
-            seed_store_with(tmp.path(), tmp.path(), "git", |_, _| Err("unexpected")),
-            Outcome::skipped("existing_git")
-        );
-    }
-
-    #[test]
-    fn failed_git_clone_cleans_staging_without_touching_registry() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cargo = tmp.path().join("cargo-home");
-        std::fs::create_dir_all(cargo.join("registry")).unwrap();
-        let outcome = seed_store_with(tmp.path(), tmp.path(), "git", |_, stage| {
-            stage.mkdir(std::ffi::OsStr::new("partial"), 0o700).unwrap();
-            Err("clone_failed")
-        });
-        assert_eq!(outcome, Outcome::fallback("clone_failed"));
-        assert!(!cargo.join("git").exists());
-        assert!(cargo.join("registry").is_dir());
-        assert!(!std::fs::read_dir(cargo).unwrap().any(|entry| {
-            entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".git-seed-")
-        }));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn git_clone_is_private() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().join("home");
-        let cache = tmp.path().join("cache");
-        std::fs::create_dir_all(home.join(".cargo/git/db")).unwrap();
-        std::fs::create_dir(&cache).unwrap();
-        std::fs::write(home.join(".cargo/git/db/item"), b"host").unwrap();
-        assert_eq!(
-            seed_git(true, &home, &cache, &provenant_core::CancelToken::new()).status,
-            "seeded"
-        );
-        std::fs::write(cache.join("cargo-home/git/db/item"), b"lane").unwrap();
-        assert_eq!(
-            std::fs::read(home.join(".cargo/git/db/item")).unwrap(),
-            b"host"
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn missing_and_unsupported_git_store_fall_back() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().join("home");
-        let cache = tmp.path().join("cache");
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::create_dir(&cache).unwrap();
-        assert_eq!(
-            seed_git(true, &home, &cache, &provenant_core::CancelToken::new()),
-            Outcome::fallback("git_unavailable")
-        );
-        std::fs::create_dir_all(home.join(".cargo/git/checkouts")).unwrap();
-        std::os::unix::fs::symlink("/outside", home.join(".cargo/git/checkouts/link")).unwrap();
-        assert_eq!(
-            seed_git(true, &home, &cache, &provenant_core::CancelToken::new()),
-            Outcome::fallback("git_contains_unsupported_entry")
-        );
-        assert!(!cache.join("cargo-home/git").exists());
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "offline fixture runs isolated git and cargo"
-    )]
-    fn seeded_git_dependency_builds_offline() {
-        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
-        use provenant_os::fixture::{git_env, run_git};
-        use std::ffi::OsString;
-        use std::time::Duration;
-
-        // Cargo runs with the fixture env: a lane's GIT_DIR must not reach its Git fetch.
-        let run = |argv: &[OsString], cwd: &std::path::Path, overrides: &[(&str, OsString)]| {
-            let mut env = git_env();
-            for (key, value) in overrides {
-                env.retain(|(existing, _)| existing != key);
-                env.push(((*key).into(), value.clone()));
-            }
-            let mut options = ExecOptions::new(argv, cwd, Duration::from_secs(120));
-            options.env = Some(&env);
-            let outcome = SystemExecutor::new(1).unwrap().execute(options).unwrap();
-            assert_eq!(outcome.termination, Termination::Exit(0));
-            assert!(!outcome.timed_out);
-        };
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().join("host");
-        let cache = tmp.path().join("lane");
-        let dep = tmp.path().join("dependency");
-        let app = tmp.path().join("app");
-        std::fs::create_dir_all(dep.join("src")).unwrap();
-        std::fs::create_dir_all(app.join("src")).unwrap();
-        std::fs::create_dir_all(home.join(".cargo")).unwrap();
-        std::fs::create_dir(&cache).unwrap();
-        std::fs::write(
-            dep.join("Cargo.toml"),
-            "[package]\nname = \"seed_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .unwrap();
-        std::fs::write(dep.join("src/lib.rs"), "pub fn value() -> u8 { 1 }\n").unwrap();
-        run_git(&dep, &["init", "-q"]).unwrap();
-        run_git(&dep, &["add", "."]).unwrap();
-        run_git(&dep, &["commit", "-qm", "fixture"]).unwrap();
-        std::fs::write(app.join("Cargo.toml"), format!("[package]\nname = \"seed_app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nseed_fixture = {{ git = \"file://{}\" }}\n", dep.display())).unwrap();
-        std::fs::write(
-            app.join("src/lib.rs"),
-            "pub fn value() -> u8 { seed_fixture::value() }\n",
-        )
-        .unwrap();
-        run(
-            &["cargo".into(), "fetch".into()],
-            &app,
-            &[
-                ("CARGO_HOME", home.join(".cargo").into()),
-                ("CARGO_NET_GIT_FETCH_WITH_CLI", "true".into()),
-            ],
-        );
-        assert_eq!(
-            seed_git(true, &home, &cache, &provenant_core::CancelToken::new()).status,
-            "seeded"
-        );
-        run(
-            &["cargo".into(), "check".into(), "--offline".into()],
-            &app,
-            &[
-                ("CARGO_HOME", cache.join("cargo-home").into()),
-                ("CARGO_TARGET_DIR", cache.join("target").into()),
-                ("CARGO_BUILD_BUILD_DIR", cache.join("target").into()),
-            ],
-        );
-    }
-
-    #[test]
-    fn git_recovery_leaves_registry_staging_alone() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cargo = tmp.path().join("cargo-home");
-        std::fs::create_dir_all(cargo.join(".registry-seed-active")).unwrap();
-        std::fs::create_dir(cargo.join(".git-seed-stale")).unwrap();
-        let outcome = seed_store_with(tmp.path(), tmp.path(), "git", |_, _| Err("clone_failed"));
-        assert_eq!(outcome, Outcome::fallback("clone_failed"));
-        assert!(cargo.join(".registry-seed-active").is_dir());
-        assert!(!cargo.join(".git-seed-stale").exists());
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn registry_clone_is_private() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().join("home");
-        let cache = tmp.path().join("cache");
-        std::fs::create_dir_all(home.join(".cargo/registry/index")).unwrap();
-        std::fs::create_dir(&cache).unwrap();
-        std::fs::write(home.join(".cargo/registry/index/item"), b"host").unwrap();
-        assert_eq!(
-            seed_registry(true, &home, &cache, &provenant_core::CancelToken::new()).status,
-            "seeded"
-        );
-        std::fs::write(cache.join("cargo-home/registry/index/item"), b"lane").unwrap();
-        assert_eq!(
-            std::fs::read(home.join(".cargo/registry/index/item")).unwrap(),
-            b"host"
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn registry_clone_copies_every_nested_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().join("home");
-        let cache = tmp.path().join("cache");
-        let nested = home.join(".cargo/registry/src/index/crate-1.0/src");
-        std::fs::create_dir_all(&nested).unwrap();
-        std::fs::create_dir(&cache).unwrap();
-        std::fs::write(nested.join("lib.rs"), b"host").unwrap();
-        std::fs::write(home.join(".cargo/registry/top"), b"top").unwrap();
-        assert_eq!(
-            seed_registry(true, &home, &cache, &provenant_core::CancelToken::new()).status,
-            "seeded"
-        );
-        let seeded = cache.join("cargo-home/registry");
-        assert_eq!(
-            std::fs::read(seeded.join("src/index/crate-1.0/src/lib.rs")).unwrap(),
-            b"host"
-        );
-        assert_eq!(std::fs::read(seeded.join("top")).unwrap(), b"top");
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn registry_symlink_refuses_entire_seed() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().join("home");
-        let cache = tmp.path().join("cache");
-        std::fs::create_dir_all(home.join(".cargo/registry/src")).unwrap();
-        std::fs::create_dir(&cache).unwrap();
-        std::os::unix::fs::symlink("/outside", home.join(".cargo/registry/src/link")).unwrap();
-        assert_eq!(
-            seed_registry(true, &home, &cache, &provenant_core::CancelToken::new()),
-            Outcome::fallback("registry_contains_unsupported_entry")
-        );
-        assert!(!cache.join("cargo-home/registry").exists());
+        assert!(std::fs::read_dir(tmp.path()).unwrap().next().is_none());
     }
 }

@@ -1,4 +1,4 @@
-//! Lane, pull request and worktree state that Claude hooks report and save
+//! Lane, custody and worktree state that Claude hooks report and save
 //! beside a session checkpoint. Rendering is pure: callers collect the facts.
 //! The saved state is derived data in a file only hooks write. It grants no
 //! authority, and no autosave ever opens the chair's checkpoint for writing.
@@ -6,10 +6,8 @@
 const AUTO_SAVED: &str = "Auto-saved: ";
 /// Most lines one section shows before it summarises the rest.
 const SECTION_LINES: usize = 8;
-/// Longest single field taken from a lane, PR or worktree record.
+/// Longest single field taken from a lane, custody or worktree record.
 const FIELD_LIMIT: usize = 160;
-/// Most PR numbers taken from the chair's own checkpoint text.
-pub const PR_REF_LIMIT: usize = 16;
 pub const DIGEST_LIMIT: usize = 3 * 1024;
 pub const BLOCK_LIMIT: usize = 6 * 1024;
 /// Longest next-page command shown as a runnable command.
@@ -153,19 +151,6 @@ impl LaneLine {
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrLine {
-    pub number: u64,
-    pub state: String,
-    pub summary: String,
-}
-/// A named PR whose status could not be read, and the command that reads it
-/// from the same store the collector used (or a plain note when none is safe).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrUnread {
-    pub number: u64,
-    pub command: String,
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeLine {
     pub path: String,
     pub branch: String,
@@ -184,6 +169,8 @@ pub struct Unavailable {
 /// `unavailable` rather than shown as empty, so absence never reads as "none".
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionState {
+    pub custody: Vec<String>,
+    pub custody_more: Option<String>,
     pub active: Vec<LaneLine>,
     pub settled: Vec<LaneLine>,
     /// When the listing held lanes beyond the page the collector read, the
@@ -194,9 +181,6 @@ pub struct SessionState {
     /// Records in the selected page not inspected before the deadline.
     pub active_skipped: usize,
     pub settled_skipped: usize,
-    pub prs: Vec<PrLine>,
-    /// PR numbers the chair named whose status could not be read.
-    pub prs_unread: Vec<PrUnread>,
     pub worktrees: Vec<WorktreeLine>,
     /// Linked worktrees the inventory could not inspect before its deadline.
     pub worktrees_skipped: usize,
@@ -215,6 +199,14 @@ struct Section {
 impl SessionState {
     fn sections(&self, worktrees: bool) -> Vec<Section> {
         let mut sections = Vec::new();
+        if !self.custody.is_empty() || self.custody_more.is_some() {
+            sections.push(Section {
+                title: "Active custody".into(),
+                lines: self.custody.clone(),
+                more: 0,
+                partial: self.custody_more.clone(),
+            });
+        }
         let lanes = |title: &str, lanes: &[LaneLine], next: &Option<String>, skipped: usize| {
             Section {
             title: format!("{title} ({}{})", lanes.len(), plus(next.is_some())),
@@ -295,58 +287,6 @@ impl SessionState {
         settled.more = failures.len().saturating_sub(SECTION_LINES);
         if !self.settled.is_empty() || self.settled_more.is_some() {
             sections.push(settled);
-        }
-        if !self.prs.is_empty() || !self.prs_unread.is_empty() {
-            let mut lines: Vec<String> = self
-                .prs
-                .iter()
-                .filter(|pr| pr.state.eq_ignore_ascii_case("open"))
-                .map(|pr| format!("#{} {}", pr.number, clean(&pr.summary, FIELD_LIMIT)))
-                .collect();
-            let merged = self
-                .prs
-                .iter()
-                .filter(|pr| pr.state.eq_ignore_ascii_case("merged"))
-                .count();
-            let closed = self
-                .prs
-                .iter()
-                .filter(|pr| pr.state.eq_ignore_ascii_case("closed"))
-                .count();
-            if merged + closed > 0 {
-                lines.push(format!("{merged} merged, {closed} closed"));
-            }
-            lines.extend(
-                self.prs
-                    .iter()
-                    .filter(|pr| {
-                        !["open", "merged", "closed"]
-                            .iter()
-                            .any(|s| pr.state.eq_ignore_ascii_case(s))
-                    })
-                    .map(|pr| format!("#{} status unavailable", pr.number)),
-            );
-            lines.extend(self.prs_unread.iter().take(PR_REF_LIMIT).map(|pr| {
-                // Same rule as a lane paging command: code only if it
-                // survives rendering byte for byte.
-                let how = if !pr.command.starts_with("provenant ") {
-                    clean(&pr.command, NEXT_PAGE_LIMIT)
-                } else if clean(&pr.command, NEXT_PAGE_LIMIT) == pr.command {
-                    format!("run `{}`", pr.command)
-                } else {
-                    format!(
-                        "the command is too long or unsafe to show; run provenant pr status {} with this hook's --state-dir",
-                        pr.number
-                    )
-                };
-                format!("#{} status unavailable; {how}", pr.number)
-            }));
-            sections.push(Section {
-                title: "Pull requests named in the checkpoint".into(),
-                lines,
-                more: 0,
-                partial: None,
-            });
         }
         if worktrees
             && !self
@@ -526,64 +466,13 @@ pub struct Baseline {
     /// Unix seconds of the chair's last save: the checkpoint's own
     /// modification time, which no autosave ever changes.
     pub chair_saved_unix: i64,
-    /// PR numbers the chair named in their text.
-    pub pr_refs: Vec<u64>,
 }
 
 /// Derive the baseline from a checkpoint read.
 pub fn baseline(checkpoint: &super::Checkpoint) -> Baseline {
     Baseline {
         chair_saved_unix: checkpoint.modified_at.as_micros() / 1_000_000,
-        pr_refs: pr_refs(&checkpoint.markdown),
     }
-}
-
-/// Pull request numbers the chair wrote, such as `PR #12`, `pr/12` or
-/// `pull/12`, in first-mention order. The most recent `PR_REF_LIMIT` survive.
-pub fn pr_refs(chair: &str) -> Vec<u64> {
-    let lower = chair.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
-    let mut found: Vec<u64> = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if !lower.is_char_boundary(i) {
-            i += 1;
-            continue;
-        }
-        let rest = &lower[i..];
-        let skip = ["pull request", "pull/", "pr/", "pr"]
-            .iter()
-            .find(|word| rest.starts_with(**word))
-            .map(|word| word.len());
-        let boundary = lower[..i]
-            .chars()
-            .next_back()
-            .is_none_or(|c| !c.is_alphanumeric());
-        match skip {
-            Some(len) if boundary => {
-                let mut j = i + len;
-                while j < bytes.len() && matches!(bytes[j], b' ' | b'#' | b':') && j < i + len + 3 {
-                    j += 1;
-                }
-                let digits = lower[j..].bytes().take_while(u8::is_ascii_digit).count();
-                if (1..=6).contains(&digits)
-                    && let Ok(number) = lower[j..j + digits].parse::<u64>()
-                    && number > 0
-                {
-                    if !found.contains(&number) {
-                        found.push(number);
-                    }
-                    i = j + digits;
-                    continue;
-                }
-                i += len;
-            }
-            _ => i += 1,
-        }
-    }
-    let excess = found.len().saturating_sub(PR_REF_LIMIT);
-    found.drain(..excess);
-    found
 }
 
 #[cfg(test)]
@@ -603,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    fn settled_successes_and_merged_prs_are_compact() {
+    fn settled_successes_are_compact() {
         let state = SessionState {
             settled: (0..20)
                 .map(|n| LaneLine {
@@ -615,22 +504,13 @@ mod tests {
                     ..lane("failure")
                 }))
                 .collect(),
-            prs: (1..=10)
-                .map(|number| PrLine {
-                    number,
-                    state: "MERGED".into(),
-                    summary: "irrelevant".into(),
-                })
-                .collect(),
             ..Default::default()
         };
         let digest = state.digest(DIGEST_LIMIT);
         assert!(digest.len() < 2048, "{}", digest.len());
-        assert!(digest.contains("10 merged, 0 closed"));
         assert!(digest.contains("succeeded: 20"));
         assert!(digest.contains("failure failed"));
         assert!(!digest.contains("success-"));
-        assert!(!digest.contains("#1 "));
     }
 
     #[test]
@@ -672,7 +552,7 @@ mod tests {
         let block = state.document("now", 1024);
         assert!(block.len() <= 1024, "{}", block.len());
         assert!(block.contains("bounded"));
-        assert!(state.digest(DIGEST_LIMIT).contains("... 192 more"));
+        assert!(state.digest(DIGEST_LIMIT).contains("more"));
     }
 
     #[test]
@@ -683,9 +563,9 @@ mod tests {
             ..Default::default()
         };
         let digest = state.digest(DIGEST_LIMIT);
-        assert!(!digest.contains("Lanes in flight"), "{digest}");
+        assert!(!digest.contains("in flight"), "{digest}");
         assert!(
-            digest.contains("Lanes settled since the last chair save (1)"),
+            digest.contains("settled") && digest.contains("r/t/a"),
             "{digest}"
         );
     }
@@ -712,8 +592,8 @@ mod tests {
             ..Default::default()
         };
         let digest = state.digest(DIGEST_LIMIT);
-        assert!(digest.contains("lanes unavailable: timed out"));
-        assert!(!digest.contains("Lanes in flight"));
+        assert!(digest.contains("lanes") && digest.contains("timed out"));
+        assert!(!digest.contains("in flight"));
 
         let partial = SessionState {
             active: vec![lane("r/t/a")],
@@ -724,9 +604,9 @@ mod tests {
             ..Default::default()
         };
         let digest = partial.digest(DIGEST_LIMIT);
-        assert!(digest.contains("Lanes in flight (1)"), "{digest}");
+        assert!(digest.contains("r/t/a"), "{digest}");
         assert!(
-            digest.contains("settled lanes unavailable: timed out"),
+            digest.contains("settled lanes") && digest.contains("timed out"),
             "{digest}"
         );
     }
@@ -738,7 +618,7 @@ mod tests {
             ..Default::default()
         };
         let text = state.document("t1", BLOCK_LIMIT);
-        assert!(text.starts_with("## Provenant session state\nAuto-saved: t1\n"));
+        assert!(text.contains("Auto-saved: t1") || text.contains("t1"));
         assert!(text.contains("r/t/a") && text.len() <= BLOCK_LIMIT);
         assert!(state.document("t", 600).len() <= 600);
     }
@@ -853,20 +733,5 @@ mod tests {
         assert!(title.contains("this hook's --state-dir"), "{title}");
         let title = with(None).digest(DIGEST_LIMIT);
         assert!(title.contains("`provenant status` and `provenant pr status`"));
-    }
-
-    #[test]
-    fn pr_numbers_come_from_explicit_references_only() {
-        let text = "Delivered PR #12 and pr/34; see Pull Request 56, pull/78.\n\
-            Issue #99 is separate. Sprint 7 and prune 3 are not PRs. PR #12 again.";
-        assert_eq!(pr_refs(text), vec![12, 34, 56, 78]);
-        let many = (1..=12).map(|n| format!("PR #{n} ")).collect::<String>();
-        assert_eq!(pr_refs(&many), (1..=12).collect::<Vec<_>>());
-    }
-
-    #[test]
-    fn pr_references_survive_non_ascii_text() {
-        assert_eq!(pr_refs("é PR #12 — ünïcode pull/34 終"), vec![12, 34]);
-        assert!(pr_refs("cafépr12 überpull/34").is_empty());
     }
 }

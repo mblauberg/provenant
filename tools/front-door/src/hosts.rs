@@ -231,8 +231,7 @@ fn presence(home: &Path, config: &Path) -> CredentialPresence {
 /// Reads the receipt and the files it owns, never a credential. A configuration
 /// or receipt defect is reported in place of rows rather than failing doctor.
 fn managed(roots: &provenant_core::Roots, home: &Path) -> (Vec<Managed>, Option<String>) {
-    let config = match provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
-    {
+    let config = match provenant_cli::config_reads::read_for(roots, "accounts") {
         Ok(config) => config,
         Err(error) => return (Vec::new(), Some(error.to_string())),
     };
@@ -341,11 +340,10 @@ pub(crate) fn local(
         claude.push(Identity { label, signin });
     }
     let (managed, managed_error) = managed(roots, home);
-    let agy_accounts =
-        provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
-            .ok()
-            .map(|config| agy_accounts(&config.domains.accounts, home))
-            .unwrap_or_default();
+    let agy_accounts = provenant_cli::config_reads::read_for(roots, "accounts")
+        .ok()
+        .map(|config| agy_accounts(&config.domains.accounts, home))
+        .unwrap_or_default();
     let mut warnings = crate::pool_effort_warnings(roots);
     let login_accounts = match provenant_cli::quota::recorded_login_rows(roots) {
         Ok(rows) => rows.into_iter().map(login_account).collect(),
@@ -832,6 +830,7 @@ mod tests {
                 reset_unix_seconds: None,
                 evidence_ref: Some("fixture".into()),
             }),
+            auth_state: None,
             login_expiry: Some(provenant_quota::LoginExpiryView {
                 state: provenant_quota::LoginExpiryState::Expired,
                 expires_unix_seconds: Some(90),

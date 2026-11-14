@@ -11,29 +11,44 @@ mod edit;
 mod gc;
 mod github_policy;
 mod history;
-mod migrate;
 mod schema;
 pub use gc::{
-    ForeignWorktrees, GcSettings, LaneBuildSettings, MemoryPressureThreshold,
-    PROJECT_WRITER_LANES_CEILING, ProjectGcSettings, STORE_BUSY_TIMEOUT_CEILING_MS, StoreSettings,
-    WRITER_LANES_CEILING, deserialize_auto, parse_cache_size,
+    ByteObservation, DiskLevel, DiskLimits, ForeignWorktrees, GcSettings, LaneBuildSettings,
+    MemoryPressureThreshold, PROJECT_WRITER_LANES_CEILING, ProjectGcSettings, RETENTION_CLASSES,
+    RemoteBranches, RetentionBytes, RetentionClass, RetentionEligibility, RetentionIssue,
+    RetentionKind, RetentionMeasurement, RetentionTrigger, STORE_BUSY_TIMEOUT_CEILING_MS,
+    StoreSettings, WRITER_LANES_CEILING, deserialize_auto, parse_cache_size, retention_schedule,
 };
-pub use github_policy::GithubPolicy;
+pub use github_policy::{
+    DEFAULT_GH_BUDGET, GH_INVOCATIONS_FILE, GithubPolicy, label_events_trigger_ci,
+};
 mod harness;
 mod hooks;
-pub use harness::mcp_entry;
 pub use hooks::{CLAUDE_HOOKS, claude_lane_settings};
 mod inspection;
 mod knobs;
 mod loader;
 mod managed;
 pub use harness::{InstallSettings, TargetSettings, apply_install_config_with_domains};
+pub mod policy;
 mod presets;
 mod providers;
 pub use providers::{ProviderSettings, ProviderUpdate};
+mod ports;
 mod project_binding;
+pub use ports::{
+    CommandExitCodes, ExitDisposition, Integration, LandBackend, LandPort, PORTS_CONFIG,
+    PORTS_SCHEMA_VERSION, PackagePath, Port, PortBackend, PortBackendKind, PortCommand,
+    PortCommandDisposition, PortCommandExecution, PortCommandReceiptProof, PortEvidenceError,
+    PortSource, PortTable, VerifyPort, VerifySelection, VerifyTier, WorktreeLayoutPort,
+    execute_port_command, port_command_receipt_proof, record_port_command,
+};
 mod release;
+mod repository_policy;
+pub use repository_policy::{REPOSITORY_CONFIG, RepositoryPolicy, read_land};
+pub mod removed;
 mod retention;
+pub use removed::{REMOVED, Removed};
 mod worktrees;
 pub use worktrees::{ProjectWorktreeSettings, WorktreeSettings, WorktreeSetup};
 pub mod shared_settings;
@@ -54,11 +69,10 @@ pub use domains::{
 };
 pub use edit::{EditOptions, Edited, edit_config, revision_of, show};
 pub use history::{FieldChange, HistoryEntry, HistoryLimits, history};
-pub use knobs::{KnobEdit, KnobSource, KnobValue};
+pub use knobs::{KNOB_SOURCES, KnobEdit, KnobSource, KnobValue};
 pub use loader::{
     config_show, inspect_config, load, load_with_domains, read, read_knobs, read_with_domains,
 };
-pub use migrate::{MigrateReport, Migration, migrate};
 pub use presets::Profile;
 pub use project_binding::{
     GcProjectSelection, ProjectBinding, ProjectLocation, bind_host, bind_project, lookup_host,
@@ -94,7 +108,7 @@ pub enum ConfigError {
     InvalidUtf8 { path: PathBuf },
     #[error("invalid TOML at {location}")]
     Syntax { location: Location },
-    #[error("{rule} at {location}; next: delete the line or run `provenant config migrate`")]
+    #[error("{rule} at {location}; next: run `provenant config check` and edit the reported key")]
     Schema {
         location: Location,
         rule: &'static str,
@@ -105,7 +119,9 @@ pub enum ConfigError {
     UnsupportedVersion { location: Location },
     #[error("config exceeds collection bounds at {location}")]
     CollectionLimit { location: Location },
-    #[error("invalid domain configuration at {location}: {source}{rejected}{}; next: provenant config check", retired_repair(.source))]
+    #[error(
+        "invalid domain configuration at {location}: {source}{rejected}; next: provenant config check"
+    )]
     Domain {
         location: Location,
         #[source]
@@ -131,6 +147,8 @@ pub enum ConfigError {
     InvalidProjectLocation,
     #[error("project GitHub policy is invalid")]
     InvalidGithubPolicy,
+    #[error("repository launch policy is invalid (.provenant/config.toml [launch_policy])")]
+    InvalidRepositoryPolicy,
     #[error("project binding state is invalid")]
     InvalidProjectBinding,
     #[error("project binding lock budget is invalid")]
@@ -281,18 +299,5 @@ pub use release::{Release, package_release};
 pub const CONFIG_SCHEMA_VERSION: u64 = 1;
 
 pub use managed::HookRegistration;
-
-/// The repair a retired key calls for, appended to the refusal.
-fn retired_repair(source: &SectionError) -> &'static str {
-    if is_retired_key_code(source.code) {
-        "; repair: run `provenant config migrate`"
-    } else {
-        ""
-    }
-}
-
-pub(crate) fn is_retired_key_code(code: &str) -> bool {
-    code.starts_with("moved_to_schedule.") || code.starts_with("retired.")
-}
 
 pub use knobs::documented_field;

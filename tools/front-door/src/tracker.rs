@@ -4,13 +4,28 @@ use provenant_cli::{
     Globals, Tracker,
     tracker::{self, Config, Finding},
 };
-use provenant_records::{CommandResult, Outcome};
+use provenant_config::{Port, PortBackend, PortCommandDisposition, PortSource, PortTable};
+use provenant_core::CancelToken;
+use provenant_os::exec::SystemExecutor;
+use provenant_records::{CanonicalV1, CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::Path, time::Duration};
+use std::{
+    collections::BTreeMap,
+    ffi::OsString,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 #[derive(Clone, Deserialize)]
 struct IssueType {
     name: String,
+}
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PortIssue {
+    body: Option<String>,
+    state: String,
+    kind: Option<String>,
 }
 #[derive(Clone, Deserialize)]
 struct Issue {
@@ -25,7 +40,7 @@ struct Report {
     skipped: Vec<String>,
 }
 
-fn issue(root: &Path, number: u64, timeout: Duration) -> Result<Issue, String> {
+fn builtin_issue(root: &Path, number: u64, timeout: Duration) -> Result<Issue, String> {
     let number = number.to_string();
     let args = [
         "gh",
@@ -39,6 +54,118 @@ fn issue(root: &Path, number: u64, timeout: Duration) -> Result<Issue, String> {
         .and_then(pr::successful)
         .map_err(|e| e.to_string())?;
     serde_json::from_slice(&output).map_err(|e| e.to_string())
+}
+
+enum TrackerPort {
+    Builtin,
+    Command {
+        command: provenant_config::PortCommand,
+        source: PortSource,
+        state: PathBuf,
+        executor: SystemExecutor,
+        cancel: CancelToken,
+    },
+    None {
+        source: PortSource,
+    },
+    Unavailable(String),
+}
+impl TrackerPort {
+    fn from_port(port: Port, state: PathBuf) -> Self {
+        let source = port.source;
+        match port.backend {
+            PortBackend::Builtin => Self::Builtin,
+            PortBackend::Command { command } => match SystemExecutor::new(1) {
+                Ok(executor) => Self::Command {
+                    command,
+                    source,
+                    state,
+                    executor,
+                    cancel: CancelToken::new(),
+                },
+                Err(error) => {
+                    Self::Unavailable(format!("cannot start tracker command executor: {error}"))
+                }
+            },
+            PortBackend::None => Self::None { source },
+        }
+    }
+
+    fn issue(&mut self, root: &Path, number: u64, timeout: Duration) -> Result<Issue, String> {
+        match self {
+            Self::Builtin => {
+                builtin_issue(root, number, timeout).map_err(|_| "forge unavailable".to_owned())
+            }
+            Self::None { source } => Err(format!("tracker port is disabled (source: {source:?})")),
+            Self::Unavailable(error) => Err(error.clone()),
+            Self::Command {
+                command,
+                source,
+                state,
+                executor,
+                cancel,
+            } => {
+                let arguments = [OsString::from(number.to_string())];
+                let mut execution = provenant_config::execute_port_command(
+                    &*executor,
+                    command,
+                    root,
+                    &arguments,
+                    &[],
+                    timeout,
+                    cancel,
+                );
+                let issue = (|| {
+                    let outcome = execution.outcome.as_ref().ok_or_else(|| {
+                        format!(
+                            "tracker command port returned {} without an exit record",
+                            disposition_name(execution.disposition)
+                        )
+                    })?;
+                    if execution.disposition != PortCommandDisposition::Succeeded
+                        || !execution.capture_complete()
+                    {
+                        return Err(format!(
+                            "tracker command port returned {}",
+                            disposition_name(execution.disposition)
+                        ));
+                    }
+                    let issue: PortIssue =
+                        serde_json::from_slice(&outcome.stdout.bytes).map_err(|_| {
+                            "tracker command port returned invalid issue JSON".to_owned()
+                        })?;
+                    Ok(Issue {
+                        body: issue.body,
+                        state: issue.state,
+                        issue_type: issue.kind.map(|name| IssueType { name }),
+                    })
+                })();
+                if issue.is_err() && execution.disposition == PortCommandDisposition::Succeeded {
+                    execution.disposition = PortCommandDisposition::Unknown;
+                }
+                let key = format!(
+                    "{}:{number}",
+                    CanonicalV1::file_digest(root.as_os_str().as_encoded_bytes())
+                );
+                provenant_config::record_port_command(
+                    state, "tracker", *source, "issue", &key, &execution,
+                )
+                .map_err(|_| "cannot record tracker command evidence".to_owned())?;
+                issue
+            }
+        }
+    }
+}
+
+fn disposition_name(disposition: PortCommandDisposition) -> &'static str {
+    match disposition {
+        PortCommandDisposition::Succeeded => "succeeded",
+        PortCommandDisposition::Unknown => "unknown",
+        PortCommandDisposition::Refused => "refused",
+        PortCommandDisposition::TimedOut => "timed_out",
+        PortCommandDisposition::Cancelled => "cancelled",
+        PortCommandDisposition::Failed => "failed",
+    }
 }
 
 fn config(root: &Path, skipped: &mut Vec<String>) -> Config {
@@ -136,7 +263,7 @@ fn collect(
                 issue.body.unwrap_or_default(),
                 issue.issue_type.map_or_else(|| kind.to_owned(), |t| t.name),
             )),
-            Err(_) => skipped.push(format!("issue #{number} skipped: forge unavailable")),
+            Err(error) => skipped.push(format!("issue #{number} skipped: {error}")),
         }
     }
     if sources.is_empty() && numbers.is_empty() && file.is_none() {
@@ -165,21 +292,35 @@ pub fn run(command: Tracker, globals: &Globals) -> u8 {
         file,
         kind,
     } = command;
-    let root = match roots::selected_project(globals.project.as_deref(), false) {
-        Ok(root) => root,
+    let resolved =
+        match roots::resolve(globals, roots::Workspace::Project, roots::Product::Optional) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                return crate::fail(
+                    "tracker lint",
+                    Outcome::Invalid,
+                    "ROOT",
+                    &error.to_string(),
+                    globals,
+                );
+            }
+        };
+    let root = project_root(&resolved.project);
+    let ports = match PortTable::read_for(Some(&root), resolved.roots.state.as_path()) {
+        Ok(ports) => ports,
         Err(error) => {
             return crate::fail(
                 "tracker lint",
                 Outcome::Invalid,
-                "ROOT",
-                &error.to_string(),
+                "PORT_CONFIG",
+                &format!("cannot read tracker port: {error}"),
                 globals,
             );
         }
     };
-    let root = project_root(&root);
+    let mut port = TrackerPort::from_port(ports.tracker, resolved.roots.state.clone());
     let report = collect(&root, &numbers, file.as_deref(), &kind, &mut |n| {
-        issue(&root, n, Duration::from_secs(15))
+        port.issue(&root, n, Duration::from_secs(15))
     });
     let human = human(&report);
     emit(

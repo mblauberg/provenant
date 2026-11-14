@@ -5,6 +5,9 @@ capacity_retry_seconds = 30
 capacity_retry_max_seconds = 600
 retry_delay_ceiling_seconds = 3600
 pacing_overrides = []
+[outcome_priors]
+enabled = true
+exploration_percent = 10
 [review.size]
 small_lines = 150
 small_files = 3
@@ -228,3 +231,10 @@ add = ["tests"]
 add = ["tests"]
 [review.lenses.by_paths."**/conftest.py"]
 add = ["tests"]
+# Depletion ladder: where work goes when its account or model is spent, in
+# order. Tiers are pool names, lowest to highest; adjacent tiers are tried
+# lower first.
+[depletion]
+rungs = ["same_model_other_account", "other_provider_same_tier", "adjacent_tier", "host_native"]
+tiers = ["utility", "junior", "senior", "principal"]
+adjacent = ["lower", "higher"]

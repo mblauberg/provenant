@@ -53,21 +53,6 @@ fn scenario(name: &str) -> Result<u8> {
                 io::stdout().write_all(b"ready\nterminal\n")?;
             }
         }
-        "mcp" => {
-            // This scenario checks the transcript driver's framing/correlation;
-            // it is a synthetic test transport, never an external recording.
-            use std::io::BufRead;
-            for line in io::stdin().lock().lines() {
-                let request: serde_json::Value = serde_json::from_str(&line?)?;
-                if let Some(id) = request.get("id") {
-                    serde_json::to_writer(
-                        io::stdout(),
-                        &serde_json::json!({"jsonrpc":"2.0","id":id,"result":{}}),
-                    )?;
-                    io::stdout().write_all(b"\n")?;
-                }
-            }
-        }
         "descendants" => {
             use provenant_os::exec::ExecOptions;
             use provenant_os::exec::Executor;
@@ -153,18 +138,6 @@ fn suite() -> Result {
     );
     let out = rig.execute(&executable, &["descendants"], None)?;
     assert_eq!(out.stdout.bytes, b"ready\nterminal\nreaped\n");
-    let mut mcp = support::mcp::McpClient::default();
-    let initialise = mcp.initialise("fixture-version")?;
-    mcp.initialised()?;
-    let list = mcp.list()?;
-    let call = mcp.call("fixture", serde_json::json!({}))?;
-    mcp.cancel(call)?;
-    let replies = mcp.eof(&rig, &executable, &["mcp"])?;
-    assert!(
-        replies.contains_key(&initialise)
-            && replies.contains_key(&list)
-            && replies.contains_key(&call)
-    );
     rig.assert_legacy_unchanged()
 }
 fn account_placement() -> Result {
@@ -277,6 +250,7 @@ fn account_placement() -> Result {
             cwd: &rig.project,
             git_context: false,
             nonce: [1; 16],
+            policy: &provenant_records::policy::Policy::default(),
             provenant: provenant_providers::LaneRuntime {
                 executable: &executable,
                 git: &std::fs::canonicalize(
@@ -287,7 +261,6 @@ fn account_placement() -> Result {
                 depth: 1,
                 attempt: provenant_core::AttemptId::from_bytes([1; 16]),
                 assets: &rig.project,
-                fabric_mcp: true,
             },
         })?;
         let auth = account.directory().join("auth.json");

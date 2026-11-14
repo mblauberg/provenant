@@ -16,6 +16,10 @@ pub const MAX_TEMPLATE_DEPTH: usize = 16;
 /// Copies one `over` may produce.
 pub const MAX_OVER_ITEMS: usize = 256;
 const ITEM: &str = "item";
+/// Host compilation context for a patch emitted by a planner. Every nested
+/// implementation in that patch has already been sized by its producer.
+pub(super) const BOUNDED_IMPLEMENTATION: &str = "implementation-brief-bounded";
+const PLAN_SOURCES: &str = "implementation-plan-sources";
 /// Node field naming the template a leaf was compiled from; carried to attempts.
 pub const TEMPLATE_FIELD: &str = "template";
 
@@ -223,7 +227,7 @@ impl ParameterKind {
 impl TemplateParameter {
     /// The shape this parameter accepts, read from its declaration alone, so a
     /// refusal never echoes the value that was supplied.
-    fn expected(&self) -> String {
+    pub fn expected(&self) -> String {
         let article = if self.kind == ParameterKind::Integer {
             "an"
         } else {
@@ -284,6 +288,33 @@ pub enum ParameterFault {
         key: String,
         expected: String,
     },
+    /// A node's `when` that cannot be resolved at submission. `key` is the
+    /// condition name, or `None` when it is not an identifier.
+    When(Box<WhenRefusal>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WhenRefusal {
+    pub reason: WhenFault,
+    pub key: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<String>,
+}
+
+/// Why a `when` was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WhenFault {
+    /// `when` is not a table of `name = value` pairs.
+    NotTable,
+    /// The name is neither a template parameter nor a single-valued launch resolver.
+    Unknown,
+    /// The expected value is not a string, number or boolean.
+    NotScalar,
+    /// `when` cannot be combined with this construct.
+    Unsupported,
 }
 
 impl ParameterRefusal {
@@ -326,6 +357,13 @@ impl ParameterRefusal {
             ParameterFault::Shape { key, expected } => {
                 *key = clean(key);
                 *expected = clean(expected);
+            }
+            ParameterFault::When(refusal) => {
+                refusal.key = refusal.key.as_deref().map(clean);
+                for name in &mut refusal.accepted {
+                    *name = clean(name);
+                }
+                refusal.suggestion = refusal.suggestion.as_deref().map(clean);
             }
         }
         safe
@@ -379,7 +417,7 @@ fn template_example(
         let binding = format!("{key}={literal}");
         args.push(format!("--set '{}'", binding.replace('\'', "'\\''")));
     }
-    Some(format!("provenant run --use {template} {}", args.join(" ")))
+    Some(format!("provenant run {template} {}", args.join(" ")))
 }
 
 impl std::fmt::Display for ParameterRefusal {
@@ -430,6 +468,39 @@ impl std::fmt::Display for ParameterRefusal {
             }
             ParameterFault::Shape { key, expected } => {
                 write!(f, "template {template} parameter {key} expects {expected}")
+            }
+            ParameterFault::When(refusal) => {
+                let WhenRefusal {
+                    reason,
+                    key,
+                    accepted,
+                    suggestion,
+                } = &**refusal;
+                let name = key.as_deref().unwrap_or("a name");
+                match reason {
+                    WhenFault::NotTable => {
+                        write!(f, "when must be a table of name = value conditions")
+                    }
+                    WhenFault::Unknown => {
+                        write!(
+                            f,
+                            "when names {name}, which is not a parameter or launch value here"
+                        )?;
+                        if !accepted.is_empty() {
+                            write!(f, "; available: {}", accepted.join(", "))?;
+                        }
+                        match suggestion {
+                            Some(near) => write!(f, "; did you mean {near}?"),
+                            None => Ok(()),
+                        }
+                    }
+                    WhenFault::NotScalar => {
+                        write!(f, "when {name} must expect a string, number or boolean")
+                    }
+                    WhenFault::Unsupported => {
+                        write!(f, "when cannot be combined with this node's construct")
+                    }
+                }
             }
         }
     }
@@ -507,42 +578,124 @@ fn edit_distance(left: &str, right: &str) -> usize {
     row[right.len()]
 }
 
-/// Identity of a top-level submission, inherited by dotted flavours.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SubmissionIdentity {
-    /// Each invocation starts work, even when its brief is unchanged.
-    #[default]
-    Fresh,
-    /// Equal bound content (including cwd and resolved HEAD) reuses work.
-    Content,
+/// The longest graph name. A name is a graph's id, so it also bounds the
+/// `NAME-k` suffix a changed replay appends.
+pub const MAX_GRAPH_NAME_BYTES: usize = 48;
+
+/// Whether `name` can name a graph: a lowercase ASCII letter, then lowercase
+/// letters, digits and single hyphens, not ending in a hyphen.
+pub fn graph_name_fault(name: &str) -> Option<&'static str> {
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || bytes.len() > MAX_GRAPH_NAME_BYTES {
+        return Some("a graph name is 1 to 48 bytes");
+    }
+    if !bytes[0].is_ascii_lowercase() {
+        return Some("a graph name starts with a lowercase letter");
+    }
+    if !bytes
+        .iter()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+        || name.contains("--")
+        || name.ends_with('-')
+    {
+        return Some(
+            "a graph name holds lowercase letters, digits and single hyphens, and does not end in a hyphen",
+        );
+    }
+    None
 }
 
-impl SubmissionIdentity {
-    /// An explicit operation ID replays independently of freshness and HEAD.
-    /// The caller supplies bound content and a fresh nonce, never clock time.
-    pub fn graph_id(
-        self,
-        content: &Value,
-        nonce: &str,
-        operation_id: Option<&str>,
-    ) -> Result<String, String> {
-        let identity = if let Some(operation) = operation_id {
-            serde_json::json!({"operation_id": operation})
-        } else {
-            match self {
-                Self::Fresh => serde_json::json!({"content":content,"nonce":nonce}),
-                Self::Content => serde_json::json!({"content":content}),
-            }
-        };
-        let digest =
-            provenant_records::CanonicalV1::record_digest("graph-submission", 1, &identity)
-                .map_err(|error| error.to_string())?;
-        Ok(format!(
-            "g-{}",
-            &provenant_core::hex(digest.as_bytes())[..30]
-        ))
+/// The handle a host assigns to an unnamed graph of `template`: dots and other
+/// separators become hyphens, so `review.adversarial` reads `review-adversarial`.
+pub fn default_graph_base(template: &str) -> String {
+    let mut base = String::new();
+    for character in template.chars() {
+        if character.is_ascii_alphanumeric() {
+            base.push(character.to_ascii_lowercase());
+        } else if !base.ends_with('-') && !base.is_empty() {
+            base.push('-');
+        }
     }
+    let base = base.trim_end_matches('-');
+    if !base.starts_with(|first: char| first.is_ascii_lowercase()) {
+        return "graph".into();
+    }
+    // Leave room for `-K` within the name limit.
+    base.chars()
+        .take(MAX_GRAPH_NAME_BYTES - 6)
+        .collect::<String>()
+        .trim_end_matches('-')
+        .to_owned()
+}
+
+/// The number `k` when `id` is `base-k`, the form a family member takes.
+fn family_suffix(base: &str, id: &str) -> Option<u64> {
+    let digits = id.strip_prefix(base)?.strip_prefix('-')?;
+    (!digits.is_empty()
+        && !digits.starts_with('0')
+        && digits.bytes().all(|byte| byte.is_ascii_digit()))
+    .then(|| digits.parse().ok())
+    .flatten()
+}
+
+/// What a named launch does about the graphs already holding its name's family.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NameDecision {
+    /// A graph of the family already holds this digest; start nothing.
+    Replay(String),
+    /// Start a new graph under this id. `taken` is the family member that
+    /// forced a suffix, when the plain name was already in use.
+    Create { id: String, taken: Option<String> },
+}
+
+/// Where `input` lands among `existing` graph ids. `digest_of` reads the replay
+/// digest of one graph, `None` when it has none. A named launch looks for its
+/// digest in `NAME`, `NAME-2`, `NAME-3` and so on before taking the next free
+/// `NAME-k`; an unnamed launch (`replay` false) never replays and takes the
+/// next unused `BASE-K`, counted from 1.
+pub fn decide_graph_name(
+    base: &str,
+    digest: &str,
+    replay: bool,
+    existing: &[String],
+    mut digest_of: impl FnMut(&str) -> Option<String>,
+) -> Result<NameDecision, String> {
+    let family: Vec<&String> = existing
+        .iter()
+        .filter(|id| {
+            id.as_str() == base
+                || family_suffix(base, id).is_some_and(|k| k >= if replay { 2 } else { 1 })
+        })
+        .collect();
+    if replay {
+        for id in &family {
+            if digest_of(id).is_some_and(|stored| stored == digest) {
+                return Ok(NameDecision::Replay((*id).clone()));
+            }
+        }
+        if family.is_empty() {
+            return Ok(NameDecision::Create {
+                id: base.to_owned(),
+                taken: None,
+            });
+        }
+    }
+    let next = family
+        .iter()
+        .filter_map(|id| family_suffix(base, id))
+        .max()
+        .map_or(if replay { 2 } else { 1 }, |last| last + 1)
+        .max(if replay { 2 } else { 1 });
+    let id = format!("{base}-{next}");
+    if id.len() > MAX_GRAPH_NAME_BYTES {
+        return Err(format!(
+            "graph name {base} has no room for a -{next} suffix within {MAX_GRAPH_NAME_BYTES} bytes; use a shorter --name"
+        ));
+    }
+    Ok(NameDecision::Create {
+        id,
+        taken: replay.then(|| base.to_owned()),
+    })
 }
 
 /// Review protocol selected by a template, inherited by dotted flavours.
@@ -623,9 +776,6 @@ pub enum CompositeBehaviour {
 pub struct Template {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub composite_behaviour: Option<CompositeBehaviour>,
-    /// Top-level run identity. Unspecified templates start fresh work.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub identity: Option<SubmissionIdentity>,
     /// Review output protocol, enforced independently of the brief.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<ReviewBehaviour>,
@@ -676,6 +826,47 @@ impl Template {
 
     pub fn is_composite(&self) -> bool {
         !self.nodes.is_empty()
+    }
+
+    /// Type one binding that arrived as text, as `--set NAME=VALUE` does. A
+    /// string parameter takes the text as written; an integer, number, boolean,
+    /// list or table parses it as TOML and must come out as that kind. A name the
+    /// template does not declare, and a value that is not text, pass through for
+    /// the compiler to judge. A refusal quotes the declaration, never the text.
+    pub fn type_binding(
+        &self,
+        template: &str,
+        name: &str,
+        value: Value,
+    ) -> Result<Value, ParameterRefusal> {
+        let (Some(parameter), Value::String(text)) = (self.parameters.get(name), &value) else {
+            return Ok(value);
+        };
+        if parameter.kind == ParameterKind::String {
+            return Ok(value);
+        }
+        let parsed = toml_edit::de::from_str::<Value>(&format!("value = {text}"))
+            .ok()
+            .and_then(|mut table| table.get_mut("value").map(Value::take));
+        let fits = parsed.as_ref().is_some_and(|parsed| match parameter.kind {
+            ParameterKind::String => true,
+            ParameterKind::Integer => parsed.is_i64() || parsed.is_u64(),
+            ParameterKind::Number => parsed.is_number(),
+            ParameterKind::Boolean => parsed.is_boolean(),
+            ParameterKind::List => parsed.is_array(),
+            ParameterKind::Table => parsed.is_object(),
+        });
+        match parsed {
+            Some(parsed) if fits => Ok(parsed),
+            _ => Err(ParameterRefusal {
+                node: None,
+                template: template.to_owned(),
+                fault: ParameterFault::Shape {
+                    key: name.to_owned(),
+                    expected: parameter.expected(),
+                },
+            }),
+        }
     }
 
     /// Structural checks every layer shares.
@@ -914,7 +1105,6 @@ impl Template {
         base.extra.extend(own.extra.clone());
         base.composite_behaviour = own.composite_behaviour.or(base.composite_behaviour);
         base.review = own.review.or(base.review);
-        base.identity = own.identity.or(base.identity);
         base.name = own.name.clone().or(base.name);
         base.doc = own.doc.clone().or(base.doc);
         base.parameters.extend(own.parameters.clone());
@@ -1185,6 +1375,10 @@ pub struct Compiler<'a> {
 
 static NO_RESOLVERS: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
+fn implementation_template(name: &str) -> bool {
+    name == "implement" || name.starts_with("implement.")
+}
+
 impl<'a> Compiler<'a> {
     pub fn new(library: &'a TemplateLibrary) -> Self {
         Self {
@@ -1212,7 +1406,106 @@ impl<'a> Compiler<'a> {
     }
 
     pub fn compile_all(&self, nodes: &[Value]) -> Result<Vec<GraphNode>, CompileError> {
-        nodes.iter().map(|node| self.compile(node)).collect()
+        let resolvers = self.scoped_plan_sources(nodes);
+        let compiler = Compiler {
+            library: self.library,
+            resolvers: &resolvers,
+        };
+        compiler
+            .bounded_plan_consumers(nodes)
+            .iter()
+            .map(|node| compiler.compile(node))
+            .collect()
+    }
+
+    /// Keep visible plan producers while descending into raw or template
+    /// composites. A local node shadows an outer producer of the same name.
+    pub(super) fn scoped_plan_sources(&self, nodes: &[Value]) -> BTreeMap<String, Vec<String>> {
+        let mut resolvers = self.resolvers.clone();
+        let locals: BTreeSet<&str> = nodes
+            .iter()
+            .filter_map(|node| node.get("id").and_then(Value::as_str))
+            .collect();
+        let mut sources = resolvers.remove(PLAN_SOURCES).unwrap_or_default();
+        sources.retain(|source| !locals.contains(source.as_str()));
+        sources.extend(
+            nodes
+                .iter()
+                .filter(|node| {
+                    node.get("plan").is_some_and(|plan| !plan.is_null())
+                        || node
+                            .get("use")
+                            .and_then(Value::as_str)
+                            .is_some_and(|name| name == "plan" || name.starts_with("plan."))
+                })
+                .filter_map(|node| node.get("id").and_then(Value::as_str).map(str::to_owned)),
+        );
+        sources.sort();
+        sources.dedup();
+        resolvers.insert(PLAN_SOURCES.into(), sources);
+        resolvers
+    }
+
+    /// A writer consuming a plan has already been sized. Other task outputs
+    /// do not imply a bounded brief, nor does a tier override.
+    pub(super) fn bounded_plan_consumers(&self, nodes: &[Value]) -> Vec<Value> {
+        let planners: BTreeSet<&str> = self
+            .resolvers
+            .get(PLAN_SOURCES)
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .collect();
+        nodes
+            .iter()
+            .map(|node| {
+                let mut node = node.clone();
+                if node
+                    .get("use")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| implementation_template(name) || name == "deliver")
+                    && node
+                        .get("inputs")
+                        .and_then(Value::as_array)
+                        .is_some_and(|inputs| {
+                            inputs.iter().any(|input| {
+                                input
+                                    .get("node")
+                                    .and_then(Value::as_str)
+                                    .is_some_and(|id| planners.contains(id))
+                                    && input.get("outputs").and_then(Value::as_array).is_some_and(
+                                        |outputs| outputs.iter().any(|output| output == "result"),
+                                    )
+                            })
+                        })
+                {
+                    Self::mark_bounded_implementation(&mut node);
+                }
+                node
+            })
+            .collect()
+    }
+
+    pub(super) fn mark_bounded_implementation(node: &mut Value) {
+        if !node
+            .get("use")
+            .and_then(Value::as_str)
+            .is_some_and(|name| implementation_template(name) || name == "deliver")
+        {
+            return;
+        }
+        let Some(fields) = node.as_object_mut() else {
+            return;
+        };
+        let with = fields
+            .entry("with")
+            .or_insert_with(|| serde_json::json!({}));
+        if with.is_null() {
+            *with = serde_json::json!({});
+        }
+        if let Some(with) = with.as_object_mut() {
+            with.insert("bounded".into(), Value::Bool(true));
+        }
     }
 
     fn lower_in(
@@ -1291,7 +1584,11 @@ impl<'a> Compiler<'a> {
                 true,
             )?;
         }
+        self.resolve_when(&mut node, bindings, stack)?;
         if let Some(repeat) = node.remove("repeat") {
+            if node.contains_key("when") {
+                return Err(self.when_refusal(&node, stack, WhenFault::Unsupported, None, None));
+            }
             return self.lower_repeat(node, repeat, stack);
         }
         if let Some(name) = node.remove("use") {
@@ -1346,6 +1643,14 @@ impl<'a> Compiler<'a> {
             // template, even when it is not a declared input parameter.
             if let Some(item) = bindings.get(ITEM) {
                 parameters.entry(ITEM).or_insert_with(|| item.clone());
+                if implementation_template(&name) {
+                    parameters.insert("bounded".into(), Value::Bool(true));
+                }
+            }
+            if (implementation_template(&name) || name == "deliver")
+                && self.resolvers.contains_key(BOUNDED_IMPLEMENTATION)
+            {
+                parameters.insert("bounded".into(), Value::Bool(true));
             }
             if template.composite_behaviour == Some(CompositeBehaviour::ReviewRepair)
                 && with.get("lenses").is_none()
@@ -1364,6 +1669,107 @@ impl<'a> Compiler<'a> {
         self.finish(node, stack)
     }
 
+    fn when_refusal(
+        &self,
+        node: &Map<String, Value>,
+        stack: &[String],
+        reason: WhenFault,
+        key: Option<String>,
+        accepted: Option<Vec<String>>,
+    ) -> CompileError {
+        let suggestion = key
+            .as_deref()
+            .and_then(|key| nearest_name(key, accepted.iter().flatten().map(String::as_str)));
+        CompileError::Parameter(ParameterRefusal {
+            node: node.get("id").and_then(Value::as_str).map(str::to_owned),
+            template: stack.last().cloned().unwrap_or_default(),
+            fault: ParameterFault::When(Box::new(WhenRefusal {
+                reason,
+                key: key.filter(|key| valid_identifier(key)),
+                accepted: accepted.unwrap_or_default(),
+                suggestion,
+            })),
+        })
+    }
+
+    /// Turn an authored `when` table into resolved terms. Each name is a
+    /// parameter of the enclosing template or a launch resolver holding one
+    /// value; a list already in resolved form passes through unchanged.
+    fn resolve_when(
+        &self,
+        node: &mut Map<String, Value>,
+        bindings: &Map<String, Value>,
+        stack: &[String],
+    ) -> Result<(), CompileError> {
+        let table = match node.get("when") {
+            None | Some(Value::Array(_)) => return Ok(()),
+            Some(Value::Null) => {
+                node.remove("when");
+                return Ok(());
+            }
+            Some(Value::Object(table)) => table.clone(),
+            Some(_) => {
+                return Err(self.when_refusal(node, stack, WhenFault::NotTable, None, None));
+            }
+        };
+        let available = || -> Vec<String> {
+            let mut names: Vec<String> = bindings
+                .keys()
+                .filter(|name| name.as_str() != ITEM)
+                .cloned()
+                .chain(
+                    self.resolvers
+                        .iter()
+                        .filter(|(_, values)| values.len() == 1)
+                        .map(|(name, _)| name.clone()),
+                )
+                .collect();
+            names.sort();
+            names.dedup();
+            names.truncate(64);
+            names
+        };
+        let text = |value: &Value| match value {
+            Value::String(text) => Some(text.clone()),
+            Value::Bool(flag) => Some(flag.to_string()),
+            Value::Number(number) => Some(number.to_string()),
+            _ => None,
+        };
+        let mut terms = Vec::with_capacity(table.len());
+        for (name, expected) in &table {
+            let expected = text(expected).ok_or_else(|| {
+                self.when_refusal(node, stack, WhenFault::NotScalar, Some(name.clone()), None)
+            })?;
+            let actual = match bindings.get(name).filter(|_| name != ITEM) {
+                Some(value) => text(value),
+                None => self
+                    .resolvers
+                    .get(name)
+                    .filter(|values| values.len() == 1)
+                    .map(|values| values[0].clone()),
+            }
+            .ok_or_else(|| {
+                self.when_refusal(
+                    node,
+                    stack,
+                    WhenFault::Unknown,
+                    Some(name.clone()),
+                    Some(available()),
+                )
+            })?;
+            terms.push(WhenTerm {
+                name: name.clone(),
+                expected,
+                actual,
+            });
+        }
+        node.insert(
+            "when".into(),
+            serde_json::to_value(terms).map_err(|error| error.to_string())?,
+        );
+        Ok(())
+    }
+
     /// `over` copies the node once per item inside a composite boundary, which
     /// keeps the node's identity, dependencies and inputs.
     fn lower_over(
@@ -1373,10 +1779,29 @@ impl<'a> Compiler<'a> {
         bindings: &Map<String, Value>,
         stack: &mut Vec<String>,
     ) -> Result<Value, CompileError> {
-        let items = self.items(over)?;
         let mut copy = object.clone();
         copy.remove("over");
+        self.resolve_when(&mut copy, bindings, stack)?;
+        // A stage whose condition does not hold never runs, so what it fans out
+        // over need not be bound at this launch; one placeholder keeps the
+        // skipped boundary well formed.
+        let skipped = copy
+            .get("when")
+            .and_then(Value::as_array)
+            .is_some_and(|terms| {
+                serde_json::from_value::<Vec<WhenTerm>>(Value::Array(terms.clone()))
+                    .is_ok_and(|terms| !when::holds(&terms))
+            });
+        let items = match self.items(over) {
+            Ok(items) => items,
+            Err(_) if skipped => vec!["skipped".to_owned()],
+            Err(error) => return Err(error.into()),
+        };
         let mut boundary = Map::new();
+        // The boundary and every copy share one condition.
+        if let Some(when) = copy.get("when") {
+            boundary.insert("when".into(), when.clone());
+        }
         for key in [
             "id",
             "title",
@@ -1605,8 +2030,13 @@ impl<'a> Compiler<'a> {
                 ).into());
             }
             let mut children = Vec::with_capacity(template.nodes.len());
-            for member in &template.nodes {
-                children.push(self.lower_in(member, parameters, stack)?);
+            let resolvers = self.scoped_plan_sources(&template.nodes);
+            let compiler = Compiler {
+                library: self.library,
+                resolvers: &resolvers,
+            };
+            for member in &compiler.bounded_plan_consumers(&template.nodes) {
+                children.push(compiler.lower_in(member, parameters, stack)?);
             }
             if template.composite_behaviour == Some(CompositeBehaviour::ReviewPanel)
                 && overrides.get("repair_panel") == Some(&Value::Bool(true))
@@ -1732,10 +2162,28 @@ impl<'a> Compiler<'a> {
             let exports = if template.exports.is_empty() {
                 default_exports(&children)
             } else {
-                serde_json::to_value(&template.exports)
+                // An export may carry its own `when`, resolved like a node's.
+                let mut kept = Vec::new();
+                for mut export in serde_json::to_value(&template.exports)
                     .ok()
                     .and_then(|value| value.as_array().cloned())
                     .unwrap_or_default()
+                {
+                    if let Some(table) = export.as_object_mut().and_then(|map| map.remove("when")) {
+                        let mut holder = Map::new();
+                        holder.insert("id".into(), export["node"].clone());
+                        holder.insert("when".into(), table);
+                        self.resolve_when(&mut holder, parameters, stack)?;
+                        let terms: Vec<WhenTerm> =
+                            serde_json::from_value(holder.remove("when").unwrap_or(Value::Null))
+                                .unwrap_or_default();
+                        if !terms.iter().all(WhenTerm::holds) {
+                            continue;
+                        }
+                    }
+                    kept.push(export);
+                }
+                kept
             };
             let mut composite = Map::new();
             composite.insert("nodes".into(), Value::Array(children));
@@ -1817,7 +2265,70 @@ impl<'a> Compiler<'a> {
         if let Some(review) = template.review {
             review.apply(&mut leaf);
         }
+        if implementation_template(name) && parameters.get("bounded") != Some(&Value::Bool(true)) {
+            return self.plan_implementation(leaf, stack);
+        }
         self.finish(leaf, stack)
+    }
+
+    /// Keep the implementation boundary and its exported writer outputs stable
+    /// for delivery/review consumers. Only the unplanned leaf gains a planner.
+    fn plan_implementation(
+        &self,
+        mut writer: Map<String, Value>,
+        stack: &mut Vec<String>,
+    ) -> Result<Value, CompileError> {
+        let mut boundary = Map::new();
+        for key in [
+            "id",
+            "title",
+            "after",
+            "depends_on",
+            "inputs",
+            "when",
+            "source",
+            "read_roots",
+            "attachments",
+        ] {
+            if let Some(value) = writer.remove(key) {
+                boundary.insert(key.into(), value);
+            }
+        }
+        let brief = writer
+            .get("prompt")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let scope = writer
+            .get("write_scope")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
+        let planner = self.lower_in(&serde_json::json!({
+            "id": "plan", "use": "plan", "tier": "senior",
+            "brief": format!("Size and split this implementation brief before the writer starts. Return a plan artefact with bounded slices, their acceptance evidence, optional write-scope metadata and dependency order. The writer will implement those slices in order in the supplied worktree. Changed paths outside declared scope are reported at settlement. Declared write-scope metadata: {scope}.\n\n{brief}")
+        }), &Map::new(), stack)?;
+        writer.insert("id".into(), Value::String("writer".into()));
+        writer.insert("after".into(), serde_json::json!(["plan"]));
+        writer.insert(
+            "inputs".into(),
+            serde_json::json!([{"node":"plan", "outputs":["result"]}]),
+        );
+        // Export only what the writer leaf supplies: an explicitly read-only
+        // implementation has no branch or commit to hand on.
+        let outputs = if writer.get("access").and_then(Value::as_str) == Some("worktree_write") {
+            serde_json::json!(["result", "branch", "commit"])
+        } else {
+            serde_json::json!(["result"])
+        };
+        boundary.insert("kind".into(), Value::String("composite".into()));
+        boundary.insert("access".into(), Value::String("read_only".into()));
+        boundary.insert(
+            "composite".into(),
+            serde_json::json!({
+                "nodes": [planner, self.finish(writer, stack)?],
+                "exports": [{"node":"writer", "outputs":outputs}]
+            }),
+        );
+        self.finish(boundary, stack)
     }
 
     /// Normalise node spelling and lower nested members.
@@ -1837,11 +2348,29 @@ impl<'a> Compiler<'a> {
                 .and_then(|spec| spec.get_mut(key))
                 .and_then(Value::as_array_mut)
             {
-                for member in members.iter_mut() {
-                    if needs_lowering(member) {
-                        *member = self.lower_in(member, &Map::new(), stack)?;
+                let resolvers = self.scoped_plan_sources(members);
+                let compiler = Compiler {
+                    library: self.library,
+                    resolvers: &resolvers,
+                };
+                let authored = compiler.bounded_plan_consumers(members);
+                for (member, authored) in members.iter_mut().zip(authored) {
+                    if needs_lowering(&authored) {
+                        *member = compiler.lower_in(&authored, &Map::new(), stack)?;
                     }
                 }
+            }
+        }
+        // A skipped composite skips everything inside it.
+        if let Some(Value::Array(terms)) = node.get("when").cloned()
+            && !terms.is_empty()
+            && let Some(members) = node
+                .get_mut("composite")
+                .and_then(|spec| spec.get_mut("nodes"))
+                .and_then(Value::as_array_mut)
+        {
+            for member in members {
+                inherit_when(member, &terms);
             }
         }
         self.finish_shallow(node)
@@ -1881,6 +2410,32 @@ impl<'a> Compiler<'a> {
     }
 }
 
+/// Add a composite's conditions to a member and, in turn, to its own members.
+fn inherit_when(member: &mut Value, terms: &[Value]) {
+    let Some(fields) = member.as_object_mut() else {
+        return;
+    };
+    let own = fields
+        .entry("when")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if let Some(own) = own.as_array_mut() {
+        for term in terms {
+            if !own.contains(term) {
+                own.push(term.clone());
+            }
+        }
+    }
+    if let Some(members) = fields
+        .get_mut("composite")
+        .and_then(|spec| spec.get_mut("nodes"))
+        .and_then(Value::as_array_mut)
+    {
+        for member in members {
+            inherit_when(member, terms);
+        }
+    }
+}
+
 /// Raw passthrough nodes (as presets lower them) stay byte-identical.
 fn needs_lowering(node: &Value) -> bool {
     node.as_object().is_some_and(|object| {
@@ -1895,6 +2450,8 @@ fn needs_lowering(node: &Value) -> bool {
         ]
         .iter()
         .any(|key| object.contains_key(*key))
+            // A resolved `when` is a list; only the authored table needs lowering.
+            || object.get("when").is_some_and(|when| !when.is_array())
             || object
                 .get("composite")
                 .and_then(|spec| spec.get("nodes"))

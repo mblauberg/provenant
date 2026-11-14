@@ -248,7 +248,14 @@ fn occupancy_keeps_scoped_census_evidence_and_held_lease_priority() -> Result<()
         keep: &[],
         written_before_ns: i128::MAX,
         dry_run: false,
-        foreign_merged_clean: false,
+        include_foreign: false,
+        retirement_port: None,
+        retirement_feeds: None,
+        mode: CollectionMode::Worktrees,
+        proof: None,
+        upstream_reference: None,
+        integration_patterns: &[],
+        excluded_paths: &[],
     };
     collect(
         &context,
@@ -796,8 +803,14 @@ fn owned_cleanup_rechecks_regenerated_output_and_keep_paths() -> Result<(), Box<
             },
             &cancel(),
         )?;
+        let retirement = HostRetirementFixture::new(&test)?;
         let attempt = provenant_core::AttemptId::from_bytes([7; 16]);
         let tree = verify_worktree(&fixture.repo, &info.path)?;
+        let branch = GitRefName::branch("regenerated")?;
+        let reference = RefLedger::for_context(&context)?
+            .load(&RefEndpoint::Local, &branch)?
+            .ok_or("created lane has no RefLedger ownership")?
+            .ownership();
         save_owner(
             &tree,
             &WorktreeOwner {
@@ -809,9 +822,19 @@ fn owned_cleanup_rechecks_regenerated_output_and_keep_paths() -> Result<(), Box<
                 created_at: context.clock.wall_now()?,
                 origin: WorktreeOrigin::Lane,
                 label: None,
-                reference: None,
+                reference: Some(reference),
             },
         )?;
+        let lane = list(&context, &cancel())?
+            .into_iter()
+            .find(|lane| lane.path == info.path)
+            .ok_or("created lane is absent from the worktree list")?;
+        retirement.seed_lane(&context, &lane)?;
+        let evidence = gc_landing_evidence(&fixture, info.head)?;
+        let decision = provenant_records::custody::RetirementDecision::RetireWorktree {
+            authority: provenant_core::ActorId::from_bytes([1; 16]),
+            evidence: provenant_records::custody::RemovalEvidence::Landing { evidence },
+        };
         let output = info.path.join("saved/new");
         fs::create_dir_all(info.path.join("build"))?;
         fs::write(info.path.join("build/old"), "initial output")?;
@@ -838,7 +861,14 @@ fn owned_cleanup_rechecks_regenerated_output_and_keep_paths() -> Result<(), Box<
             regenerable: &["build".into(), "saved".into()],
             keep: &kept,
             written_before_ns: i128::MAX,
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement_port: Some(&retirement),
+            retirement_feeds: Some(&retirement),
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
             dry_run: false,
         };
         let result = prune_owned(
@@ -848,6 +878,9 @@ fn owned_cleanup_rechecks_regenerated_output_and_keep_paths() -> Result<(), Box<
             info.head,
             info.head,
             &policy,
+            &retirement,
+            decision.clone(),
+            |_| Ok(()),
             &cancel(),
         );
         assert_eq!(
@@ -859,7 +892,9 @@ fn owned_cleanup_rechecks_regenerated_output_and_keep_paths() -> Result<(), Box<
             assert!(matches!(result, Err(WorktreeError::IgnoredPaths(_))));
             assert_eq!(fs::read_to_string(&output)?, "regenerated output");
         } else {
-            assert_eq!(result?.removed.len(), 1);
+            let (report, record) = result?;
+            assert_eq!(report.removed.len(), 1);
+            assert!(record.valid_evidence());
             assert!(!info.path.exists());
         }
     }
@@ -880,8 +915,14 @@ fn owned_cleanup_refuses_dirty_unmerged_and_adopted_trees() -> Result<(), Box<dy
         },
         &cancel(),
     )?;
+    let retirement = HostRetirementFixture::new(&test)?;
     let tree = verify_worktree(&fixture.repo, &info.path)?;
     let attempt = provenant_core::AttemptId::from_bytes([7; 16]);
+    let branch = GitRefName::branch("owned")?;
+    let reference = RefLedger::for_context(&context)?
+        .load(&RefEndpoint::Local, &branch)?
+        .ok_or("created lane has no RefLedger ownership")?
+        .ownership();
     let mut owner = WorktreeOwner {
         attempt_id: Some(attempt),
         operation_id: Some("owned-create".parse()?),
@@ -891,9 +932,19 @@ fn owned_cleanup_refuses_dirty_unmerged_and_adopted_trees() -> Result<(), Box<dy
         created_at: context.clock.wall_now()?,
         origin: WorktreeOrigin::Lane,
         label: None,
-        reference: None,
+        reference: Some(reference),
     };
     save_owner(&tree, &owner)?;
+    let lane = list(&context, &cancel())?
+        .into_iter()
+        .find(|lane| lane.path == info.path)
+        .ok_or("created lane is absent from the worktree list")?;
+    retirement.seed_lane(&context, &lane)?;
+    let evidence = gc_landing_evidence(&fixture, base)?;
+    let decision = provenant_records::custody::RetirementDecision::RetireWorktree {
+        authority: provenant_core::ActorId::from_bytes([1; 16]),
+        evidence: provenant_records::custody::RemovalEvidence::Landing { evidence },
+    };
     let policy = WorktreeGcPolicy {
         upstream: Some(base),
         terminal: &|_| true,
@@ -901,7 +952,14 @@ fn owned_cleanup_refuses_dirty_unmerged_and_adopted_trees() -> Result<(), Box<dy
         regenerable: &[],
         keep: &[],
         written_before_ns: i128::MAX,
-        foreign_merged_clean: false,
+        include_foreign: false,
+        retirement_port: Some(&retirement),
+        retirement_feeds: Some(&retirement),
+        mode: CollectionMode::Worktrees,
+        proof: None,
+        upstream_reference: None,
+        integration_patterns: &[],
+        excluded_paths: &[],
         dry_run: false,
     };
     fs::write(info.path.join("dirty"), "keep")?;
@@ -913,6 +971,9 @@ fn owned_cleanup_refuses_dirty_unmerged_and_adopted_trees() -> Result<(), Box<dy
             base,
             base,
             &policy,
+            &retirement,
+            decision.clone(),
+            |_| Ok(()),
             &cancel()
         )
         .is_err()
@@ -928,6 +989,9 @@ fn owned_cleanup_refuses_dirty_unmerged_and_adopted_trees() -> Result<(), Box<dy
             base,
             base,
             &policy,
+            &retirement,
+            decision.clone(),
+            |_| Ok(()),
             &cancel()
         )
         .is_err()
@@ -946,6 +1010,9 @@ fn owned_cleanup_refuses_dirty_unmerged_and_adopted_trees() -> Result<(), Box<dy
             base,
             base,
             &denied,
+            &retirement,
+            decision.clone(),
+            |_| Ok(()),
             &cancel()
         )
         .is_err()
@@ -972,6 +1039,9 @@ fn owned_cleanup_refuses_dirty_unmerged_and_adopted_trees() -> Result<(), Box<dy
             head,
             base,
             &policy,
+            &retirement,
+            decision.clone(),
+            |_| Ok(()),
             &cancel()
         )
         .is_err()
@@ -980,16 +1050,24 @@ fn owned_cleanup_refuses_dirty_unmerged_and_adopted_trees() -> Result<(), Box<dy
         upstream: None,
         ..policy
     };
-    let removed = prune_owned(
+    let retained_decision = provenant_records::custody::RetirementDecision::RetireWorktree {
+        authority: provenant_core::ActorId::from_bytes([1; 16]),
+        evidence: provenant_records::custody::RemovalEvidence::IdleRetirement { tip: head },
+    };
+    let (removed, record) = prune_owned(
         &context,
         &info.path,
         attempt,
         head,
         head,
         &pushed_policy,
+        &retirement,
+        retained_decision,
+        |_| Ok(()),
         &cancel(),
     )?;
     assert_eq!(removed.removed.len(), 1);
+    assert!(record.valid_evidence());
     assert!(!info.path.exists());
     assert!(removed.pruned_refs.is_empty());
     assert!(
@@ -1003,21 +1081,16 @@ fn owned_cleanup_refuses_dirty_unmerged_and_adopted_trees() -> Result<(), Box<dy
 }
 
 #[test]
-fn transient_held_path_is_reobserved_but_persistent_holder_refuses() -> Result<(), Box<dyn Error>> {
-    transient_holder_is_reobserved_but_persistent_holder_refuses(ProcessEvidenceKind::OtherHeldPath)
+fn observed_held_path_is_advisory_for_launch() -> Result<(), Box<dyn Error>> {
+    observed_holder_is_advisory_for_launch(ProcessEvidenceKind::OtherHeldPath)
 }
 
 #[test]
-fn transient_working_directory_holder_is_reobserved_but_persistent_holder_refuses()
--> Result<(), Box<dyn Error>> {
-    transient_holder_is_reobserved_but_persistent_holder_refuses(
-        ProcessEvidenceKind::WorkingDirectory,
-    )
+fn observed_working_directory_is_advisory_for_launch() -> Result<(), Box<dyn Error>> {
+    observed_holder_is_advisory_for_launch(ProcessEvidenceKind::WorkingDirectory)
 }
 
-fn transient_holder_is_reobserved_but_persistent_holder_refuses(
-    kind: ProcessEvidenceKind,
-) -> Result<(), Box<dyn Error>> {
+fn observed_holder_is_advisory_for_launch(kind: ProcessEvidenceKind) -> Result<(), Box<dyn Error>> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct Holder {
         calls: AtomicUsize,
@@ -1074,24 +1147,9 @@ fn transient_holder_is_reobserved_but_persistent_holder_refuses(
         Err(WorktreeError::LiveWriter | WorktreeError::LiveProcess(_))
     ));
     assert_eq!(transient.calls.load(Ordering::SeqCst), 1);
-    transient.calls.store(0, Ordering::SeqCst);
     fast_forward(&context, &info.path, info.head, &cancel())?;
-    assert_eq!(transient.calls.load(Ordering::SeqCst), 5);
-    let persistent = Holder {
-        calls: AtomicUsize::new(0),
-        persistent: true,
-        kind,
-    };
-    context.workers = &persistent;
-    context.lock_budget = WaitBudget::up_to(
-        context.clock.mono_now(),
-        provenant_core::DurationMicros::from_micros(350_000),
-    );
-    assert!(matches!(
-        fast_forward(&context, &info.path, info.head, &cancel()),
-        Err(WorktreeError::LiveWriter | WorktreeError::LiveProcess(_))
-    ));
-    assert!(persistent.calls.load(Ordering::SeqCst) >= 1);
+    let held = lock_worktree_for_launch(&context, entry, &cancel())?;
+    drop(held);
     Ok(())
 }
 
@@ -1242,5 +1300,51 @@ fn writer_git_preparation_leaves_the_shared_registry_free() -> Result<(), Box<dy
     fixture.run(&["commit", "--allow-empty", "-m", "source"])?;
     fast_forward(&context, &info.path, fixture.head()?, &cancel())?;
     assert!(probe.calls.load(std::sync::atomic::Ordering::SeqCst) > 0);
+    Ok(())
+}
+
+#[test]
+fn unknown_unrelated_process_does_not_block_a_writer() -> Result<(), Box<dyn Error>> {
+    struct Unknown;
+    impl WorkerObserver for Unknown {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| {
+                    (
+                        root.clone(),
+                        Occupancy::census_unknown(root, "unrelated process unavailable"),
+                    )
+                })
+                .collect()
+        }
+        fn requires_complete_census(&self) -> bool {
+            true
+        }
+    }
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let info = create(
+        &context,
+        WorktreeCreate {
+            branch: "advisory-census".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    context.workers = &Unknown;
+    let entries = context.facts.fresh_inventory(&context, &cancel())?;
+    let entry = entries
+        .iter()
+        .find(|entry| entry.path == info.path)
+        .ok_or("worktree entry")?;
+    let writer = lock_worktree_for_launch(&context, entry, &cancel())?;
+    assert!(matches!(
+        lock_worktree_for_launch(&context, entry, &cancel()),
+        Err(WorktreeError::LockBusy)
+    ));
+    drop(writer);
     Ok(())
 }

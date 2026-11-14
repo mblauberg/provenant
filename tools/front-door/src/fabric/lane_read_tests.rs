@@ -7,7 +7,7 @@
 )]
 use super::*;
 use crate::worktree_tests::support::{Result, TestRig, code};
-use provenant_core::{AttemptId, RunId, TaskId};
+use provenant_core::AttemptId;
 use provenant_fabric_runtime::graph::{
     FileJournal, GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
 };
@@ -144,27 +144,21 @@ fn settled_attempt(
         52
     };
     let id = AttemptId::from_bytes([number; 16]);
-    let run = RunId::from_bytes([number; 16]);
-    let task = TaskId::from_bytes([number; 16]);
     let prompt = "fixture child";
     let request = serde_json::from_value(json!({
-        "schema_version":1,"concurrency":1,"parent":null,
-        "tasks":[{"task_id":task,"prompt_digest":CanonicalV1::file_digest(prompt.as_bytes()),
-            "context":{"graph_id":graph,"node_id":if success {"parent--success"} else {"parent--failure"}},
+        "schema_version":1,"parent":null,
+        "task":{"prompt_digest":CanonicalV1::file_digest(prompt.as_bytes()),
+            "context":{"graph_id":graph,"node_id":if success {"parent--success"} else {"parent--failure"},"attempt":1},
             "route":{"kind":"model","provider":"codex","model":"gpt-6-luna","effort":null},
             "authority_digest":provenant_core::Digest::from_bytes([7;32]),
-            "provider_timeout_seconds":30,"delivery_id":null}]
+            "provider_timeout_seconds":30,"delivery_id":null}
     }))?;
     store.create(
         &provenant_run::PreparedRun {
-            run_id: run,
+            attempt_id: id,
             operation_id: format!("lane-read-{number}").parse()?,
             request,
-            attempts: vec![provenant_run::NewAttempt {
-                attempt_id: id,
-                task_id: task,
-                prompt: prompt.into(),
-            }],
+            prompt: prompt.into(),
             created_at: clock.wall_now()?,
         },
         &call,
@@ -174,7 +168,6 @@ fn settled_attempt(
         launch_refusal: None,
         publication: PublicationState::Durable,
         scope: Scope {
-            run,
             attempt: id,
             generation: record.generation,
         },
@@ -204,13 +197,8 @@ fn settled_attempt(
     let fields = sealed_exit.as_object_mut().ok_or("exit object")?;
     fields.remove("publication");
     fields.insert("schema_version".into(), 1.into());
-    let directory = provenant_os::fs::Directory::open_anchor(
-        &rig.state
-            .join("runs")
-            .join(run.to_string())
-            .join("attempts")
-            .join(id.to_string()),
-    )?;
+    let directory =
+        provenant_os::fs::Directory::open_anchor(&rig.state.join("attempts").join(id.to_string()))?;
     directory
         .atomic_write(
             std::ffi::OsStr::new("process-exit.json"),
@@ -228,6 +216,7 @@ fn settled_attempt(
         id,
         record.revision,
         &provenant_run::TerminalPublication {
+            handoff: None,
             terminal_cause: None,
             terminal_note: None,
             outcome: if success {
@@ -245,10 +234,8 @@ fn settled_attempt(
             },
             result: if success {
                 "child result reached parent"
-            } else if graph == "lane-read-children" {
-                "child provider failure details"
             } else {
-                "unrelated project secret"
+                "child provider failure details"
             },
             complete: true,
             redacted: false,
@@ -282,9 +269,9 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
     let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
         "schema_version":1,"graph_id":graph,"plan_digest":"fixture",
         "nodes":[
-            {"id":"parent","state":"running","attempts":[{"key":{"graph_id":graph,"node_id":"parent","route_index":0},"launched":true,"route":{"alias":"senior"},"state":"running","attempt_ref":reference(caller),"launch_actor":"fixture"}]},
-            {"id":"parent--success","state":"succeeded","attempts":[{"key":{"graph_id":graph,"node_id":"parent--success","route_index":0},"launched":true,"route":{"alias":"junior"},"state":"terminal","attempt_ref":reference(success),"launch_actor":"fixture","outcome":"succeeded"}]},
-            {"id":"parent--failure","state":"failed","advance_error_code":"launch_refused","advance_owner_code":"command_unavailable","advance_error":"configure the fixture provider command","attempts":[{"key":{"graph_id":graph,"node_id":"parent--failure","route_index":0},"launched":true,"route":{"alias":"junior"},"state":"terminal","attempt_ref":reference(failure),"launch_actor":"fixture","outcome":"task_failed"}]}
+            {"id":"parent","state":"running","attempts":[{"key":{"graph_id":graph,"node_id":"parent","route_index":0, "attempt": 1},"launched":true,"route":{"alias":"senior"},"state":"running","attempt_ref":reference(caller),"launch_actor":"fixture"}]},
+            {"id":"parent--success","state":"succeeded","attempts":[{"key":{"graph_id":graph,"node_id":"parent--success","route_index":0, "attempt": 1},"launched":true,"route":{"alias":"junior"},"state":"terminal","attempt_ref":reference(success),"launch_actor":"fixture","outcome":"succeeded"}]},
+            {"id":"parent--failure","state":"failed","advance_error_code":"launch_refused","advance_owner_code":"command_unavailable","advance_error":"configure the fixture provider command","attempts":[{"key":{"graph_id":graph,"node_id":"parent--failure","route_index":0, "attempt": 1},"launched":true,"route":{"alias":"junior"},"state":"terminal","attempt_ref":reference(failure),"launch_actor":"fixture","outcome":"task_failed"}]}
         ]
     }))?;
     let document: GraphDocument = serde_json::from_value(
@@ -306,48 +293,13 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
         &clock,
     )?;
     journal.bind(GraphExecution {
-        review_base: None,
         extra: Default::default(),
-        integration_base: None,
+        bases: None,
         directory: rig.project.clone(),
         document,
     })?;
     journal.save(&checkpoint)?;
     drop(journal);
-    // A graph ID can equal a permitted bare attempt ID. Its result must never
-    // replace the attempt selected by the relay's authorisation.
-    let collision = success.to_string();
-    let unrelated_attempt = settled_attempt(&context, &rig, false, &collision)?;
-    let unrelated_document: GraphDocument = serde_json::from_value(json!({
-        "schema_version":2,"graph_id":collision,"nodes":[
-            {"id":"parent--failure","access":"read_only","prompt":"unrelated","route":{"alias":"junior"}}
-        ]
-    }))?;
-    let unrelated_checkpoint: GraphCheckpoint = serde_json::from_value(json!({
-        "schema_version":1,"graph_id":collision,"plan_digest":"fixture",
-        "nodes":[{"id":"parent--failure","state":"failed","attempts":[{
-            "key":{"graph_id":collision,"node_id":"parent--failure","route_index":0},
-            "launched":true,"route":{"alias":"junior"},"state":"terminal",
-            "attempt_ref":reference(unrelated_attempt),"launch_actor":"fixture","outcome":"task_failed"
-        }]}]
-    }))?;
-    let mut unrelated = FileJournal::open(
-        &context.roots.state,
-        context.identity.project,
-        &collision,
-        budget,
-        &cancel,
-        &clock,
-    )?;
-    unrelated.bind(GraphExecution {
-        review_base: None,
-        extra: Default::default(),
-        integration_base: None,
-        directory: rig.project.clone(),
-        document: unrelated_document,
-    })?;
-    unrelated.save(&unrelated_checkpoint)?;
-    drop(unrelated);
     let mut holder = provenant_run::HolderContext {
         schema_version: 1,
         roots: provenant_run::RootSeed {
@@ -357,7 +309,7 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
         },
         project_id: context.identity.project,
         actor_id: context.identity.inbox.actor,
-        run_id: RunId::from_bytes([53; 16]),
+
         attempt_id: caller,
         host_delivery: None,
         sealed: None,
@@ -446,34 +398,43 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
     assert!(!host_holder.has_live_children(&serde_json::to_vec(&foreign_holder)?)?);
     let foreign_read = super::read_lane_graph(
         &foreign_holder,
-        json!({"op":"output","id":"parent--success"}),
+        json!({"op":"output","id":"lane-read-children/parent--success"}),
         &cancel,
         std::time::Duration::from_secs(30),
         &provenant_confinement::worktrees::SystemWorkerObserver,
     )?;
     assert_eq!(foreign_read["bytes"]["data"], "child result reached parent");
-    let unrelated_result = super::read_lane_graph(
-        &holder,
-        json!({"op":"output","id":collision}),
-        &cancel,
-        std::time::Duration::from_secs(30),
-        &provenant_confinement::worktrees::SystemWorkerObserver,
-    )?;
-    assert_eq!(
-        unrelated_result["bytes"]["data"],
-        "unrelated project secret"
-    );
+    // A malformed target is the caller's input, never a host I/O failure.
+    assert!(matches!(
+        super::read_lane_graph(
+            &holder,
+            json!({"op":"output","id":"parent--success"}),
+            &cancel,
+            std::time::Duration::from_secs(30),
+            &provenant_confinement::worktrees::SystemWorkerObserver,
+        ),
+        Err(ServiceError::Facade(FacadeError::InvalidInput { .. }))
+    ));
     let result = read(json!({"op":"output","id":"parent--success"}))?;
     assert_eq!(
         result["bytes"]["data"], "child result reached parent",
         "{result}"
     );
-    for selector in [success.to_string(), reference(success)] {
+    // Inside a lane, targets name the calling graph's own nodes; attempt IDs
+    // are not targets (cli.md "Targets").
+    for selector in [
+        "lane-read-children/parent--success",
+        "lane-read-children/parent--success#1",
+        "parent--success#1",
+    ] {
         let output = read(json!({"op":"output","id":selector}))?;
         assert_eq!(
             output["bytes"]["data"], "child result reached parent",
             "{output}"
         );
+    }
+    for selector in [success.to_string(), reference(success)] {
+        assert!(read(json!({"op":"output","id":selector})).is_err());
     }
     let failure_result = read(json!({"op":"output","id":"parent--failure"}))?;
     assert_eq!(
@@ -504,7 +465,7 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
             .ok_or("host trace events")?
             .is_empty()
     );
-    for selector in [success.to_string(), reference(success)] {
+    for selector in ["parent--success", "lane-read-children/parent--success"] {
         let trace = read(json!({"op":"trace","id":selector}))?;
         let events = trace["events"].as_array().ok_or("child attempt trace")?;
         assert!(!events.is_empty());
@@ -515,12 +476,12 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
         );
     }
     assert!(read(json!({"op":"output","id":"another-graph/parent"})).is_err());
-    let relay = provenant_fabric_mcp::lane::HostRelay::start_with_graph(
+    let relay = provenant_fabric_runtime::relay::HostRelay::start_with_graph(
         provenant_providers::LaneRuntime::fabric_socket(caller),
         Default::default(),
         |_, _, _| Err(ServiceError::FabricOwnerUnavailable),
         move |arguments, cancel, within| {
-            let budget = provenant_fabric_mcp::lane::host_budget(&clock, within)?;
+            let budget = provenant_fabric_runtime::relay::host_budget(&clock, within)?;
             provenant_cli::fabric::graph_relay::serve_with_read(
                 &context,
                 &caller.to_string(),
@@ -563,7 +524,11 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
             caller.to_string().into(),
         ),
     ]);
-    let result = lane_command(&rig, &["output", "parent--success", "--json"], 0)?;
+    let result = lane_command(
+        &rig,
+        &["output", "lane-read-children/parent--success", "--json"],
+        0,
+    )?;
     assert_eq!(
         result["data"]["bytes"]["data"],
         "child result reached parent"
@@ -573,7 +538,7 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
         &rig,
         &[
             "output",
-            "parent--success",
+            "lane-read-children/parent--success",
             "--to",
             destination.to_str().ok_or("output destination")?,
             "--json",
@@ -588,7 +553,11 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
     let path: provenant_records::StructuredPathWire =
         serde_json::from_value(written["data"]["to"].clone())?;
     assert_eq!(path.to_path_buf()?, std::fs::canonicalize(&destination)?);
-    let failure = lane_command(&rig, &["output", "parent--failure", "--json"], 0)?;
+    let failure = lane_command(
+        &rig,
+        &["output", "lane-read-children/parent--failure", "--json"],
+        0,
+    )?;
     assert_eq!(
         failure["data"]["bytes"]["data"],
         "child provider failure details"
@@ -610,27 +579,18 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
     );
     let waited = lane_command(
         &rig,
-        &[
-            "status",
-            "--target",
-            "graph:lane-read-children",
-            "--wait=1s",
-            "--follow",
-            "--json",
-        ],
+        &["wait", "lane-read-children", "--timeout", "1s", "--json"],
         124,
     )?;
-    assert_eq!(waited["event"], "snapshot");
-    assert_eq!(waited["target"], "graph:lane-read-children");
-    assert_eq!(waited["terminal"], false);
+    assert_eq!(waited["data"]["timed_out"], true);
     assert!(
-        waited["data"]["rows"]
+        waited["data"]["targets"][0]["data"]["rows"]
             .as_array()
             .ok_or("wait status rows")?
             .iter()
             .any(|row| row["node_id"] == "parent--failure" && row["state"] == "failed")
     );
-    let trace = lane_command(&rig, &["output", graph, "--trace", "--json"], 0)?;
+    let trace = lane_command(&rig, &["trace", graph, "--json"], 0)?;
     assert!(
         !trace["data"]["events"]
             .as_array()
@@ -639,15 +599,16 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
     );
     let denied = lane_command(&rig, &["output", "another-graph/parent", "--json"], 3)?;
     assert!(
-        denied["data"]["error"]
+        denied["error"]["message"]
             .as_str()
-            .is_some_and(|reason| reason.contains("not_found"))
+            .is_some_and(|reason| reason.contains("not_found")),
+        "{denied}"
     );
     assert_eq!(std::fs::read_dir(child_state)?.count(), 0);
     if let Some(launch) = native_lane(&rig, caller)? {
         let result = lane_command_with_launch(
             &rig,
-            &["output", "parent--success", "--json"],
+            &["output", "lane-read-children/parent--success", "--json"],
             0,
             Some(&launch),
         )?;
@@ -657,7 +618,7 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
         );
         let failure = lane_command_with_launch(
             &rig,
-            &["output", "parent--failure", "--json"],
+            &["output", "lane-read-children/parent--failure", "--json"],
             0,
             Some(&launch),
         )?;
@@ -666,12 +627,7 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
             "command_unavailable"
         );
         lane_command_with_launch(&rig, &["status", graph, "--json"], 0, Some(&launch))?;
-        lane_command_with_launch(
-            &rig,
-            &["output", graph, "--trace", "--json"],
-            0,
-            Some(&launch),
-        )?;
+        lane_command_with_launch(&rig, &["trace", graph, "--json"], 0, Some(&launch))?;
     }
     drop(relay);
     Ok(())
@@ -699,7 +655,8 @@ fn native_lane(
         }
     };
     let scratch = rig.root.join("native-lane-scratch");
-    std::fs::create_dir(&scratch)?;
+    // Lane scratch is private to the user, as the launcher creates it.
+    provenant_os::fixture::private_state_dir(&scratch)?;
     let grant = |path, scope| PathGrant { path, scope };
     let executable = std::fs::canonicalize(std::env::current_exe()?)?;
     let git = std::fs::canonicalize(provenant_os::git::git_executable().ok_or("Git unavailable")?)?;

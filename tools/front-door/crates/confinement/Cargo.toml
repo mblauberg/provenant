@@ -25,6 +25,7 @@ snapshot = []
 
 [dev-dependencies]
 provenant-test-support = { path = "../test-support" }
+provenant-fabric-store = { path = "../fabric-store" }
 provenant-os = { workspace = true, features = ["fixture"] }
 provenant-supervisor = { workspace = true, features = ["fixture"] }
 tempfile = { workspace = true }

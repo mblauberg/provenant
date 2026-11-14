@@ -3,11 +3,6 @@ use super::{LandingError, model::*, ports::*};
 use provenant_cli::domains::MergeMethod;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-type WaitReads = (
-    std::rc::Rc<std::cell::Cell<bool>>,
-    std::rc::Rc<std::cell::Cell<usize>>,
-);
-
 #[derive(Default)]
 pub struct FakeForge {
     pub target_branch: String,
@@ -15,12 +10,13 @@ pub struct FakeForge {
     pub move_after_merge: Option<(u64, String)>,
     pub pull_requests: BTreeMap<u64, PullRequestInfo>,
     pub stacks: BTreeMap<u64, Vec<StackMember>>,
-    pub after_wait_reads: Option<WaitReads>,
     pub heads: BTreeMap<u64, String>,
     pub head_reads: BTreeMap<u64, VecDeque<String>>,
     pub approvals_at_head: BTreeMap<(u64, String), Vec<Approval>>,
     pub check_runs: BTreeMap<String, Vec<GateEvidence>>,
+    pub check_sequences: BTreeMap<String, VecDeque<Vec<GateEvidence>>>,
     pub check_timeouts: Vec<std::time::Duration>,
+    pub next_observation_interval: Option<std::time::Duration>,
     pub labels: BTreeMap<u64, Vec<String>>,
     pub direct_push: bool,
     pub lose_merge_response: bool,
@@ -39,6 +35,9 @@ pub struct FakeForge {
     pub reverts: Vec<(u64, String, String, String)>,
 }
 impl Forge for FakeForge {
+    fn observation_interval(&self) -> Option<std::time::Duration> {
+        self.next_observation_interval
+    }
     fn stack_members(&mut self, number: u64) -> Result<Vec<StackMember>, LandingError> {
         self.stacks
             .get(&number)
@@ -49,11 +48,6 @@ impl Forge for FakeForge {
         Ok("fake-repository".into())
     }
     fn pull_request(&mut self, number: u64) -> Result<PullRequestInfo, LandingError> {
-        if let Some((waited, reads)) = &self.after_wait_reads
-            && waited.get()
-        {
-            reads.set(reads.get() + 1);
-        }
         self.pull_requests
             .get(&number)
             .cloned()
@@ -90,6 +84,13 @@ impl Forge for FakeForge {
     }
     #[allow(clippy::disallowed_methods, reason = "simulate a slow forge in tests")]
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError> {
+        if let Some(observation) = self
+            .check_sequences
+            .get_mut(commit)
+            .and_then(VecDeque::pop_front)
+        {
+            return Ok(observation);
+        }
         Ok(self.check_runs.get(commit).cloned().unwrap_or_default())
     }
     fn checks_with_timeout(
@@ -217,7 +218,7 @@ impl FakeReviews {
     }
 }
 impl ReviewRecords for FakeReviews {
-    fn reviews(&self, number: u64) -> Result<Reviews, LandingError> {
+    fn reviews(&self, number: u64, _head: &str) -> Result<Reviews, LandingError> {
         if let Some(failure) = &self.failure {
             return Err(LandingError::Failed(failure.clone()));
         }
@@ -229,6 +230,9 @@ impl ReviewRecords for FakeReviews {
 }
 #[derive(Default)]
 pub struct FakeRepo {
+    pub command_calls: Vec<PendingAttempt>,
+    pub command_result: Option<Result<PublishResult, LandingError>>,
+    pub command_publishes: bool,
     pub target: String,
     pub shared_target: Option<std::rc::Rc<std::cell::RefCell<String>>>,
     pub fail_fetch: Option<std::rc::Rc<std::cell::Cell<bool>>>,
@@ -256,6 +260,27 @@ pub struct FakeRepo {
     pub local_followed: Vec<u64>,
 }
 impl Repo for FakeRepo {
+    fn publish_command(
+        &mut self,
+        _command: &provenant_records::landing::RepositoryCommand,
+        attempt: &PendingAttempt,
+    ) -> Result<PublishResult, LandingError> {
+        self.command_calls.push(attempt.clone());
+        if self.command_publishes {
+            self.target = attempt.candidate.commit.clone();
+        }
+        self.command_result.take().unwrap_or_else(|| {
+            Ok(PublishResult {
+                landed: attempt
+                    .candidate
+                    .steps
+                    .iter()
+                    .map(|step| step.commit.clone())
+                    .collect(),
+                alarms: Vec::new(),
+            })
+        })
+    }
     fn follow_local(&mut self, pr: &EligiblePr) -> Result<bool, LandingError> {
         self.local_followed.push(pr.number);
         if self.fail_local || self.fail_local_at == Some(pr.number) {

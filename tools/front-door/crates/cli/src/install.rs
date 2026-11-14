@@ -29,7 +29,7 @@ pub struct Install {
     /// Plan the install without changing anything
     #[arg(long)]
     pub dry_run: bool,
-    /// Check state before a graph cutover (installer use only)
+    /// Preview the install and check the release without changing anything (installer use only)
     #[arg(long, hide = true)]
     pub upgrade_preflight: bool,
 }
@@ -43,7 +43,7 @@ pub struct Uninstall {
 
 #[derive(Debug, clap::Args)]
 pub struct Upgrade {
-    /// Proceed after the upgrade preflight reports work to drain or port
+    /// Accept the pinned toolchain install
     #[arg(long)]
     pub yes: bool,
     /// Build this checkout instead of downloading the latest release
@@ -74,9 +74,12 @@ pub fn configured_targets(
     codex_home: Option<&Path>,
 ) -> Result<Targets, InstallError> {
     let mut targets = Targets::new(roots, home, harnesses);
-    // Validate against every registered domain, so sections other commands
-    // write (accounts, routing, quota) never block installation.
-    config::apply_install_config_with_domains(&mut targets, &crate::domains::SECTIONS)?;
+    // Read installation dependencies only; unrelated domain settings remain
+    // advisory and cannot block installation.
+    config::apply_install_config_with_domains(
+        &mut targets,
+        &crate::config_reads::sections_for("knobs")?,
+    )?;
     targets.apply_environment(claude_config_dir, codex_home)?;
     Ok(targets)
 }

@@ -14,7 +14,7 @@ fn past_deadline_account_stands_by_for_an_available_account()
     let reset = local(31)? + 86_400;
     let catalogue = Catalogue::bundled()?;
     let config: RoutingConfig = serde_json::from_value(
-        serde_json::json!({"pacing":{"accounts":{"michael":{"policy":"pace","windows":["seven_day"],"deadline":{"reset_of":"anese"}},"anese":{"policy":"pace","windows":["seven_day"],"deadline":{"reset_of":"michael"}}}}}),
+        serde_json::json!({"pacing":{"accounts":{"claude/michael":{"policy":"pace","windows":["seven_day"],"deadline":{"reset_of":"claude/anese"}},"claude/anese":{"policy":"pace","windows":["seven_day"],"deadline":{"reset_of":"claude/michael"}}}}}),
     )?;
     let mut michael = availability();
     michael.adapter = "claude".into();
@@ -76,7 +76,7 @@ fn past_deadline_account_stands_by_for_an_available_account()
 }
 
 #[test]
-fn pace_reserves_account_headroom_across_windows() -> Result<(), Box<dyn std::error::Error>> {
+fn pacing_reserve_warns_without_excluding_accounts() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_quota::{QuotaStatus, QuotaWindow};
     use provenant_records::diagnostic::PacingReserveSetting;
     let catalogue = Catalogue::bundled()?;
@@ -108,7 +108,7 @@ fn pace_reserves_account_headroom_across_windows() -> Result<(), Box<dyn std::er
         (vec![window(18_000, 5_000, 9_000)], None),
     ] {
         for policy in ["pace", "spend", "max"] {
-            let config: RoutingConfig =
+            let mut config: RoutingConfig =
                 serde_json::from_value(serde_json::json!({"pacing": {"codex": policy}}))?;
             let mut observation = quota(
                 "codex/test",
@@ -120,21 +120,38 @@ fn pace_reserves_account_headroom_across_windows() -> Result<(), Box<dyn std::er
             )?;
             observation.snapshot.windows = windows.clone();
             let observations = [observation];
+            config.launch_policy.overlay(
+                &std::collections::BTreeMap::from([
+                    (
+                        "PACING_ADAPTER".into(),
+                        provenant_records::policy::Strength::Warn,
+                    ),
+                    (
+                        "PACING_ACCOUNT".into(),
+                        provenant_records::policy::Strength::Warn,
+                    ),
+                    (
+                        "PACING_FREE".into(),
+                        provenant_records::policy::Strength::Warn,
+                    ),
+                ]),
+                provenant_records::policy::Source::Dispatch,
+            );
             let mut ctx = context(&catalogue, &config, now()?);
             ctx.registry = &registry;
             ctx.availability = &availability;
             ctx.access = &access;
             ctx.quota = &observations;
             let route = resolve(&request("codex/test")?, &ctx)?;
+            assert!(reason(&route).is_none());
             assert_eq!(
-                reason(&route) == Some(&RouteExclusionReason::PacingReserve),
+                route.extra["account_load"]["warnings"]
+                    .as_array()
+                    .is_some_and(|warnings| !warnings.is_empty()),
                 expected_setting.is_some() && policy == "pace"
             );
             if expected_setting.is_some() && policy == "pace" {
-                assert_eq!(
-                    route.exclusions[0].reason,
-                    RouteExclusionReason::PacingReserve
-                );
+                assert!(route.exclusions.is_empty());
                 assert!(serde_json::to_string(&route)?.contains("pacing_reserve"));
                 let fact: provenant_records::diagnostic::ResourceFact =
                     serde_json::from_value(route.extra["pacing_reserve_fact"].clone())?;
@@ -177,13 +194,30 @@ fn pace_reserves_account_headroom_across_windows() -> Result<(), Box<dyn std::er
             20,
         ),
         (
-            serde_json::json!({"pacing": {"accounts": {"opaque-account": {"policy": "pace", "reserve": {"five_hour": 25}}}}}),
+            serde_json::json!({"pacing": {"accounts": {"codex/opaque-account": {"policy": "pace", "reserve": {"five_hour": 25}}}}}),
             provenant_records::diagnostic::PacingReserveSetting::Account,
             provenant_records::diagnostic::PacingSettingSource::Configuration,
             25,
         ),
     ] {
-        let config: RoutingConfig = serde_json::from_value(configuration)?;
+        let mut config: RoutingConfig = serde_json::from_value(configuration)?;
+        config.launch_policy.overlay(
+            &std::collections::BTreeMap::from([
+                (
+                    "PACING_ADAPTER".into(),
+                    provenant_records::policy::Strength::Warn,
+                ),
+                (
+                    "PACING_ACCOUNT".into(),
+                    provenant_records::policy::Strength::Warn,
+                ),
+                (
+                    "PACING_FREE".into(),
+                    provenant_records::policy::Strength::Warn,
+                ),
+            ]),
+            provenant_records::policy::Source::Dispatch,
+        );
         let mut ctx = context(&catalogue, &config, now()?);
         ctx.registry = &registry;
         ctx.availability = &availability;
@@ -340,6 +374,19 @@ fn availability_access_and_scoped_quota_are_independent_gates()
         };
         assert_eq!(reason(&resolve(&query, &auth_context)?), expected.as_ref());
     }
+    let refresh_pending = [quota(
+        "codex/test",
+        "opaque-account",
+        QuotaStatus::RefreshPending,
+        1,
+        80,
+        120,
+    )?];
+    let pending_context = RoutingContext {
+        quota: &refresh_pending,
+        ..context
+    };
+    assert!(reason(&resolve(&query, &pending_context)?).is_none());
     let newer_unknown = [
         quota(
             "codex/test",
@@ -540,6 +587,7 @@ fn account_override_selects_a_pool_member_and_keeps_other_provider_fallbacks()
     let mut catalogue = Catalogue::bundled()?;
     for id in ["codex/test", "claude/test"] {
         catalogue.models.push(ModelEntry {
+            capability: Default::default(),
             free: false,
             model: ModelId::parse(id)?,
             efforts: vec![],
@@ -722,8 +770,8 @@ fn reset_reference_uses_fresh_reset_and_reports_unknown_or_stale_fallback()
     let model = "claude/claude-haiku-5-5";
     let config = || {
         serde_json::from_value::<RoutingConfig>(serde_json::json!({
-            "pacing":{"accounts":{"michael":{"policy":"pace", "windows":["seven_day"],
-                "deadline":{"reset_of":"anese"}}}}
+            "pacing":{"accounts":{"claude/michael":{"policy":"pace", "windows":["seven_day"],
+                "deadline":{"reset_of":"claude/anese"}}}}
         }))
     };
     let own = QuotaWindow {
@@ -770,6 +818,54 @@ fn reset_reference_uses_fresh_reset_and_reports_unknown_or_stale_fallback()
                 .contains("falling back"),
             fallback
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn registered_opencode_plans_select_independently_of_account_keys()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let mut config = RoutingConfig::default();
+    config
+        .pacing
+        .providers
+        .insert("opencode_free".into(), PacingPolicy::Pace);
+    let spec = provenant_records::AdapterSpec::get("opencode").ok_or("adapter")?;
+    let records: Vec<_> = spec
+        .account_model_plans
+        .iter()
+        .enumerate()
+        .map(|(index, plan)| AvailabilityRecord {
+            adapter: spec.name.into(),
+            plan: Some(plan.plan.into()),
+            account_key: Some(format!("registered-{index}")),
+            observed_models: vec![],
+            ..availability()
+        })
+        .collect();
+    let access = opencode_access();
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    for entry in catalogue
+        .models()
+        .iter()
+        .filter(|entry| entry.model.adapter() == spec.name)
+    {
+        let serving = records
+            .iter()
+            .find(|record| spec.account_serves_model(record.plan.as_deref(), entry.model.model()))
+            .ok_or("serving plan")?;
+        let route = resolve(&request(entry.model.as_str())?, &ctx)?;
+        assert_eq!(route.account_key, serving.account_key);
+        if entry.free {
+            let preview = pacing_preview(&entry.model, &ctx);
+            assert!(preview.iter().all(
+                |p| p.account == serving.account_key && matches!(p.policy, PacingPolicy::Pace)
+            ));
+            assert!(!preview.is_empty());
+        }
     }
     Ok(())
 }

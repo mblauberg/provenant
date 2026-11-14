@@ -1,5 +1,8 @@
 use super::*;
 
+/// Stored execution/checkpoint contract; older duplicate-pin records are rejected.
+pub(super) const CHECKPOINT_SCHEMA_VERSION: u64 = 2;
+
 #[path = "events.rs"]
 mod events;
 pub use events::{GraphEvent, GraphEventKind};
@@ -19,6 +22,7 @@ pub fn take_checkpoint_read_ids() -> Vec<String> {
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum CrashPoint {
+    PeerOrigin,
     PendingMarker,
     TerminalCheckpoint,
     SentinelBefore,
@@ -42,6 +46,8 @@ pub enum JournalError {
     InvalidGraphId,
     #[error("journal was opened for a different graph")]
     GraphMismatch,
+    #[error("graph name is reserved by a retained or incomplete generation")]
+    NameReserved,
     #[error("graph checkpoint exceeds its byte limit")]
     TooLarge,
     #[error("checkpoint is visible but directory durability is unconfirmed")]
@@ -58,13 +64,7 @@ pub enum JournalError {
     BadEnvelope,
     #[error("graph checkpoint digest does not match its contents")]
     BadDigest,
-    #[error(
-        "graph checkpoint predates node asks; finish or cancel it with the previous release, or cancel it here to retire the record"
-    )]
-    RetiredLoopCheckpoint,
-    #[error(
-        "graph checkpoint topology is incomplete or invalid; finish or cancel it with the previous release, or cancel it here to retire the record"
-    )]
+    #[error("graph checkpoint topology is incomplete or invalid")]
     InvalidTopology,
 }
 
@@ -77,7 +77,6 @@ impl JournalError {
                 | Self::BadEnvelope
                 | Self::BadDigest
                 | Self::Canonical(_)
-                | Self::RetiredLoopCheckpoint
                 | Self::InvalidTopology
         )
     }
@@ -87,6 +86,7 @@ impl JournalError {
         match self {
             Self::InvalidGraphId => "invalid_graph_id",
             Self::GraphMismatch => "graph_mismatch",
+            Self::NameReserved => "name_reserved",
             Self::TooLarge => "too_large",
             Self::DurabilityUnconfirmed(_) => "durability_unconfirmed",
             Self::Filesystem(_) => "filesystem",
@@ -95,21 +95,14 @@ impl JournalError {
             Self::Io(_) => "io",
             Self::BadEnvelope => "bad_envelope",
             Self::BadDigest => "bad_digest",
-            Self::RetiredLoopCheckpoint => "retired_loop_checkpoint",
             Self::InvalidTopology => "invalid_topology",
         }
     }
 }
 
 /// Guidance for an unreadable checkpoint, with any recovery its error allows.
-pub fn unreadable_graph_explanation(graph_id: &str, error: &JournalError) -> String {
-    let guidance = unreadable_graph_guidance(graph_id);
-    match error {
-        JournalError::RetiredLoopCheckpoint => format!(
-            "{guidance} This graph predates node asks: to finish it instead, use the previous release."
-        ),
-        _ => guidance,
-    }
+pub fn unreadable_graph_explanation(graph_id: &str, _error: &JournalError) -> String {
+    unreadable_graph_guidance(graph_id)
 }
 
 /// A tick notice already recorded in the dedicated unreadable marker.
@@ -135,7 +128,57 @@ pub struct FileJournal {
     pub(super) _lock: LockGuard,
 }
 
+/// One graph or node cancellation scope and its optional reason.
+#[derive(Clone, Copy, Debug)]
+pub struct CancellationTarget<'a> {
+    pub graph_id: &'a str,
+    pub node: Option<&'a str>,
+    pub reason: Option<&'a str>,
+}
+
 impl FileJournal {
+    /// Resolve owner-managed observation paths without creating graph state.
+    /// The event log is pre-commit; the checkpoint path signals the following
+    /// authoritative publication, and the sidecar changes displayed status.
+    pub fn observation_paths(
+        root: &StateRoot,
+        project: ProjectId,
+        graph_id: &str,
+    ) -> Result<Vec<std::path::PathBuf>, JournalError> {
+        if !valid_identifier(graph_id) {
+            return Err(JournalError::InvalidGraphId);
+        }
+        let directory = graph_directory(root, project)?;
+        let path = directory.current_path()?;
+        Ok(vec![
+            path.join(events::name(graph_id)),
+            path.join(checkpoint_file_name(graph_id)),
+            path.join(advance_error_name(graph_id)),
+        ])
+    }
+
+    /// Persist cancellation without waiting for the graph's journal lock.
+    pub fn request_cancellation(
+        root: &StateRoot,
+        project: ProjectId,
+        target: CancellationTarget<'_>,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<String, JournalError> {
+        super::cancellation_intent::record(root, project, target, budget, cancel, clock)
+    }
+
+    /// Whether one particular stop request still awaits graph-lock acknowledgement.
+    pub fn cancellation_request_pending(
+        root: &StateRoot,
+        project: ProjectId,
+        graph_id: &str,
+        request_id: &str,
+    ) -> Result<bool, JournalError> {
+        super::cancellation_intent::pending(root, project, graph_id, request_id)
+    }
+
     /// Read complete event records in order, ignoring a torn final record.
     pub fn read_events(
         root: &StateRoot,
@@ -274,23 +317,48 @@ impl FileJournal {
         })
     }
 
+    /// Try the graph lock once. Stop uses this after writing its independent
+    /// intent so it can return a pending receipt while a launch owns the lock.
+    pub fn try_open(
+        root: &StateRoot,
+        project: ProjectId,
+        graph_id: &str,
+    ) -> Result<Self, JournalError> {
+        if !valid_identifier(graph_id) {
+            return Err(JournalError::InvalidGraphId);
+        }
+        let root_dir = Directory::open_anchor(root.as_path())?;
+        let fabric_dir = open_or_create(&root_dir, OsStr::new("fabric"))?;
+        let graphs_dir = open_or_create(&fabric_dir, OsStr::new("graphs"))?;
+        let graphs_dir = open_or_create(&graphs_dir, OsStr::new(&project.to_string()))?;
+        let lock_name = format!("graph-{graph_id}.lock");
+        let lock = graphs_dir.try_lock(OsStr::new(&lock_name), LockMode::Exclusive)?;
+        let stored = load_checkpoint(&graphs_dir, graph_id)?;
+        let (extra, execution) = stored.map_or_else(
+            || (Default::default(), None),
+            |stored| (stored.extra, Some(stored.execution)),
+        );
+        Ok(Self {
+            extra,
+            graph_id: graph_id.to_owned(),
+            directory: graphs_dir,
+            execution,
+            _lock: lock,
+        })
+    }
+
     pub fn bind(&mut self, execution: GraphExecution) -> Result<(), JournalError> {
         if execution.document.graph_id != self.graph_id || !execution.directory.is_absolute() {
             return Err(JournalError::GraphMismatch);
         }
-        if execution
-            .document
-            .review_base
-            .as_deref()
-            .is_some_and(|base| !base.is_empty())
-            && execution.review_base.is_none()
-        {
+        if self.execution.is_none() && self.has_retained_identity()? {
+            return Err(JournalError::NameReserved);
+        }
+        if !execution.valid_bases() {
             return Err(JournalError::BadEnvelope);
         }
         if let Some(bound) = &self.execution {
-            if bound.integration_base != execution.integration_base
-                || bound.review_base != execution.review_base
-            {
+            if bound.bases != execution.bases {
                 return Err(JournalError::GraphMismatch);
             }
             // The original host execution is part of the checkpoint. A caller
@@ -305,7 +373,8 @@ impl FileJournal {
     pub fn integration_base(&self) -> Option<provenant_core::GitOid> {
         self.execution
             .as_ref()
-            .and_then(|execution| execution.integration_base)
+            .and_then(|execution| execution.bases)
+            .and_then(|bases| bases.integration)
     }
 
     /// Discover journals without creating directories. Each is read separately
@@ -330,6 +399,36 @@ impl FileJournal {
         }
         ids.sort();
         Ok(ids)
+    }
+
+    /// Names that have identified a graph generation, including collected
+    /// checkpoints. Reservations are never released because retained attempt,
+    /// chair and event stores continue to identify the graph by this name.
+    pub fn reserved_graph_ids(
+        root: &StateRoot,
+        project: ProjectId,
+    ) -> Result<Vec<String>, JournalError> {
+        let directory = match graph_directory(root, project) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut ids = Self::graph_ids(root, project)?
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        ids.extend(Self::event_graph_ids(root, project)?);
+        for entry in directory.entries()? {
+            let name = entry?;
+            if let Some(id) = name
+                .to_str()
+                .and_then(|name| name.strip_prefix("graph-"))
+                .and_then(|name| name.strip_suffix(".reserved"))
+                && valid_identifier(id)
+            {
+                ids.insert(id.to_owned());
+            }
+        }
+        Ok(ids.into_iter().collect())
     }
 
     /// Discover retained event logs, including graphs whose checkpoints were collected.
@@ -427,7 +526,7 @@ impl FileJournal {
             };
             let checkpoint = &stored.checkpoint;
             if stored_pending(&stored)
-                || checkpoint.asks.iter().any(|ask| !ask.closed)
+                || !checkpoint.asks.is_empty()
                 || checkpoint.wake_at.is_some()
                 || checkpoint.nodes.iter().any(|node| {
                     node.land
@@ -443,6 +542,7 @@ impl FileJournal {
                 continue;
             }
             collect_scratch_documents(&stored.execution)?;
+            journal.reserve_name()?;
             journal.directory.unlink(&name)?;
             prompt_store::collect(&journal.directory, &id)?;
             for sidecar in [unreadable_marker_name(&id), advance_error_name(&id)] {
@@ -705,6 +805,14 @@ impl FileJournal {
             Err(error) if error.is_not_found() => return Ok(false),
             Err(error) => return Err(error.into()),
         };
+        // A readable checkpoint needs no retirement. Inspect the atomic
+        // snapshot first so an ordinary stop never waits on a live graph writer
+        // before it can persist its independent cancellation request.
+        match load_checkpoint(&directory, graph_id) {
+            Ok(_) => return Ok(false),
+            Err(error) if !error.is_unreadable() => return Err(error.into()),
+            Err(_) => {}
+        }
         let lock_name = format!("graph-{graph_id}.lock");
         let _lock = directory.lock(
             OsStr::new(&lock_name),
@@ -791,7 +899,94 @@ impl FileJournal {
     }
 
     pub(super) fn checkpoint_name(&self) -> OsString {
-        format!("graph-{}.json", self.graph_id).into()
+        checkpoint_file_name(&self.graph_id)
+    }
+
+    /// The immutable origin binding retained with the graph's name after
+    /// collection removes its checkpoint. It is copied from document metadata
+    /// under the same journal lock before the first attempt can launch.
+    pub fn peer_origin(
+        root: &StateRoot,
+        project: ProjectId,
+        graph_id: &str,
+    ) -> Result<Option<provenant_records::WorkKey>, JournalError> {
+        if !valid_identifier(graph_id) {
+            return Err(JournalError::InvalidGraphId);
+        }
+        let directory = match graph_directory(root, project) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let bytes = match directory
+            .read_stable(OsStr::new(&format!("peer-origin-{graph_id}.json")), 4096)
+        {
+            Ok(bytes) => bytes,
+            Err(error) if error.is_not_found() => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|_| JournalError::BadEnvelope)
+    }
+
+    fn reserve_name(&self) -> Result<(), JournalError> {
+        // Reserve first: a crash while publishing retained metadata must not
+        // make a partially admitted launch available to different input.
+        let name: OsString = format!("graph-{}.reserved", self.graph_id).into();
+        self.directory
+            .atomic_write(&name, ".graph-name.", b"reserved\n", PublishMode::Replace)?
+            .require_durable()
+            .map_err(JournalError::DurabilityUnconfirmed)?;
+        if let Some(origin) = self
+            .execution
+            .as_ref()
+            .and_then(|execution| execution.document.extra.get("peer_origin_work_key"))
+        {
+            let origin: provenant_records::WorkKey =
+                serde_json::from_value(origin.clone()).map_err(|_| JournalError::BadEnvelope)?;
+            let name = format!("peer-origin-{}.json", self.graph_id);
+            match self.directory.read_stable(OsStr::new(&name), 4096) {
+                Ok(bytes) => {
+                    let retained: provenant_records::WorkKey =
+                        serde_json::from_slice(&bytes).map_err(|_| JournalError::BadEnvelope)?;
+                    if retained != origin {
+                        return Err(JournalError::GraphMismatch);
+                    }
+                }
+                Err(error) if error.is_not_found() => {
+                    let bytes = CanonicalV1::bytes(&origin)?;
+                    self.directory
+                        .atomic_write(
+                            OsStr::new(&name),
+                            ".peer-origin.",
+                            bytes.as_bytes(),
+                            PublishMode::NoReplace,
+                        )?
+                        .require_durable()
+                        .map_err(JournalError::DurabilityUnconfirmed)?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+            #[cfg(test)]
+            inject_crash(CrashPoint::PeerOrigin);
+        }
+        Ok(())
+    }
+
+    fn has_retained_identity(&self) -> Result<bool, JournalError> {
+        for name in [
+            OsString::from(format!("graph-{}.reserved", self.graph_id)),
+            OsString::from(format!("peer-origin-{}.json", self.graph_id)),
+            OsString::from(format!("{}.events.jsonl", self.graph_id)),
+        ] {
+            match self.directory.open_read(&name) {
+                Ok(_) => return Ok(true),
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -805,14 +1000,25 @@ impl GraphJournal for FileJournal {
         Ok(load_checkpoint(&self.directory, graph_id)?.map(|stored| stored.checkpoint))
     }
 
+    fn apply_cancellation(
+        &mut self,
+        document: &GraphDocument,
+        checkpoint: &mut GraphCheckpoint,
+    ) -> Result<bool, Self::Error> {
+        super::cancellation_intent::acknowledge(self, document, checkpoint)
+    }
+
     fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
         if checkpoint.graph_id != self.graph_id {
             return Err(JournalError::GraphMismatch);
         }
         let execution = self.execution.as_ref().ok_or(JournalError::BadEnvelope)?;
+        if execution.bases != checkpoint.bases {
+            return Err(JournalError::GraphMismatch);
+        }
         let stored = StoredCheckpoint {
             extra: self.extra.clone(),
-            schema_version: 1,
+            schema_version: CHECKPOINT_SCHEMA_VERSION,
             digest: CanonicalV1::record_digest(
                 "fabric-graph-checkpoint",
                 2,
@@ -836,6 +1042,7 @@ impl GraphJournal for FileJournal {
         if bytes.as_bytes().len() as u64 > MAX_CHECKPOINT_BYTES {
             return Err(JournalError::TooLarge);
         }
+        self.reserve_name()?;
         let previous = load_checkpoint(&self.directory, &self.graph_id)?;
         events::append_changes(
             &self.directory,
@@ -871,7 +1078,7 @@ impl GraphJournal for FileJournal {
 
 fn stored_pending(stored: &StoredCheckpoint) -> bool {
     let checkpoint = &stored.checkpoint;
-    no_work::pending(&stored.execution.document, checkpoint)
+    next_step::pending(checkpoint)
         || checkpoint
             .nodes
             .iter()
@@ -880,10 +1087,7 @@ fn stored_pending(stored: &StoredCheckpoint) -> bool {
             && !checkpoint.delivered
             && stored.execution.document.delivery == Some(provenant_records::run::DeliveryMode::Pr)
             && checkpoint.successful()
-        || checkpoint
-            .asks
-            .iter()
-            .any(|ask| !ask.closed && (ask.resolved || checkpoint.cancelled))
+        || !checkpoint.asks.is_empty()
 }
 
 /// Remove scratch documents equal to this graph's retained document. The
@@ -984,6 +1188,10 @@ pub(super) fn advance_error_name(graph_id: &str) -> OsString {
     format!("graph-{graph_id}.advance-error").into()
 }
 
+fn checkpoint_file_name(graph_id: &str) -> OsString {
+    format!("graph-{graph_id}.json").into()
+}
+
 pub(super) fn graph_directory(root: &StateRoot, project: ProjectId) -> Result<Directory, FsError> {
     let root = Directory::open_anchor(root.as_path())?;
     let fabric = root.open_verified_directory(OsStr::new("fabric"))?;
@@ -1022,12 +1230,10 @@ fn checkpoint_json_settled(bytes: &[u8]) -> bool {
             Some("succeeded" | "failed" | "blocked" | "skipped")
         )
     });
+    // A link means an inbox request that is still open or unread.
     let asks_closed = match checkpoint.get("asks") {
         None => true,
-        Some(asks) => asks.as_array().is_some_and(|asks| {
-            asks.iter()
-                .all(|ask| ask.get("closed") == Some(&serde_json::Value::Bool(true)))
-        }),
+        Some(asks) => asks.as_array().is_some_and(Vec::is_empty),
     };
     if !terminal || !asks_closed {
         return false;
@@ -1095,13 +1301,6 @@ fn decode_checkpoint_limited(
     max_bytes: u64,
 ) -> Result<StoredCheckpoint, JournalError> {
     let stored = decode_verified_checkpoint(bytes, graph_id, max_bytes.max(MAX_CHECKPOINT_BYTES))?;
-    if stored.checkpoint.nodes.iter().any(|node| {
-        ["loop_asks", "loop_inbox_error", "loop_decision_actor"]
-            .iter()
-            .any(|field| node.extra.contains_key(*field))
-    }) {
-        return Err(JournalError::RetiredLoopCheckpoint);
-    }
     let limits = crate::config::GraphLimits {
         nodes: usize::MAX,
         edges: usize::MAX,
@@ -1127,7 +1326,7 @@ fn decode_verified_checkpoint(
     graph_id: &str,
     max_bytes: u64,
 ) -> Result<StoredCheckpoint, JournalError> {
-    let stored: StoredCheckpoint = decode_v1(
+    let stored: StoredCheckpoint = provenant_records::decode(
         bytes,
         Limits {
             max_bytes,
@@ -1135,11 +1334,16 @@ fn decode_verified_checkpoint(
             max_members: MAX_CHECKPOINT_MEMBERS,
         },
     )?;
-    if stored.schema_version != 1 {
-        return Err(JournalError::BadEnvelope);
+    if stored.schema_version != CHECKPOINT_SCHEMA_VERSION {
+        return Err(DecodeError::UnsupportedVersion {
+            found: stored.schema_version,
+            line: 1,
+            column: 1,
+        }
+        .into());
     }
     for (found, supported) in [
-        (stored.checkpoint.schema_version, 1),
+        (stored.checkpoint.schema_version, 2),
         (stored.execution.document.schema_version, 2),
     ] {
         if found > supported {
@@ -1151,9 +1355,15 @@ fn decode_verified_checkpoint(
             .into());
         }
     }
+    if stored.checkpoint.schema_version != 2 {
+        return Err(JournalError::BadEnvelope);
+    }
     let document = &stored.execution.document;
-    let has_v2 = document_requires_schema_v2(document)
-        || stored.execution.review_base.is_some()
+    let has_v2 = document_requires_review_fields(document)
+        || stored
+            .execution
+            .bases
+            .is_some_and(|bases| bases.review.is_some())
         || stored
             .checkpoint
             .expansions
@@ -1174,14 +1384,7 @@ fn decode_verified_checkpoint(
     if digest.to_string() != stored.digest {
         return Err(JournalError::BadDigest);
     }
-    if stored
-        .execution
-        .document
-        .review_base
-        .as_deref()
-        .is_some_and(|base| !base.is_empty())
-        && stored.execution.review_base.is_none()
-    {
+    if !stored.execution.valid_bases() {
         return Err(JournalError::BadEnvelope);
     }
     if stored.checkpoint.graph_id != graph_id
@@ -1191,11 +1394,13 @@ fn decode_verified_checkpoint(
         return Err(JournalError::GraphMismatch);
     }
 
+    let mut stored = stored;
+    stored.checkpoint.bases = stored.execution.bases;
     Ok(stored)
 }
 
 #[derive(Serialize, Deserialize)]
-// Bump STATE_FORMAT_VERSION for changes an older or newer binary cannot read.
+// CHECKPOINT_SCHEMA_VERSION owns stored layout changes; older records are rejected.
 pub(super) struct StoredCheckpoint {
     /// Envelope extensions sit outside the checkpoint digest.
     #[serde(flatten)]
@@ -1204,6 +1409,32 @@ pub(super) struct StoredCheckpoint {
     pub(super) digest: String,
     pub(super) checkpoint: GraphCheckpoint,
     pub(super) execution: GraphExecution,
+}
+
+/// Read typed Provenant review settlements covering exactly `head`.
+/// The graph settlement writes this projection; the query never reads verdict prose.
+pub fn landing_reviews(
+    root: &StateRoot,
+    project: ProjectId,
+    head: provenant_core::GitOid,
+) -> Result<Vec<ReviewSettlement>, JournalError> {
+    let mut reviews = Vec::new();
+    for id in FileJournal::graph_ids(root, project)? {
+        let Some(checkpoint) = FileJournal::read_checkpoint(root, project, &id)? else {
+            continue;
+        };
+        for node in &checkpoint.nodes {
+            if node.state == NodeState::Succeeded
+                && let Some(review) = node
+                    .review_settlement
+                    .as_ref()
+                    .filter(|review| review.head == head)
+            {
+                reviews.push(review.clone());
+            }
+        }
+    }
+    Ok(reviews)
 }
 
 pub(super) fn open_or_create(directory: &Directory, name: &OsStr) -> Result<Directory, FsError> {

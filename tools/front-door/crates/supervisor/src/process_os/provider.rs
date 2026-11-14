@@ -596,7 +596,6 @@ pub(crate) struct ProviderGroup {
     observed: Option<Termination>,
     provider_identity: Option<ProcessIdentity>,
     owned_descendants: BTreeSet<ProcessIdentity>,
-    paused_builds: crate::build_pause::PausedBuilds,
     spared_descendants: BTreeSet<ProcessIdentity>,
     last_adopted_signal: BTreeMap<ProcessIdentity, i32>,
     ownership_uncertain: bool,
@@ -815,7 +814,6 @@ impl ProviderGroup {
             observed: None,
             provider_identity: Some(identity),
             owned_descendants: BTreeSet::new(),
-            paused_builds: crate::build_pause::PausedBuilds::default(),
             spared_descendants: BTreeSet::new(),
             last_adopted_signal: BTreeMap::new(),
             ownership_uncertain: false,
@@ -1008,28 +1006,6 @@ impl ProviderGroup {
         }
     }
 
-    /// Only builds with a current ancestry proof below this provider qualify.
-    /// The policy excludes nested owners and their entire descendant trees.
-    pub(crate) fn pause_builds(
-        &mut self,
-        census: &Census,
-        provider: &ProcessIdentity,
-        spared: &BTreeSet<ProcessIdentity>,
-        attempt: &provenant_os::fs::Directory,
-        scope: crate::custody::Scope,
-        guardian: &ProcessIdentity,
-    ) {
-        if self.paused_builds.bind(attempt, scope, guardian).is_err() {
-            return;
-        }
-        self.paused_builds
-            .pause(census, provider, spared, signal_build);
-    }
-
-    pub(crate) fn resume_builds(&mut self) {
-        self.paused_builds.resume(signal_build);
-    }
-
     /// Reap only exact native identities previously proven below the provider
     /// and now adopted by this guardian. Sparing includes descendants proven
     /// through `Census::ancestry`; unknown and escaped rows remain fenced.
@@ -1220,7 +1196,6 @@ impl ProviderGroup {
 }
 impl Drop for ProviderGroup {
     fn drop(&mut self) {
-        self.resume_builds();
         if let (Some(child), Some(permit)) = (self.child.take(), self.permit.take()) {
             // Permit was reserved before spawn. Transfer preserves bounded
             // direct-child reaping and deliberately performs no signal.
@@ -1413,12 +1388,22 @@ mod tests {
     }
 
     #[test]
-    fn reactor_rounds_positive_waits_up_without_turning_nonblocking_polls_into_waits() {
+    fn reactor_waits_never_shrink_and_polls_never_block() {
         assert_eq!(poll_timeout_ms(Duration::ZERO), 0);
-        assert_eq!(poll_timeout_ms(Duration::from_nanos(1)), 1);
-        assert_eq!(poll_timeout_ms(Duration::from_millis(1)), 1);
-        assert_eq!(poll_timeout_ms(Duration::from_nanos(1_000_001)), 2);
-        assert_eq!(poll_timeout_ms(Duration::MAX), 1_000);
+        for wait in [
+            Duration::from_nanos(1),
+            Duration::from_micros(999),
+            Duration::from_millis(1),
+            Duration::from_nanos(1_000_001),
+            Duration::from_millis(250),
+        ] {
+            let rounded = i128::from(poll_timeout_ms(wait));
+            assert!(rounded > 0, "{wait:?} became a nonblocking poll");
+            assert!(
+                rounded * 1_000_000 >= wait.as_nanos() as i128,
+                "{wait:?} was cut short"
+            );
+        }
     }
 
     #[test]
@@ -1527,7 +1512,7 @@ mod tests {
     fn orphaned_provider_descendant_does_not_retain_writer_flock()
     -> Result<(), Box<dyn std::error::Error>> {
         use crate::custody::Scope;
-        use provenant_core::{AttemptId, CancelToken, Clock, RunId, WaitBudget};
+        use provenant_core::{AttemptId, CancelToken, Clock, WaitBudget};
         use provenant_os::{clock::SystemClock, fs::Directory};
 
         let root = tempfile::tempdir()?;
@@ -1535,7 +1520,6 @@ mod tests {
         let clock = SystemClock;
         let cancel = CancelToken::new();
         let scope = Scope {
-            run: RunId::from_bytes([1; 16]),
             attempt: AttemptId::from_bytes([2; 16]),
             generation: 1,
         };

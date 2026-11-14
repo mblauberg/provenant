@@ -1,4 +1,4 @@
-//! Human requests through the app-independent installed command and MCP edges.
+//! Human requests through the app-independent installed command.
 mod support;
 use serde_json::{Value, json};
 use support::{Result, TestRig, code};
@@ -29,7 +29,7 @@ fn draft(rig: &TestRig, kind: &str) -> Result<String> {
     std::fs::write(
         &path,
         serde_json::to_vec(
-            &json!({"work":{"run_id":"00000000000000000000000000000001","task_id":"00000000000000000000000000000002"},"kind":kind,"title":"Repair choice","body":"Choose how to repair the check.","blocking":kind=="decision","options":[{"id":"repair","label":"Repair","description":"Repair the failing check"}],"recommended_option_id":"repair","proceeding_with":if kind=="assumption" {json!("Repair the failing check")}else{Value::Null}}),
+            &json!({"work":{"graph":"inbox-graph","node":"repair"},"kind":kind,"title":"Repair choice","body":"Choose how to repair the check.","blocking":kind=="decision","options":[{"id":"repair","label":"Repair","description":"Repair the failing check"}],"recommended_option_id":"repair","proceeding_with":if kind=="assumption" {json!("Repair the failing check")}else{Value::Null}}),
         )?,
     )?;
     Ok(path.to_str().ok_or("draft path")?.into())
@@ -86,10 +86,7 @@ fn inbox_cli_posts_lists_and_resolves_all_kinds_without_apps() -> Result {
             .iter()
             .find(|item| item["id"] == id)
             .ok_or("created request")?;
-        assert_eq!(
-            item["request"]["work"]["task_id"],
-            "00000000000000000000000000000002"
-        );
+        assert_eq!(item["request"]["work"]["node"], "repair");
         assert_eq!(item["work_coverage"], "unindexed");
         let action = match kind {
             "assumption" => "confirm",
@@ -163,6 +160,74 @@ fn inbox_cli_posts_lists_and_resolves_all_kinds_without_apps() -> Result {
             .len(),
         3
     );
+    Ok(())
+}
+
+#[test]
+fn console_overview_and_the_cli_list_the_same_open_asks() -> Result {
+    let rig = TestRig::new()?;
+    let file = draft(&rig, "decision")?;
+    let mut ids = Vec::new();
+    for number in 0..3 {
+        let operation = format!("ask-{number}");
+        let created = call(
+            &rig,
+            &[
+                "ask",
+                "--file",
+                &file,
+                "--session",
+                "chair-a",
+                "--operation-id",
+                &operation,
+            ],
+            None,
+            0,
+        )?;
+        ids.push(
+            created["data"]["request_id"]
+                .as_str()
+                .ok_or("request ID")?
+                .to_owned(),
+        );
+    }
+    // Answering by chat closes one of them for both views.
+    let answered = call(
+        &rig,
+        &[
+            "answer",
+            &ids[1],
+            "--action",
+            "choose",
+            "--option",
+            "repair",
+            "--expect-revision",
+            "1",
+            "--channel",
+            "chat",
+            "--operation-id",
+            "chat-answer",
+        ],
+        None,
+        0,
+    )?;
+    assert_eq!(answered["data"]["revision"], 2);
+    let ids_of = |value: &Value, items: &str| -> Result<Vec<String>> {
+        let mut ids = value["data"][items]
+            .as_array()
+            .ok_or("items")?
+            .iter()
+            .map(|item| item["id"].as_str().map(str::to_owned).ok_or("item ID"))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        ids.sort();
+        Ok(ids)
+    };
+    let cli = ids_of(&call(&rig, &["inbox"], None, 0)?, "items")?;
+    let console = ids_of(&call(&rig, &["console", "overview"], None, 0)?, "needs_you")?;
+    let mut expected = vec![ids[0].clone(), ids[2].clone()];
+    expected.sort();
+    assert_eq!(cli, expected);
+    assert_eq!(console, expected);
     Ok(())
 }
 
@@ -302,101 +367,8 @@ fn inbox_explicit_local_and_unconfigured_owner() -> Result {
     Ok(())
 }
 
-fn mcp_call(rig: &TestRig, name: &str, arguments: Value) -> Result<Value> {
-    let frames = [
-        json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}}),
-        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
-        json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}}),
-    ];
-    let mut stdin = Vec::new();
-    for frame in frames {
-        stdin.extend(serde_json::to_vec(&frame)?);
-        stdin.push(b'\n');
-    }
-    let args = [
-        "--state-dir",
-        rig.state.to_str().ok_or("state")?,
-        "fabric",
-        "mcp",
-        "--client",
-        "codex",
-    ];
-    let output = rig.execute(
-        std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
-        &args,
-        Some(&stdin),
-    )?;
-    assert_eq!(
-        code(&output),
-        0,
-        "{}",
-        String::from_utf8_lossy(&output.stderr.bytes)
-    );
-    let frames = output
-        .stdout
-        .bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(serde_json::from_slice)
-        .collect::<std::result::Result<Vec<Value>, _>>()?;
-    Ok(frames
-        .into_iter()
-        .find(|frame| frame["id"] == 1)
-        .ok_or("MCP reply")?["result"]
-        .clone())
-}
-
 #[test]
-fn inbox_mcp_remote_home_lists_locally_when_configured() -> Result {
-    for with_peer in [false, true] {
-        let mut rig = TestRig::new()?;
-        let moved = rig.home.join("repo");
-        std::fs::rename(&rig.project, &moved)?;
-        rig.project = moved;
-        for (key, value) in &mut rig.env {
-            if key == "PROVENANT_ROOT" {
-                *value = rig.project.clone().into();
-            }
-        }
-        let identity = call(&rig, &["fabric", "identity"], None, 0)?;
-        let key = identity["data"]["federation"]["key"]
-            .as_str()
-            .ok_or("project key")?;
-        let remote = "09".repeat(16);
-        assert_ne!(identity["data"]["host"], remote);
-        let file = rig.state.join("config.toml");
-        let mut config: toml_edit::DocumentMut = std::fs::read_to_string(&file)?.parse()?;
-        config["domains"]["fabric"]["home_hosts"][key] = toml_edit::value(remote.clone());
-        if with_peer {
-            config["domains"]["fabric"]["peers"]["fixture"]["host"] = toml_edit::value(remote);
-            config["domains"]["fabric"]["peers"]["fixture"]["destination"] =
-                toml_edit::value("fixture");
-        }
-        std::fs::write(file, config.to_string())?;
-        assert!(!rig.state.join("fabric").exists());
-        let reply = mcp_call(&rig, "fabric_inbox", json!({"op":"list"}))?;
-        if with_peer {
-            assert_eq!(reply["structuredContent"]["result"], "listed", "{reply}");
-            assert_eq!(reply["structuredContent"]["items"], json!([]));
-            assert!(
-                reply["structuredContent"]["coverage"]
-                    .as_str()
-                    .ok_or("coverage")?
-                    .contains("local_only")
-            );
-        } else {
-            assert_eq!(
-                reply["structuredContent"]["code"], "home_unavailable",
-                "{reply}"
-            );
-            assert!(!rig.state.join("fabric").exists());
-        }
-    }
-    Ok(())
-}
-
-#[test]
-fn inbox_close_uses_the_same_configured_body_limit_on_both_edges() -> Result {
+fn inbox_close_uses_the_configured_body_limit() -> Result {
     let rig = TestRig::new()?;
     let file = rig.state.join("config.toml");
     let mut config: toml_edit::DocumentMut = std::fs::read_to_string(&file)?.parse()?;
@@ -428,77 +400,9 @@ fn inbox_close_uses_the_same_configured_body_limit_on_both_edges() -> Result {
         2,
     )?;
     assert_eq!(cli["error"]["code"], "invalid_input");
-    let mcp = mcp_call(
-        &rig,
-        "fabric_inbox",
-        json!({"op":"close","id":id,"state":"withdrawn","reason":reason,"expect_revision":1}),
-    )?;
-    assert_eq!(mcp["structuredContent"]["code"], "invalid_input");
     let current = call(&rig, &["inbox", id], None, 0)?;
     assert_eq!(current["data"]["item"]["request"]["revision"], 1);
     assert_eq!(current["data"]["item"]["request"]["state"], "open");
-    Ok(())
-}
-
-#[test]
-fn inbox_mcp_and_cli_share_the_same_authoritative_records() -> Result {
-    let rig = TestRig::new()?;
-    let file = draft(&rig, "question")?;
-    let request: Value = serde_json::from_slice(&std::fs::read(file)?)?;
-    let asked = mcp_call(
-        &rig,
-        "fabric_inbox",
-        json!({"op":"ask","session":"chair-a","request":request,"operation_id":"mcp-ask"}),
-    )?;
-    assert_ne!(asked["isError"], true, "{asked}");
-    let id = asked["structuredContent"]["request_id"]
-        .as_str()
-        .ok_or("request ID")?;
-    let cli = call(&rig, &["inbox", id], None, 0)?;
-    assert_eq!(
-        cli["data"]["item"]["request"]["chair_session_id"],
-        "chair-a"
-    );
-    let reply = mcp_call(
-        &rig,
-        "fabric_inbox",
-        json!({"op":"answer","id":id,"action":"reply","text":"  yes\n","expect_revision":1,"channel":"chat","operation_id":"mcp-answer"}),
-    )?;
-    assert_ne!(reply["isError"], true, "{reply}");
-    let cli = call(&rig, &["inbox", id], None, 0)?;
-    assert_eq!(cli["data"]["item"]["answer"]["text"], "  yes\n");
-    assert_eq!(cli["data"]["item"]["answer"]["channel"], "chat");
-    let conflict = mcp_call(
-        &rig,
-        "fabric_inbox",
-        json!({"op":"answer","id":id,"action":"reply","text":"different","expect_revision":1,"channel":"chat","operation_id":"mcp-answer"}),
-    )?;
-    assert_eq!(conflict["isError"], true);
-    assert_eq!(conflict["structuredContent"]["code"], "operation_conflict");
-    assert_eq!(conflict["structuredContent"]["operation_id"], "mcp-answer");
-    let stale = call(
-        &rig,
-        &[
-            "answer",
-            id,
-            "--action",
-            "reply",
-            "--text-stdin",
-            "--expect-revision",
-            "1",
-            "--channel",
-            "cli",
-        ],
-        Some(b"another answer"),
-        1,
-    )?;
-    assert_eq!(stale["error"]["code"], "conflict");
-    assert!(
-        stale["error"]["repair"]
-            .as_str()
-            .ok_or("repair")?
-            .contains("inbox --state all")
-    );
     Ok(())
 }
 
@@ -568,8 +472,10 @@ impl provenant_run::Providers for Indexed {
         _: &str,
         _: &provenant_run::LaunchPaths,
         _: Option<&provenant_run::AttemptRecord>,
-    ) -> std::result::Result<provenant_run::PreparedLaunch, provenant_run::PrepareRefusal> {
+    ) -> std::result::Result<provenant_run::PreparedLaunch, Box<provenant_run::PrepareRefusal>>
+    {
         Ok(provenant_run::PreparedLaunch {
+            limits: Default::default(),
             argv: vec!["fixture".into()],
             environment: vec![],
             stdin: vec![],
@@ -583,9 +489,12 @@ impl provenant_run::Providers for Indexed {
                 ..Default::default()
             },
             repository: Some(self.0.clone()),
-            observed_head: Some(
-                provenant_core::GitOid::parse(&"a".repeat(40)).map_err(|e| e.to_string())?,
-            ),
+            observed_head: Some(provenant_core::GitOid::parse(&"a".repeat(40)).map_err(|e| {
+                provenant_run::PrepareRefusal::boxed(
+                    provenant_records::run::TerminalCause::HandoffRefused,
+                    e.to_string(),
+                )
+            })?),
         })
     }
     fn decode(
@@ -601,7 +510,7 @@ impl provenant_run::Providers for Indexed {
 
 #[test]
 fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result {
-    use provenant_core::{ActorId, CancelToken, OperationId, ProjectId, TaskId};
+    use provenant_core::{ActorId, CancelToken, OperationId, ProjectId};
     use provenant_run::{
         DispatchRequest, DispatchTask, ExecutionContext, Request, RequestedRoute, RunStore, Service,
     };
@@ -623,19 +532,21 @@ fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result
         read_prompts: false,
     };
     let store = RunStore::open(&context, &request)?;
-    let task = TaskId::from_bytes([3; 16]);
-    let run = Service::new(&store).dispatch(
+    let attempt = Service::new(&store).dispatch(
         DispatchRequest {
             chair: None,
             operation_id: OperationId::parse("correlation-fixture")?,
-            concurrency: 1,
             lane_depth: 1,
             parent_attempt: None,
-            tasks: vec![DispatchTask {
-                context: None,
+            task: DispatchTask {
+                context: Some(provenant_records::run::WorkContext {
+                    graph_id: Some("correlation-graph".into()),
+                    node_id: Some("review".into()),
+                    attempt: Some(1),
+                    ..Default::default()
+                }),
                 build_heavy: false,
                 title: None,
-                task_id: task,
                 prompt: "fixture".into(),
                 base: None,
                 pinned_base: None,
@@ -653,14 +564,14 @@ fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result
                 deliver: None,
                 worktree: None,
                 access: Default::default(),
-            }],
+            },
         },
         &rig.project,
         &request,
     )?;
     let repository = identity["data"]["common_dir"].clone();
     let outcomes = store.start(
-        run.run_id,
+        attempt.attempt_id,
         &Indexed(serde_json::from_value(repository.clone())?),
         &|_, _| Err(provenant_run::RunError::Validation("fixture handoff")),
         &request,
@@ -669,7 +580,7 @@ fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result
         matches!(outcomes.as_slice(), [provenant_run::Started::Refused { reason, .. }] if reason.contains("fixture handoff"))
     );
     let draft = json!({"kind":"question","title":"Correlation","body":"Which work?",
-        "work":{"run_id":run.run_id,"task_id":task,"repository":repository,"head":"a".repeat(40)}});
+        "work":{"graph":attempt.key.graph(),"node":attempt.key.node(),"attempt_id":attempt.attempt_id,"repository":repository,"head":"a".repeat(40)}});
     let path = rig.root.join("linked.json");
     let path_str = path.to_str().ok_or("draft")?;
     std::fs::write(&path, serde_json::to_vec(&draft)?)?;
@@ -679,22 +590,16 @@ fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result
         None,
         0,
     )?;
-    let mcp = mcp_call(
-        &rig,
-        "fabric_inbox",
-        json!({"op":"ask","session":"chair-a","request":draft}),
-    )?;
-    for receipt in [&cli["data"], &mcp["structuredContent"]] {
-        assert_eq!(receipt["work_coverage"], "verified");
-        let id = receipt["request_id"].as_str().ok_or("request ID")?;
-        let shown = call(&rig, &["inbox", id], None, 0)?;
-        assert_eq!(shown["data"]["item"]["request"]["schema_version"], 2);
-    }
+    let receipt = &cli["data"];
+    assert_eq!(receipt["work_coverage"], "verified");
+    let id = receipt["request_id"].as_str().ok_or("request ID")?;
+    let shown = call(&rig, &["inbox", id], None, 0)?;
+    assert_eq!(shown["data"]["item"]["request"]["schema_version"], 2);
     for unqualified in [false, true] {
         for field in ["repository", "head"] {
             let mut bad = draft.clone();
             if unqualified {
-                bad["work"].as_object_mut().ok_or("work")?.remove("task_id");
+                bad["work"].as_object_mut().ok_or("work")?.remove("node");
             }
             bad["work"][field] = if field == "head" {
                 json!("b".repeat(40))
@@ -713,23 +618,15 @@ fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result
                 )?["error"]["code"],
                 "work_mismatch"
             );
-            assert_eq!(
-                mcp_call(
-                    &rig,
-                    "fabric_inbox",
-                    json!({"op":"ask","session":"chair-a","request":bad})
-                )?["structuredContent"]["code"],
-                "work_mismatch"
-            );
         }
     }
     let db = rusqlite::Connection::open(rig.state.join("fabric/fabric.sqlite3"))?;
     assert_eq!(
         db.query_row("SELECT count(*) FROM human_requests", [], |r| r
             .get::<_, i64>(0))?,
-        2
+        1
     );
-    let index = rusqlite::Connection::open(rig.state.join(provenant_run::WORK_INDEX_FILE))?;
+    let index = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
     index.pragma_update(None, "user_version", 2)?;
     std::fs::write(&path, serde_json::to_vec(&draft)?)?;
     let failed = call(

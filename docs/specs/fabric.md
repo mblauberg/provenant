@@ -1,9 +1,9 @@
 # Fabric
 
 Owner: `crates/fabric-store` (SQLite), `crates/fabric-runtime` (identity,
-coordination, peers, graphs, Git transport), `crates/fabric-mcp` (stdio MCP)
+coordination, lane relay, peers, graphs, Git transport)
 Anchor: `crates/fabric-store/src/tests.rs`, `crates/fabric-runtime/src/graph.rs`,
-`crates/fabric-mcp/src/stdio_tests.rs`
+`crates/fabric-runtime/src/relay/lane_tests.rs`
 
 Fabric is the daemonless coordination layer for one user's agents and hosts.
 It grants no authority to install, land or run a provider, and keeps no second
@@ -13,7 +13,6 @@ run status ([run](run.md)). ADRs
 [0026](../adr/0026-federate-fabric-across-own-hosts-over-ssh.md) and
 [0039](../adr/0039-graph-of-templates.md) record the decisions; the
 [peer host runbook](../runbooks/fabric-hosts.md) and `provenant help --all`
-and the MCP tool list
 own use, flags and limits. Paths are relative to `tools/front-door/`.
 
 ## Identity and store
@@ -31,37 +30,85 @@ peer. No scan or URL heuristic joins projects.
 
 Lanes open the database read-only and no lane profile grants writes to it, its
 companions or Fabric locks. A lane reaches the host only through its own
-attempt-bound socket, where the host, not the request, fixes the sender; CLI
-coordination mutations refuse inside lanes.
+attempt-bound socket, where the host, not the request, fixes the sender.
+`fabric mail send` uses that relay inside a lane; other CLI coordination
+mutations refuse. A caller-supplied sender is rejected at the relay boundary.
 - Why: a lane must not forge records that the host or another agent trusts.
 - Test: `crates/providers/src/seatbelt_snapshots.rs::fabric_profiles_only_read_database_and_allow_only_the_attempt_socket`;
-  `crates/fabric-mcp/src/coordination_tests.rs::lane_relay_binds_sender_replays_receipts_and_refreshes_read_only_wal`
-- Owner: `crates/fabric-mcp/src/lane.rs`, `crates/fabric-store/src/db.rs`
+  `crates/fabric-runtime/src/relay/lane_tests.rs::lane_relay_binds_sender_replays_receipts_and_refreshes_read_only_wal`
+- Owner: `crates/fabric-runtime/src/relay/host.rs`, `crates/fabric-store/src/db.rs`
 
 ### Private, versioned, atomic store
 
-The store is one private SQLite database; symlinked or shared components and a
+Coordination and the host custody ledger use private SQLite databases; symlinked or shared components and a
 future schema are refused before any mutation, and config may lower limits but
 never raise them. A mutation and its event commit together, and no transaction
 stays open across waits, spawns, Git or SSH. A retried operation ID returns its
 stored receipt; the same ID with a different digest conflicts.
 - Why: a swapped database could forge fences, and agents retry after timeouts.
 - Test: `crates/fabric-store/src/tests.rs::state_symlinks_and_non_private_components_are_refused`;
-  `::event_failure_rolls_back_mail_mutations`;
+  `crates/fabric-store/src/tests.rs::event_failure_rolls_back_mail_mutations`;
   `crates/fabric-store/src/tests/operations.rs::concurrent_duplicate_operations_apply_once_and_share_the_committed_receipt`
 
-### Fences and cursors
+### Custody and cursors
 
-Generations survive release and expiry, and claims use the home host's clock.
-Path claims are advisory and never authorise writing. Cursors advance
-monotonically, only for the caller, in the same transaction as deduplication;
-an unreachable peer is `Unknown`, never complete.
-- Why: a stale holder must never act, and a reader must never skip events.
-- Test: `crates/fabric-store/src/tests/f2.rs::canonical_overlap_expiry_release_and_generation`
+Fabric claims and graph chair identity use one host-owned custody ledger.
+Subject kinds are declared once in `records::custody::SubjectKind`: graph,
+attempt, branch, ref, worktree, pr, issue, path and cloud key. Records retain
+the holder (chair or attempt nested under a chair), project, origin,
+active/landed/retired/released state, last activity, related artefacts and
+dispatch provenance.
+`LandedEvidence` names its predicate (subsumed or landed) and proof source.
+The custody-owned `RetirementRecord` pins the endpoint-qualified reference
+generation, expected commit, authority and initial proof in the host store.
+New intent observes the current tip through the generation allocator under
+removal custody. Replay preserves that identity and initial intent while
+recording freshly validated proof on each completed step.
+Remote endpoint identity keeps only a digest of its bound push URL. Detached
+worktrees identify their real private `HEAD` through a worktree endpoint and the
+same generation allocator. Worktree-only retirement records affect only the
+worktree custody subjects; they preserve the reference and its custody.
+Each completed subject step stores the proof it used: under a landing-based
+intent, a worktree may complete when its tip is subsumed or landed, while
+reference deletion requires a landed proof. Explicit discard remains a distinct
+authority choice and never claims landing. Worktree discard pins the archive
+ID and exact tip captured before removal in that same record. `Removed`
+projections carry the completed step proof and durable retirement ID. Retention
+and evidence owners decide eligibility; the custody-owned lifecycle
+alone records intent, resumable outcomes and removal projections. State alone
+never authorises deletion.
+
+Claims do not expire, lock or refuse overlapping advisory ownership. Acquiring
+another holder's item warns, records the previous holder in the same transaction
+as the custody change, and proceeds. Gone holders leave unattended items for
+adoption. Unknown native presence stays unknown. Run writer leases still own
+Git isolation. Cursors advance monotonically; an unreachable peer is Unknown.
+- Why: unattended work must remain discoverable without making advisory custody
+  another admission boundary.
+- Test: `crates/fabric-store/src/tests/f2.rs::custody_is_durable_advisory_and_queryable_by_declared_kinds`;
+  `crates/fabric-store/src/tests/f2.rs::custody_event_failure_rolls_back_the_record`;
+  `crates/fabric-store/src/tests/f2.rs::custody_queries_page_and_include_nested_lanes_without_crossing_chairs`;
+  `crates/fabric-store/src/tests/f2.rs::retirement_decisions_preserve_archive_proof_and_reference_custody`
+- Owner: `crates/records/src/custody.rs`, `crates/fabric-store/src/claims.rs`, `crates/config/src/gc.rs`
+
+### Chair bindings follow graph names
+
+The host chair index reads graph subjects in the custody ledger, keyed by
+project and graph name. A graph's first launch seals its dispatch provenance;
+every later attempt resolves it. Direct host launch observes the chair when
+its canonical request names none, without rewriting that request. An explicit
+chair change warns and records the previous holder. Child graphs inherit their
+parent's chair; an unknown parent stays unbound. Explicit adoption changes
+advisory custody and is recorded. Graph names, rather than attempt or operation
+identifiers, address this view.
+- Why: every node in a graph resolves the same dispatching chair without a
+  second identity mapping.
+- Test: `crates/fabric-runtime/src/chairs.rs::tests::associations_are_keyed_by_project_and_graph_and_inherit_by_name`
+- Owner: `crates/fabric-store/src/chairs.rs`, `crates/fabric-runtime/src/chairs.rs`
 
 ## Human requests
 
-One service for CLI and MCP owns requests and immutable answers, binding
+One service for the CLI owns requests and immutable answers, binding
 project, host and actor from identity, never request JSON. An answer commits
 with its history, delivery intent and receipt in one transaction, and a
 competing answer cannot replace the winner. Claimed work stays unverified until
@@ -73,26 +120,25 @@ reported, never mirrored.
   authoritative answer or stand in for a workflow gate.
 - Test: `tests/inbox.rs::inbox_cli_refuses_forged_ownership_and_closes_without_approval`;
   `crates/fabric-runtime/src/inbox/tests.rs::inbox_concurrent_answers_have_one_winner_and_one_mail`;
-  `::request_correlation_lookup_never_holds_fabric_write_lock`;
-  `::inbox_fabric_mail_is_correlated_and_read_cursor_does_not_acknowledge`;
+  `crates/fabric-runtime/src/inbox/tests.rs::request_correlation_lookup_never_holds_fabric_write_lock`;
+  `crates/fabric-runtime/src/inbox/tests.rs::inbox_fabric_mail_is_correlated_and_read_cursor_does_not_acknowledge`;
   `tests/fabric_transport.rs::remote_inbox_owner`
 - Owner: `crates/fabric-runtime/src/inbox.rs`, `crates/fabric-store/src/human_inbox.rs`
 
-## CLI and MCP surfaces
+## CLI and relay surfaces
 
-Tool input is a strict tagged enum with no coercion, validated before side
-effects. Output is lossless and paged within its byte budget, but committed
-mutation receipts always survive. A full stdio queue is a typed busy error, and
-cancellation suppresses the late reply without cancelling a launched run. CLI
-and MCP render one typed category per error. Settlement reactions (graph
-advance, chair notice, chair log) run once in effect; notices never instruct.
-- Why: a lenient parser turns a typo into another request, and a lost client
-  must never kill lanes.
-- Test: `crates/fabric-mcp/src/schema_tests.rs::generated_schema_values_match_strict_serde_for_every_operation_and_field`;
-  `crates/fabric-mcp/src/tools_tests.rs::result_limit_preserves_mutation_receipts_and_rejects_oversized_observations`;
-  `crates/fabric-mcp/src/stdio_tests.rs::cancellation_suppresses_late_observations_without_cancelling_runs`;
+Relay input is a strict tagged enum with no coercion, validated before side
+effects, and the relay carries coordination only. A queued relay caller must
+still be present with budget left before any effect, so a timed-out call cannot
+commit. The CLI and the relay render one typed category per error. Settlement
+reactions (graph advance, chair notice, chair log) run once in effect; notices
+never instruct.
+- Why: a lenient parser turns a typo into another request, and a lost lane must
+  never commit after its deadline.
+- Test: `crates/fabric-runtime/src/relay/host.rs::tests::disconnected_queued_caller_cannot_commit_after_admission`;
+  `crates/fabric-runtime/src/relay/host.rs::tests::configured_frame_limits_reject_before_any_effect`;
   `crates/cli/src/fabric.rs::upgrade_and_peer_version_refusals_match_on_both_edges`
-- Owner: `crates/fabric-mcp/src/`, `crates/fabric-runtime/src/coordination/facade.rs`
+- Owner: `crates/fabric-runtime/src/relay/`, `crates/fabric-runtime/src/coordination/facade.rs`
 
 ## Bounded graphs and route fallback
 
@@ -100,10 +146,38 @@ The graph runtime admits a template, document or planner fragment only after
 checking schema capability, structural limits, the fully expanded plan, the
 checkpoint envelope and selected outputs. A launch retry without a wall clock
 leaves the prior checkpoint.
+General launch/read waits and writer provisioning have independent, sourced allowances in `domains.fabric.graph.launch_wait_seconds` and `domains.fabric.graph.writer_provision_seconds`; both default to 55 seconds and accept 1..=14400.
+An occupied concurrency threshold warns and proceeds unless its declared policy refuses; writer custody remains a Git boundary.
 - Why: a graph that starts must be able to finish within its bounds.
 - Test: `crates/fabric-runtime/src/graph/graph_launch_retry_tests.rs::launch_retry_without_a_wall_clock_keeps_the_prior_checkpoint`;
   `crates/fabric-runtime/src/graph/plan_tests.rs::plan_validates_host_limits_before_saving`
 - Owner: `crates/fabric-runtime/src/graph.rs`
+
+### Live steering unavailable
+
+Every provider currently returns `control_unsupported` for live steering; delivery transports come later (2.1, #3278).
+The host verifies launch evidence and ownership before reading steering input.
+Only the current live continuation leaf may receive control; authenticated
+peer requests must also match the origin and receiver identities. Missing,
+conflicting, terminal or unverifiable ownership is refused.
+
+- Why: a lane must not direct another attempt.
+- Test: `tests/graph_cli.rs::steer_graph_and_node_refuse_an_unlaunched_attempt_before_reading_stdin`
+
+### Graph cancellation intent
+
+`stop` first writes a bounded request under a short control lock that is separate
+from the graph journal lock. The request is bound to the graph plan and instance,
+and may name the graph or one node subtree. A launch owner checks requests at
+graph and attempt binding boundaries; it saves the cancellation fence before
+acknowledging and removing the request. A stop that finds the graph journal busy
+returns `cancellation_requested` with its request ID and pending acknowledgement
+state. Re-reading status does not enqueue another request. The owner preserves
+the accepted attempt receipt before applying cancellation, and a resume cannot
+clear a newly acknowledged stop in the same advance.
+- Why: a launch may hold the journal lock while preparing a writer, but stop
+  must remain durable and available during that work.
+- Test: `crates/fabric-runtime/src/graph/cancellation_intent.rs::cancellation_intent_survives_graph_lock_and_is_acknowledged_after_save`
 
 ### Sources and read roots
 
@@ -115,6 +189,8 @@ pins the newest commit of a writer's continuation chain. The runtime never
 resets or creates a worktree to satisfy a binding.
 - Why: scouts share read access while review and repair keep one immutable subject.
 - Test: `crates/fabric-runtime/src/graph/land_tests.rs::a_head_source_reviews_the_newest_continuation_and_lands_it`
+
+A relay admission stores one schema-versioned typed receipt with its request digest in the patch record; replay returns that receipt with `replayed=true`, independent of current worktree-layout configuration. A missing or malformed receipt is invalid.
 
 ### Writer continuation
 
@@ -129,7 +205,13 @@ force and refuses a mismatched branch.
 
 Gates decide without a model or attempt and save the decision before dependants
 run. CI gates query the exact pinned SHA; unavailable checks or policy fail
-explicitly.
+explicitly. The shared forge observer uses conditional validators by default,
+controlled by `domains.wait.pr_conditional_requests`. Its cached result age
+uses `pr_slow_interval_ms` while checks run and returns to `pr_interval_ms`
+within `pr_near_end_window_ms` of the median duration for that check name,
+learned from the latest 64 cached commit pages in the repository observer.
+These settings change request cadence only; they do not change a gate verdict.
+Their sources are shown by `provenant config show`.
 - Why: deterministic decisions need durable evidence without a launch.
 - Test: `crates/fabric-runtime/src/graph/graph_plan_and_gates_tests.rs::gate_verdict_fixture_is_attempt_less_and_replays`;
   `crates/fabric-runtime/src/graph/ci_tests.rs::ci_outcomes_are_recorded_and_fail_closed`
@@ -146,35 +228,29 @@ delivery, and an extension never adds rounds twice.
 
 ### Node asks and decide nodes
 
-A node ask is a blocking inbox decision stored on the checkpoint and replayed
-identically. A decide node's chosen option, or its default at the deadline,
-becomes its verdict; an answer is saved before it is acted on.
-- Why: graphs need human decisions at known points with a safe default.
+The inbox owns the question and answer; graph checkpoints link to it. Replay
+must not create another request. A stored decide request carries its optional default and effective configurable timeout with source.
+Decision outcomes distinguish owner answers, answers by declared default or policy, and unanswered deadlines; an unanswered outcome carries no option and follows its declared disposition without releasing dependants as if an option were chosen.
+Answers require held authority and the exact target; cancellation closes owned requests. A timed-out authority gate has no default and never grants authority through silence.
+
+- Why: the owner and chair need one authoritative answer.
 - Test: `crates/fabric-runtime/src/graph/ask_tests.rs::decide_answer_becomes_the_verdict_and_routes_the_chosen_edge`
 
 ### Land nodes
 
-A land node merges only a head that a passing independent review judged and CI
-passed, through the host's own land path and tier policy. An inbox answer never
-approves a land, because lanes and peers can write the inbox; a tier that asks
-succeeds only once the chair merges at the pinned head.
-- Why: routine work lands without a chair while crucial work waits for a person.
-- Test: `crates/fabric-runtime/src/graph/land_tests.rs::an_inbox_answer_of_land_never_approves_a_land`;
-  `::a_crucial_tier_asks_and_succeeds_only_once_the_chair_merges_by_hand`
-- Owner: `crates/fabric-runtime/src/graph/land.rs`, `src/pr/land.rs`
+Graph landing uses the [landing authority policy](cli.md#landing-adds-no-merge-authority). An inbox answer alone never approves a land.
+
+- Why: a graph cannot confer authority through an inbox answer.
+- Test: `crates/fabric-runtime/src/graph/land_tests.rs::an_inbox_answer_of_land_never_approves_a_land`
 
 ### Typed node outputs
 
-Settled nodes record bounded outputs: a digest of the full stored result, a
-redacted excerpt, and optional verdict, findings, branch and commit. A verdict
-is valid only as exactly one `VERDICT: TOKEN` line outside fenced blocks,
-wherever it sits; a rejection names what was seen. Invalid evidence fails a
-consuming gate; a matched `required_verdict` cannot override it. Selected
-outputs reach dependants as delimited untrusted data that must fit the prompt
-budget, or the node fails before launch.
-- Why: dependants use bounded evidence without copying transcripts.
-- Test: `crates/fabric-runtime/src/graph/graph_inputs_and_outputs_tests.rs::outputs_feed_direct_dependants_and_survive_replay`;
-  `crates/fabric-runtime/src/graph/graph_delivery_and_routes_tests.rs::matched_required_contract_cannot_override_ambiguous_verdict_evidence`
+Settled outputs are bounded and passed to dependants as untrusted data. Invalid
+verdict evidence fails a consuming gate; full findings remain retrievable.
+Oversized findings use content-addressed graph text while the checkpoint retains a bounded summary and reference.
+
+- Why: dependants need evidence without copying or trusting transcripts.
+- Test: `crates/fabric-runtime/src/graph/graph_inputs_and_outputs_tests.rs::outputs_feed_direct_dependants_and_survive_replay`; `crates/fabric-runtime/src/graph/graph_review_contract_tests.rs::oversized_blocking_findings_remain_retrievable_with_the_verdict`; `crates/fabric-runtime/src/graph/graph_delivery_and_routes_tests.rs::matched_required_contract_cannot_override_ambiguous_verdict_evidence`
 
 ### Checkpoint before launch
 
@@ -187,10 +263,9 @@ checkpoint missing launch evidence or its actor is refused.
 
 ### Checkpoint envelope
 
-A plan whose worst-case checkpoint could exceed 16 MiB is refused before its
-first save, naming the size; every stored string is capped and growing lists
-keep their newest entries.
-- Why: an accepted graph must never stop on a checkpoint too large to save.
+Admission bounds the worst-case checkpoint before saving the plan.
+
+- Why: an accepted graph must be able to save its checkpoint.
 - Test: `crates/fabric-runtime/src/graph/envelope_tests.rs::worst_case_checkpoint_fits_its_bound`
 
 ### Fallback only for unavailability
@@ -208,28 +283,15 @@ Graph delivery opens at most one final PR, only after every active path
 succeeds and custody is released; settlement advances only the matching graph.
 - Why: a partial graph must never publish, and settlement must not scan unrelated graphs.
 - Test: `crates/fabric-runtime/src/graph/graph_delivery_and_routes_tests.rs::graph_delivers_nodes_and_opens_one_final_pr_only_after_success`;
-  `src/fabric/peer_graph_routing.rs::settlement_without_hint_does_not_advance_unrelated_graphs`
+  `src/fabric/peer_graph_routing.rs::failed_settlement_does_not_advance_unrelated_graphs`
 
 ## Peer hosts
 
-Each host owns its records and liveness, so an unreachable peer is `Unknown`,
-never dead. Peers use system SSH and the fixed `provenant fabric peer` command,
-which refuses another protocol before decoding. An uncertain remote mutation is
-resolved only by the home host's receipt, never resent, and code crosses hosts
-only as committed objects Git verifies. Credentials, keys and keychains never cross hosts (no test:
-peer request types carry no credential fields), and peer changes need a
-chair-run smoke between two real hosts (review gate).
-- Why: remote guesses or a resent mutation could free a live lane or apply twice.
-- Test: `tests/fabric_transport.rs::run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates`;
-  `::peer_ingress_refuses_protocol_before_decoding_or_running_mutations`;
-  `crates/fabric-runtime/src/hosts.rs::fixed_peer_transport_preserves_mutation_uncertainty_without_retry`;
-  `crates/fabric-runtime/src/git_transport.rs::fetch_refuses_corrupt_missing_duplicate_and_malformed_objects`
-- Owner: `crates/fabric-runtime/src/hosts.rs`, `crates/fabric-runtime/src/git_transport.rs`
+Each host owns its records and liveness; an unreachable peer is unknown, not
+dead. An uncertain remote mutation is resolved by the owner's receipt, never
+resent. Remote attempts bind the origin identity, and transferred Git objects
+are verified before use. Protocol mismatch is refused before decoding;
+credentials do not cross hosts.
 
-## Project-local scratch
-
-Scratch lives in `.provenant/scratch/`, excluded through Git's common metadata
-and never tracked; symlinked roots refuse.
-- Why: graph documents need a project-local home without tracked changes.
-- Test: `crates/confinement/src/scratch.rs::scratch_is_local_excluded_idempotent_and_refuses_links`
-- Owner: `crates/confinement/src/scratch.rs`
+- Why: a remote guess or resent mutation could free a live lane or apply twice.
+- Test: `tests/fabric_transport.rs::peer_ingress_refuses_protocol_before_decoding_or_running_mutations`; `crates/fabric-runtime/src/hosts.rs::fixed_peer_transport_preserves_mutation_uncertainty_without_retry`; `crates/fabric-runtime/src/git_transport.rs::fetch_refuses_corrupt_missing_duplicate_and_malformed_objects`

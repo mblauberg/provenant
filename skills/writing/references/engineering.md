@@ -36,8 +36,7 @@ happens: `a 5xx from upstream retries twice, then returns 503`.
 ## Artefacts
 
 - **README.** Prerequisites before the first command; a separate verify step
-  with its expected result; exact supported versions (`Node.js >=24.15.0
-  <25`, not `Node.js 24`). Status and roadmap stay out unless the README is the
+  with its expected result; exact supported versions. Status and roadmap stay out unless the README is the
   current-state authority. A shortened README keeps every load-bearing fact
   (versions, commands, security-reporting path, generated blocks) verbatim.
 - **Pull request.** What changed, why, tests run with results, what was not

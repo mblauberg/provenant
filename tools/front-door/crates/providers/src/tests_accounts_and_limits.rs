@@ -398,10 +398,6 @@ fn claude_writer_shell_has_private_config_and_rust_tools() -> Result<(), Provide
     assert!(launch.profile.spec.authentication.is_empty());
     for (key, value) in [
         (
-            "CARGO_HOME",
-            "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/cargo-home",
-        ),
-        (
             "CARGO_TARGET_DIR",
             "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/target",
         ),
@@ -437,9 +433,8 @@ fn claude_writer_shell_has_private_config_and_rust_tools() -> Result<(), Provide
             "{path}"
         );
     }
-    // No shared toolchain store is writable; the compiler hard-denies Cargo
-    // credentials.
-    assert!(launch.profile.spec.tool_writes.is_empty());
+    assert_eq!(cargo_home_path(&launch), Path::new("/fixture/home/.cargo"));
+    assert_read_only_cargo_access(&launch);
     // Claude's env scrub drops GIT_CONFIG_GLOBAL from Bash, so scratch git is a
     // wrapper that sets it, and its directory is executable.
     assert!(launch.setup.iter().any(|step| matches!(
@@ -766,7 +761,8 @@ fn lanes_read_git_global_ignore_and_attributes_only_when_present()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::permissions::PathScope;
     let temp = tempfile::tempdir()?;
-    let home = temp.path();
+    let canonical_home = temp.path().canonicalize()?;
+    let home = canonical_home.as_path();
     let git = home.join(".config/git");
     let mut route = route("codex", "fixture-model");
     route.account_key = None;
@@ -989,7 +985,7 @@ fn package_root_never_grants_a_hidden_home_tool_tree() {
 }
 
 #[test]
-fn registration_org_refuses_a_different_org_and_upgrades_legacy_records() {
+fn registration_org_fingerprint_pins_on_first_available_probe() {
     let mut entry = accounts::Registration {
         adapter: "claude".into(),
         label: "pro".into(),

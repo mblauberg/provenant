@@ -135,7 +135,7 @@ pub fn select_batch_with_reasons(
                         head: info.head,
                         approval: approved.reference,
                         base_branch: info.base_branch,
-                        carried_paths: approved.carried,
+                        approval_evidence: approved.evidence,
                         accepted: approved.accepted,
                     });
                     if selected.len() == limit {
@@ -440,7 +440,7 @@ mod tests {
                 number,
                 head: format!("{number:040x}"),
                 approval: "approved".into(),
-                carried_paths: Vec::new(),
+                approval_evidence: Vec::new(),
                 accepted: None,
                 base_branch: "main".into(),
             })

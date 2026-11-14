@@ -423,7 +423,6 @@ mod tests {
             schema_version: 1,
             sequence,
             project_id: ProjectId::from_bytes([9; 16]),
-            run_id: provenant_core::RunId::from_bytes([3; 16]),
             attempt_id: provenant_core::AttemptId::from_bytes([4; 16]),
             revision,
             change: AttemptState::Running {

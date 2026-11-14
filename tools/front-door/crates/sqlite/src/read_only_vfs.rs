@@ -395,7 +395,7 @@ mod tests {
     #[test]
     fn locking_reader_observes_wal_without_writes_or_companions_and_excludes_writers()
     -> Result<(), Box<dyn std::error::Error>> {
-        let directory = std::env::temp_dir().join(format!(
+        let directory = std::env::temp_dir().canonicalize()?.join(format!(
             "provenant-locking-reader-{}-{:?}",
             std::process::id(),
             std::thread::current().id()

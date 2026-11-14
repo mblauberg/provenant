@@ -1,7 +1,8 @@
 //! Typed F3 run records and helpers consumed by the binary facade.
 
-use super::coordination::facade::{AttemptTarget, WaitCondition};
+use super::coordination::facade::{AttemptTarget, FacadeError, WaitCondition};
 use provenant_core::OperationId;
+use provenant_records::WorkKey;
 use provenant_records::run::{AttemptRecord, RunEvent};
 use serde::{Deserialize, Serialize};
 
@@ -32,10 +33,8 @@ pub struct PeerWorktree {
 pub struct AttemptSummary {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
+    pub key: WorkKey,
     pub attempt_id: provenant_core::AttemptId,
-    pub run_id: provenant_core::RunId,
-    pub task_id: provenant_core::TaskId,
-    pub operation_id: OperationId,
     pub state: String,
     pub reason: Option<String>,
     pub exit_code: Option<i64>,
@@ -59,12 +58,14 @@ impl From<AttemptRecord> for AttemptSummary {
             }
             _ => None,
         };
+        let mut extra = record.extra;
+        for field in provenant_records::run::PRIVATE_ATTEMPT_EXTRA_FIELDS {
+            extra.remove(*field);
+        }
         Self {
-            extra: record.extra,
+            extra,
+            key: record.key,
             attempt_id: record.attempt_id,
-            run_id: record.run_id,
-            task_id: record.task_id,
-            operation_id: record.operation_id,
             state: projected.state,
             reason: projected.reason,
             exit_code: projected.exit_code,
@@ -136,7 +137,7 @@ pub enum RunResult {
 }
 
 fn encode_attempt(record: &AttemptRecord) -> Result<serde_json::Value, serde_json::Error> {
-    let mut value = serde_json::to_value(record)?;
+    let mut value = provenant_records::run::public_attempt_value(record)?;
     let seconds = provenant_records::wire::provider_seconds(record.provider_ms);
     let object = value.as_object_mut().ok_or_else(|| {
         <serde_json::Error as serde::ser::Error>::custom("attempt record must be an object")
@@ -257,6 +258,29 @@ pub struct RunCapabilities {
     pub events: bool,
 }
 
+/// Finalize every wait return through the same snapshot rule. At expiry the
+/// owner may refresh local records; the callback must not start remote reads or
+/// grant another wait budget.
+pub fn finish_wait_snapshot(
+    condition: WaitCondition,
+    mut attempts: Vec<AttemptRecord>,
+    expired: bool,
+    extra: provenant_records::ExtraFields,
+    refresh_local: impl FnOnce(&mut [AttemptRecord]) -> Result<(), FacadeError>,
+) -> Result<RunResult, FacadeError> {
+    if expired {
+        refresh_local(&mut attempts)?;
+    }
+    let satisfied = wait_satisfied(condition, attempts.iter().map(|record| &record.state));
+    Ok(RunResult::Wait {
+        extra,
+        condition,
+        attempts,
+        satisfied,
+        timed_out: expired && !satisfied,
+    })
+}
+
 /// Input-required wakes either condition; other outcomes remain result data.
 pub fn wait_satisfied<'a>(
     condition: WaitCondition,
@@ -287,7 +311,8 @@ pub fn wait_satisfied<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_core::{AttemptId, Digest, ProjectId, RunId, TaskId, WallTime};
+    use provenant_core::{AttemptId, Digest, ProjectId, WallTime};
+    use provenant_records::WorkKey;
     use provenant_records::{
         CanonicalV1,
         run::{AttemptState, Outcome},
@@ -297,9 +322,10 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "schema_version": 1,
             "attempt_id": AttemptId::from_bytes([1; 16]),
-            "run_id": RunId::from_bytes([2; 16]),
+            "run_id": "02020202020202020202020202020202",
+            "task_id": "04040404040404040404040404040404",
             "project_id": ProjectId::from_bytes([3; 16]),
-            "task_id": TaskId::from_bytes([4; 16]),
+            "key": WorkKey::new(ProjectId::from_bytes([3; 16]), "graph", "node", 1).unwrap(),
             "operation_id": "wire-silence",
             "attempt_number": 1,
             "revision": 1,
@@ -309,6 +335,8 @@ mod tests {
             "queued_at": WallTime::from_micros(1).unwrap(),
             "state": {"state":"running"},
             "usage": {},
+            "read_only_writable": [],
+            "protected_paths": [], "trace": {},
             "prompt": {"path":{"encoding":"utf8","path":"prompt.txt"},"digest":CanonicalV1::file_digest(b""),"bytes":0,"complete":true,"redacted":false}
         }))
         .unwrap()
@@ -321,7 +349,6 @@ mod tests {
         let mut other_read = record.clone();
         other_read.provider_silent_for_ms.0 = None;
         other_read.process_observation_valid.0 = true;
-        other_read.provider_silence_suppressed.0 = true;
         assert_eq!(record, other_read);
         assert!(
             serde_json::to_value(&record)
@@ -335,6 +362,82 @@ mod tests {
             decode_attempt(wire).unwrap().provider_silent_for_ms.0,
             Some(1_800_000)
         );
+    }
+
+    #[test]
+    fn public_detail_and_summary_hide_only_private_attempt_metadata() {
+        let mut record = attempt();
+        let binding = serde_json::json!({"command":{"argv":["admission-check"]}});
+        record.extra.insert(
+            provenant_records::run::REPOSITORY_ADMISSION_BINDING_FIELD.into(),
+            binding.clone(),
+        );
+        record.extra.insert(
+            "visible_extension".into(),
+            serde_json::json!({"kept": true}),
+        );
+
+        // The stored record keeps the private lifecycle binding.
+        assert_eq!(
+            serde_json::to_value(&record).unwrap()
+                [provenant_records::run::REPOSITORY_ADMISSION_BINDING_FIELD],
+            binding
+        );
+
+        let detail = encode_attempt(&record).unwrap();
+        assert!(
+            detail
+                .get(provenant_records::run::REPOSITORY_ADMISSION_BINDING_FIELD)
+                .is_none()
+        );
+        assert_eq!(
+            detail["visible_extension"],
+            serde_json::json!({"kept": true})
+        );
+
+        let summary =
+            serde_json::to_value(AttemptSummary::from(record)).expect("summary projection");
+        assert!(
+            summary
+                .get(provenant_records::run::REPOSITORY_ADMISSION_BINDING_FIELD)
+                .is_none()
+        );
+        assert_eq!(
+            summary["visible_extension"],
+            serde_json::json!({"kept": true})
+        );
+    }
+
+    #[test]
+    fn expired_wait_evaluates_the_final_local_snapshot_before_its_verdict() {
+        for condition in [WaitCondition::Any, WaitCondition::All] {
+            let pending = attempt();
+            let result = finish_wait_snapshot(
+                condition,
+                vec![pending],
+                true,
+                Default::default(),
+                |records| {
+                    records[0].state = AttemptState::Terminal {
+                        extra: Default::default(),
+                        outcome: Outcome::Succeeded,
+                        exit_code: Some(0),
+                        finished_at: WallTime::from_micros(2).unwrap(),
+                        reason: None,
+                    };
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert!(matches!(
+                result,
+                RunResult::Wait {
+                    satisfied: true,
+                    timed_out: false,
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]

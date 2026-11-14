@@ -27,8 +27,8 @@ TOML edits and syscall bindings. Temporary fixture directories are test-only.
 ### 4. In-house primitives
 
 Keep bounded HTTP calls on the system `curl` transport with secrets off argv.
-Fabric has one small stdio JSON-RPC transport, so it needs neither an MCP SDK
-nor an async runtime. Use threads, typed library errors and small edge
+Fabric's peer and lane relays are small framed transports, so they need no
+RPC framework or async runtime. Use threads, typed library errors and small edge
 diagnostics rather than adding generic runtime and logging frameworks.
 
 ### 5. External YAML
@@ -53,5 +53,4 @@ A narrow dependency set limits audit and update work; bespoke protocol and
 subset readers carry focused conformance tests. This is a dependency policy,
 not a migration rollout plan.
 
-Overturn when (decision 4): Fabric must serve MCP over a transport other than
-stdio, or a supported host has no system `curl`.
+Overturn when (decision 4): a supported host has no system `curl`.

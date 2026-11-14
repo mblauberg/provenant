@@ -1,10 +1,9 @@
-
 #[test]
 fn identity_probes_preserve_auth_failures_only_from_intact_captures() {
     use provenant_os::exec::{
         CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
     };
-    struct SignedOut<'a>(&'a [u8], bool, bool, bool);
+    struct SignedOut<'a>(&'a [u8], bool, bool, bool, bool);
     impl Executor for SignedOut<'_> {
         fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
             assert!(matches!(
@@ -13,10 +12,14 @@ fn identity_probes_preserve_auth_failures_only_from_intact_captures() {
             ));
             Ok(ExecOutcome {
                 termination: Termination::Exit(1),
-                stdout: Default::default(),
+                stdout: CapturedStream {
+                    bytes: if self.4 { self.0.to_vec() } else { vec![] },
+                    truncated: self.1 && self.4,
+                    ..Default::default()
+                },
                 stderr: CapturedStream {
-                    bytes: self.0.to_vec(),
-                    truncated: self.1,
+                    bytes: if self.4 { vec![] } else { self.0.to_vec() },
+                    truncated: self.1 && !self.4,
                     ..Default::default()
                 },
                 timed_out: self.2,
@@ -28,12 +31,14 @@ fn identity_probes_preserve_auth_failures_only_from_intact_captures() {
         }
     }
     let scratch = tempfile::tempdir().unwrap();
-    for (adapter, capture) in [
+    for (adapter, capture, structured) in [
         (
             "agy",
             include_bytes!("../../../tests/fixtures/providers/agy/auth-required.stderr").as_slice(),
+            false,
         ),
-        ("claude", b"Not logged in".as_slice()),
+        ("claude", b"Not logged in".as_slice(), false),
+        ("claude", br#"{"loggedIn":false}"#.as_slice(), true),
     ] {
         for (truncated, timed_out, cancelled) in [
             (false, false, false),
@@ -42,7 +47,7 @@ fn identity_probes_preserve_auth_failures_only_from_intact_captures() {
             (false, false, true),
         ] {
             let result = accounts::detect(
-                &SignedOut(capture, truncated, timed_out, cancelled),
+                &SignedOut(capture, truncated, timed_out, cancelled, structured),
                 adapter,
                 Path::new("/fixture/agy"),
                 scratch.path(),
@@ -50,8 +55,10 @@ fn identity_probes_preserve_auth_failures_only_from_intact_captures() {
                 scratch.path(),
                 scratch.path(),
             );
-            if truncated || timed_out || cancelled {
+            if truncated || timed_out || cancelled || (adapter == "claude" && !structured) {
                 assert!(matches!(result, Err(ProviderError::UnknownIdentity)));
+            } else if adapter == "claude" {
+                assert!(matches!(result, Err(ProviderError::LoginRequired)));
             } else {
                 assert!(matches!(result, Err(ProviderError::CredentialUnavailable)));
             }
@@ -120,9 +127,10 @@ fn optional_discovered_grants_are_filtered_without_touching_required_grants()
         &mut grants,
         1,
         &home,
+        crate::tests::fixture_policy(),
         crate::launch::OmissionSource::Toolchain,
         &mut omitted,
-    );
+    )?;
     assert_eq!(grants, vec![required]);
     assert_eq!(
         omitted,
@@ -159,9 +167,10 @@ fn optional_unrepresentable_discovery_is_omitted_with_evidence()
         &mut grants,
         1,
         &home,
+        crate::tests::fixture_policy(),
         crate::OmissionSource::Toolchain,
         &mut omitted,
-    );
+    )?;
     assert_eq!(grants, vec![required]);
     assert_eq!(omitted.len(), 2);
     assert_eq!(omitted[0].path, target);
@@ -198,7 +207,7 @@ fn optional_unrepresentable_write_is_omitted_from_applied_access()
     spec.tool_requirements
         .writes
         .push(crate::launch::subtree(&target));
-    spec.complete_tool_requirements(&plan, &home, Path::new("/fixture/repo"));
+    spec.complete_tool_requirements(&plan, &home, Path::new("/fixture/repo"))?;
     assert!(
         spec.profile
             .spec
@@ -318,7 +327,7 @@ fn discovered_grants_in_credential_roots_are_omitted() -> Result<(), Box<dyn std
     // Feed an independently discovered Node prefix through the same resolver.
     spec.tool_requirements = crate::launch::ToolRequirements::default();
     crate::launch::homebrew_tools(&node_alias, &mut spec.tool_requirements, &mut spec.env);
-    spec.complete_tool_requirements(&plan, &home, Path::new("/fixture/repo"));
+    spec.complete_tool_requirements(&plan, &home, Path::new("/fixture/repo"))?;
     let node_bin = node_prefix.join("bin");
     assert!(
         spec.omitted_discovery
@@ -434,7 +443,9 @@ fn assert_lane_user_skills(adapter: &str) -> Result<(), Box<dyn std::error::Erro
         std::fs::create_dir_all(opencode_config.parent().unwrap())?;
         std::fs::write(&opencode_config, "{}")?;
     }
-    let target = home.join(".local/share/provenant/v1/releases/digest/skill");
+    let target = home
+        .join(provenant_core::DEFAULT_STATE_SUFFIX)
+        .join("releases/digest/skill");
     std::fs::create_dir_all(&target)?;
     let resource = home.join("shared/reference.md");
     std::fs::create_dir_all(resource.parent().unwrap())?;
@@ -580,9 +591,8 @@ fn assert_lane_user_skills(adapter: &str) -> Result<(), Box<dyn std::error::Erro
             }
             if adapter == "opencode" {
                 assert!(
-                    spec.profile
-                        .spec
-                        .authentication[0].roots
+                    spec.profile.spec.authentication[0]
+                        .roots
                         .contains(&crate::launch::exact(&opencode_config))
                 );
             }
@@ -698,7 +708,7 @@ fn applied_access_matches_compiled_profile() -> Result<(), Box<dyn std::error::E
         vec![],
         project_receipt.clone(),
     );
-    spec.complete_tool_requirements(&plan, &home, Path::new("/fixture/repo"));
+    spec.complete_tool_requirements(&plan, &home, Path::new("/fixture/repo"))?;
     assert_eq!(spec.project_requirements_receipt(), Some(&project_receipt));
     assert!(spec.profile.spec.runtime_reads.contains(&project_grant));
     assert!(spec.profile.spec.tool_exec_roots.contains(&project_grant));
@@ -932,7 +942,12 @@ fn staged_skills_native_probes() -> Result<(), Box<dyn std::error::Error>> {
             probe
                 .args(["-p", &profile])
                 .arg(&executable)
-                .args(["--exact", "tests::staged_skills_probe_child", "--ignored", "--nocapture"])
+                .args([
+                    "--exact",
+                    "tests::staged_skills_probe_child",
+                    "--ignored",
+                    "--nocapture",
+                ])
                 .env_clear()
                 .env("PROVENANT_PROBE_STAGE", stage.join("SKILL.md"))
                 .env("PROVENANT_PROBE_SECRET", &secret);
@@ -1002,17 +1017,24 @@ fn tool_search_path_preserves_native_home_and_omits_unusable_entry() {
     use std::os::unix::ffi::OsStringExt;
     use std::path::PathBuf;
     let home = PathBuf::from(OsString::from_vec(b"/fixture/home-\xff".to_vec()));
-    let path = crate::launch::tool_search_path(&home, true);
+    let path =
+        crate::launch::tool_search_path(&home, true, crate::tests::fixture_policy()).unwrap();
     assert_eq!(
         std::env::split_paths(&path).next(),
         Some(home.join(".cargo/bin"))
     );
-    let path = crate::launch::tool_search_path(Path::new("/fixture/home:with-separator"), true);
+    let path = crate::launch::tool_search_path(
+        Path::new("/fixture/home:with-separator"),
+        true,
+        crate::tests::fixture_policy(),
+    )
+    .unwrap();
     assert_eq!(
         std::env::split_paths(&path).collect::<Vec<_>>(),
         [PathBuf::from("/usr/bin"), PathBuf::from("/bin")]
     );
-    let path = crate::launch::tool_search_path(&home, false);
+    let path =
+        crate::launch::tool_search_path(&home, false, crate::tests::fixture_policy()).unwrap();
     assert_eq!(
         std::env::split_paths(&path).next(),
         Some(PathBuf::from("/usr/bin"))
@@ -1020,7 +1042,7 @@ fn tool_search_path_preserves_native_home_and_omits_unusable_entry() {
 }
 
 #[test]
-fn claude_writer_requires_private_state() -> Result<(), ProviderError> {
+fn claude_writer_uses_scratch_when_private_state_is_absent() -> Result<(), ProviderError> {
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
     let original = fixture_access_plan(Access::WorktreeWrite, None, false);
     let mut permissions = original.permissions().clone();
@@ -1037,14 +1059,25 @@ fn claude_writer_requires_private_state() -> Result<(), ProviderError> {
     route.account_key = None;
     let prompt = Prompt::new("fixture".into());
     let token = fixture_token();
-    assert!(matches!(claude::Claude.prepare(fixture_input(
-        &route, &plan, &prompt, Path::new("/fixture/repo"), Some(&token),
-    )), Err(ProviderError::UnsupportedPolicy)));
+    let launch = claude::Claude.prepare(fixture_input(
+        &route,
+        &plan,
+        &prompt,
+        Path::new("/fixture/repo"),
+        Some(&token),
+    ))?;
+    assert!(launch.env.iter().any(|(key, value)| {
+        key == "CLAUDE_CONFIG_DIR"
+            && value == plan.permissions().scratch.path.join("claude-config").as_os_str()
+    }));
+    assert!(launch.profile.spec.state_writes.iter().all(|grant| {
+        !grant.path.starts_with("/fixture/home/.claude")
+    }));
     Ok(())
 }
 
 #[test]
-fn opencode_requires_private_state() -> Result<(), ProviderError> {
+fn opencode_uses_scratch_when_private_state_is_absent() -> Result<(), ProviderError> {
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
     let route = route("opencode", "fixture-model");
     let prompt = Prompt::new("fixture".into());
@@ -1060,10 +1093,27 @@ fn opencode_requires_private_state() -> Result<(), ProviderError> {
             agy_state: None,
         })
         .expect("fixture plan");
-        assert!(matches!(opencode::OpenCode.prepare(fixture_input(
-            &route, &plan, &prompt, Path::new("/fixture/repo"), None,
-        )), Err(ProviderError::UnsupportedPolicy)));
-
+        let launch = opencode::OpenCode.prepare(fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            Path::new("/fixture/repo"),
+            None,
+        ))?;
+        let scratch = &plan.permissions().scratch.path;
+        for (key, expected) in [
+            ("XDG_CONFIG_HOME", scratch.join("config")),
+            ("XDG_DATA_HOME", scratch.join("data")),
+            ("XDG_CACHE_HOME", scratch.join("cache")),
+            ("XDG_STATE_HOME", scratch.join("state")),
+        ] {
+            assert!(launch.env.iter().any(|(name, value)| {
+                name == key && value == expected.as_os_str()
+            }));
+        }
+        assert!(launch.profile.spec.state_writes.iter().all(|grant| {
+            !grant.path.starts_with("/fixture/home/.config/opencode")
+        }));
     }
     Ok(())
 }

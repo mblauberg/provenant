@@ -8,8 +8,8 @@ pub enum Verdict {
     Off,
     /// Usage is within the budget; `used` tokens so far.
     Within { used: u64 },
-    /// Usage has passed the budget: end the attempt and attempt to commit its
-    /// work so a continuation can pick it up.
+    /// Usage has passed the target. The resolved action chooses whether to
+    /// warn, resume once to wrap up, or stop dirty work.
     Over { used: u64, budget: u64 },
     /// The provider reported no usage. Warn; never refuse.
     Unreported,
@@ -93,7 +93,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fake_provider_passing_the_budget_ends_the_attempt_and_silence_only_warns() {
+    fn reported_usage_crosses_the_target_and_missing_usage_never_implies_a_stop() {
         let provider = FakeProvider(vec![Some(100_000), Some(499_999), Some(500_001)]);
         assert_eq!(
             judge(&provider.report(0), 500_000),
@@ -114,24 +114,6 @@ mod tests {
         assert_eq!(
             judge(&FakeProvider(vec![None]).report(0), 500_000),
             Verdict::Unreported
-        );
-    }
-
-    #[test]
-    fn budget_capture_applies_the_budget_for_providers_reporting_live_usage() {
-        let input = crate::tests::input();
-        let task = &input.request.tasks[0];
-        assert_eq!(
-            crate::launch::capture_plan(task, 60, 500, "codex").token_budget,
-            500
-        );
-        assert_eq!(
-            crate::launch::capture_plan(task, 60, 500, "opencode").token_budget,
-            0
-        );
-        assert_eq!(
-            crate::launch::capture_plan(task, 60, 500, "claude").token_budget,
-            500
         );
     }
 

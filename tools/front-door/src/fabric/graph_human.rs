@@ -112,7 +112,10 @@ pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
         .collect();
     action.sort_by_key(|(_, state, _)| rank(state));
     let mut rows: Vec<String> = Vec::new();
-    if let Some(reason) = text(checkpoint, "pause_reason") {
+    if let Some(reason) = checkpoint
+        .get("pause")
+        .and_then(|pause| text(pause, "reason"))
+    {
         rows.push(format!("paused: {}", bounded_reason(&reason)));
     }
     if let Some(error) = text(run, "advance_error") {
@@ -287,18 +290,18 @@ mod test_presentation {
             .flat_map(|node| node.children.iter())
             .collect();
         let mut human = format!("Graph {}: {:?}\n", run.checkpoint.graph_id, run.status);
-        if full
-            && (run.checkpoint.bound_review_base.is_some()
-                || run.checkpoint.bound_integration_base.is_some())
-        {
+        if full && run.checkpoint.bases.is_some() {
+            let bases = run.checkpoint.bases.unwrap_or_default();
             human.push_str(&format!(
                 "Graph bases: review={} integration={}\n",
-                run.checkpoint
-                    .bound_review_base
+                bases
+                    .review
+                    .map(|base| base.to_string())
                     .as_deref()
                     .unwrap_or("unavailable"),
-                run.checkpoint
-                    .bound_integration_base
+                bases
+                    .integration
+                    .map(|base| base.to_string())
                     .as_deref()
                     .unwrap_or("unavailable")
             ));
@@ -307,7 +310,7 @@ mod test_presentation {
             human.push_str(&format!("Outcome: {outcome:?}\n"));
         }
         if run.status == provenant_fabric_runtime::graph::GraphStatus::Paused
-            && let Some(reason) = &run.checkpoint.pause_reason
+            && let Some(reason) = run.checkpoint.pause_reason()
         {
             human.push_str(&format!("Pause reason: {}\n", bounded_reason(reason)));
         }

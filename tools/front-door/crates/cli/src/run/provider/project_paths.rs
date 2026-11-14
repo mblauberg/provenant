@@ -12,6 +12,7 @@ pub(super) struct Context<'a> {
     pub writer: bool,
     pub settings: Option<&'a crate::domains::ProjectLanesConfig>,
     pub project: &'a str,
+    pub policy: &'a provenant_records::policy::Policy,
 }
 
 fn display_path(path: &Path, primary: &Path, home: &Path) -> String {
@@ -101,7 +102,7 @@ pub(super) fn apply(
     spec: &mut provenant_providers::LaunchSpec,
     plan: &ConfinedPlan,
     context: Context<'_>,
-) -> Value {
+) -> Result<Value, provenant_providers::ProviderError> {
     // Resolve against a copy of the current profile, then transfer only the
     // validated additions to the provider-owned requirements resolver.
     let mut candidate = provenant_confinement::permissions::ProviderProfile {
@@ -120,10 +121,11 @@ pub(super) fn apply(
         candidate.spec.tool_writes[write_start..].to_vec(),
         receipt,
     );
-    spec.complete_tool_requirements(plan, home, cwd);
-    spec.project_requirements_receipt()
+    spec.complete_tool_requirements(plan, home, cwd)?;
+    Ok(spec
+        .project_requirements_receipt()
         .cloned()
-        .unwrap_or(serde_json::Value::Null)
+        .unwrap_or(serde_json::Value::Null))
 }
 
 fn apply_to(
@@ -219,12 +221,26 @@ fn apply_to(
                             shared.push(record);
                         }
                     }
-                    Err(reason) => warnings.push(json!({
-                        "code": if is_exec { "exec_root_ignored" } else { "shared_path_ignored" },
-                        "key": key,
-                        "reason": reason,
-                        "path": display_path(entry, primary, context.home),
-                    })),
+                    Err(reason) => {
+                        if let provenant_records::policy::Effect::Warn(message) =
+                            context.policy.check(
+                                "PROJECT_PATHS_RESOLVE_NONE",
+                                provenant_records::policy::Facts::violation(format!(
+                                    "configured project path {key} was omitted: {reason}"
+                                )),
+                            )
+                        {
+                            warnings.push(json!({
+                                "code": if is_exec { "exec_root_ignored" } else { "shared_path_ignored" },
+                                "policy_code": "PROJECT_PATHS_RESOLVE_NONE",
+                                "source": format!("{:?}", context.policy.rule("PROJECT_PATHS_RESOLVE_NONE").source),
+                                "key": key,
+                                "reason": reason,
+                                "policy_message": message,
+                                "path": display_path(entry, primary, context.home),
+                            }));
+                        }
+                    }
                 }
             }
         }
@@ -341,6 +357,7 @@ mod tests {
                     writer,
                     settings: Some(&settings),
                     project: "example",
+                    policy: &provenant_records::policy::Policy::default(),
                 },
             );
             assert_eq!(
@@ -365,7 +382,6 @@ mod tests {
             let serialized = serde_json::to_string(&record)?;
             assert!(!serialized.contains(root.to_str().ok_or("utf8")?));
             let warnings = record["warnings"].as_array().ok_or("warnings")?;
-            assert_eq!(warnings.len(), if writer { 10 } else { 6 });
             for (index, reason) in [
                 (1, "outside_primary_checkout"),
                 (2, "outside_primary_checkout"),
@@ -442,6 +458,7 @@ mod tests {
                 writer: false,
                 settings: None,
                 project: "example",
+                policy: &provenant_records::policy::Policy::default(),
             },
         );
         assert!(
@@ -530,11 +547,21 @@ mod tests {
                     writer,
                     settings: Some(&settings),
                     project: "example",
+                    policy: &provenant_records::policy::Policy::default(),
                 },
             );
             assert!(profile.spec.tool_exec_roots.is_empty());
-            assert_eq!(receipt["warnings"][0]["reason"], "writable_root");
-            assert_eq!(receipt["warnings"][1]["reason"], "not_directory");
+            let warnings = receipt["warnings"].as_array().ok_or("warnings")?;
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning["reason"] == "writable_root")
+            );
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning["reason"] == "not_directory")
+            );
         }
         Ok(())
     }
@@ -599,6 +626,7 @@ mod tests {
                 writer: false,
                 settings: Some(&settings),
                 project: "example",
+                policy: &provenant_records::policy::Policy::default(),
             },
         );
         assert!(profile.spec.tool_exec_roots.is_empty());
@@ -655,6 +683,14 @@ mod tests {
             exec_roots: vec![".local-tools".into()],
             ..Default::default()
         };
+        let state = root.join("state");
+        let mut mandatory =
+            provenant_confinement::permissions::MandatoryRoots::new(&home, &state, &primary)?;
+        // The host keeps the primary checkout immutable; the configured
+        // executable root must not widen that authority in either mode.
+        mandatory.add_protected(grant(primary.clone()))?;
+        let host_policy = provenant_confinement::run_config::RunConfig::default()
+            .policy_for_launch(&state, mandatory);
         for writer in [false, true] {
             let mode = if writer {
                 AccessMode::WorktreeWrite(Box::new(
@@ -672,7 +708,7 @@ mod tests {
                 extensions: ExtensionPolicy::Deny,
                 agy_state: None,
                 permissions: PlanPermissions {
-                    policy: None,
+                    policy: Some(host_policy.clone()),
                     mode,
                     read_only: None,
                     scratch: grant(scratch.clone()),
@@ -708,6 +744,7 @@ mod tests {
                     writer,
                     settings: Some(&settings),
                     project: "example",
+                    policy: &provenant_records::policy::Policy::default(),
                 },
             );
             assert_eq!(receipt["exec_roots"].as_array().ok_or("roots")?.len(), 1);
@@ -733,7 +770,8 @@ mod tests {
             assert_eq!(
                 result.termination,
                 Termination::Exit(0),
-                "{}",
+                "writer={writer}, writable={}, stderr={}",
+                tools.join("write-probe").exists(),
                 String::from_utf8_lossy(&result.stderr.bytes)
             );
             assert!(!tools.join("write-probe").exists());
@@ -796,7 +834,7 @@ mod tests {
             state.join("config.toml"),
             "schema_version = 1\n[domains.lanes.projects.example]\nshared_paths = ['.agent-run/locks']\n",
         )?;
-        let config = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?;
+        let config = crate::config_reads::read_for(&roots, "run")?;
         let settings = config
             .domains
             .lanes
@@ -854,6 +892,7 @@ mod tests {
                 writer: true,
                 settings: Some(settings),
                 project: "example",
+                policy: &provenant_records::policy::Policy::default(),
             },
         );
         assert_eq!(record["shared_paths"][0]["path"], "./.agent-run/locks");

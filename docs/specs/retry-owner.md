@@ -25,6 +25,7 @@ window persists one deadline and next wake under the same operation identity.
 Transient, typed contention may back off within that window. An uncertain
 handoff reobserves the same guardian and route rather than launching a second
 provider. Unknown writer ownership remains fail-closed.
+Preparation fallback requires evidence that custody was released before launch.
 - Why: polling or process restart must not create more time or writer authority.
 - Test: `crates/fabric-runtime/src/graph/graph_launch_retry_tests.rs::launch_errors_retry_until_the_persisted_deadline`;
   `crates/fabric-runtime/src/graph/graph_launch_retry_tests.rs::uncertain_handoff_reobserves_one_guardian_on_the_same_route`
@@ -37,8 +38,5 @@ reopens selected consumers without restarting unrelated work.
 - Why: a retry must neither discard useful work nor erase the cost of failure.
 - Test: `crates/fabric-runtime/src/graph/graph_composite_and_allowance_tests.rs::writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source`;
   `crates/fabric-runtime/src/graph/retry_tests.rs::node_redo_retains_spent_budget_and_unknown_usage_across_attempt_generations`;
-  `crates/fabric-runtime/src/graph/retry_tests.rs::retry_node_and_dependants_resets_consumers_and_preserves_unrelated_work`
-
-Test: none (gap) for atomic terminal publication and successor insertion across
-all owners, and for every real-provider custody failure. Those requirements
-remain review gates; unit recovery evidence does not prove native enforcement.
+  `crates/fabric-runtime/src/graph/retry_tests.rs::retry_node_and_dependants_resets_consumers_and_preserves_unrelated_work`;
+  `crates/fabric-runtime/src/graph/plan_tests.rs::continuation_budget_pauses_then_extends_without_duplicating_prior_work`

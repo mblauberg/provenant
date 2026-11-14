@@ -3,7 +3,7 @@ use crate::{
     db::{bytes, decode, sql_int},
     *,
 };
-use provenant_core::{AttemptId, OperationId, RunId, TaskId, WallTime};
+use provenant_core::{AttemptId, OperationId, WallTime};
 use provenant_os::{exec::Termination, fs::LockMode};
 use provenant_records::{AttemptFile, CanonicalV1};
 use provenant_supervisor::custody::ExitObservation;
@@ -41,7 +41,7 @@ pub(crate) fn import_cancelled(
     owner: provenant_core::ActorId,
 ) -> Result<bool> {
     let marked = read_sealed(attempt, "import-cancelled.json", RECORD_LIMIT)?
-        .map(|raw| crate::db::decode_unversioned::<provenant_supervisor::custody::Scope>(&raw))
+        .map(|raw| crate::db::decode_column::<provenant_supervisor::custody::Scope>(&raw))
         .transpose()?
         .is_some_and(|saved| saved == scope);
     if !marked {
@@ -52,24 +52,40 @@ pub(crate) fn import_cancelled(
         .is_some_and(|request| request.requests_stop(scope, owner)))
 }
 
-pub struct NewAttempt {
-    pub attempt_id: AttemptId,
-    pub task_id: TaskId,
-    /// Exact, already scanned prompt bytes. Store never opens a source file.
-    pub prompt: String,
-}
+/// One launch: exactly one attempt, its request and its scanned prompt.
 pub struct PreparedRun {
-    pub run_id: RunId,
+    pub attempt_id: AttemptId,
     pub operation_id: OperationId,
     pub request: CanonicalRequest,
-    pub attempts: Vec<NewAttempt>,
+    /// Exact, already scanned prompt bytes. Store never opens a source file.
+    pub prompt: String,
     pub created_at: WallTime,
+}
+/// The work key a first attempt records: the graph, node and attempt number
+/// its task context names. A launch without a key is refused; the store never
+/// derives one. A continuation takes its key from its parent instead.
+pub(crate) fn work_key(
+    project: provenant_core::ProjectId,
+    context: Option<&provenant_records::run::WorkContext>,
+) -> Result<provenant_records::WorkKey> {
+    let named = context.and_then(|context| {
+        Some((
+            context.graph_id.clone()?,
+            context.node_id.clone()?,
+            context.attempt?,
+        ))
+    });
+    let (graph, node, attempt) = named.ok_or(RunError::Validation("task names no work key"))?;
+    provenant_records::WorkKey::new(project, graph, node, attempt)
+        .map_err(|_| RunError::Validation("work key"))
 }
 /// Result and route material is supplied by the trusted provider/confinement
 /// composition edge, after secret scanning. This storage API never launches.
 #[derive(Clone)]
 pub struct TerminalPublication<'a> {
     pub terminal_cause: Option<TerminalCause>,
+    /// Provider handoff evidence decoded by the common terminal classifier.
+    pub handoff: Option<provenant_records::handoff::Handoff>,
     /// A bounded sentence Provenant composed from fixed text and typed values,
     /// such as a retry decision. It is never provider output.
     pub terminal_note: Option<String>,
@@ -110,7 +126,7 @@ impl RunStore {
         self.write(call, |tx| {
             let raw: Vec<u8> = tx
                 .query_row(
-                    "SELECT record FROM operations WHERE project=?1 AND actor=?2 AND operation=?3",
+                    "SELECT operation_record FROM attempts WHERE project=?1 AND actor=?2 AND operation=?3 AND refused=1 ORDER BY sequence LIMIT 1",
                     params![
                         self.context.project_id.to_string(),
                         self.context.actor_id.to_string(),
@@ -123,8 +139,6 @@ impl RunStore {
             let mut current: OperationRecord = decode(&raw)?;
             if current.project_id != self.context.project_id
                 || current.actor_id != self.context.actor_id
-                || current.operation_id != expected.operation_id
-                || current.run_id != expected.run_id
                 || current.kind != expected.kind
                 || current.state != OperationState::Refused
                 || current.request_digest != expected.request_digest
@@ -139,7 +153,7 @@ impl RunStore {
                 .extra
                 .insert("refusal_notice_done".into(), serde_json::json!(true));
             tx.execute(
-                "UPDATE operations SET record=?1 WHERE project=?2 AND actor=?3 AND operation=?4",
+                "UPDATE attempts SET operation_record=?1 WHERE project=?2 AND actor=?3 AND operation=?4",
                 params![
                     bytes(&current)?,
                     self.context.project_id.to_string(),
@@ -187,12 +201,7 @@ impl RunStore {
         }
         let digest = input.request.digest()?;
         let mut extra = provenant_records::ExtraFields::default();
-        if let Some(notice) = input
-            .request
-            .tasks
-            .first()
-            .and_then(|task| task.profile.knobs.get("chair.refusal_notice"))
-        {
+        if let Some(notice) = input.request.task.profile.knobs.get("chair.refusal_notice") {
             extra.insert("refusal_notice".into(), notice.clone());
         }
         if let Some(digest) = context.intent_digest {
@@ -210,7 +219,6 @@ impl RunStore {
                 OperationKind::Dispatch
             },
             request_digest: digest,
-            run_id: input.run_id,
             state: OperationState::Refused,
             blocked_reason: None,
             refusal: Some(diagnostic),
@@ -221,20 +229,52 @@ impl RunStore {
                 .clone()
                 .or_else(|| input.request.chair.clone()),
         };
-        self.insert_refusal(operation, call)
+        let key = work_key(self.context.project_id, input.request.task.context.as_ref())?;
+        self.insert_refusal_row(key, input.attempt_id, operation, call)
     }
 
     /// Commit a trusted owner's preflight refusal before canonical admission.
     /// The caller supplies only an already projected, safe diagnostic. The first
     /// record wins; replays may not change its scope, kind or request identity.
+    /// A refusal that never reached a node is a one-node lane under a fresh
+    /// name; callers that know the key use `insert_refusal_under`.
     pub fn insert_refusal(
         &self,
+        operation: OperationRecord,
+        call: &Request<'_>,
+    ) -> Result<OperationRecord> {
+        let id = AttemptId::from_bytes(provenant_os::fs::entropy_128()?);
+        let key = provenant_records::WorkKey::new(
+            self.context.project_id,
+            format!("lane-{id}"),
+            "lane",
+            1,
+        )
+        .map_err(|_| RunError::Validation("work key"))?;
+        self.insert_refusal_row(key, id, operation, call)
+    }
+    /// Commit a preflight refusal under the work key the caller would have
+    /// admitted. The refused row keeps the key, so it is never reused.
+    pub fn insert_refusal_under(
+        &self,
+        key: &provenant_records::WorkKey,
+        operation: OperationRecord,
+        call: &Request<'_>,
+    ) -> Result<OperationRecord> {
+        let id = AttemptId::from_bytes(provenant_os::fs::entropy_128()?);
+        self.insert_refusal_row(key.clone(), id, operation, call)
+    }
+    fn insert_refusal_row(
+        &self,
+        key: provenant_records::WorkKey,
+        id: AttemptId,
         operation: OperationRecord,
         call: &Request<'_>,
     ) -> Result<OperationRecord> {
         if operation.schema_version != 1
             || operation.project_id != self.context.project_id
             || operation.actor_id != self.context.actor_id
+            || key.project() != self.context.project_id
             || operation.state != OperationState::Refused
             || operation.refusal.is_none()
             || operation.refused_at.is_none()
@@ -251,7 +291,7 @@ impl RunStore {
         self.write(call, |tx| {
             let prior: Option<Vec<u8>> = tx
                 .query_row(
-                    "SELECT record FROM operations WHERE project=?1 AND actor=?2 AND operation=?3",
+                    "SELECT operation_record FROM attempts WHERE project=?1 AND actor=?2 AND operation=?3 ORDER BY sequence LIMIT 1",
                     params![
                         self.context.project_id.to_string(),
                         self.context.actor_id.to_string(),
@@ -264,7 +304,6 @@ impl RunStore {
                 let prior: OperationRecord = decode(&prior)?;
                 if prior.project_id != self.context.project_id
                     || prior.actor_id != self.context.actor_id
-                    || prior.operation_id != operation.operation_id
                     || prior.kind != operation.kind
                     || prior.request_digest != digest
                 {
@@ -272,14 +311,31 @@ impl RunStore {
                 }
                 return Ok(prior);
             }
+            if let Some((prior_digest, raw)) = tx
+                .query_row(
+                    "SELECT digest,operation_record FROM attempts WHERE project=?1 AND graph=?2 AND node=?3 AND attempt=?4",
+                    params![key.project().to_string(), key.graph(), key.node(), key.attempt()],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                )
+                .optional()?
+            {
+                if prior_digest != digest.to_string() {
+                    return Err(RunError::OperationConflict);
+                }
+                return decode(&raw);
+            }
             tx.execute(
-                "INSERT INTO operations VALUES (?1,?2,?3,?4,?5,?6)",
+                "INSERT INTO attempts(id,project,graph,node,attempt,digest,actor,operation,number,refused,operation_record,revision,terminal,record,tmp_retained) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,1,1,?9,0,1,NULL,0)",
                 params![
+                    id.to_string(),
                     self.context.project_id.to_string(),
+                    key.graph(),
+                    key.node(),
+                    key.attempt(),
+                    digest.to_string(),
                     self.context.actor_id.to_string(),
                     operation.operation_id.as_str(),
-                    digest.to_string(),
-                    operation.run_id.to_string(),
                     bytes(&operation)?
                 ],
             )?;
@@ -295,7 +351,7 @@ impl RunStore {
         record: &AttemptRecord,
         call: &Request<'_>,
     ) -> Result<bool> {
-        let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let attempt = self.attempt_dir(record.attempt_id, false)?;
         if crate::settlement::abandoned(&attempt, Self::scope(record))?.is_some() {
             return Ok(true);
         }
@@ -337,12 +393,12 @@ impl RunStore {
     /// the failure hiding every other attempt of the run.
     pub(crate) fn pending_effect_attempts(
         &self,
-        run: RunId,
+        attempt: AttemptId,
         call: &Request<'_>,
     ) -> Result<Vec<AttemptId>> {
-        let mut query = self.db.prepare("SELECT a.id,r.record FROM attempts a JOIN settlement_receipts r ON r.attempt=a.id WHERE a.run=?1 AND a.project=?2 AND a.terminal=1")?;
+        let mut query = self.db.prepare("SELECT a.id,r.record FROM attempts a JOIN settlement_receipts r ON r.attempt=a.id WHERE a.id=?1 AND a.project=?2 AND a.terminal=1")?;
         let rows = query.query_map(
-            params![run.to_string(), self.context.project_id.to_string()],
+            params![attempt.to_string(), self.context.project_id.to_string()],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
         )?;
         let mut pending = Vec::new();
@@ -350,20 +406,14 @@ impl RunStore {
             call.check()?;
             let (id, raw) = row?;
             let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
-            if self.effects_pending(run, id, &raw, call).unwrap_or(true) {
+            if self.effects_pending(id, &raw, call).unwrap_or(true) {
                 pending.push(id);
             }
         }
         Ok(pending)
     }
 
-    fn effects_pending(
-        &self,
-        run: RunId,
-        id: AttemptId,
-        raw: &[u8],
-        call: &Request<'_>,
-    ) -> Result<bool> {
+    fn effects_pending(&self, id: AttemptId, raw: &[u8], call: &Request<'_>) -> Result<bool> {
         // A cancelled delivery waits for an explicit `lane deliver`.
         let retryable = |effect: &EffectDisposition| {
             matches!(
@@ -375,13 +425,13 @@ impl RunStore {
                     }
             )
         };
-        let receipts: SettlementReceipts = crate::db::decode_unversioned(raw)?;
+        let receipts: SettlementReceipts = crate::db::decode_column(raw)?;
         let record = self.record(id, call)?;
         let delivery = Self::delivery_outcome(&record) && retryable(&receipts.delivery);
         let manifest = retryable(&receipts.manifest_conflict)
             && (matches!(receipts.manifest_conflict, EffectDisposition::Failed { .. })
                 || self
-                    .attempt_dir(run, id, false)
+                    .attempt_dir(id, false)
                     .and_then(|attempt| {
                         crate::artifacts::subdir(&attempt, OsStr::new("quarantine"), false)
                     })
@@ -407,7 +457,7 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
         let old = self.record(id, call)?;
-        let dir = self.attempt_dir(old.run_id, id, false)?;
+        let dir = self.attempt_dir(id, false)?;
         if read_sealed(
             &dir,
             AttemptFile::TerminalPending.name(),
@@ -439,7 +489,7 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
         let old = self.record(id, call)?;
-        let dir = self.attempt_dir(old.run_id, id, false)?;
+        let dir = self.attempt_dir(id, false)?;
         let pending: AttemptRecord = crate::db::decode_attempt(
             &read_sealed(
                 &dir,
@@ -450,10 +500,9 @@ impl RunStore {
         )?;
         super::reader::validate_attempt(&pending)?;
         if pending.attempt_id != id
-            || pending.run_id != old.run_id
+            || pending.attempt_id != old.attempt_id
             || pending.project_id != old.project_id
-            || pending.task_id != old.task_id
-            || pending.operation_id != old.operation_id
+            || pending.key != old.key
             || pending.generation != old.generation
         {
             return Err(RunError::Conflict);
@@ -465,8 +514,8 @@ impl RunStore {
     }
     /// Commit the exact scoped decision sealed before a failed transaction.
     pub fn replay_terminal(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptRecord> {
-        let current = self.record(id, call)?;
-        let run = self.run_dir(current.run_id, false)?;
+        self.record(id, call)?;
+        let run = self.attempt_dir(id, false)?;
         let guard = run.lock(
             OsStr::new("publication.lock"),
             LockMode::Exclusive,
@@ -478,6 +527,8 @@ impl RunStore {
         drop(guard);
         if committed {
             self.settle_cleanup(&record, None, call);
+        } else {
+            self.release_admission(&record, call);
         }
         self.record(id, call)
     }
@@ -489,7 +540,7 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<(AttemptRecord, bool)> {
         let current = self.record(id, call)?;
-        let dir = self.attempt_dir(current.run_id, id, false)?;
+        let dir = self.attempt_dir(id, false)?;
         let pending: AttemptRecord = crate::db::decode_attempt(
             &read_sealed(
                 &dir,
@@ -500,10 +551,9 @@ impl RunStore {
         )?;
         super::reader::validate_attempt(&pending)?;
         if pending.attempt_id != id
-            || pending.run_id != current.run_id
+            || pending.attempt_id != current.attempt_id
             || pending.project_id != current.project_id
-            || pending.task_id != current.task_id
-            || pending.operation_id != current.operation_id
+            || pending.key != current.key
             || pending.generation != current.generation
             || !matches!(pending.state, AttemptState::Terminal { .. })
             || pending.settlement_receipts.is_some()
@@ -512,10 +562,10 @@ impl RunStore {
             return Err(RunError::Conflict);
         }
         if let Some(result) = &pending.result {
-            self.artifact_bytes(current.run_id, result, RESULT_LIMIT)?;
+            self.artifact_bytes(result, RESULT_LIMIT)?;
         }
         if let Some(exit) = &pending.exit_evidence {
-            let raw = self.artifact_bytes(current.run_id, exit, RECORD_LIMIT)?;
+            let raw = self.artifact_bytes(exit, RECORD_LIMIT)?;
             let stored: SealedExit = decode(&raw)?;
             let AttemptState::Terminal { exit_code, .. } = pending.state else {
                 return Err(RunError::Conflict);
@@ -563,10 +613,11 @@ impl RunStore {
             let mut decision = current.clone();
             decision.settlement_receipts = None;
             decision.custody_pending = None;
-            // Delivery is a post-commit receipt projected by record(), not a
-            // replacement of the immutable decision's delivery snapshot.
+            // Delivery is a post-commit receipt. Admission phase stays frozen
+            // in the terminal decision; release outcome lives in the port receipt.
             decision.delivery = pending.delivery.clone();
-            return if decision == pending {
+            let pending_decision = pending.clone();
+            return if decision == pending_decision {
                 Ok((current, false))
             } else {
                 Err(RunError::Conflict)
@@ -614,7 +665,7 @@ impl RunStore {
             if attempt.generation != generation { return Err(RunError::Conflict); }
             let existing: Option<(i64, Vec<u8>)> = tx.query_row("SELECT generation,record FROM settlement_receipts WHERE attempt=?1", [id.to_string()], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
             let mut receipts: SettlementReceipts = match existing {
-                Some((saved, raw)) if saved == sql_int(generation)? => crate::db::decode_unversioned(&raw)?,
+                Some((saved, raw)) if saved == sql_int(generation)? => crate::db::decode_column(&raw)?,
                 Some(_) => return Err(RunError::Conflict),
                 None => SettlementReceipts::default(),
             };
@@ -624,10 +675,6 @@ impl RunStore {
             tx.execute("INSERT INTO settlement_receipts(attempt,generation,record) VALUES (?1,?2,?3) ON CONFLICT(attempt) DO UPDATE SET record=excluded.record", params![id.to_string(), sql_int(generation)?, bytes(&receipts)?])?;
             Ok(receipts)
         })?;
-        provenant_os::changes::hint(
-            self.context.state_root.as_path(),
-            &[provenant_os::changes::Scope::Board],
-        );
         Ok(receipts)
     }
     /// Record whether a cancellation was effective, without rewriting the decision.
@@ -644,7 +691,7 @@ impl RunStore {
             if attempt.generation != generation { return Err(RunError::Conflict); }
             if disposition == CancellationDisposition::Effective && attempt.cancellation_disposition != Some(CancellationDisposition::Effective) { return Err(RunError::Conflict); }
             let raw: Option<Vec<u8>> = tx.query_row("SELECT record FROM settlement_receipts WHERE attempt=?1 AND generation=?2", params![id.to_string(), sql_int(generation)?], |row| row.get(0)).optional()?;
-            let mut receipts: SettlementReceipts = raw.as_deref().map(crate::db::decode_unversioned).transpose()?.unwrap_or_default();
+            let mut receipts: SettlementReceipts = raw.as_deref().map(crate::db::decode_column).transpose()?.unwrap_or_default();
             if disposition == CancellationDisposition::AcknowledgedIneffective && !matches!(receipts.cancellation, Some(CancellationDisposition::DeliveryEffective | CancellationDisposition::ImportEffective)) {
                 receipts.late_cancellation_acknowledged = true;
             }
@@ -656,69 +703,40 @@ impl RunStore {
             if changed != 1 { return Err(RunError::Conflict); }
             Ok(())
         })?;
-        provenant_os::changes::hint(
-            self.context.state_root.as_path(),
-            &[provenant_os::changes::Scope::Board],
-        );
         Ok(())
     }
-    /// Reserve records first, seal the exact request/prompts, then acknowledge.
-    /// Repeating a prepared operation repairs a publication gap with the same
-    /// request. No scheduler, admission or launch is implied by acceptance here.
-    pub fn create(&self, input: &PreparedRun, call: &Request<'_>) -> Result<RunRecord> {
+    /// Reserve the record first, seal the exact request and prompt, then
+    /// acknowledge. Repeating a prepared operation repairs a publication gap
+    /// with the same request. No scheduler, admission or launch is implied by
+    /// acceptance here.
+    pub fn create(&self, input: &PreparedRun, call: &Request<'_>) -> Result<AttemptRecord> {
         validate_request(input)?;
         // A crash before sealing left the operation prepared under its own
-        // IDs; a replay with fresh IDs adopts them rather than conflicting.
+        // attempt ID; a replay with a fresh ID adopts it rather than conflicting.
         if let Some(op) = self.operation(&input.operation_id, call)?
             && op.state == OperationState::Prepared
             && op.request_digest == input.request.digest()?
-            && op.run_id != input.run_id
         {
-            return self.create_exact(&self.adopt(op.run_id, input, call)?, call);
+            let attempt_id = self.operation_attempt(&input.operation_id, call)?;
+            if attempt_id != input.attempt_id {
+                return self.create_exact(
+                    &PreparedRun {
+                        attempt_id,
+                        operation_id: input.operation_id.clone(),
+                        request: input.request.clone(),
+                        prompt: input.prompt.clone(),
+                        created_at: input.created_at,
+                    },
+                    call,
+                );
+            }
         }
         self.create_exact(input, call)
     }
-    fn adopt(&self, run: RunId, input: &PreparedRun, call: &Request<'_>) -> Result<PreparedRun> {
-        call.check()?;
-        let ids: Vec<(String, String)> = {
-            let mut query = self
-                .db
-                .prepare("SELECT task,id FROM attempts WHERE run=?1 AND project=?2")?;
-            let rows = query.query_map(
-                params![run.to_string(), self.context.project_id.to_string()],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
-            rows.collect::<std::result::Result<_, _>>()?
-        };
-        let attempts = input
-            .attempts
-            .iter()
-            .map(|new| {
-                let (_, id) = ids
-                    .iter()
-                    .find(|(task, _)| *task == new.task_id.to_string())
-                    .ok_or(RunError::Conflict)?;
-                Ok(NewAttempt {
-                    attempt_id: AttemptId::parse(id)
-                        .map_err(|_| RunError::Validation("attempt index ID"))?,
-                    task_id: new.task_id,
-                    prompt: new.prompt.clone(),
-                })
-            })
-            .collect::<Result<_>>()?;
-        Ok(PreparedRun {
-            run_id: run,
-            operation_id: input.operation_id.clone(),
-            request: input.request.clone(),
-            attempts,
-            created_at: input.created_at,
-        })
-    }
-    fn create_exact(&self, input: &PreparedRun, call: &Request<'_>) -> Result<RunRecord> {
+    fn create_exact(&self, input: &PreparedRun, call: &Request<'_>) -> Result<AttemptRecord> {
         let digest = input.request.digest()?;
         let context = &self.context;
-        let existing = self.operation(&input.operation_id, call)?;
-        if let Some(op) = &existing {
+        if let Some(op) = self.operation(&input.operation_id, call)? {
             if op.request_digest != digest {
                 return Err(RunError::OperationConflict);
             }
@@ -729,43 +747,24 @@ impl RunStore {
                         .ok_or(RunError::Validation("refusal diagnostic missing"))?,
                 )));
             }
+            let admitted = self.operation_attempt(&input.operation_id, call)?;
             if op.state != OperationState::Prepared {
-                return self.run(op.run_id, call);
+                return self.record(admitted, call);
             }
-            if op.run_id != input.run_id {
+            if admitted != input.attempt_id {
                 return Err(RunError::Conflict);
             }
         }
         // Configuration and volume probes happen before the store transaction,
         // but a stored refusal replays without depending on current host state.
-        let disk_floor_bytes = provenant_config::GcSettings::read(&self.writer_registry)?
-            .free_floor_bytes(&self.writer_registry)?;
-        let telemetry_contexts: Vec<_> = input
-            .request
-            .tasks
-            .iter()
-            .map(|task| crate::telemetry_context::capture(task, input.created_at))
-            .collect();
-        let run = RunRecord {
-            extra: Default::default(),
-            schema_version: 1,
-            run_id: input.run_id,
-            project_id: context.project_id,
-            actor_id: context.actor_id,
-            operation_id: input.operation_id.clone(),
-            request_digest: digest,
-            task_ids: input.request.tasks.iter().map(|t| t.task_id).collect(),
-            parent: input.request.parent,
-            parent_attempt: input.request.parent_attempt,
-            children: vec![],
-            revision: 1,
-            generation: 0,
-            created_at: input.created_at,
-            closed_at: None,
-            closure: Closure::Open,
-        };
+        let task = &input.request.task;
+        let telemetry_context = crate::telemetry_context::capture(task, input.created_at);
+        let mut operation_extra = provenant_records::ExtraFields::default();
+        if let Some(parent) = input.request.parent_attempt {
+            operation_extra.insert("parent_attempt".into(), serde_json::json!(parent));
+        }
         let operation = OperationRecord {
-            extra: Default::default(),
+            extra: operation_extra,
             schema_version: 1,
             project_id: context.project_id,
             actor_id: context.actor_id,
@@ -776,7 +775,6 @@ impl RunStore {
                 OperationKind::Dispatch
             },
             request_digest: digest,
-            run_id: input.run_id,
             state: OperationState::Prepared,
             blocked_reason: None,
             refusal: None,
@@ -784,7 +782,80 @@ impl RunStore {
             refused_at: None,
             refusal_chair: None,
         };
-        let dir = self.run_dir(input.run_id, true)?;
+        let admitted = self.write(call, |tx| {
+            // The operation ID is the caller's replay handle; the work key is
+            // the attempt's identity.
+            let prior: Option<(Vec<u8>, String)> = tx.query_row("SELECT operation_record,id FROM attempts WHERE project=?1 AND actor=?2 AND operation=?3 ORDER BY sequence LIMIT 1", params![context.project_id.to_string(), context.actor_id.to_string(), input.operation_id.as_str()], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            if let Some((prior, id)) = prior {
+                let prior: OperationRecord = decode(&prior)?;
+                if prior.request_digest != digest { return Err(RunError::OperationConflict); }
+                if prior.state == OperationState::Refused {
+                    return Err(RunError::RecordedRefusal(Box::new(prior.refusal.ok_or(RunError::Validation("refusal diagnostic missing"))?)));
+                }
+                if id != input.attempt_id.to_string() { return Err(RunError::Conflict); }
+                return Ok(None);
+            }
+            // A continuation is the next attempt of its parent's node: it
+            // takes the node's key with the following attempt number, and
+            // each terminal attempt is continued at most once. Any other
+            // launch names its own key in its task context.
+            let key = match input.request.parent {
+                None => work_key(context.project_id, task.context.as_ref())?,
+                Some(target) => {
+                    let (graph, node, number): (String, String, u32) = tx.query_row("SELECT graph,node,attempt FROM attempts WHERE id=?1 AND project=?2 AND refused=0", params![target.to_string(), context.project_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?.ok_or(RunError::NotFound)?;
+                    let taken: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM attempts WHERE continues=?1)", [target.to_string()], |r| r.get(0))?;
+                    if taken { return Err(RunError::Conflict); }
+                    let next = number.checked_add(1).ok_or(RunError::Validation("attempt number"))?;
+                    provenant_records::WorkKey::new(context.project_id, graph, node, next).map_err(|_| RunError::Validation("work key"))?
+                }
+            };
+            // Concurrent submissions of one key serialise on this write; the
+            // first admits it and the rest replay or conflict.
+            let existing: Option<(String, bool, Vec<u8>, String)> = tx.query_row("SELECT digest,refused,operation_record,id FROM attempts WHERE project=?1 AND graph=?2 AND node=?3 AND attempt=?4", params![key.project().to_string(), key.graph(), key.node(), key.attempt()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
+            if let Some((prior_digest, refused, raw, id)) = existing {
+                if prior_digest != digest.to_string() { return Err(RunError::OperationConflict); }
+                if refused {
+                    let prior: OperationRecord = decode(&raw)?;
+                    return Err(RunError::RecordedRefusal(Box::new(prior.refusal.ok_or(RunError::Validation("refusal diagnostic missing"))?)));
+                }
+                return Ok(Some(AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?));
+            }
+            let queued: i64 = tx.query_row("SELECT COUNT(*) FROM admission WHERE active=0", [], |r| r.get(0))?;
+            if queued >= sql_int(crate::admission::HOST_QUEUED)? { return Err(RunError::Capacity); }
+            let attempt_id = input.attempt_id;
+            let attempt = AttemptRecord {extra: Default::default(),
+                key: key.clone(),
+                context: task.context.clone(),
+                title: task.title.clone(),
+                continuation: input.request.fresh_continuation.as_ref().map(|_| "fresh".into()),
+                profile: task.profile.clone(),
+                limits: None,
+                schema_version: 2, attempt_id, project_id: context.project_id, attempt_number: u64::from(key.attempt()), revision: 1, generation: 0,
+                delivery_id: task.delivery_id, retry_of: input.request.parent, superseded_by: None, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, subject: None, head: None, protected_paths: Vec::new(), delivery: None, verified_owner: Some(context.actor_id), session: None,
+                queued_at: input.created_at, started_at: None, priority: None, requested_priority: None, last_output_at: None, provider_silent_for_ms: provenant_records::run::Transient(None), process_observation_valid: provenant_records::run::Transient(false), provider_launched: None, preparation_failure: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, partial_signals: Vec::new(), state: AttemptState::Queued { extra: Default::default() }, usage: UsageRecord::default(),
+                terminal_evidence: None, settlement_reason: None, cancellation_disposition: None, settlement_receipts: None, custody_pending: None,
+                prompt: ArtifactRecord {extra: Default::default(),  path: artifact_path(attempt_id, AttemptFile::Prompt.name())?, digest: task.prompt_digest, bytes: input.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None, skipped_routes: Vec::new(),
+                trace: provenant_records::Trace {extra: telemetry_context.clone(),
+                    host: self.host,
+                    project: Some(context.project_id),
+                    attempt: Some(attempt_id),
+                    operation: Some(input.operation_id.clone()),
+                    actor: Some(context.actor_id),
+                    parent: input.request.parent.or(input.request.parent_attempt),
+                },
+            };
+            tx.execute("INSERT INTO attempts(id,project,graph,node,attempt,digest,actor,operation,number,continues,operation_record,revision,terminal,record) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,1,0,?12)", params![attempt_id.to_string(), context.project_id.to_string(), key.graph(), key.node(), key.attempt(), digest.to_string(), context.actor_id.to_string(), input.operation_id.as_str(), i64::from(key.attempt()), input.request.parent.map(|target| target.to_string()), bytes(&operation)?, crate::db::attempt_bytes(&attempt)?])?;
+            insert_event(tx, &attempt)?;
+            let class = Service::lane_class(task.writer.is_some(), &task.access.write_roots, &[]);
+            self.queue_ticket(tx, &attempt, class, task.provider_timeout_seconds)?;
+            Ok(None)
+        })?;
+        if let Some(existing) = admitted {
+            return self.record(existing, call);
+        }
+        // Reserve first: a conflicting or replayed work key must not leave an
+        // unindexed attempt directory.
+        let dir = self.attempt_dir(input.attempt_id, true)?;
         let _writer = dir.lock(
             OsStr::new("publication.lock"),
             LockMode::Exclusive,
@@ -792,107 +863,24 @@ impl RunStore {
             call.cancel,
             call.clock,
         )?;
-        if let Some(op) = self.operation(&input.operation_id, call)? {
-            if op.request_digest != digest {
-                return Err(RunError::OperationConflict);
-            }
-            if op.state == OperationState::Refused {
-                return Err(RunError::RecordedRefusal(Box::new(
-                    op.refusal
-                        .ok_or(RunError::Validation("refusal diagnostic missing"))?,
-                )));
-            }
-            if op.state != OperationState::Prepared {
-                return self.run(op.run_id, call);
-            }
-        }
-        self.write(call, |tx| {
-            let prior: Option<Vec<u8>> = tx.query_row("SELECT record FROM operations WHERE project=?1 AND actor=?2 AND operation=?3", params![context.project_id.to_string(), context.actor_id.to_string(), input.operation_id.as_str()], |r| r.get(0)).optional()?;
-            if let Some(prior) = prior {
-                let prior: OperationRecord = decode(&prior)?;
-                if prior.request_digest != digest { return Err(RunError::OperationConflict); }
-                if prior.state == OperationState::Refused {
-                    return Err(RunError::RecordedRefusal(Box::new(prior.refusal.ok_or(RunError::Validation("refusal diagnostic missing"))?)));
-                }
-                if prior.run_id != input.run_id { return Err(RunError::Conflict); }
-                return Ok(());
-            }
-            let queued: i64 = tx.query_row("SELECT COUNT(*) FROM admission WHERE active=0", [], |r| r.get(0))?;
-            let local_tasks = input.request.tasks.len();
-            if queued + local_tasks as i64 > sql_int(crate::admission::HOST_QUEUED)? { return Err(RunError::Capacity); }
-            tx.execute("INSERT INTO operations VALUES (?1,?2,?3,?4,?5,?6)", params![context.project_id.to_string(), context.actor_id.to_string(), input.operation_id.as_str(), digest.to_string(), input.run_id.to_string(), bytes(&operation)?])?;
-            tx.execute("INSERT INTO runs VALUES (?1,?2,?3)", params![input.run_id.to_string(), context.project_id.to_string(), bytes(&run)?])?;
-            if let Some(target) = input.request.parent {
-                // Each terminal attempt is continued at most once.
-                let taken = tx.execute("INSERT INTO continuations(target,run) VALUES (?1,?2) ON CONFLICT DO NOTHING", params![target.to_string(), input.run_id.to_string()])?;
-                if taken != 1 { return Err(RunError::Conflict); }
-            }
-            // A continuation is the next attempt of the prior task.
-            let number: i64 = match input.request.parent {
-                None => 1,
-                Some(target) => {
-                    let (task, number): (String, i64) = tx.query_row("SELECT task,number FROM attempts WHERE id=?1 AND project=?2", params![target.to_string(), context.project_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?))).optional()?.ok_or(RunError::NotFound)?;
-                    if input.request.tasks.iter().any(|t| t.task_id.to_string() != task) { return Err(RunError::Validation("continuation must keep its task")); }
-                    number.checked_add(1).ok_or(RunError::Validation("attempt number"))?
-                }
-            };
-            for (index, task) in input.request.tasks.iter().enumerate() {
-                let new = input.attempts.iter().find(|a| a.task_id == task.task_id).ok_or(RunError::Validation("missing task prompt"))?;
-                let attempt = AttemptRecord {extra: Default::default(),
-                    context: task.context.clone(),
-                    title: task.title.clone(),
-                    continuation: input.request.fresh_continuation.as_ref().map(|_| "fresh".into()),
-                    profile: task.profile.clone(),
-                    schema_version: 2, attempt_id: new.attempt_id, run_id: run.run_id, project_id: run.project_id, task_id: task.task_id, operation_id: run.operation_id.clone(), attempt_number: u64::try_from(number).map_err(|_| RunError::Validation("attempt number"))?, revision: 1, generation: 0,
-                    delivery_id: task.delivery_id, retry_of: input.request.parent, superseded_by: None, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, granted_tracking_ref: None, subject: None, head: None, protected_paths: Vec::new(), delivery: None, verified_owner: Some(context.actor_id), session: None,
-                queued_at: input.created_at, started_at: None, priority: None, requested_priority: None, last_output_at: None, provider_silent_for_ms: provenant_records::run::Transient(None), process_observation_valid: provenant_records::run::Transient(false), provider_silence_suppressed: provenant_records::run::Transient(false), provider_launched: None, preparation_failure: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, partial_signals: Vec::new(), state: AttemptState::Queued { extra: Default::default() }, usage: UsageRecord::default(),
-                    terminal_evidence: None, settlement_reason: None, cancellation_disposition: None, settlement_receipts: None, custody_pending: None,
-                    prompt: ArtifactRecord {extra: Default::default(),  path: artifact_path(new.attempt_id, AttemptFile::Prompt.name())?, digest: task.prompt_digest, bytes: new.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None, skipped_routes: Vec::new(),
-                    trace: provenant_records::Trace {extra: telemetry_contexts[index].clone(),
-                        host: self.host,
-                        project: Some(run.project_id),
-                        run: Some(run.run_id),
-                        attempt: Some(new.attempt_id),
-                        operation: Some(run.operation_id.clone()),
-                        actor: Some(run.actor_id),
-                        parent: input.request.parent.or(input.request.parent_attempt),
-                    },
-                };
-                tx.execute("INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,?5,1,0,?6)", params![attempt.attempt_id.to_string(), run.run_id.to_string(), run.project_id.to_string(), task.task_id.to_string(), number, crate::db::attempt_bytes(&attempt)?])?;
-                insert_event(tx, &attempt)?;
-                let waves = index as u64 / input.request.concurrency.max(1);
-                let class = Service::lane_class(task.writer.is_some(), &task.access.write_roots, &[]);
-                self.queue_ticket(tx, &attempt, class, input.request.concurrency, crate::admission::Allowance { queue_seconds: waves.saturating_mul(task.provider_timeout_seconds), runtime_seconds: task.provider_timeout_seconds }, disk_floor_bytes)?;
-            }
-            Ok(())
-        })?;
-        provenant_os::changes::hint(
-            self.context.state_root.as_path(),
-            &[provenant_os::changes::Scope::Board],
-        );
         #[cfg(test)]
         crate::tests::crash_at("reserved");
         seal(&dir, "request.json", &bytes(&input.request)?, RECORD_LIMIT)?;
-        for attempt in &input.attempts {
-            let recorded = self.record(attempt.attempt_id, call)?;
-            if recorded.run_id != input.run_id
-                || recorded.task_id != attempt.task_id
-                || recorded.prompt.digest != CanonicalV1::file_digest(attempt.prompt.as_bytes())
-            {
-                return Err(RunError::Conflict);
-            }
-            seal(
-                &self.attempt_dir(input.run_id, attempt.attempt_id, true)?,
-                AttemptFile::Prompt.name(),
-                attempt.prompt.as_bytes(),
-                RECORD_LIMIT,
-            )?;
+        let recorded = self.record(input.attempt_id, call)?;
+        if recorded.prompt.digest != CanonicalV1::file_digest(input.prompt.as_bytes()) {
+            return Err(RunError::Conflict);
         }
+        seal(
+            &dir,
+            AttemptFile::Prompt.name(),
+            input.prompt.as_bytes(),
+            RECORD_LIMIT,
+        )?;
         self.write(call, |tx| {
             let mut accepted = operation.clone();
             accepted.state = OperationState::Accepted;
             tx.execute(
-                "UPDATE operations SET record=?1 WHERE project=?2 AND actor=?3 AND operation=?4",
+                "UPDATE attempts SET operation_record=?1 WHERE project=?2 AND actor=?3 AND operation=?4",
                 params![
                     bytes(&accepted)?,
                     context.project_id.to_string(),
@@ -902,7 +890,7 @@ impl RunStore {
             )?;
             Ok(())
         })?;
-        self.run(input.run_id, call)
+        self.record(input.attempt_id, call)
     }
     pub fn publish_terminal(
         &self,
@@ -913,12 +901,12 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
         let old = self.record(id, call)?;
-        let durable_exit = sealed_exit(&self.attempt_dir(old.run_id, id, false)?, exit)?;
+        let durable_exit = sealed_exit(&self.attempt_dir(id, false)?, exit)?;
         let outcome_exit = match exit.termination {
             Some(Termination::Exit(code)) => Some(code),
             _ => None,
         };
-        if exit.scope.run != old.run_id
+        if exit.scope.attempt != old.attempt_id
             || exit.scope.attempt != id
             || exit.scope.generation != old.generation
             || exit.unresolved_cleanup
@@ -930,7 +918,20 @@ impl RunStore {
         if matches!(
             publication.outcome,
             Outcome::Succeeded | Outcome::ReviewRequired
-        ) && (outcome_exit != Some(0) || exit.never_spawned)
+        ) && (exit.never_spawned
+            || (outcome_exit != Some(0)
+                && !matches!(
+                    SettlementReason::derive(
+                        publication.outcome,
+                        Some(&TerminalEvidence::ProcessExit),
+                        &publication.partial_signals,
+                        publication.terminal_cause,
+                        publication.handoff.as_ref(),
+                    )
+                    .rule()
+                    .terminal_outcome,
+                    provenant_records::run::SettlementTerminalOutcome::Succeeded
+                )))
         {
             return Err(RunError::Validation("success lacks verified provider exit"));
         }
@@ -938,7 +939,7 @@ impl RunStore {
             && !exit.never_spawned
             && exit.cancel_delivered_before_exit != Some(true)
             && !import_cancelled(
-                &self.attempt_dir(old.run_id, id, false)?,
+                &self.attempt_dir(id, false)?,
                 Self::scope(&old),
                 old.verified_owner.unwrap_or(self.context.actor_id),
             )?
@@ -1043,9 +1044,14 @@ impl RunStore {
             terminal_cause,
             terminal_note,
         } = withdrawal;
-        if failure.is_some() && !matches!(expected, AttemptState::Queued { .. }) {
+        if failure.is_some()
+            && !matches!(
+                expected,
+                AttemptState::Queued { .. } | AttemptState::Starting { .. }
+            )
+        {
             return Err(RunError::Validation(
-                "preparation evidence requires queued attempt",
+                "preparation evidence requires an unlaunched attempt",
             ));
         }
         if !matches!(
@@ -1055,8 +1061,10 @@ impl RunStore {
             return Err(RunError::Validation("withdrawal outcome"));
         }
         let defer_writer_cleanup = matches!(expected, AttemptState::Starting { .. });
-        let old = self.record(id, call)?;
-        let dir = self.run_dir(old.run_id, false)?;
+        self.record(id, call)?;
+        // The queued DB transaction can outlive an interrupted directory
+        // publication. A starting attempt must retain its launch evidence.
+        let dir = self.attempt_dir(id, matches!(expected, AttemptState::Queued { .. }))?;
         let writer = dir.lock(
             OsStr::new("publication.lock"),
             LockMode::Exclusive,
@@ -1077,7 +1085,7 @@ impl RunStore {
             return Err(RunError::Conflict);
         }
         let revision = old.revision;
-        let attempt_dir = self.attempt_dir(old.run_id, id, true)?;
+        let attempt_dir = self.attempt_dir(id, true)?;
         // An interrupted withdrawal resumes its own sealed facts, so a retry
         // never renders a second finished_at or reason.
         let (outcome, finished_at, reason, preparation_failure, terminal_cause, terminal_note) =
@@ -1101,7 +1109,7 @@ impl RunStore {
                             extra,
                             ..
                         } if saved.attempt_id == id
-                            && saved.run_id == old.run_id
+                            && saved.attempt_id == old.attempt_id
                             && saved.generation == old.generation
                             && saved.exit_evidence.is_none()
                             && saved.provider_launched == Some(false)
@@ -1135,6 +1143,7 @@ impl RunStore {
             };
         old.preparation_failure = preparation_failure;
         let publication = TerminalPublication {
+            handoff: None,
             terminal_cause,
             terminal_note,
             outcome,
@@ -1145,9 +1154,9 @@ impl RunStore {
             result: "",
             complete: true,
             redacted: false,
-            resolved_route: None,
-            applied_route: None,
-            observed_route: None,
+            resolved_route: old.resolved_route.clone(),
+            applied_route: old.applied_route.clone(),
+            observed_route: old.observed_route.clone(),
             usage: UsageRecord::default(),
             session: None,
             partial_signals: Vec::new(),
@@ -1179,29 +1188,142 @@ impl RunStore {
                             ..
                         }
                     )
-                    && self
-                        .request(record.run_id, call)?
-                        .tasks
-                        .iter()
-                        .any(|task| task.task_id == record.task_id && task.writer.is_some())
+                    && self.request(record.attempt_id, call)?.task.writer.is_some()
                 {
+                    self.release_admission(&record, call);
                     return self.record(id, call).map(Some);
                 }
                 if !preserve_evidence {
                     self.settle_cleanup(&record, None, call);
+                } else {
+                    self.release_admission(&record, call);
                 }
                 self.record(id, call).map(Some)
             }
             other => other,
         }
     }
+    pub(crate) fn record_admission_binding(
+        &self,
+        expected: &AttemptRecord,
+        binding: serde_json::Value,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        if !matches!(expected.state, AttemptState::Queued { .. })
+            || expected
+                .extra
+                .contains_key(crate::launch::ADMISSION_PORT_BINDING_FIELD)
+        {
+            return Err(RunError::Conflict);
+        }
+        let mut next = expected.clone();
+        next.revision = expected.revision.checked_add(1).ok_or(RunError::Conflict)?;
+        next.extra
+            .insert(crate::launch::ADMISSION_PORT_BINDING_FIELD.into(), binding);
+        super::reader::validate_attempt(&next)?;
+        self.write(call, |tx| {
+            let changed = tx.execute(
+                "UPDATE attempts SET revision=?1,record=?2 WHERE id=?3 AND revision=?4 AND terminal=0",
+                params![
+                    sql_int(next.revision)?,
+                    crate::db::attempt_bytes(&next)?,
+                    next.attempt_id.to_string(),
+                    sql_int(expected.revision)?,
+                ],
+            )?;
+            if changed != 1 {
+                return Err(RunError::Conflict);
+            }
+            insert_event(tx, &next)?;
+            Ok(())
+        })?;
+        self.record(expected.attempt_id, call)
+    }
+
+    pub(crate) fn record_admission_phase(
+        &self,
+        expected: &AttemptRecord,
+        phase: crate::launch::AdmissionPhase,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        let value = expected
+            .extra
+            .get(crate::launch::ADMISSION_PORT_BINDING_FIELD)
+            .cloned()
+            .ok_or(RunError::Conflict)?;
+        let mut binding: crate::launch::AdmissionPortBinding = serde_json::from_value(value)
+            .map_err(|_| RunError::Validation("stored repository admission binding"))?;
+        if !binding.valid() {
+            return Err(RunError::Validation(
+                "stored repository admission binding digest",
+            ));
+        }
+        if binding.phase == phase {
+            return Ok(expected.clone());
+        }
+        if matches!(expected.state, AttemptState::Terminal { .. }) {
+            return Err(RunError::Conflict);
+        }
+        let active_owner = matches!(
+            &expected.state,
+            AttemptState::Queued { .. } | AttemptState::Starting { .. }
+        );
+        if !binding.can_transition_to(phase, active_owner) {
+            return Err(RunError::Conflict);
+        }
+        if binding.phase == crate::launch::AdmissionPhase::Released
+            && phase == crate::launch::AdmissionPhase::AcquirePending
+        {
+            binding.lease_epoch = binding
+                .lease_epoch
+                .checked_add(1)
+                .ok_or(RunError::Conflict)?;
+        }
+        binding.phase = phase;
+        let mut next = expected.clone();
+        next.revision = expected.revision.checked_add(1).ok_or(RunError::Conflict)?;
+        // These terminal projections have independent durable owners.
+        next.settlement_receipts = None;
+        next.custody_pending = None;
+        next.extra.insert(
+            crate::launch::ADMISSION_PORT_BINDING_FIELD.into(),
+            serde_json::to_value(binding)
+                .map_err(|_| RunError::Validation("repository admission binding"))?,
+        );
+        super::reader::validate_attempt(&next)?;
+        let terminal = matches!(&expected.state, AttemptState::Terminal { .. });
+        self.write(call, |tx| {
+            let changed = tx.execute(
+                "UPDATE attempts SET revision=?1,record=?2 WHERE id=?3 AND project=?4 AND revision=?5 AND terminal=?6",
+                params![
+                    sql_int(next.revision)?,
+                    crate::db::attempt_bytes(&next)?,
+                    next.attempt_id.to_string(),
+                    self.context.project_id.to_string(),
+                    sql_int(expected.revision)?,
+                    terminal,
+                ],
+            )?;
+            if changed != 1 {
+                return Err(RunError::Conflict);
+            }
+            insert_event(tx, &next)?;
+            Ok(())
+        })?;
+        self.record(expected.attempt_id, call)
+    }
+
     pub(crate) fn settle_cleanup(
         &self,
         record: &AttemptRecord,
         recovery: Option<&provenant_supervisor::custody::Recovery>,
         call: &Request<'_>,
     ) {
-        let Ok(attempt_dir) = self.attempt_dir(record.run_id, record.attempt_id, false) else {
+        if !self.release_admission(record, call) {
+            let _ = self.set_temporary_retained(record.attempt_id, true, call);
+            return;
+        }
+        let Ok(attempt_dir) = self.attempt_dir(record.attempt_id, false) else {
             return;
         };
         if !matches!(
@@ -1226,13 +1348,31 @@ impl RunStore {
                 return;
             }
         }
-        if self.request(record.run_id, call).is_ok_and(|request| {
-            request
-                .tasks
-                .iter()
-                .any(|task| task.task_id == record.task_id && task.writer.is_some())
-        }) {
+        if self
+            .request(record.attempt_id, call)
+            .is_ok_and(|request| request.task.writer.is_some())
+        {
             let _ = self.retry_git_cleanup_with_custody(record, recovery, call);
+        }
+        // Terminal publication is not proof that a read-only guardian has
+        // released its attempt. Try once under the same admission gate as GC.
+        let Ok(observation) = provenant_supervisor::custody::writer_admission_guard(&attempt_dir)
+        else {
+            let _ = self.set_temporary_retained(record.attempt_id, true, call);
+            return;
+        };
+        let lease = attempt_dir.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive);
+        drop(observation);
+        let Ok(_lease) = lease else {
+            let _ = self.set_temporary_retained(record.attempt_id, true, call);
+            return;
+        };
+        if !matches!(
+            provenant_supervisor::custody::reservation_present(&attempt_dir, Self::scope(record)),
+            Ok(false)
+        ) {
+            let _ = self.set_temporary_retained(record.attempt_id, true, call);
+            return;
         }
         // The terminal record retains tmp before cleanup; clear that hint only
         // after removal succeeds.
@@ -1243,7 +1383,10 @@ impl RunStore {
             &mut ProviderStateGc::default(),
         );
         let _ = self.set_temporary_retained(record.attempt_id, true, call);
-        if remove_temporary_best_effort(&attempt_dir).is_ok() {
+        let scratch_declared =
+            provenant_config::retention_schedule(provenant_config::RetentionTrigger::Settlement)
+                .any(|class| class.class == provenant_config::RetentionKind::AttemptScratch);
+        if scratch_declared && remove_temporary_best_effort(&attempt_dir).is_ok() {
             let _ = self.set_temporary_retained(record.attempt_id, false, call);
         }
     }
@@ -1277,11 +1420,12 @@ impl RunStore {
             Outcome::Succeeded | Outcome::ReviewRequired
         ) && (!publication.complete
             || publication.result.is_empty()
-            || !super::reader::verified_route(
+            || !super::reader::route_identity(
                 publication.resolved_route.as_ref(),
                 publication.applied_route.as_ref(),
                 publication.observed_route.as_ref(),
-            ))
+            )
+            .permits_success(&publication.partial_signals))
         {
             return Err(RunError::Validation(
                 "success lacks complete result or verified provider identity",
@@ -1289,6 +1433,7 @@ impl RunStore {
         }
         let mut next = old.clone();
         next.revision = expected_revision.checked_add(1).ok_or(RunError::Conflict)?;
+        crate::launch::mark_admission_release_pending(&mut next)?;
         next.started_at = publication.started_at;
         next.provider_launched = Some(launched);
         next.provider_ms = publication.provider_ms;
@@ -1307,35 +1452,13 @@ impl RunStore {
             complete: publication.complete,
             redacted: publication.redacted,
         });
-        let mut terminal_extra = provenant_records::ExtraFields::default();
-        if let Some(cause) = publication.terminal_cause {
-            terminal_extra.insert(
-                "terminal_cause".into(),
-                serde_json::to_value(cause)
-                    .map_err(|_| RunError::Validation("terminal cause could not be encoded"))?,
-            );
-        }
-        if let Some(note) = publication.terminal_note.as_deref() {
-            terminal_extra.insert(
-                "terminal_note".into(),
-                serde_json::Value::String(provenant_records::diagnostic::safe_text(note)),
-            );
-        }
-        next.state = AttemptState::Terminal {
-            extra: terminal_extra,
-            outcome: publication.outcome,
-            exit_code: outcome_exit,
-            finished_at: publication.finished_at,
-            reason: publication.reason.clone(),
-        };
-        next.schema_version = 2;
         let import_cancellation = publication.outcome == Outcome::Cancelled
             && import_cancelled(
-                &self.attempt_dir(old.run_id, id, false)?,
+                &self.attempt_dir(id, false)?,
                 Self::scope(&old),
                 old.verified_owner.unwrap_or(self.context.actor_id),
             )?;
-        next.terminal_evidence = Some(if import_cancellation {
+        let terminal_evidence = if import_cancellation {
             TerminalEvidence::ImportCancellation
         } else if publication.outcome == Outcome::Unsettled {
             TerminalEvidence::Unsettled {
@@ -1351,15 +1474,49 @@ impl RunStore {
             TerminalEvidence::ProcessExit
         } else {
             TerminalEvidence::PreLaunchRefusal
-        });
-        next.settlement_reason = Some(SettlementReason::derive(
+        };
+        let classification = SettlementReason::classify(
             publication.outcome,
-            next.terminal_evidence.as_ref(),
+            Some(&terminal_evidence),
             &next.partial_signals,
-        ));
+            publication.terminal_cause,
+            publication.handoff.as_ref(),
+        )
+        .map_err(|_| RunError::Validation("terminal classification could not be sealed"))?;
+        let mut terminal_extra = provenant_records::ExtraFields::default();
+        if let Some(cause) = publication.terminal_cause {
+            terminal_extra.insert(
+                "terminal_cause".into(),
+                serde_json::to_value(cause)
+                    .map_err(|_| RunError::Validation("terminal cause could not be encoded"))?,
+            );
+        }
+        if let Some(stop) = &classification.stop {
+            terminal_extra.insert(
+                "stop".into(),
+                serde_json::to_value(stop)
+                    .map_err(|_| RunError::Validation("stop could not be encoded"))?,
+            );
+        }
+        if let Some(note) = publication.terminal_note.as_deref() {
+            terminal_extra.insert(
+                "terminal_note".into(),
+                serde_json::Value::String(provenant_records::diagnostic::safe_text(note)),
+            );
+        }
+        next.state = AttemptState::Terminal {
+            extra: terminal_extra,
+            outcome: classification.outcome,
+            exit_code: outcome_exit,
+            finished_at: publication.finished_at,
+            reason: publication.reason.clone(),
+        };
+        next.schema_version = 2;
+        next.terminal_evidence = Some(terminal_evidence);
+        next.settlement_reason = Some(classification.reason);
         next.publication_error = None;
         next.exit_evidence = durable_exit;
-        let attempt = self.attempt_dir(old.run_id, id, false)?;
+        let attempt = self.attempt_dir(id, false)?;
         if import_cancellation {
             next.cancellation_disposition = Some(CancellationDisposition::ImportEffective);
         } else if publication.outcome == Outcome::Cancelled
@@ -1386,7 +1543,7 @@ impl RunStore {
             let writer: crate::writer::WriterTerminal = decode(&raw)?;
             next.head = Some(writer.head);
         }
-        if publication.outcome == Outcome::Succeeded {
+        if classification.outcome == Outcome::Succeeded {
             // Recovery reports uncertainty from the sealed start marker without
             // repeating an external effect or inferring success from prose.
             let raw = match read_sealed(&attempt, "delivery.json", RECORD_LIMIT)? {
@@ -1399,13 +1556,7 @@ impl RunStore {
                     next.head = receipt.head;
                     next.delivery = Some(receipt);
                 }
-            } else if let Some(deliver) = self
-                .request(old.run_id, call)?
-                .tasks
-                .into_iter()
-                .find(|task| task.task_id == old.task_id)
-                .and_then(|task| task.deliver)
-            {
+            } else if let Some(deliver) = self.request(old.attempt_id, call)?.task.deliver {
                 // Requested delivery that never ran must not read as success
                 // with no trace.
                 next.delivery = Some(WriterDeliveryReceipt {
@@ -1432,12 +1583,9 @@ impl RunStore {
         if old.revision != expected_revision {
             return Err(RunError::Conflict);
         }
-        next.superseded_by = self
-            .automatic_continuation(&old)?
-            .map(|successor| successor.id());
         super::reader::validate_attempt(&next)?;
         let intent = crate::db::attempt_bytes(&next)?;
-        let attempt_dir = self.attempt_dir(old.run_id, id, false)?;
+        let attempt_dir = self.attempt_dir(id, false)?;
         // Seal the result, then the exact terminal intent that names it. A
         // crash between them leaves a result-only orphan, which the edge
         // recovers with revalidated facts; intent never names missing bytes.
@@ -1496,7 +1644,7 @@ impl RunStore {
         if publication_locked {
             self.commit_terminal_record(&old, &next, call)?;
         } else {
-            let run = self.run_dir(old.run_id, false)?;
+            let run = self.attempt_dir(id, false)?;
             let _lock = run.lock(
                 OsStr::new("publication.lock"),
                 LockMode::Exclusive,
@@ -1532,7 +1680,7 @@ impl RunStore {
         reason: &str,
         call: &Request<'_>,
     ) -> Result<()> {
-        let directory = self.run_dir(scope.run, false)?;
+        let directory = self.attempt_dir(scope.attempt, false)?;
         let _publication = directory.lock(
             OsStr::new("publication.lock"),
             LockMode::Exclusive,
@@ -1545,10 +1693,13 @@ impl RunStore {
             return Err(RunError::Conflict);
         }
         if matches!(old.state, AttemptState::Terminal { .. }) {
+            drop(_publication);
+            self.release_admission(&old, call);
             return Ok(());
         }
         let mut next = old.clone();
         next.revision = old.revision.checked_add(1).ok_or(RunError::Conflict)?;
+        crate::launch::mark_admission_release_pending(&mut next)?;
         next.schema_version = 2;
         next.terminal_evidence = Some(TerminalEvidence::Lost {
             reason: reason.into(),
@@ -1565,7 +1716,7 @@ impl RunStore {
             reason: Some(reason.into()),
         };
         super::reader::validate_attempt(&next)?;
-        let attempt = self.attempt_dir(old.run_id, old.attempt_id, false)?;
+        let attempt = self.attempt_dir(old.attempt_id, false)?;
         let name = AttemptFile::TerminalPending.name();
         let next = match read_sealed(&attempt, name, TERMINAL_RECORD_LIMIT)? {
             Some(raw) => {
@@ -1579,16 +1730,17 @@ impl RunStore {
                     AttemptState::Terminal { outcome, .. } if outcome != Outcome::Lost
                 ) {
                     let (record, committed) = self.replay_terminal_locked(old.attempt_id, call)?;
+                    drop(_publication);
                     if committed {
                         self.settle_cleanup(&record, None, call);
+                    } else {
+                        self.release_admission(&record, call);
                     }
                     return Ok(());
                 }
                 if saved.attempt_id != old.attempt_id
-                    || saved.run_id != old.run_id
                     || saved.project_id != old.project_id
-                    || saved.task_id != old.task_id
-                    || saved.operation_id != old.operation_id
+                    || saved.key != old.key
                     || saved.generation != old.generation
                     || saved.revision != next.revision
                     || !matches!(
@@ -1602,10 +1754,10 @@ impl RunStore {
                     return Err(RunError::Conflict);
                 }
                 if let Some(result) = &saved.result {
-                    self.artifact_bytes(old.run_id, result, RESULT_LIMIT)?;
+                    self.artifact_bytes(result, RESULT_LIMIT)?;
                 }
                 if let Some(exit) = &saved.exit_evidence {
-                    self.artifact_bytes(old.run_id, exit, RECORD_LIMIT)?;
+                    self.artifact_bytes(exit, RECORD_LIMIT)?;
                 }
                 saved
             }
@@ -1622,7 +1774,12 @@ impl RunStore {
         // Keep recovery discoverable until fence release, even for readers
         // whose reservations live outside the writer registry. Reconcile
         // recognises this lost state and preserves scratch on every retry.
-        self.commit_terminal_record(&old, &next, call)
+        let result = self.commit_terminal_record(&old, &next, call);
+        drop(_publication);
+        if result.is_ok() {
+            self.release_admission(&next, call);
+        }
+        result
     }
 
     /// Run the post-commit Git pin cleanup of a committed terminal attempt and
@@ -1642,15 +1799,18 @@ impl RunStore {
         recovery: Option<&provenant_supervisor::custody::Recovery>,
         call: &Request<'_>,
     ) -> Result<SettlementReceipts> {
+        if !self.release_admission(record, call) {
+            self.set_temporary_retained(record.attempt_id, true, call)?;
+            return Err(RunError::Conflict);
+        }
         if !self.import_release_permitted(record, call)? {
             return Err(RunError::Conflict);
         }
-        let request = self.request(record.run_id, call)?;
+        let request = self.request(record.attempt_id, call)?;
         let writer = request
-            .tasks
-            .iter()
-            .find(|task| task.task_id == record.task_id)
-            .and_then(|task| task.writer.as_ref())
+            .task
+            .writer
+            .as_ref()
             .ok_or(RunError::Validation("attempt has no writer to clean up"))?;
         // A missing custody directory has no lock holder; keep the import pin.
         let slot = self.writer_custody_directory(record, writer).ok();
@@ -1674,7 +1834,7 @@ impl RunStore {
                 }
                 _ => None,
             };
-            let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+            let attempt = self.attempt_dir(record.attempt_id, false)?;
             let head = crate::settlement::pinned_head(&attempt, Self::scope(record))?;
             let mut remove_import_pin = slot.is_some();
             if let Some(slot) = &slot {
@@ -1731,25 +1891,19 @@ impl RunStore {
         next: &AttemptRecord,
         call: &Request<'_>,
     ) -> Result<()> {
-        let AttemptState::Terminal { finished_at, .. } = next.state else {
+        let AttemptState::Terminal { .. } = next.state else {
             return Err(RunError::Validation("terminal state missing"));
         };
         let id = old.attempt_id;
-        let request = self.request(old.run_id, call)?;
-        let successor = self.automatic_continuation(old)?;
-        let staged = successor
-            .as_ref()
-            .map(|successor| successor.id().to_string());
-        let reaction = self.freeze_reaction(
-            next,
-            request
-                .tasks
-                .iter()
-                .find(|task| task.task_id == old.task_id)
-                .is_some_and(|task| task.writer.is_some()),
-            staged.as_deref(),
-        )?;
-        let attempt = self.attempt_dir(old.run_id, id, false)?;
+        let writer = match self.request(old.attempt_id, call) {
+            Ok(request) => request.task.writer.is_some(),
+            // A queued row may survive before its request directory is
+            // published. With no launch there are no writer effects to report.
+            Err(RunError::NotFound) if matches!(old.state, AttemptState::Queued { .. }) => false,
+            Err(error) => return Err(error),
+        };
+        let reaction = self.freeze_reaction(next, writer)?;
+        let attempt = self.attempt_dir(id, false)?;
         let mut receipts = SettlementReceipts {
             cancellation: next.cancellation_disposition,
             ..Default::default()
@@ -1775,34 +1929,16 @@ impl RunStore {
             tx.execute("DELETE FROM admission WHERE attempt=?1", [id.to_string()])?;
             Self::insert_reaction(tx, &reaction)?;
             insert_event(tx, next)?;
-            if let Some(successor) = &successor {
-                self.queue_automatic_continuation(tx, successor, &request)?;
-            }
-            let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM attempts WHERE run=?1 AND terminal=0)", [old.run_id.to_string()], |r| r.get(0))?;
-            let mut run = self.run_on(tx, old.run_id)?;
-            run.revision = run.revision.checked_add(1).ok_or(RunError::Conflict)?;
-            if !pending && run.children.is_empty() { run.closure = Closure::Closed; run.closed_at = Some(finished_at); }
-            tx.execute("UPDATE runs SET record=?1 WHERE id=?2", params![bytes(&run)?, run.run_id.to_string()])?;
-            if run.closure == Closure::Closed {
-                let raw: Vec<u8> = tx.query_row("SELECT record FROM operations WHERE run=?1", [run.run_id.to_string()], |r| r.get(0))?;
-                let mut op: OperationRecord = decode(&raw)?;
-                op.state = OperationState::Terminal;
-                tx.execute("UPDATE operations SET record=?1 WHERE run=?2", params![bytes(&op)?, run.run_id.to_string()])?;
-            }
             #[cfg(test)]
             crate::tests::crash_at("transaction");
             Ok(())
         })?;
-        provenant_os::changes::hint(
-            self.context.state_root.as_path(),
-            &[provenant_os::changes::Scope::Board],
-        );
         // A stop accepted after the decision read cancel.json (but before this
         // commit became visible) is acknowledged here from the host-sealed,
         // scope- and requester-checked request, not from mutable lane state.
         // A stop sealed later is acknowledged by `cancel` seeing the terminal row.
         if next.cancellation_disposition.is_none()
-            && let Ok(attempt) = self.attempt_dir(old.run_id, id, false)
+            && let Ok(attempt) = self.attempt_dir(id, false)
             && let Ok(Some(raw)) = read_sealed(&attempt, "cancel.json", RECORD_LIMIT)
             && decode::<CancellationEvidence>(&raw).is_ok_and(|request| {
                 request.requests_stop(
@@ -1818,7 +1954,7 @@ impl RunStore {
                 call,
             );
         }
-        self.contribution_diagnostic(next.run_id, self.retain_contribution_route(next, call));
+        self.contribution_diagnostic(next.attempt_id, self.retain_contribution_route(next, call));
         Ok(())
     }
 
@@ -1845,9 +1981,6 @@ fn validate_request(input: &PreparedRun) -> Result<()> {
     if input.request.schema_version != 1 {
         return Err(RunError::Version(input.request.schema_version as i64));
     }
-    if input.request.parent.is_some() && input.request.tasks.len() != 1 {
-        return Err(RunError::Validation("a continuation has one task"));
-    }
     if input
         .request
         .fresh_continuation
@@ -1860,32 +1993,16 @@ fn validate_request(input: &PreparedRun) -> Result<()> {
             "fresh continuation needs a bounded reason and parent",
         ));
     }
-    if !(1..=64).contains(&input.request.tasks.len())
-        || !(1..=16).contains(&input.request.concurrency)
-        || input.attempts.len() != input.request.tasks.len()
-    {
-        return Err(RunError::Validation("task/concurrency bounds"));
-    }
-    if input
-        .request
-        .tasks
-        .iter()
-        .any(|task| task.context.as_ref().is_some_and(|c| !c.accepted()))
+    let task = &input.request.task;
+    if task
+        .context
+        .as_ref()
+        .is_some_and(|context| !context.accepted() || !context.valid())
     {
         return Err(RunError::Validation("work context"));
     }
     bytes(&input.request)?;
-    let mut tasks = std::collections::BTreeSet::new();
-    let mut attempts = std::collections::BTreeSet::new();
-    let mut prompt_bytes = 0u64;
-    for task in &input.request.tasks {
-        if task
-            .context
-            .as_ref()
-            .is_some_and(|context| !context.valid())
-        {
-            return Err(RunError::Validation("work context"));
-        }
+    {
         if let Some(deliver) = &task.deliver {
             if task.writer.is_none() {
                 return Err(RunError::Validation("delivery requires a writer"));
@@ -1902,32 +2019,14 @@ fn validate_request(input: &PreparedRun) -> Result<()> {
         }) {
             return Err(RunError::Validation("account override"));
         }
-        if !tasks.insert(task.task_id) {
-            return Err(RunError::Validation("duplicate task"));
-        }
-        let new = input
-            .attempts
-            .iter()
-            .find(|a| a.task_id == task.task_id)
-            .ok_or(RunError::Validation("missing task"))?;
-        if !attempts.insert(new.attempt_id)
-            || task.provider_timeout_seconds == 0
-            || CanonicalV1::file_digest(new.prompt.as_bytes()) != task.prompt_digest
+        if task.provider_timeout_seconds == 0
+            || CanonicalV1::file_digest(input.prompt.as_bytes()) != task.prompt_digest
         {
             return Err(RunError::Validation("attempt or prompt identity"));
         }
-        prompt_bytes += new.prompt.len() as u64;
     }
-    if prompt_bytes > RECORD_LIMIT {
-        let task_index = input.request.tasks.iter().position(|task| {
-            input
-                .attempts
-                .iter()
-                .find(|attempt| attempt.task_id == task.task_id)
-                .is_some_and(|attempt| attempt.prompt.len() as u64 > RECORD_LIMIT)
-        });
+    if input.prompt.len() as u64 > RECORD_LIMIT {
         return Err(RunError::PromptTooLarge {
-            task_index,
             limit: RECORD_LIMIT,
         });
     }
@@ -1939,7 +2038,6 @@ pub(crate) fn insert_event(db: &rusqlite::Connection, attempt: &AttemptRecord) -
         schema_version: 1,
         sequence: 0,
         project_id: attempt.project_id,
-        run_id: attempt.run_id,
         attempt_id: attempt.attempt_id,
         revision: attempt.revision,
         change: attempt.state.clone(),
@@ -1962,15 +2060,15 @@ pub(crate) fn insert_event(db: &rusqlite::Connection, attempt: &AttemptRecord) -
     Ok(())
 }
 
-// Supervisor owns this extensible v1 file. Only custody/exit fields consumed by
-// run are decoded; the bounded codec still rejects duplicate members/version.
+// Supervisor owns this extensible file. Run decodes the fields it consumes;
+// the bounded codec still rejects duplicate members and malformed records.
 #[derive(serde::Deserialize)]
 struct SealedExit {
     scope: provenant_supervisor::custody::Scope,
     termination: Option<Termination>,
     never_spawned: bool,
     stop_reason: Option<provenant_supervisor::machine::StopReason>,
-    #[serde(default)]
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
     cancel_delivered_before_exit: Option<bool>,
     terminal_observed: bool,
     unresolved_cleanup: bool,
@@ -2040,4 +2138,55 @@ fn sealed_exit(
         complete: true,
         redacted: true,
     })
+}
+
+#[cfg(test)]
+mod admission_key_tests {
+    use super::*;
+    use crate::tests::{call, clock, context, input};
+
+    #[test]
+    fn graph_number_is_preserved_in_the_record_and_operation_replay()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let clock = clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        for number in 1..=3 {
+            let mut prepared = input();
+            prepared.attempt_id = AttemptId::from_bytes([number as u8; 16]);
+            prepared.operation_id = OperationId::parse(&format!("number-{number}"))?;
+            prepared.attempt_id = AttemptId::from_bytes([number as u8 + 10; 16]);
+            crate::tests::rekey(&mut prepared);
+            prepared.request.task.context = Some(provenant_records::run::WorkContext {
+                graph_id: Some("numbered-graph".into()),
+                node_id: Some("writer".into()),
+                attempt: Some(number),
+                ..Default::default()
+            });
+            let admitted = store.create(&prepared, &call)?;
+            let record = store.record(prepared.attempt_id, &call)?;
+            assert_eq!(record.attempt_number, u64::from(number));
+            assert_eq!(record.key.attempt(), number);
+            assert_eq!(
+                store.create(&prepared, &call)?.attempt_id,
+                admitted.attempt_id
+            );
+            let mut conflict = prepared;
+            conflict.attempt_id = AttemptId::from_bytes([number as u8 + 20; 16]);
+            conflict.operation_id = OperationId::parse(&format!("other-{number}"))?;
+            assert_eq!(
+                store.create(&conflict, &call)?.attempt_id,
+                admitted.attempt_id
+            );
+            conflict.request.task.title = Some("different request".into());
+            assert!(matches!(
+                store.create(&conflict, &call),
+                Err(RunError::OperationConflict)
+            ));
+        }
+        Ok(())
+    }
 }

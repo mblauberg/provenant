@@ -30,7 +30,7 @@ keeps the bytes measured so far. Hard links count once.
 ## Figures are observations, not promises
 
 No figure promises bytes recoverable by deletion, a fallback measurement says
-so in `method`, and the report is a sequence of observations, not a snapshot.
+so, and the report is a sequence of observations, not a snapshot.
 - Why: users decide deletions from these numbers.
 - Test: `crates/os/src/disk.rs::unavailable_private_size_selects_allocated_fallback`
 
@@ -43,18 +43,21 @@ deletion authority: GC revalidates its own conditions.
 - Test: `crates/confinement/src/disk.rs::lane_inventory_refuses_incomplete_measurements`;
   `::lane_classification_reuses_gc_owner_and_reason`
 
-## Collection keeps evidence and needs fresh proof
+Collection belongs to [worktrees](supervisor.md#worktrees) and
+[state retention](state.md#retention-keeps-evidence).
 
-GC removes a worktree, or declared idle output inside one, only under held
-writer custody with a fresh complete census; unknown writer evidence keeps it
-unless the project opts into `merged-clean` foreign collection. Log retention
-expires bulky captures only after every sibling attempt is terminal and keeps
-the tail, results, exit evidence and digests. Low-disk collection is bounded and
-never fetches or deletes worktrees.
-- Why: rebuildable output should be reclaimable without ending a worktree, while
-  sealed evidence and possible writers stay protected.
-- Test: `crates/confinement/src/worktrees/lifecycle_tests/gc_safety.rs::gc_idle_output_requires_ignored_idle_and_free_writer`;
-  `::gc_foreign_merged_clean_is_opt_in_immediate_and_requires_complete_census`;
-  `crates/run/src/retention.rs::gc_logs_keep_tail_and_evidence_and_obey_age_custody_and_preview`;
-  `crates/cli/src/run/tests/writer_disk.rs::writer_rechecks_once_after_collection_and_reports_reclaimed_bytes`
-- Owner: `crates/confinement/src/worktrees/gc.rs`, `crates/run/src/retention.rs`
+## Dispatch and new-build pressure
+
+Dispatch and new builds share `GcSettings::disk_limits` and `DiskLimits::level`.
+Below `gc.free_floor`, warn and proceed. Only below `gc.critical_free` (default
+2 GiB; `0B` disables it) refuse new work. Diagnostics report available bytes,
+both thresholds and their configuration or shipped-default sources. Running
+builds continue. The build shim receives one serialized
+`PROVENANT_BUILD_DISK_LIMITS`; sandbox-off preparation evaluates the same limits
+against its target volume before launch. Advisory policy strengths cannot turn the free floor into a
+refusal or bypass the separate critical threshold.
+- Why: a collection target must not prevent ordinary lane work; critical
+  exhaustion can compromise output integrity.
+- Test: `crates/config/src/gc.rs::disk_levels_follow_the_declared_thresholds_and_keep_their_sources`;
+  `crates/run/src/dispatch_disk_admission_tests.rs::admission_uses_only_the_critical_threshold_for_refusal`;
+  `tests/build_slot.rs::disk_policy_applies_before_starting_a_new_build`

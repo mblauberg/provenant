@@ -44,7 +44,10 @@ fn node_attempt_spec_reaches_the_launch() {
         &mut MemoryJournal::default(),
     )
     .unwrap();
-    assert_eq!(owner.attempt_specs, vec![None]);
+    assert!(owner
+        .attempt_specs
+        .first()
+        .is_some_and(|spec| spec.as_ref().is_none_or(AttemptSpec::is_empty)));
 }
 
 #[test]
@@ -173,6 +176,8 @@ fn distinct_from_writer_passes_the_writer_attempts_to_the_owner() {
         result_path: None,
         branch: Some("writer".into()),
         commit: Some("3".repeat(40)),
+        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        stop: None,
     };
     let mut owner = FakeOwner {
         observations: [writer_done, terminal(AttemptOutcome::Succeeded)].into(),
@@ -261,7 +266,7 @@ fn alias_retry_receives_the_prior_model() {
         alias: Some("senior".into()),
         effort: None,
         account: None,
-    };
+    tier: None, };
     member.route = None;
     member.routes = Some(vec![alias.clone(), alias]);
     let mut limited = done_as("h/1");
@@ -427,7 +432,7 @@ fn panel_with_one_usage_limited_member_reaches_synthesis() {
         alias: Some("junior".into()),
         effort: None,
         account: None,
-    };
+    tier: None, };
     let mut nodes = Vec::new();
     for id in ["one", "two", "three"] {
         let mut member = node(id, route("first"));
@@ -756,6 +761,8 @@ fn a_required_separation_is_passed_to_the_router_and_recorded_when_refused() {
                 result_path: None,
                 branch: None,
                 commit: None,
+                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                stop: None,
             },
         ]
         .into(),

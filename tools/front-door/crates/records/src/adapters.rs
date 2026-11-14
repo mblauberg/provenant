@@ -116,6 +116,18 @@ pub struct SkillLocation {
     pub suffix: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountQuota {
+    LocalLedger,
+    ObservedRefusals,
+}
+#[derive(Debug, Clone, Copy)]
+pub struct AccountModelPlan {
+    pub plan: &'static str,
+    pub model_prefix: &'static str,
+    pub quota: AccountQuota,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct AdapterSpec {
     pub id: Harness,
@@ -197,8 +209,6 @@ pub struct AdapterSpec {
     pub stderr_quota: bool,
     /// Parse stdout error diagnostics for provider failure explanations.
     pub stdout_error_diagnostic: bool,
-    /// Drop unsupported reasoning-effort values with an effort warning instead of refusing the candidate.
-    pub drops_unsupported_effort: bool,
     /// Source of model identity after a run.
     pub model_observation: ModelObservation,
     /// Preparation mechanism for a model-less named entry.
@@ -216,9 +226,11 @@ pub struct AdapterSpec {
     pub peer_bootstrap: bool,
     /// A snapshot governs only this model prefix; None governs every model.
     pub quota_model_prefix: Option<&'static str>,
-    /// Account and model prefix served by the free allowance.
-    pub free_account: Option<(&'static str, &'static str)>,
+    /// Registered plans partition model namespaces independently of account keys.
+    pub account_model_plans: &'static [AccountModelPlan],
     pub free_pool: Option<&'static str>,
+    /// Drop a valid but unrecorded model effort with a route warning.
+    pub drop_unsupported_effort: bool,
     pub pacing_keys: Option<(&'static str, &'static str)>,
     /// What a launch may ask of this adapter. The one source for dispatch,
     /// `run`, resume and graph validation.
@@ -344,10 +356,20 @@ impl AdapterSpec {
             })
         })
     }
-    pub fn account_serves_model(&self, account: &str, model: &str) -> bool {
-        self.free_account.is_none_or(|(free_account, prefix)| {
-            (account == free_account) == model.starts_with(prefix)
-        })
+    pub fn account_plan(&self, plan: Option<&str>) -> Option<&AccountModelPlan> {
+        self.account_model_plans
+            .iter()
+            .find(|row| plan.is_some_and(|plan| row.plan.eq_ignore_ascii_case(plan.trim())))
+    }
+    pub fn is_free_plan(&self, plan: Option<&str>) -> bool {
+        self.account_plan(plan)
+            .is_some_and(|row| row.quota == AccountQuota::ObservedRefusals)
+    }
+    pub fn account_serves_model(&self, plan: Option<&str>, model: &str) -> bool {
+        self.account_model_plans.is_empty()
+            || self
+                .account_plan(plan)
+                .is_some_and(|row| model.starts_with(row.model_prefix))
     }
     /// Whether a quota window governs a model drawing on `model_pool`. Only
     /// adapters with grouped quota pools separate windows by their `group.`
@@ -366,7 +388,10 @@ impl AdapterSpec {
 
 // The installed Provenant release carries the common portfolio used by each
 // provider. Linked skill targets outside these roots remain eligible too.
-const SKILL_INSTALL_ROOTS: &[&str] = &[".local/share/provenant/v1/releases"];
+const SKILL_INSTALL_ROOTS: &[&str] = &[concat!(
+    provenant_core::default_state_suffix!(),
+    "/releases"
+)];
 
 // Keep the rows in Harness order. CLI installation also uses this order.
 adapter_specs! { $;
@@ -389,9 +414,9 @@ adapter_specs! { $;
         transcript_account_root: true,
         setup_root: SetupRoot::None,
         local_login: false,
-        login_reprobe: LoginReprobe::None,
-        login_observation: LoginObservation::AccountAvailability,
-        login_check_names_account: false,
+        login_reprobe: LoginReprobe::AccountIdentity,
+        login_observation: LoginObservation::Reprobe,
+        login_check_names_account: true,
         local_account: ("default", "local"),
         argv_prompt: false,
         authentication: None,
@@ -420,7 +445,6 @@ adapter_specs! { $;
         exit_route: false,
         stderr_quota: false,
         stdout_error_diagnostic: false,
-        drops_unsupported_effort: false,
         model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::None,
         user_sessions: false,
@@ -433,8 +457,9 @@ adapter_specs! { $;
         quota_identity_check: false,
         peer_bootstrap: true,
         quota_model_prefix: None,
-        free_account: None,
+        account_model_plans: &[],
         free_pool: None,
+        drop_unsupported_effort: false,
         pacing_keys: None,
         launch: LaunchCapabilities {
             model: true,
@@ -504,7 +529,6 @@ adapter_specs! { $;
         exit_route: false,
         stderr_quota: false,
         stdout_error_diagnostic: false,
-        drops_unsupported_effort: false,
         model_observation: ModelObservation::Rollout,
         named_entry: NamedEntry::None,
         user_sessions: false,
@@ -517,8 +541,9 @@ adapter_specs! { $;
         quota_identity_check: true,
         peer_bootstrap: true,
         quota_model_prefix: None,
-        free_account: None,
+        account_model_plans: &[],
         free_pool: None,
+        drop_unsupported_effort: false,
         pacing_keys: None,
         launch: LaunchCapabilities {
             model: true,
@@ -587,7 +612,6 @@ adapter_specs! { $;
         exit_route: false,
         stderr_quota: false,
         stdout_error_diagnostic: false,
-        drops_unsupported_effort: false,
         model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::None,
         user_sessions: false,
@@ -600,8 +624,9 @@ adapter_specs! { $;
         quota_identity_check: true,
         peer_bootstrap: false,
         quota_model_prefix: None,
-        free_account: None,
+        account_model_plans: &[],
         free_pool: None,
+        drop_unsupported_effort: false,
         pacing_keys: None,
         launch: LaunchCapabilities {
             model: true,
@@ -674,7 +699,6 @@ adapter_specs! { $;
         exit_route: false,
         stderr_quota: false,
         stdout_error_diagnostic: false,
-        drops_unsupported_effort: false,
         model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::None,
         user_sessions: false,
@@ -687,8 +711,9 @@ adapter_specs! { $;
         quota_identity_check: false,
         peer_bootstrap: false,
         quota_model_prefix: None,
-        free_account: None,
+        account_model_plans: &[],
         free_pool: None,
+        drop_unsupported_effort: false,
         pacing_keys: None,
         launch: LaunchCapabilities {
             model: true,
@@ -759,7 +784,6 @@ adapter_specs! { $;
         exit_route: false,
         stderr_quota: true,
         stdout_error_diagnostic: true,
-        drops_unsupported_effort: true,
         model_observation: ModelObservation::SessionDatabase,
         named_entry: NamedEntry::None,
         user_sessions: false,
@@ -772,8 +796,12 @@ adapter_specs! { $;
         quota_identity_check: false,
         peer_bootstrap: false,
         quota_model_prefix: Some("opencode-go/"),
-        free_account: Some(("zen", "opencode/")),
+        account_model_plans: &[
+            AccountModelPlan { plan: "go", model_prefix: "opencode-go/", quota: AccountQuota::LocalLedger },
+            AccountModelPlan { plan: "zen", model_prefix: "opencode/", quota: AccountQuota::ObservedRefusals },
+        ],
         free_pool: Some("opencode-free"),
+        drop_unsupported_effort: true,
         pacing_keys: Some(("opencode_free", "opencode_paid")),
         launch: LaunchCapabilities {
             model: true,
@@ -835,7 +863,6 @@ adapter_specs! { $;
         exit_route: true,
         stderr_quota: false,
         stdout_error_diagnostic: false,
-        drops_unsupported_effort: false,
         model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::Command,
         user_sessions: false,
@@ -848,8 +875,9 @@ adapter_specs! { $;
         quota_identity_check: false,
         peer_bootstrap: false,
         quota_model_prefix: None,
-        free_account: None,
+        account_model_plans: &[],
         free_pool: None,
+        drop_unsupported_effort: false,
         pacing_keys: None,
         launch: LaunchCapabilities {
             model: false,
@@ -913,7 +941,6 @@ adapter_specs! { $;
         exit_route: false,
         stderr_quota: false,
         stdout_error_diagnostic: false,
-        drops_unsupported_effort: false,
         model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::DelegatedAgent,
         user_sessions: false,
@@ -926,8 +953,9 @@ adapter_specs! { $;
         quota_identity_check: false,
         peer_bootstrap: false,
         quota_model_prefix: None,
-        free_account: None,
+        account_model_plans: &[],
         free_pool: None,
+        drop_unsupported_effort: false,
         pacing_keys: None,
         launch: LaunchCapabilities {
             model: false,
@@ -990,7 +1018,6 @@ adapter_specs! { $;
         exit_route: true,
         stderr_quota: false,
         stdout_error_diagnostic: false,
-        drops_unsupported_effort: false,
         model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::None,
         user_sessions: false,
@@ -1003,8 +1030,9 @@ adapter_specs! { $;
         quota_identity_check: false,
         peer_bootstrap: false,
         quota_model_prefix: None,
-        free_account: None,
+        account_model_plans: &[],
         free_pool: None,
+        drop_unsupported_effort: false,
         pacing_keys: None,
         launch: LaunchCapabilities {
             model: true,
@@ -1191,14 +1219,27 @@ mod account_tests {
 }
 
 #[cfg(test)]
-mod free_account_tests {
+mod account_plan_tests {
     #[test]
-    fn zen_account_does_not_serve_go_models() {
-        let spec = super::AdapterSpec::get("opencode").unwrap();
-        assert!(spec.account_serves_model("zen", "opencode/beam-free"));
-        assert!(!spec.account_serves_model("go", "opencode/beam-free"));
-        assert!(spec.account_serves_model("go", "opencode-go/mimo-v2.6-flash"));
-        assert!(!spec.account_serves_model("zen", "opencode-go/mimo-v2.6-flash"));
+    fn registered_plan_partitions_follow_the_adapter_declaration() {
+        for spec in super::ADAPTER_SPECS {
+            for plan in spec.account_model_plans {
+                let model = format!("{}fixture", plan.model_prefix);
+                assert!(spec.account_serves_model(Some(plan.plan), &model));
+                assert_eq!(
+                    spec.is_free_plan(Some(plan.plan)),
+                    plan.quota == super::AccountQuota::ObservedRefusals
+                );
+                assert!(!spec.account_serves_model(None, &model));
+                for other in spec
+                    .account_model_plans
+                    .iter()
+                    .filter(|other| other.plan != plan.plan)
+                {
+                    assert!(!spec.account_serves_model(Some(other.plan), &model));
+                }
+            }
+        }
     }
 }
 

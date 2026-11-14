@@ -21,7 +21,7 @@ pub struct GraphNodeWait {
     pub cause: Option<String>,
     pub branch: Option<String>,
     pub head: Option<String>,
-    pub handoff: Option<String>,
+    pub handoff: Option<provenant_records::handoff::Handoff>,
     pub output_path: Option<String>,
     pub spec_concerns: Vec<provenant_records::handoff::SpecConcern>,
     pub spec_concern_count: usize,
@@ -41,9 +41,10 @@ pub fn graph_waits(checkpoint: &GraphCheckpoint) -> Vec<GraphNodeWait> {
             let quota = node.state == NodeState::Failed
                 && attempt.and_then(|attempt| attempt.outcome)
                     == Some(AttemptOutcome::UsageLimited);
-            let approval = checkpoint.asks.iter().find(|ask| {
-                ask.node.as_deref() == Some(node.id.as_str()) && !ask.closed && !ask.resolved
-            });
+            let approval = checkpoint
+                .asks
+                .iter()
+                .find(|ask| ask.node.as_deref() == Some(node.id.as_str()));
             let retry = node
                 .launch_retry
                 .as_ref()
@@ -215,16 +216,16 @@ mod tests {
     fn wait_view_uses_only_recorded_facts_without_changing_checkpoint() {
         let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
             "schema_version":1,"graph_id":"g","plan_digest":"digest",
-            "asks":[{"ask_id":"ask","kind":"decide","node":"approval","session":"chair","title":"t","body":"b","options":[],"resolved":false,"closed":false}],
+            "asks":[{"ask_id":"ask","kind":"decide","node":"approval","session":"chair","request":"hrq-ask"}],
             "nodes":[
                 {"id":"approval","state":"running","worktree":null,"attempts":[]},
                 {"id":"ci","state":"running","worktree":null,"attempts":[],"ci":{"state":"pending","summary":"waiting"}},
                 {"id":"land","state":"running","worktree":null,"attempts":[],"land":{"tier":"routine","policy":"auto","policy_source":"default","branch":"work","head":"abc"}},
-                {"id":"retry","state":"running","worktree":null,"launch_retry":{"policy":{"limit":3,"limit_source":"host","first_seconds":5,"max_seconds":60},"failures":2,"wake_at":"2026-01-01T00:00:00.000000Z"},"attempts":[{"launched":false,"key":{"graph_id":"g","node_id":"retry","route_index":0},"route":{"alias":"senior"},"state":"starting","attempt_ref":"host/attempt","outcome":null,"launch_actor":"actor"}]},
+                {"id":"retry","state":"running","worktree":null,"launch_retry":{"policy":{"limit":3,"limit_source":"host","first_seconds":5,"max_seconds":60},"failures":2,"wake_at":"2026-01-01T00:00:00.000000Z"},"attempts":[{"launched":false,"key":{"graph_id":"g","node_id":"retry","route_index":0, "attempt": 1},"route":{"alias":"senior"},"state":"starting","attempt_ref":"host/attempt","outcome":null,"launch_actor":"actor"}]},
                 {"id":"blocked","state":"blocked","worktree":null,"advance_error_code":"launch_retry_exhausted","last_launch_retry":{"policy":{"limit":1,"limit_source":"project","first_seconds":5,"max_seconds":60},"failures":2},"attempts":[]},
-                {"id":"quota","state":"failed","worktree":null,"attempts":[{"launched":true,"key":{"graph_id":"g","node_id":"quota","route_index":0},"route":{"alias":"senior"},"state":"terminal","attempt_ref":"host/quota","outcome":"usage_limited","launch_actor":"actor"}]},
+                {"id":"quota","state":"failed","worktree":null,"attempts":[{"launched":true,"key":{"graph_id":"g","node_id":"quota","route_index":0, "attempt": 1},"route":{"alias":"senior"},"state":"terminal","attempt_ref":"host/quota","outcome":"usage_limited","launch_actor":"actor"}]},
                 {"id":"pending","state":"pending","worktree":null,"attempts":[]},
-                {"id":"done","state":"succeeded","worktree":null,"handoff":"done","outputs":{"schema_version":1,"result":{"digest":"sha256:test","excerpt":"","truncated":false,"path":"result.txt"},"verdict":null,"findings":[],"branch":"lane","commit":"abc","warnings":[]},"attempts":[]}
+                {"id":"done","state":"succeeded","worktree":null,"handoff":{"schema_version":2,"status":"stopped_early","note":"done","remaining":[],"decisions":[],"verify":[]},"outputs":{"schema_version":1,"result":{"digest":"sha256:test","excerpt":"","truncated":false,"path":"result.txt"},"verdict":null,"findings":[],"findings_available":null,"branch":"lane","commit":"abc","warnings":[]},"attempts":[]}
             ]
         })).unwrap();
         let before = serde_json::to_vec(&checkpoint).unwrap();
@@ -235,7 +236,10 @@ mod tests {
         assert_eq!(by_id("done").disposition, "terminal");
         assert_eq!(by_id("done").branch.as_deref(), Some("lane"));
         assert_eq!(by_id("done").head.as_deref(), Some("abc"));
-        assert_eq!(by_id("done").handoff.as_deref(), Some("done"));
+        assert_eq!(
+            by_id("done").handoff.as_ref().map(|h| h.note.as_str()),
+            Some("done")
+        );
         assert_eq!(by_id("done").output_path.as_deref(), Some("result.txt"));
         assert_eq!(
             by_id("blocked").cause.as_deref(),

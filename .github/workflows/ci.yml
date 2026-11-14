@@ -1,5 +1,9 @@
 name: CI
 
+# Trigger policy (#3273, #3270): pull requests, main and landing candidates
+# only. Pushes to lane branches start nothing; a lane's CI runs once its pull
+# request exists, and workflow_dispatch stays open for an explicit run.
+# `land/**` is the landing owner's candidate ref, which the land gate waits on.
 on:
   push:
     branches: [main, 'land/**']
@@ -28,13 +32,15 @@ env:
 #
 # Main runs share a separate group with cancellation disabled. The active run
 # finishes, and GitHub retains only the newest pending push for that group.
+# Cancelling there is unsafe: post-merge checks on the landed tip read a
+# cancelled ci-status as a failure, which can alarm or revert-forward.
 concurrency:
   group: ${{ github.ref == 'refs/heads/main' && format('ci-{0}-main', github.workflow) || format('ci-{0}-{1}', github.workflow, github.ref) }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   macos-scope:
-    name: Select macOS checks
+    name: Select Rust and macOS checks
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -49,7 +55,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - name: Select macOS checks from changed paths
+      - name: Select Rust and macOS checks from changed paths
         id: paths
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -58,10 +64,13 @@ jobs:
         run: scripts/select-macos-checks
 
   generated-reference:
-    name: Harness assets and generated reference
+    name: Generated reference
+    needs: macos-scope
+    if: needs.macos-scope.outputs.run_rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
       CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
     permissions:
       contents: read
@@ -70,28 +79,15 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Check shell syntax
-        run: git ls-files -z -- '*.sh' | xargs -0 -n1 bash -n
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.99.1 --profile minimal
       - name: Cache Rust build artefacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: tools/front-door
-          shared-key: ${{ inputs.cold_cache && format('front-door-ci-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci' }}
+          shared-key: ${{ inputs.cold_cache && format('front-door-ci-dev-default-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci-dev-default' }}
           add-job-id-key: false
-          save-if: false
-      - name: Check harness assets
-        run: |
-          python3 -m venv "$RUNNER_TEMP/harness-venv"
-          "$RUNNER_TEMP/harness-venv/bin/pip" install PyYAML==6.0.2
-          echo "$RUNNER_TEMP/harness-venv/bin" >> "$GITHUB_PATH"
-          "$RUNNER_TEMP/harness-venv/bin/python" scripts/check-harness
-          "$RUNNER_TEMP/harness-venv/bin/python" scripts/test-check-harness
-
-      - name: Test retrospective analysis
-        run: python3 -m unittest discover -s skills/improve/scripts/tests -v
-
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       # Generated reference is not tracked: this proves it still renders, and
       # leaves the output for download. It never compares against a checkout.
       - name: Generate contract reference
@@ -102,8 +98,6 @@ jobs:
           name: contract-reference
           path: docs/reference
           if-no-files-found: error
-      - name: Require documentation inventory and resolvable evidence
-        run: scripts/check-doc-truth --inventory-only --strict-inventory --strict-citations
       # Commands and non-evidence inline references remain advisory.
       - name: Report unresolved documentation references
         continue-on-error: true
@@ -112,16 +106,16 @@ jobs:
           cat "$RUNNER_TEMP/doc-truth.txt"
           cat "$RUNNER_TEMP/doc-truth.txt" >> "$GITHUB_STEP_SUMMARY"
 
-  # Lint and test run as separate jobs so they overlap; the tests are further
-  # split into three hash partitions. `ci-status` gates on both jobs, and a
+  # Lint and test builds overlap; tests are built once and split into three
+  # hash partitions. `ci-status` gates on all jobs, and a
   # matrix job reports success only when every partition succeeds.
   rust-lint:
-    name: Rust lint
+    name: Lint and script checks
     needs: macos-scope
-    if: needs.macos-scope.outputs.run_rust == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
       CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
       CARGO_INCREMENTAL: "0"
     permissions:
@@ -134,22 +128,27 @@ jobs:
       # The runner image ships rustup; the toolchain is pinned here and in
       # tools/front-door/rust-toolchain.toml (ADR 0027).
       - name: Set Rust temporary directory
+        if: needs.macos-scope.outputs.run_rust == 'true'
         env:
           TMPDIR: ${{ runner.temp }}
         run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain
+        if: needs.macos-scope.outputs.run_rust == 'true'
         run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
       - name: Cache Rust build artefacts
+        if: needs.macos-scope.outputs.run_rust == 'true'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: tools/front-door
-          shared-key: ${{ inputs.cold_cache && format('front-door-ci-lint-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci-lint' }}
+          shared-key: ${{ inputs.cold_cache && format('front-door-ci-lint-dev-all-features-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci-lint-dev-all-features' }}
           add-job-id-key: false
-          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'pull_request' }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Check formatting
+        if: needs.macos-scope.outputs.run_rust == 'true'
         working-directory: tools/front-door
         run: cargo fmt --all --check
       - name: Check isolated test features
+        if: needs.macos-scope.outputs.run_rust == 'true'
         working-directory: tools/front-door
         run: |
           # Separate invocations prevent workspace feature unification from hiding missing dependencies.
@@ -162,369 +161,23 @@ jobs:
           cargo check --locked -p provenant-providers --features recording
           cargo check --locked -p provenant-providers --all-targets --features recording
       - name: Lint
+        if: needs.macos-scope.outputs.run_rust == 'true'
         working-directory: tools/front-door
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
-  rust:
-    name: Rust front door (${{ matrix.partition }}/3)
-    needs: macos-scope
-    if: needs.macos-scope.outputs.run_rust == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        partition: [1, 2, 3]
-    env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
-      CARGO_INCREMENTAL: "0"
-    permissions:
-      contents: read
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-      - name: Set Rust temporary directory
-        env:
-          TMPDIR: ${{ runner.temp }}
-        run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
-      - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.99.1 --profile minimal
-      - name: Select affected Rust tests
-        id: affected
-        working-directory: tools/front-door
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          IS_MAIN: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/land/') }}
-        run: ../../scripts/select-affected-crate-tests
-      - name: Cache Rust build artefacts
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          workspaces: tools/front-door
-          shared-key: ${{ inputs.cold_cache && format('front-door-ci-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci' }}
-          add-job-id-key: false
-          save-if: ${{ matrix.partition == 1 && (github.ref == 'refs/heads/main' || github.event_name == 'pull_request') }}
-      - name: Install nextest
-        uses: ./.github/actions/install-nextest
-        timeout-minutes: 10
-      - name: Check literal nextest test filters
-        working-directory: tools/front-door
-        run: python3 ../../scripts/check-nextest-filters
-      - name: Validate flaky-test quarantine
-        id: quarantine
-        working-directory: tools/front-door
+      - name: Check harness assets
         run: |
-          filter="$(../../scripts/flaky-quarantine)"
-          printf '%s\n' "$filter" > "$RUNNER_TEMP/quarantine-filter"
-          if [ -n "$filter" ]; then
-            echo "Validated quarantined tests: $filter" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo 'No quarantined tests.' >> "$GITHUB_STEP_SUMMARY"
-          fi
-      # Hash partitioning is stable per test, and each runner keeps its own
-      # serial-process group, so the serial worktree suites split across both.
-      - name: Run workspace tests
-        working-directory: tools/front-door
-        env:
-          NEXTTEST_FILTER: ${{ steps.affected.outputs.nextest_filter }}
-          QUARANTINE_FILTER_FILE: ${{ runner.temp }}/quarantine-filter
-        run: |
-          QUARANTINE_FILTER="$(cat "$QUARANTINE_FILTER_FILE")"
-          filter="$NEXTTEST_FILTER"
-          if [ -n "$QUARANTINE_FILTER" ]; then
-            if [ -n "$filter" ]; then
-              filter="($filter) & not ($QUARANTINE_FILTER)"
-            else
-              filter="not ($QUARANTINE_FILTER)"
-            fi
-          fi
-          if [ -n "$filter" ]; then
-            cargo nextest run --profile ci --workspace --locked --features provenant-providers/recording --partition hash:${{ matrix.partition }}/3 -E "$filter"
-          else
-            cargo nextest run --profile ci --workspace --locked --features provenant-providers/recording --partition hash:${{ matrix.partition }}/3
-          fi
-      - name: Report slowest tests
-        if: always()
-        run: scripts/nextest-slowest tools/front-door/target/nextest/ci/junit.xml "$GITHUB_STEP_SUMMARY"
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: rust-nextest-junit-${{ matrix.partition }}
-          path: tools/front-door/target/nextest/ci/junit.xml
-          if-no-files-found: warn
-      # Runs after the upload: it reuses the ci profile and overwrites junit.xml.
-      - name: Run quarantined tests (advisory)
-        if: matrix.partition == 1
-        continue-on-error: true
-        working-directory: tools/front-door
-        env:
-          QUARANTINE_FILTER_FILE: ${{ runner.temp }}/quarantine-filter
-        run: |
-          QUARANTINE_FILTER="$(cat "$QUARANTINE_FILTER_FILE")"
-          if [ -n "$QUARANTINE_FILTER" ]; then
-            cargo nextest run --profile ci --workspace --locked --features provenant-providers/recording --status-level flaky --final-status-level pass -E "$QUARANTINE_FILTER"
-          else
-            echo 'No quarantined tests to run.'
-          fi
-      # Cargo does not include example tests in the default nextest selection.
-      - name: Run provider recording example test
-        if: matrix.partition == 1 && steps.affected.outputs.run_provider_example == 'true'
-        working-directory: tools/front-door
-        run: |
-          cargo test --locked -p provenant-providers --features recording --example record bash_proof_needs_a_matching_successful_tool_result
+          python3 -m venv "$RUNNER_TEMP/harness-venv"
+          "$RUNNER_TEMP/harness-venv/bin/pip" install PyYAML==6.0.2
+          echo "$RUNNER_TEMP/harness-venv/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/harness-venv/bin/python" scripts/check-harness
+          "$RUNNER_TEMP/harness-venv/bin/python" scripts/test-check-harness
 
-  rust-dependencies:
-    name: Rust dependency policy
-    needs: macos-scope
-    if: needs.macos-scope.outputs.run_rust == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Set Rust temporary directory
-        env:
-          TMPDIR: ${{ runner.temp }}
-        run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
-      - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.99.1 --profile minimal
-      - name: Install dependency tools
-        uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
-        timeout-minutes: 6
-        with:
-          tool: cargo-deny@0.20.2,cargo-shear@1.14.0
-      - name: Check advisories, licences and dependency allowlist
-        working-directory: tools/front-door
-        run: cargo deny check
-      - name: Check for unused dependencies
-        working-directory: tools/front-door
-        run: cargo shear
+      - name: Test retrospective analysis
+        run: python3 -m unittest discover -s skills/improve/scripts/tests -v
 
-  rust-macos-tests:
-    name: Rust macOS tests
-    runs-on: macos-15
-    timeout-minutes: 20
-    needs: macos-scope
-    if: needs.macos-scope.outputs.run_macos == 'true'
-    env:
-      CARGO_INCREMENTAL: "0"
-    permissions:
-      contents: read
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Set Rust temporary directory
-        env:
-          TMPDIR: ${{ runner.temp }}
-        run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
-      - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.99.1 --profile minimal --component clippy
-      - name: Cache Rust build artefacts
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          workspaces: tools/front-door
-          shared-key: ${{ inputs.cold_cache && format('front-door-ci-macos-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci-macos' }}
-          add-job-id-key: false
-          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'pull_request' }}
-      - name: Install nextest
-        uses: ./.github/actions/install-nextest
-        timeout-minutes: 10
-      - name: Lint Rust workspace
-        working-directory: tools/front-door
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - name: Build macOS test archive
-        working-directory: tools/front-door
-        run: >-
-          cargo nextest archive --locked --workspace
-          --archive-file "$RUNNER_TEMP/macos-tests.tar.zst"
-      - name: Install tools for native confinement smokes
-        env:
-          HOMEBREW_NO_INSTALL_CLEANUP: "1"
-        run: |
-          brew install postgresql@18 node pnpm ripgrep
-          echo "PROVENANT_TEST_POSTGRES_BIN=$(brew --prefix postgresql@18)/bin" >> "$GITHUB_ENV"
-      - name: Configure native census host policy
-        run: |
-          mkdir -p "$RUNNER_TEMP/provenant-native-host"
-          cat > "$RUNNER_TEMP/provenant-native-host/config.toml" <<'TOML'
-          schema_version = 1
-          [knobs]
-          "confinement.census_ignore_unreadable" = [
-            { path = "/Library/Apple/System/Library/PrivateFrameworks/MobileDevice.framework/Versions/A/Resources/usbmuxd", team_id = "platform" },
-          ]
-          TOML
-      - name: List macOS tests in the archive
-        working-directory: tools/front-door
-        run: cargo nextest list --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --message-format json > "$RUNNER_TEMP/native-test-list.json"
-      - name: Run macOS supervisor custody tests
-        working-directory: tools/front-door
-        env:
-          PROVENANT_CONFINEMENT_REQUIRED: "1"
-          PROVENANT_POSTGRES_REQUIRED: "1"
-        run: |
-          ../../scripts/run-native-test-group custody cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E '((package(=provenant-supervisor) | package(=provenant-confinement) | package(=provenant-os) | package(=provenant-providers)) & !(test(=worktrees::census_tests::native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree) | test(=worktrees::census_tests::native_full_census_places_clean_merged_worktree_and_same_user_sleep) | (package(=provenant-os) & test(sys::pid::tests::native_)) | test(=tests::claude_network_on_native_tls_files_are_readable))) | (package(=provenant-cli) & test(=run::provider::project_paths::tests::configured_shared_path_allows_lane_lock_contended_by_host))'
-      - name: Run macOS census tests
-        if: ${{ !cancelled() }}
-        working-directory: tools/front-door
-        env:
-          PROVENANT_CONFINEMENT_REQUIRED: "1"
-          PROVENANT_POSTGRES_REQUIRED: "1"
-        run: |
-          PROVENANT_STATE_DIR="$RUNNER_TEMP/provenant-native-host" ../../scripts/run-native-test-group census cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --success-output immediate -E '(test(=worktrees::census_tests::native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree) | test(=worktrees::census_tests::native_full_census_places_clean_merged_worktree_and_same_user_sleep) | (package(=provenant-os) & test(sys::pid::tests::native_)))'
-      - name: Run macOS Cargo seed tests
-        if: ${{ !cancelled() }}
-        working-directory: tools/front-door
-        run: ../../scripts/run-native-test-group cargo-seed cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E 'package(=provenant-run) & test(cargo_seed)'
-      - name: Run dispatch confinement integration tests
-        if: ${{ !cancelled() }}
-        working-directory: tools/front-door
-        env:
-          PROVENANT_CONFINEMENT_REQUIRED: "1"
-          PROVENANT_LANE_TOOLS_REQUIRED: "1"
-        # One thread keeps these writer fixtures serial, as the separate
-        # cargo test invocations did.
-        run: >-
-          ../../scripts/run-native-test-group dispatch cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --test-threads 1
-          -E 'binary(=worktrees) & (test(=lane_prepare_isolates_nested_state) | test(=lane_prepare_isolates_nested_publishing_state)
-          | test(=read_only_lane_builds_and_tests_swift_in_scratch)
-          | test(=read_only_lane_builds_and_tests_cargo_in_scratch)
-          | test(=read_only_dispatch_applies_bound_git_and_project_writes)
-          | test(=writer_dispatch_uses_lane_cache_and_narrow_provider_state)
-          | test(=writer_dispatch_edits_a_linked_worktree)
-          | test(=second_writer_is_refused_while_first_holds_the_worktree)
-          | test(=writer_terminal_refuses_sequencer_state)
-          | test(=writer_production_plan_denies_outside_writes)
-          | test(=writer_reconcile_refuses_unfinished_cherry_pick_and_releases))
-          | (package(=provenant-fabric-runtime) & test(=graph::tests::composite_and_allowance_tests::writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source))'
-      - name: Run native writer capability probes
-        if: ${{ !cancelled() }}
-        working-directory: tools/front-door
-        env:
-          PROVENANT_CONFINEMENT_REQUIRED: "1"
-          PROVENANT_LANE_TOOLS_REQUIRED: "1"
-        run: ../../scripts/run-native-test-group capability cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E 'binary(=worktrees) & test(=lane_prepare_isolates_nested_writer_state)'
-      - name: Run provider dispatch integration tests
-        if: ${{ !cancelled() }}
-        working-directory: tools/front-door
-        env:
-          PROVENANT_CONFINEMENT_REQUIRED: "1"
-        run: ../../scripts/run-native-test-group provider-dispatch cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E 'binary(=graph_provider) | binary(=command_adapter)'
-      - name: Require Claude network and native TLS file probes
-        if: ${{ !cancelled() }}
-        working-directory: tools/front-door
-        env:
-          PROVENANT_CONFINEMENT_REQUIRED: "1"
-        run: ../../scripts/run-native-test-group tls cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E 'package(=provenant-providers) & test(claude_network_on)'
-
-      - name: Verify required native test inventory
-        if: always()
-        run: scripts/check-native-inventory "$RUNNER_TEMP/native-test-list.json" "$RUNNER_TEMP/native-test-results"
-      - name: Preserve native test evidence
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: native-test-evidence
-          path: |
-            ${{ runner.temp }}/native-test-list.json
-            ${{ runner.temp }}/native-test-results/
-          if-no-files-found: ignore
-
-  # #1339: stripping proc-macro dylibs broke macOS release builds at install
-  # time. Exercise the front door's release build without LTO for speed; the
-  # full-LTO build runs only at install (docs/runbooks/install.md).
-  rust-macos-release:
-    name: Rust macOS release smoke
-    runs-on: macos-15
-    timeout-minutes: 20
-    needs: macos-scope
-    if: needs.macos-scope.outputs.run_macos == 'true'
-    permissions:
-      contents: read
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Set Rust temporary directory
-        env:
-          TMPDIR: ${{ runner.temp }}
-        run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
-      - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.99.1 --profile minimal
-      # Use a separate uncached target: install builds from a clean target, and cached
-      # proc-macro dylibs would hide the failure this job exists to catch.
-      - name: Build release front door
-        working-directory: tools/front-door
-        env:
-          CARGO_TARGET_DIR: ${{ runner.temp }}/release-target
-          CARGO_PROFILE_RELEASE_LTO: "false"
-          RUSTC_WRAPPER: .cargo/rustc-wrapper.sh
-        run: |
-          cargo build --release --locked -p provenant --bin provenant
-
-      - name: Package release and preview isolated installation
-        working-directory: tools/front-door
-        env:
-          CARGO_TARGET_DIR: ${{ runner.temp }}/release-target
-          CARGO_PROFILE_RELEASE_LTO: "false"
-          RUSTC_WRAPPER: .cargo/rustc-wrapper.sh
-        run: |
-          cargo run --release --locked --bin package-release -- \
-            --binary "$RUNNER_TEMP/release-target/release/provenant" \
-            --out "$RUNNER_TEMP/release"
-          mkdir -p "$RUNNER_TEMP/home"
-          HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/release/bin/provenant" \
-            --state-dir "$RUNNER_TEMP/state" config set fabric.mcp_server true
-          HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/release/bin/provenant" \
-            --state-dir "$RUNNER_TEMP/state" install --source "$RUNNER_TEMP/release" \
-            --harness codex --bin-dir "$RUNNER_TEMP/bin"
-          HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/release/bin/provenant" \
-            --state-dir "$RUNNER_TEMP/state" check install --source "$RUNNER_TEMP/release"
-          codex_config="$RUNNER_TEMP/home/.codex/config.toml"
-          fabric_entry='^(fabric = |\[mcp_servers\.fabric\])'
-          grep -Eq "$fabric_entry" "$codex_config"
-          HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/release/bin/provenant" \
-            --state-dir "$RUNNER_TEMP/state" install --source "$RUNNER_TEMP/release" \
-            --harness codex --bin-dir "$RUNNER_TEMP/bin"
-          test "$(grep -Ec "$fabric_entry" "$codex_config")" -eq 1
-          HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/release/bin/provenant" \
-            --state-dir "$RUNNER_TEMP/state" uninstall --harness codex
-          if [ -f "$codex_config" ]; then
-            if grep -Eq "$fabric_entry" "$codex_config"; then
-              echo "Uninstall left the managed Codex entry behind."
-              exit 1
-            fi
-          fi
-      # Clippy lives in the macOS test job, which compiles and caches the
-      # workspace; only the Swift package tests (shared client, menu bar and
-      # console) stay here, to balance the two jobs.
-      - name: Run Swift package tests
-        working-directory: apps/quota-menubar
-        run: swift test
-
-  generic-checks:
-    name: Spelling, workflows and Markdown links
-    runs-on: ubuntu-latest
-    # Covers the worst case of the download budgets below: two tool downloads
-    # at 3 minutes each, plus the install-action budgets and the checks.
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
+      - name: Require documentation inventory and resolvable evidence
+        run: scripts/check-doc-truth --inventory-only --strict-inventory --strict-citations
       - name: Install spelling checker
         uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
         timeout-minutes: 3
@@ -587,6 +240,7 @@ jobs:
         run: |
           scripts/test-select-macos-checks
           scripts/test-check-ci-status
+          scripts/test-select-affected-crate-tests
           scripts/test-verify-tier
           scripts/test-download-with-retry
       - name: Test native inventory evidence
@@ -620,8 +274,462 @@ jobs:
           advanced-security: "false"
           annotations: "true"
 
-  # Keep one required check. The macOS job may skip only when its path filter
-  # explicitly says it is unnecessary; all other skips fail closed.
+  rust-test-archive:
+    name: Build Linux test archive
+    needs: macos-scope
+    if: needs.macos-scope.outputs.run_rust == 'true'
+    outputs:
+      nextest_filter: ${{ steps.affected.outputs.nextest_filter }}
+      quarantine_filter: ${{ steps.quarantine.outputs.filter }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
+      CARGO_INCREMENTAL: "0"
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set Rust temporary directory
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: tools/front-door
+          shared-key: ${{ inputs.cold_cache && format('front-door-ci-test-recording-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci-test-recording' }}
+          add-job-id-key: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Install nextest
+        uses: ./.github/actions/install-nextest
+        timeout-minutes: 10
+      - name: Build Linux test archive
+        working-directory: tools/front-door
+        run: >-
+          cargo nextest archive --profile ci --workspace --locked --features provenant-providers/recording
+          --archive-file "$RUNNER_TEMP/linux-tests.tar.zst"
+      - name: Select affected Rust tests
+        id: affected
+        working-directory: tools/front-door
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          IS_MAIN: ${{ github.event_name != 'pull_request' }}
+        run: ../../scripts/select-affected-crate-tests
+      - name: Validate selectors and flaky-test quarantine once
+        id: quarantine
+        working-directory: tools/front-door
+        run: |
+          cargo nextest list --profile ci --ignore-default-filter --archive-file "$RUNNER_TEMP/linux-tests.tar.zst" --message-format json > "$RUNNER_TEMP/linux-test-list.json"
+          python3 ../../scripts/check-nextest-filters --test-list "$RUNNER_TEMP/linux-test-list.json"
+          filter="$(../../scripts/flaky-quarantine --test-list "$RUNNER_TEMP/linux-test-list.json")"
+          printf 'filter=%s\n' "$filter" >> "$GITHUB_OUTPUT"
+      # Example tests are not part of nextest's default target inventory.
+      - name: Run provider recording example test
+        if: steps.affected.outputs.run_provider_example == 'true'
+        working-directory: tools/front-door
+        run: cargo test --locked -p provenant-providers --features recording --example record bash_proof_needs_a_matching_successful_tool_result
+      - name: Upload Linux test archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-tests
+          path: ${{ runner.temp }}/linux-tests.tar.zst
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  rust:
+    name: Rust front door (${{ matrix.partition }}/3)
+    needs: [macos-scope, rust-test-archive]
+    if: needs.macos-scope.outputs.run_rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3]
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
+      CARGO_INCREMENTAL: "0"
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set Rust temporary directory
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Install nextest
+        uses: ./.github/actions/install-nextest
+        timeout-minutes: 10
+      - name: Download Linux test archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: linux-tests
+          path: ${{ runner.temp }}
+      # Extract into the original target layout for tests with compiled-in binary paths.
+      # Hash partitioning is stable per test, and each runner keeps its own
+      # serial-process group, so the serial worktree suites split across the partitions.
+      - name: Run workspace tests
+        working-directory: tools/front-door
+        env:
+          NEXTTEST_FILTER: ${{ needs.rust-test-archive.outputs.nextest_filter }}
+          QUARANTINE_FILTER: ${{ needs.rust-test-archive.outputs.quarantine_filter }}
+        run: |
+          filter="$NEXTTEST_FILTER"
+          if [ -n "$QUARANTINE_FILTER" ]; then
+            if [ -n "$filter" ]; then
+              filter="($filter) & not ($QUARANTINE_FILTER)"
+            else
+              filter="not ($QUARANTINE_FILTER)"
+            fi
+          fi
+          if [ -n "$filter" ]; then
+            cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/linux-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --partition hash:${{ matrix.partition }}/3 -E "$filter"
+          else
+            cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/linux-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --partition hash:${{ matrix.partition }}/3
+          fi
+      - name: Report slowest tests
+        if: always()
+        run: scripts/nextest-slowest tools/front-door/target/nextest/ci/junit.xml "$GITHUB_STEP_SUMMARY"
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rust-nextest-junit-${{ matrix.partition }}
+          path: tools/front-door/target/nextest/ci/junit.xml
+          if-no-files-found: warn
+      # Runs after the upload: it reuses the ci profile and overwrites junit.xml.
+      - name: Run quarantined tests (advisory)
+        if: matrix.partition == 1
+        continue-on-error: true
+        working-directory: tools/front-door
+        env:
+          QUARANTINE_FILTER: ${{ needs.rust-test-archive.outputs.quarantine_filter }}
+        run: |
+          if [ -n "$QUARANTINE_FILTER" ]; then
+            cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/linux-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --status-level flaky --final-status-level pass -E "$QUARANTINE_FILTER"
+          else
+            echo 'No quarantined tests to run.'
+          fi
+
+  rust-dependencies:
+    name: Rust dependency policy
+    needs: macos-scope
+    if: needs.macos-scope.outputs.run_rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set Rust temporary directory
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Install dependency tools
+        uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
+        timeout-minutes: 6
+        with:
+          tool: cargo-deny@0.20.2,cargo-shear@1.14.0
+      - name: Check advisories, licences and dependency allowlist
+        working-directory: tools/front-door
+        run: cargo deny check
+      - name: Check for unused dependencies
+        working-directory: tools/front-door
+        run: cargo shear
+
+  rust-macos-archive:
+    name: Build macOS test archive
+    runs-on: macos-15
+    timeout-minutes: 20
+    needs: macos-scope
+    if: needs.macos-scope.outputs.run_macos == 'true'
+    env:
+      CARGO_INCREMENTAL: "0"
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set Rust temporary directory
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal --component clippy
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: tools/front-door
+          shared-key: ${{ inputs.cold_cache && format('front-door-ci-macos-test-default-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci-macos-test-default' }}
+          add-job-id-key: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Install nextest
+        uses: ./.github/actions/install-nextest
+        timeout-minutes: 10
+      - name: Lint Rust workspace
+        working-directory: tools/front-door
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Build macOS test archive
+        working-directory: tools/front-door
+        run: >-
+          cargo nextest archive --locked --workspace
+          --archive-file "$RUNNER_TEMP/macos-tests.tar.zst"
+      - name: List macOS tests in the archive
+        working-directory: tools/front-door
+        run: cargo nextest list --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --message-format json > "$RUNNER_TEMP/native-test-list.json"
+      - name: Upload macOS test archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-tests
+          path: ${{ runner.temp }}/macos-tests.tar.zst
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+      - name: Upload macOS test list
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-test-list
+          path: ${{ runner.temp }}/native-test-list.json
+          if-no-files-found: error
+          retention-days: 1
+
+  rust-macos-tests:
+    name: Rust macOS tests (${{ matrix.group }})
+    runs-on: macos-15
+    timeout-minutes: 20
+    needs: [macos-scope, rust-macos-archive]
+    if: needs.macos-scope.outputs.run_macos == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [custody, provider-dispatch, dispatch, light]
+    env:
+      CARGO_INCREMENTAL: "0"
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set Rust temporary directory
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Install nextest
+        uses: ./.github/actions/install-nextest
+        timeout-minutes: 10
+      - name: Download macOS test archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: macos-tests
+          path: ${{ runner.temp }}
+      - name: Install tools for native confinement smokes
+        env:
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+          NATIVE_GROUP: ${{ matrix.group }}
+        run: |
+          brew install node pnpm ripgrep
+          if [ "$NATIVE_GROUP" = custody ] || [ "$NATIVE_GROUP" = light ]; then
+            brew install postgresql@18
+            echo "PROVENANT_TEST_POSTGRES_BIN=$(brew --prefix postgresql@18)/bin" >> "$GITHUB_ENV"
+          fi
+      - name: Configure native census host policy
+        run: |
+          mkdir -p "$RUNNER_TEMP/provenant-native-host"
+          cat > "$RUNNER_TEMP/provenant-native-host/config.toml" <<'TOML'
+          schema_version = 1
+          [knobs]
+          "confinement.census_ignore_unreadable" = [
+            { path = "/Library/Apple/System/Library/PrivateFrameworks/MobileDevice.framework/Versions/A/Resources/usbmuxd", team_id = "platform" },
+          ]
+          TOML
+      - name: Run macOS supervisor custody tests
+        if: ${{ !cancelled() && matrix.group == 'custody' }}
+        working-directory: tools/front-door
+        env:
+          PROVENANT_CONFINEMENT_REQUIRED: "1"
+          PROVENANT_POSTGRES_REQUIRED: "1"
+        run: |
+          ../../scripts/run-native-test-group custody cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite -E '((package(=provenant-supervisor) | package(=provenant-confinement) | package(=provenant-os) | package(=provenant-providers)) & !(test(=worktrees::census_tests::native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree) | test(=worktrees::census_tests::native_full_census_places_clean_merged_worktree_and_same_user_sleep) | (package(=provenant-os) & test(sys::pid::tests::native_)) | test(=tests::claude_network_on_native_tls_files_are_readable))) | (package(=provenant-cli) & test(=run::provider::project_paths::tests::configured_shared_path_allows_lane_lock_contended_by_host))'
+      - name: Run macOS census tests
+        if: ${{ !cancelled() && matrix.group == 'light' }}
+        working-directory: tools/front-door
+        env:
+          PROVENANT_CONFINEMENT_REQUIRED: "1"
+          PROVENANT_POSTGRES_REQUIRED: "1"
+        run: |
+          PROVENANT_STATE_DIR="$RUNNER_TEMP/provenant-native-host" ../../scripts/run-native-test-group census cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --success-output immediate -E '(test(=worktrees::census_tests::native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree) | test(=worktrees::census_tests::native_full_census_places_clean_merged_worktree_and_same_user_sleep) | (package(=provenant-os) & test(sys::pid::tests::native_)))'
+      - name: Run macOS Cargo seed tests
+        if: ${{ !cancelled() && matrix.group == 'light' }}
+        working-directory: tools/front-door
+        run: ../../scripts/run-native-test-group cargo-seed cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite -E 'package(=provenant-run) & test(cargo_seed)'
+      - name: Run dispatch confinement integration tests
+        if: ${{ !cancelled() && matrix.group == 'dispatch' }}
+        working-directory: tools/front-door
+        env:
+          PROVENANT_CONFINEMENT_REQUIRED: "1"
+          PROVENANT_LANE_TOOLS_REQUIRED: "1"
+        # One thread keeps these writer fixtures serial, as the separate
+        # cargo test invocations did.
+        run: >-
+          ../../scripts/run-native-test-group dispatch cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --test-threads 1
+          -E 'binary(=worktrees) & (test(=lane_prepare_isolates_nested_state) | test(=lane_prepare_isolates_nested_publishing_state)
+          | test(=read_only_lane_builds_and_tests_swift_in_scratch)
+          | test(=read_only_lane_builds_and_tests_cargo_in_scratch)
+          | test(=read_only_dispatch_applies_bound_git_and_project_writes)
+          | test(=writer_dispatch_uses_lane_cache_and_narrow_provider_state)
+          | test(=writer_dispatch_edits_a_linked_worktree)
+          | test(=second_writer_is_refused_while_first_holds_the_worktree)
+          | test(=writer_terminal_refuses_sequencer_state)
+          | test(=writer_production_plan_denies_outside_writes)
+          | test(=writer_reconcile_refuses_unfinished_cherry_pick_and_releases))
+          | (package(=provenant-fabric-runtime) & test(=graph::tests::composite_and_allowance_tests::writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source))'
+      - name: Run native writer capability probes
+        if: ${{ !cancelled() && matrix.group == 'light' }}
+        working-directory: tools/front-door
+        env:
+          PROVENANT_CONFINEMENT_REQUIRED: "1"
+          PROVENANT_LANE_TOOLS_REQUIRED: "1"
+        run: ../../scripts/run-native-test-group capability cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite -E 'binary(=worktrees) & test(=lane_prepare_isolates_nested_writer_state)'
+      - name: Run provider dispatch integration tests
+        if: ${{ !cancelled() && matrix.group == 'provider-dispatch' }}
+        working-directory: tools/front-door
+        env:
+          PROVENANT_CONFINEMENT_REQUIRED: "1"
+        run: ../../scripts/run-native-test-group provider-dispatch cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite -E 'binary(=graph_provider) | binary(=command_adapter)'
+      - name: Require Claude network and native TLS file probes
+        if: ${{ !cancelled() && matrix.group == 'light' }}
+        working-directory: tools/front-door
+        env:
+          PROVENANT_CONFINEMENT_REQUIRED: "1"
+        run: ../../scripts/run-native-test-group tls cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite -E 'package(=provenant-providers) & test(claude_network_on)'
+
+      - name: Preserve native test evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-test-evidence-${{ matrix.group }}
+          path: |
+            ${{ runner.temp }}/native-test-results/
+          if-no-files-found: error
+          retention-days: 1
+
+  rust-macos-inventory:
+    name: Verify macOS native evidence
+    needs: [macos-scope, rust-macos-archive, rust-macos-tests]
+    if: ${{ always() && needs.macos-scope.outputs.run_macos == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download native test list
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: native-test-list
+          path: ${{ runner.temp }}
+      - name: Collect every native invocation
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: native-test-evidence-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/native-test-results
+      - name: Verify required native test inventory
+        run: scripts/check-native-inventory "$RUNNER_TEMP/native-test-list.json" "$RUNNER_TEMP/native-test-results"
+
+  # #1339: stripping proc-macro dylibs broke macOS release builds at install
+  # time. Exercise the front door's release build without LTO for speed; the
+  # configured LTO build runs at release and install (docs/runbooks/install.md).
+  rust-macos-release:
+    name: Rust macOS release smoke
+    runs-on: macos-15
+    timeout-minutes: 20
+    needs: macos-scope
+    if: needs.macos-scope.outputs.run_macos == 'true'
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set Rust temporary directory
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
+      # Use a separate uncached target: install builds from a clean target, and cached
+      # proc-macro dylibs would hide the failure this job exists to catch.
+      - name: Build release front door
+        working-directory: tools/front-door
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/release-target
+          CARGO_PROFILE_RELEASE_LTO: "false"
+          RUSTC_WRAPPER: .cargo/rustc-wrapper.sh
+        run: |
+          cargo build --release --locked -p provenant --bin provenant
+
+      - name: Package release and preview isolated installation
+        working-directory: tools/front-door
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/release-target
+          CARGO_PROFILE_RELEASE_LTO: "false"
+          RUSTC_WRAPPER: .cargo/rustc-wrapper.sh
+        run: |
+          cargo run --release --locked --bin package-release -- \
+            --binary "$RUNNER_TEMP/release-target/release/provenant" \
+            --out "$RUNNER_TEMP/release"
+          mkdir -p "$RUNNER_TEMP/home"
+          HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/release/bin/provenant" \
+            --state-dir "$RUNNER_TEMP/state" install --source "$RUNNER_TEMP/release" \
+            --harness codex --bin-dir "$RUNNER_TEMP/bin"
+          HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/release/bin/provenant" \
+            --state-dir "$RUNNER_TEMP/state" check install --source "$RUNNER_TEMP/release"
+          HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/release/bin/provenant" \
+            --state-dir "$RUNNER_TEMP/state" install --source "$RUNNER_TEMP/release" \
+            --harness codex --bin-dir "$RUNNER_TEMP/bin"
+          HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/release/bin/provenant" \
+            --state-dir "$RUNNER_TEMP/state" uninstall --harness codex
+      # Clippy lives in the macOS test job, which compiles and caches the
+      # workspace; only the Swift package tests (shared client, menu bar and
+      # console) stay here, to balance the two jobs.
+      - name: Run Swift package tests
+        working-directory: apps/quota-menubar
+        run: swift test
+
+  # ci-status is the single required check. Only explicitly unselected Rust
+  # and macOS jobs may skip; failures, cancellations and absent jobs fail closed.
   ci-status:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -631,11 +739,13 @@ jobs:
       - macos-scope
       - generated-reference
       - rust-lint
+      - rust-test-archive
       - rust
+      - rust-macos-archive
       - rust-macos-tests
+      - rust-macos-inventory
       - rust-macos-release
       - rust-dependencies
-      - generic-checks
     if: always()
     steps:
       - name: Check out repository

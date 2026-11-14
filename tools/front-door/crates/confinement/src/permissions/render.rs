@@ -1,10 +1,11 @@
 //! SBPL compilation and rendering.
 
 #[cfg(target_os = "macos")]
-use super::validation::filtered_native_controls;
+use super::validation::filtered_native_controls_with_policy;
 use super::*;
 #[cfg(target_os = "macos")]
 use crate::cache::verify_cache_metadata;
+use provenant_records::policy::{Effect, Facts, Policy};
 #[cfg(target_os = "macos")]
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -113,17 +114,20 @@ pub(super) const PSEUDO_TTY_RULES: &str = r##"(allow pseudo-tty)
 (allow file-read* file-write* file-ioctl (literal "/dev/ptmx"))
 (allow file-read* file-write* file-ioctl (require-all (regex #"^/dev/ttys[0-9]+$") (extension "com.apple.sandbox.pty")))
 "##;
-/// Default profile-byte warning threshold for renderer fixtures.
-#[cfg(any(test, feature = "snapshot"))]
-pub(super) const PROFILE_LIMIT: usize = 512 * 1024;
-
 #[cfg(all(target_os = "macos", any(test, feature = "snapshot")))]
 pub(super) fn compile_sbpl(
     plan: &PlanPermissions,
     profile: &ProviderProfile,
     anchors: &Anchors<'_>,
 ) -> Result<ConfinedLaunch, PermissionError> {
-    compile_sbpl_impl(plan, profile, anchors, false, ProfileLimits::default())
+    compile_sbpl_impl(
+        plan,
+        profile,
+        anchors,
+        false,
+        ProfileLimits::default(),
+        &Policy::default(),
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -132,13 +136,19 @@ pub(super) fn compile_sbpl_with_diagnostic(
     profile: &ProviderProfile,
     anchors: &Anchors<'_>,
     limits: ProfileLimits,
+    policy: &Policy,
 ) -> Result<ConfinedLaunch, PermissionError> {
     // Enforcing launches require the complete host contract. The pure snapshot
     // seam may still render standalone fixtures with the shared baseline.
     if plan.policy.is_none() {
-        return Err(PermissionError::PermissionNotRecorded);
+        let error = PermissionError::PermissionNotRecorded;
+        return Err(Policy::default().boundary_error(
+            "RENDER_COMPILE_SBPL_AUTHORITY_3",
+            Facts::violation("the enforcing launch is missing its complete permission snapshot"),
+            error,
+        ));
     }
-    compile_sbpl_impl(plan, profile, anchors, true, limits)
+    compile_sbpl_impl(plan, profile, anchors, true, limits, policy)
 }
 
 #[cfg(target_os = "macos")]
@@ -148,10 +158,59 @@ fn compile_sbpl_impl(
     anchors: &Anchors<'_>,
     diagnostic: bool,
     limits: ProfileLimits,
+    policy: &Policy,
 ) -> Result<ConfinedLaunch, PermissionError> {
-    anchors.verify_all()?;
+    compile_sbpl_inner(plan, profile, anchors, diagnostic, limits, policy)
+        .map_err(compile_boundary_error)
+}
+
+#[cfg(target_os = "macos")]
+fn compile_boundary_error(error: PermissionError) -> PermissionError {
+    use provenant_records::diagnostic::BoundaryClass;
+    let code = match error.boundary_class() {
+        BoundaryClass::Credentials => Some("RENDER_COMPILE_SBPL_CREDENTIALS"),
+        BoundaryClass::LaneGit => Some("RENDER_COMPILE_SBPL_GIT_ISOLATION"),
+        BoundaryClass::Authority => Some(match &error {
+            PermissionError::NestedConfinementUnsupported => "RENDER_COMPILE_SBPL_AUTHORITY",
+            PermissionError::PermissionNotRecorded => "RENDER_COMPILE_SBPL_AUTHORITY_3",
+            _ => "RENDER_COMPILE_SBPL_AUTHORITY_2",
+        }),
+        BoundaryClass::Integrity | BoundaryClass::None => None,
+    };
+    match code {
+        Some(code) => {
+            let detail = error.to_string();
+            Policy::default().boundary_error(code, Facts::violation(detail), error)
+        }
+        None => error,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn compile_authority_error(error: PermissionError) -> PermissionError {
+    let detail = error.to_string();
+    Policy::default().boundary_error(
+        "RENDER_COMPILE_SBPL_AUTHORITY_2",
+        Facts::violation(detail),
+        error,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn compile_sbpl_inner(
+    plan: &PlanPermissions,
+    profile: &ProviderProfile,
+    anchors: &Anchors<'_>,
+    diagnostic: bool,
+    limits: ProfileLimits,
+    policy: &Policy,
+) -> Result<ConfinedLaunch, PermissionError> {
+    anchors.verify_all().map_err(compile_authority_error)?;
     if let Some(policy) = &plan.policy {
-        policy.mandatory().revalidate_paths()?;
+        policy
+            .mandatory()
+            .revalidate_paths()
+            .map_err(compile_authority_error)?;
     }
     if plan.nested_confinement {
         return Err(PermissionError::NestedConfinementUnsupported);
@@ -184,13 +243,34 @@ fn compile_sbpl_impl(
     .into_iter()
     .max()
     .unwrap_or(0);
-    report_capacity_warning(capacity_warning(
+    if let Some(warning) = check_capacity_policy(
+        policy,
+        "GRANT_COUNT",
         "domains.run.grant_limit",
-        plan_count.max(profile_count),
+        plan_count,
         limits.grant_limit,
         limits.grant_origin,
-    ));
-    validate_plan_grant_limit(plan, usize::MAX)?;
+        PermissionError::GrantLimitExceeded {
+            family: "plan root grant count",
+            limit: limits.grant_limit,
+        },
+    )? {
+        report_policy_message(warning);
+    }
+    if let Some(warning) = check_capacity_policy(
+        policy,
+        "PROFILE_GRANT_COUNT",
+        "domains.run.grant_limit",
+        profile_count,
+        limits.grant_limit,
+        limits.grant_origin,
+        PermissionError::GrantLimitExceeded {
+            family: "provider profile grant count",
+            limit: limits.grant_limit,
+        },
+    )? {
+        report_policy_message(warning);
+    }
     validate_profile_spec_with_home(&profile.spec, anchors.home, usize::MAX)?;
     for grant in &plan.read_roots {
         validate_read_exec_grant(grant)
@@ -210,7 +290,7 @@ fn compile_sbpl_impl(
         if !matches!(plan.mode, AccessMode::ReadOnly) {
             return Err(PermissionError::InvalidReadOnlyPolicy);
         }
-        read_only.revalidate()?;
+        read_only.revalidate().map_err(compile_authority_error)?;
         for grant in &read_only.writes {
             validate_noncredential_grant(grant)
                 .map_err(|error| error.with_credential_path(&grant.path, Some(anchors.home)))?;
@@ -223,7 +303,9 @@ fn compile_sbpl_impl(
             {
                 return Err(PermissionError::ProtectedOverlap);
             }
-            anchors.verify_grant_held(grant)?;
+            anchors
+                .verify_grant_held(grant)
+                .map_err(compile_authority_error)?;
         }
     }
     if let Some(policy) = &plan.policy {
@@ -269,16 +351,22 @@ fn compile_sbpl_impl(
         });
     }
     for grant in read_grants {
-        anchors.verify_read_held(grant)?;
+        anchors
+            .verify_read_held(grant)
+            .map_err(compile_authority_error)?;
     }
     for grant in discovery() {
-        anchors.verify_discovery_grant(grant)?;
+        verify_discovery_grant(anchors, grant)?;
     }
     for executable in &profile.spec.process_executables {
-        anchors.verify_executable(executable)?;
+        anchors
+            .verify_executable(executable)
+            .map_err(compile_authority_error)?;
     }
     for grant in credential_writes {
-        anchors.verify_single_link_grant(grant)?;
+        anchors
+            .verify_single_link_grant(grant)
+            .map_err(compile_authority_error)?;
     }
     verify_state_writes(plan, profile, anchors)?;
     if let AccessMode::WorktreeWrite(authority) = &plan.mode {
@@ -300,7 +388,9 @@ fn compile_sbpl_impl(
     }
     validate_noncredential_grant(&plan.scratch)
         .map_err(|error| error.with_credential_path(&plan.scratch.path, Some(anchors.home)))?;
-    anchors.verify_grant_held(&plan.scratch)?;
+    anchors
+        .verify_grant_held(&plan.scratch)
+        .map_err(compile_authority_error)?;
     let mut scratch_exclusions: Vec<&PathGrant> = all_reads()
         .chain(&plan.protected_roots)
         .chain(&plan.secret_roots)
@@ -352,7 +442,9 @@ fn compile_sbpl_impl(
 
     for secret in &plan.secret_roots {
         secret.validate()?;
-        anchors.verify_grant_held(secret)?;
+        anchors
+            .verify_grant_held(secret)
+            .map_err(compile_authority_error)?;
     }
     for read in all_reads() {
         if plan.secret_roots.iter().any(|secret| read.overlaps(secret)) {
@@ -380,13 +472,21 @@ fn compile_sbpl_impl(
         return Err(PermissionError::ProtectedOverlap);
     }
 
-    let mut profile_bytes = render_with_limit(&grants, usize::MAX)?.into_bytes();
-    report_capacity_warning(capacity_warning(
+    let mut profile_bytes = render_with_policy(&grants, policy)?.into_bytes();
+    if let Some(warning) = check_capacity_policy(
+        policy,
+        "PROFILE_BYTES",
         "domains.run.profile_limit_bytes",
         profile_bytes.len(),
         limits.profile_limit_bytes,
         limits.profile_origin,
-    ));
+        PermissionError::ProfileTooLarge {
+            bytes: profile_bytes.len(),
+            limit: limits.profile_limit_bytes,
+        },
+    )? {
+        report_policy_message(warning);
+    }
     let profile_digest = Sha256::digest(&profile_bytes).into();
     // SBPL grants pathnames, so rebind them to their held identities after
     // rendering, immediately before returning the launch profile.
@@ -399,9 +499,11 @@ fn compile_sbpl_impl(
     }
     verify_state_writes(plan, profile, anchors)?;
     if let Some(read_only) = &plan.read_only {
-        read_only.revalidate()?;
+        read_only.revalidate().map_err(compile_authority_error)?;
         for grant in &read_only.writes {
-            anchors.verify_grant_held(grant)?;
+            anchors
+                .verify_grant_held(grant)
+                .map_err(compile_authority_error)?;
         }
     }
     if let AccessMode::WorktreeWrite(authority) = &plan.mode {
@@ -418,16 +520,20 @@ fn compile_sbpl_impl(
                 .map_err(PermissionError::Filesystem)?,
         )?;
     }
-    anchors.verify_all()?;
+    anchors.verify_all().map_err(compile_authority_error)?;
     for grant in discovery() {
-        anchors.verify_discovery_grant(grant)?;
+        verify_discovery_grant(anchors, grant)?;
     }
     if let Some(policy) = &plan.policy {
-        policy.mandatory().revalidate_paths()?;
+        policy
+            .mandatory()
+            .revalidate_paths()
+            .map_err(compile_authority_error)?;
     }
     // Avoid retaining a second mutable representation of the profile.
     profile_bytes.shrink_to_fit();
-    let native_controls = filtered_native_controls(&profile.spec.native_controls);
+    let native_controls =
+        filtered_native_controls_with_policy(&profile.spec.native_controls, policy);
     Ok(ConfinedLaunch {
         enforcement: Enforcement::MacOsSandboxExec,
         profile: profile_bytes,
@@ -496,22 +602,22 @@ impl<'a> GrantSet<'a> {
 /// Render a built grant set without filesystem or environment access.
 #[cfg(any(test, feature = "snapshot"))]
 pub(crate) fn render(grants: &GrantSet<'_>) -> Result<String, PermissionError> {
-    render_with_limit(grants, PROFILE_LIMIT)
+    render_with_policy(grants, &Policy::default())
 }
 
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
-pub(super) fn render_with_limit(
+pub(super) fn render_with_policy(
     grants: &GrantSet<'_>,
-    limit: usize,
+    policy: &Policy,
 ) -> Result<String, PermissionError> {
-    let source = String::from_utf8(render_profile_with_limit(
+    let source = String::from_utf8(render_profile_with_policy(
         grants.plan,
         grants.profile,
         &grants.reads,
         &grants.credential_writes,
         grants.worktree.as_ref(),
         grants.home,
-        limit,
+        policy,
     )?)
     .map_err(|_| PermissionError::NonUtf8Path)?;
     Ok(source)
@@ -655,26 +761,26 @@ pub(super) fn render_profile(
     worktree_grants: Option<&WorktreeWriteGrants>,
     home: &Path,
 ) -> Result<Vec<u8>, PermissionError> {
-    render_profile_with_limit(
+    render_profile_with_policy(
         plan,
         profile,
         reads,
         credential_writes,
         worktree_grants,
         home,
-        PROFILE_LIMIT,
+        &Policy::default(),
     )
 }
 
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
-fn render_profile_with_limit(
+fn render_profile_with_policy(
     plan: &PlanPermissions,
     profile: &ProviderProfile,
     reads: &[PathGrant],
     credential_writes: &[PathGrant],
     worktree_grants: Option<&WorktreeWriteGrants>,
     home: &Path,
-    limit: usize,
+    policy: &Policy,
 ) -> Result<Vec<u8>, PermissionError> {
     let mut source = String::from("(version 1)\n(allow default)\n");
     let network = plan.policy.as_ref().map_or(plan.network, |policy| {
@@ -695,19 +801,19 @@ fn render_profile_with_limit(
     for grant in reads {
         push_rule(&mut source, "allow", "file-read*", &grant.path, grant.scope)?;
     }
-    let mut omitted_discovery = false;
+    let mut omitted_discovery = 0;
     for grant in &profile.spec.discovery_reads {
         if super::validation::valid_discovery_read(grant) {
             push_rule(&mut source, "allow", "file-read*", &grant.path, grant.scope)?;
         } else {
-            omitted_discovery = true;
+            omitted_discovery += 1;
         }
     }
-    if omitted_discovery {
-        use std::io::Write;
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: invalid discovery paths were omitted"
+    if omitted_discovery > 0 {
+        report_policy_warning(
+            policy,
+            "RENDER_RENDER_PROFILE_WITH_LIMIT_NONE_2",
+            format!("omitted {omitted_discovery} invalid discovery-only reads"),
         );
     }
     if writer {
@@ -861,16 +967,20 @@ fn render_profile_with_limit(
             sbpl_path(&socket.path)?
         ));
     }
+    let mut omitted_endpoints = 0;
     for endpoint in &profile.spec.provider_api {
         if super::validation::validate_endpoint(endpoint).is_ok() {
             push_network_endpoint(&mut source, endpoint)?;
         } else {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: invalid provider network endpoint was omitted"
-            );
+            omitted_endpoints += 1;
         }
+    }
+    if omitted_endpoints > 0 {
+        report_policy_warning(
+            policy,
+            "RENDER_RENDER_PROFILE_WITH_LIMIT_NONE",
+            format!("omitted {omitted_endpoints} malformed provider network endpoints"),
+        );
     }
     if profile.spec.loopback_server {
         source.push_str(concat!(
@@ -899,13 +1009,29 @@ fn render_profile_with_limit(
         home,
         network,
     )?;
-    report_capacity_warning(capacity_warning(
-        "domains.run.profile_limit_bytes",
-        source.len(),
-        limit,
-        provenant_records::diagnostic::SettingSource::ShippedDefault,
-    ));
     Ok(source.into_bytes())
+}
+
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[allow(clippy::panic)]
+fn report_policy_warning(policy: &Policy, code: &str, detail: String) {
+    match policy.check(code, Facts::violation(detail)) {
+        Effect::Proceed => {}
+        Effect::Warn(message) => report_policy_message(message),
+        Effect::Refuse(_) => panic!("optional-filter rules are warn-or-off decisions"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn verify_discovery_grant(anchors: &Anchors<'_>, grant: &PathGrant) -> Result<(), PermissionError> {
+    anchors.verify_discovery_grant(grant).map_err(|error| {
+        let detail = error.to_string();
+        Policy::default().boundary_error(
+            "VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_CREDENTIALS_2",
+            Facts::violation(detail),
+            error,
+        )
+    })
 }
 
 /// Resolve the shared baseline even for standalone renderer fixtures. Real
@@ -919,7 +1045,7 @@ fn mandatory_for_plan(
     if let Some(policy) = &plan.policy {
         return Ok(policy.mandatory().clone());
     }
-    let state = home.join(".local/share/provenant/v1");
+    let state = home.join(provenant_core::DEFAULT_STATE_SUFFIX);
     let missing_source = home.join(".provenant-unbound-source");
     let source = worktree
         .map(|grants| grants.worktree.path.as_path())
@@ -1391,9 +1517,20 @@ pub(super) fn push_rule(
 
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 pub(super) fn sbpl_path(path: &Path) -> Result<String, PermissionError> {
-    let text = path.to_str().ok_or(PermissionError::NonUtf8Path)?;
+    let error = |error| {
+        let detail = format!("required path cannot be represented in SBPL: {path:?}: {error}");
+        Policy::default().boundary_error(
+            "RENDER_SBPL_PATH_AUTHORITY",
+            Facts::violation(detail),
+            error,
+        )
+    };
+    let text = path
+        .to_str()
+        .ok_or(PermissionError::NonUtf8Path)
+        .map_err(error)?;
     if !profile_path_representable(path) {
-        return Err(PermissionError::InvalidPath(path.to_owned()));
+        return Err(error(PermissionError::InvalidPath(path.to_owned())));
     }
     let mut escaped = String::with_capacity(text.len());
     for character in text.chars() {
@@ -1404,7 +1541,7 @@ pub(super) fn sbpl_path(path: &Path) -> Result<String, PermissionError> {
             '\r' => escaped.push_str("\\r"),
             '\t' => escaped.push_str("\\t"),
             value if value.is_control() => {
-                return Err(PermissionError::InvalidPath(path.to_owned()));
+                return Err(error(PermissionError::InvalidPath(path.to_owned())));
             }
             value => escaped.push(value),
         }

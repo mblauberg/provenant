@@ -1,4 +1,4 @@
-//! Document-based graph service shared by the CLI and MCP transports.
+//! Document-based graph service shared by the CLI and the lane relay.
 use super::*;
 use provenant_fabric_runtime::coordination::facade::is_map_key_parent;
 use provenant_fabric_runtime::graph::{
@@ -130,27 +130,313 @@ fn required<'a>(input: &'a Value, field: &str) -> Result<&'a str, FacadeError> {
         .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field(field.into())))
 }
 
-/// Observe a submitted graph within the caller's original wait budget.
-pub(super) fn wait_submission(
+fn graph_run_has_remote_pending(
+    run: &provenant_fabric_runtime::graph::GraphRun,
+    local_host: Option<provenant_core::HostId>,
+    target: Option<&super::unified::GraphTarget>,
+) -> bool {
+    use provenant_fabric_runtime::graph::AttemptState;
+    run.checkpoint
+        .nodes
+        .iter()
+        .filter(|node| {
+            target.is_none_or(|target| {
+                target.node.as_ref().is_none_or(|id| {
+                    &node.id == id
+                        || node.extra.get("subtree_cancel").and_then(Value::as_str) == Some(id)
+                })
+            })
+        })
+        .flat_map(|node| node.recorded_attempts())
+        .filter(|attempt| {
+            attempt.state != AttemptState::Terminal
+                && target
+                    .and_then(|target| target.attempt.as_deref())
+                    .is_none_or(|reference| attempt.attempt_ref.as_deref() == Some(reference))
+        })
+        .any(|attempt| {
+            let Some(reference) = attempt.attempt_ref.as_deref() else {
+                return false;
+            };
+            let Some(local_host) = local_host.as_ref() else {
+                return true;
+            };
+            !reference
+                .split_once('/')
+                .and_then(|(owner, _)| owner.parse::<provenant_core::HostId>().ok())
+                .is_some_and(|owner| &owner == local_host)
+        })
+}
+
+fn observation_clock_error(error: provenant_core::TimeError) -> FacadeError {
+    FacadeError::StateCorruptDetail {
+        detail: format!("graph observation clock: {error}"),
+    }
+}
+
+fn next_launch_retry_delay(
+    run: &provenant_fabric_runtime::graph::GraphRun,
+    clock: &(impl provenant_core::Clock + ?Sized),
+) -> Result<Option<std::time::Duration>, provenant_core::TimeError> {
+    let wake_at = run
+        .checkpoint
+        .nodes
+        .iter()
+        .filter_map(|node| node.launch_retry.as_ref()?.wake_at)
+        .min();
+    let Some(wake_at) = wake_at else {
+        return Ok(None);
+    };
+    let now = clock.wall_now()?;
+    Ok(Some(std::time::Duration::from_micros(
+        wake_at.as_micros().saturating_sub(now.as_micros()).max(0) as u64,
+    )))
+}
+
+fn launch_retry_due(
+    run: &provenant_fabric_runtime::graph::GraphRun,
+    clock: &(impl provenant_core::Clock + ?Sized),
+) -> Result<bool, provenant_core::TimeError> {
+    let wake_at = run
+        .checkpoint
+        .nodes
+        .iter()
+        .filter_map(|node| node.launch_retry.as_ref()?.wake_at)
+        .min();
+    let Some(wake_at) = wake_at else {
+        return Ok(false);
+    };
+    Ok(clock.wall_now()? >= wake_at)
+}
+
+pub(super) fn graph_wait_needs_refresh(
+    wake: crate::status_wait::ObservationWake,
+    launch_retry_due: bool,
+) -> bool {
+    use crate::status_wait::ObservationWake;
+    match wake {
+        ObservationWake::Changed | ObservationWake::PacedFallback => true,
+        ObservationWake::NativeTimeout => launch_retry_due,
+        ObservationWake::Woken | ObservationWake::Cancelled => false,
+    }
+}
+
+#[derive(Default)]
+struct GraphObservationHistory {
+    remote_source_seen: bool,
+    reader_woken: bool,
+}
+impl GraphObservationHistory {
+    fn record(
+        &mut self,
+        run: &provenant_fabric_runtime::graph::GraphRun,
+        local_host: Option<provenant_core::HostId>,
+        target: Option<&super::unified::GraphTarget>,
+    ) -> bool {
+        let remote_pending = graph_run_has_remote_pending(run, local_host, target);
+        self.remote_source_seen |= remote_pending;
+        remote_pending
+    }
+
+    fn report(&self, observation: &crate::status_wait::LocalObservation) -> String {
+        observation.report(self.remote_source_seen)
+    }
+}
+
+fn interval_micros(interval: std::time::Duration) -> u64 {
+    u64::try_from(interval.as_micros()).unwrap_or(u64::MAX)
+}
+
+pub(super) fn next_remote_deadline(
+    previous: Option<u64>,
+    remote_pending: bool,
+    remote_due: bool,
+    now: u64,
+    interval: u64,
+) -> Option<u64> {
+    if !remote_pending {
+        None
+    } else if previous.is_none() || remote_due {
+        Some(now.saturating_add(interval))
+    } else {
+        previous
+    }
+}
+
+fn wait_graph_updates<C: provenant_core::Clock + ?Sized>(
     mut run: provenant_fabric_runtime::graph::GraphRun,
     wait: WaitBudget,
-    clock: &dyn Clock,
-    pause: &dyn provenant_core::Pause,
+    clock: &C,
     cancel: &CancelToken,
-    mut observe: impl FnMut(&str) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
-) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
-    while run.status == GraphStatus::Pending && !cancel.is_cancelled() {
-        let remaining = wait.remaining(clock.mono_now());
-        if remaining.as_micros() == 0 {
+    observation: &mut crate::status_wait::LocalObservation,
+    local_host: Option<provenant_core::HostId>,
+    remote_target: Option<&super::unified::GraphTarget>,
+    watch_launch_retries: bool,
+    mut active: impl FnMut(&provenant_fabric_runtime::graph::GraphRun) -> bool,
+    mut observe: impl FnMut(
+        &provenant_fabric_runtime::graph::GraphRun,
+    ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
+    mut observe_remote: impl FnMut(
+        &provenant_fabric_runtime::graph::GraphRun,
+    ) -> Result<(), FacadeError>,
+) -> Result<
+    (
+        provenant_fabric_runtime::graph::GraphRun,
+        GraphObservationHistory,
+    ),
+    FacadeError,
+> {
+    use crate::status_wait::ObservationWake;
+    let interval = observation.interval();
+    let mut history = GraphObservationHistory::default();
+    let mut remote_pending = history.record(&run, local_host, remote_target);
+    let mut remote_deadline = next_remote_deadline(
+        None,
+        remote_pending,
+        false,
+        clock.mono_now().as_micros(),
+        interval_micros(interval),
+    );
+
+    // The observer is registered before this refresh, closing the race between
+    // submission/stop and the first status read.
+    if active(&run) && !cancel.is_cancelled() && wait.remaining(clock.mono_now()).as_micros() > 0 {
+        run = observe(&run)?;
+        remote_pending = history.record(&run, local_host, remote_target);
+        if remote_pending {
+            observe_remote(&run)?;
+        }
+        remote_deadline = next_remote_deadline(
+            remote_deadline,
+            remote_pending,
+            remote_pending,
+            clock.mono_now().as_micros(),
+            interval_micros(interval),
+        );
+    }
+
+    while active(&run) && !cancel.is_cancelled() {
+        let now = clock.mono_now();
+        let remaining = wait.remaining(now).as_micros();
+        if remaining == 0 {
             break;
         }
-        pause.wait(
-            provenant_core::DurationMicros::from_micros(250_000.min(remaining.as_micros())),
-            cancel,
+        let retry_due = watch_launch_retries
+            && launch_retry_due(&run, clock).map_err(observation_clock_error)?;
+        let remote_due = remote_deadline.is_some_and(|deadline| now.as_micros() >= deadline);
+        if retry_due || remote_due {
+            if retry_due {
+                run = observe(&run)?;
+                remote_pending = history.record(&run, local_host, remote_target);
+            }
+            if remote_due && remote_pending {
+                observe_remote(&run)?;
+            }
+            remote_deadline = next_remote_deadline(
+                remote_deadline,
+                remote_pending,
+                remote_due,
+                clock.mono_now().as_micros(),
+                interval_micros(interval),
+            );
+            continue;
+        }
+
+        let mut maximum_micros = remaining;
+        if watch_launch_retries
+            && let Some(delay) =
+                next_launch_retry_delay(&run, clock).map_err(observation_clock_error)?
+        {
+            maximum_micros = maximum_micros.min(interval_micros(delay));
+        }
+        if let Some(deadline) = remote_deadline {
+            maximum_micros = maximum_micros.min(deadline.saturating_sub(now.as_micros()));
+        }
+        let wake = observation
+            .wait(
+                std::time::Duration::from_micros(maximum_micros),
+                cancel,
+                clock,
+            )
+            .map_err(|error| FacadeError::StateCorruptDetail {
+                detail: format!("graph observation clock: {error}"),
+            })?;
+        if matches!(wake, ObservationWake::Woken | ObservationWake::Cancelled) {
+            history.reader_woken = true;
+            break;
+        }
+        if wait.remaining(clock.mono_now()).as_micros() == 0 {
+            break;
+        }
+        let now = clock.mono_now();
+        let retry_due = watch_launch_retries
+            && launch_retry_due(&run, clock).map_err(observation_clock_error)?;
+        let remote_due = remote_deadline.is_some_and(|deadline| now.as_micros() >= deadline);
+        if graph_wait_needs_refresh(wake, retry_due) {
+            run = observe(&run)?;
+            remote_pending = history.record(&run, local_host, remote_target);
+        }
+        if remote_due && remote_pending {
+            observe_remote(&run)?;
+        }
+        remote_deadline = next_remote_deadline(
+            remote_deadline,
+            remote_pending,
+            remote_due,
+            clock.mono_now().as_micros(),
+            interval_micros(interval),
         );
-        run = observe(&run.checkpoint.graph_id)?;
     }
-    Ok(run)
+    Ok((run, history))
+}
+
+/// Observe a submitted graph within the caller's original wait budget.
+pub(super) fn wait_submission<C: provenant_core::Clock + ?Sized>(
+    run: provenant_fabric_runtime::graph::GraphRun,
+    wait: WaitBudget,
+    clock: &C,
+    cancel: &CancelToken,
+    observation: &mut crate::status_wait::LocalObservation,
+    local_host: Option<provenant_core::HostId>,
+    mut observe: impl FnMut(&str) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
+    observe_remote: impl FnMut(&provenant_fabric_runtime::graph::GraphRun) -> Result<(), FacadeError>,
+) -> Result<(provenant_fabric_runtime::graph::GraphRun, String, bool), FacadeError> {
+    let (run, history) = wait_graph_updates(
+        run,
+        wait,
+        clock,
+        cancel,
+        observation,
+        local_host,
+        None,
+        true,
+        |run| run.status == GraphStatus::Pending,
+        |run| observe(&run.checkpoint.graph_id),
+        observe_remote,
+    )?;
+    Ok((run, history.report(observation), !history.reader_woken))
+}
+
+fn control_receipt_unfinished(
+    run: &provenant_fabric_runtime::graph::GraphRun,
+    target: &super::unified::GraphTarget,
+    stopping: bool,
+) -> bool {
+    if stopping {
+        run.checkpoint
+            .nodes
+            .iter()
+            .filter(|node| {
+                target.node.as_ref().is_none_or(|id| {
+                    &node.id == id
+                        || node.extra.get("subtree_cancel").and_then(Value::as_str) == Some(id)
+                })
+            })
+            .flat_map(|node| &node.attempts)
+            .any(|attempt| attempt.state != provenant_fabric_runtime::graph::AttemptState::Terminal)
+    } else {
+        run.status == GraphStatus::Pending
+    }
 }
 
 /// Attempt settings are reserved launch controls, not template parameters.
@@ -175,12 +461,21 @@ fn launch_input(input: &Value) -> Result<Value, FacadeError> {
             .collect();
         for key in keys {
             let value = settings.remove(&key).ok_or_else(invalid)?;
-            attempt[&key[8..]] = value;
+            attempt[&key[8..]] = type_attempt_field(&key[8..], value)?;
         }
     }
     for field in ["host", "account"] {
         if let Some(value) = input.get(field).filter(|value| !value.is_null()) {
             attempt[field] = value.clone();
+        }
+    }
+    // Retain provenance when these run controls are merged onto a template.
+    for field in ["token_budget", "on_budget", "budget_grace"] {
+        if attempt.get(field).is_some() {
+            if !attempt["budget_sources"].is_object() {
+                attempt["budget_sources"] = json!({});
+            }
+            attempt["budget_sources"][field] = json!("launch");
         }
     }
     let typed: provenant_fabric_runtime::graph::AttemptSpec =
@@ -208,36 +503,33 @@ fn launch_input(input: &Value) -> Result<Value, FacadeError> {
         }
     }
     input["attempt"] = attempt;
-    if let Some(value) = input.get("operation_id").filter(|value| !value.is_null()) {
-        value
-            .as_str()
-            .ok_or_else(invalid)?
-            .parse::<provenant_core::OperationId>()
-            .map_err(|_| invalid())?;
-    }
     Ok(input)
 }
 
-/// Run-file operation IDs belong to the envelope, not the template schema.
-fn run_envelope(input: &Value) -> Result<Value, FacadeError> {
-    let mut input = input.clone();
-    let nested = input
-        .get_mut("document")
-        .and_then(Value::as_object_mut)
-        .and_then(|fields| fields.remove("operation_id"));
-    if input.get("operation_id").is_none()
-        && let Some(operation) = nested
-    {
-        input["operation_id"] = operation;
+/// A `--set attempt.FIELD=VALUE` that arrived as text takes the first reading
+/// the attempt schema accepts: TOML (`true`, `300`, `["a"]`), then the text as
+/// written. A value that arrived typed, as it does from the lane relay, is left alone.
+fn type_attempt_field(field: &str, value: Value) -> Result<Value, FacadeError> {
+    let Value::String(text) = &value else {
+        return Ok(value);
+    };
+    let parsed = toml_edit::de::from_str::<Value>(&format!("value = {text}"))
+        .ok()
+        .and_then(|mut table| table.get_mut("value").map(Value::take));
+    for candidate in parsed.into_iter().chain([value.clone()]) {
+        if decode_input::<provenant_fabric_runtime::graph::AttemptSpec>(
+            json!({ field: candidate }),
+            "attempt",
+        )
+        .is_ok()
+        {
+            return Ok(candidate);
+        }
     }
-    if let Some(operation) = input.get("operation_id").filter(|value| !value.is_null()) {
-        let id = operation.as_str().ok_or_else(|| {
-            FacadeError::invalid(InvalidInputDetail::Field("operation_id".into()))
-        })?;
-        provenant_core::OperationId::parse(id)
-            .map_err(|_| FacadeError::invalid(InvalidInputDetail::Field("operation_id".into())))?;
-    }
-    Ok(input)
+    Err(FacadeError::invalid(InvalidInputDetail::FieldDecode {
+        field: format!("attempt.{field}"),
+        missing: false,
+    }))
 }
 
 fn override_launch(
@@ -328,7 +620,12 @@ fn bind_submission_subject(
 }
 
 /// Apply plain-task execution controls before template lowering and patch admission.
-fn bind_launch_controls(input: &Value, node: &mut Value, cwd: &Path) -> Result<(), FacadeError> {
+fn bind_launch_controls(
+    input: &Value,
+    node: &mut Value,
+    cwd: &Path,
+    ports: &provenant_config::PortTable,
+) -> Result<(), FacadeError> {
     let invalid = |field: &str| FacadeError::invalid(InvalidInputDetail::Field(field.into()));
     let branch = input.get("branch").filter(|value| !value.is_null());
     let base = input.get("base").filter(|value| !value.is_null());
@@ -363,7 +660,10 @@ fn bind_launch_controls(input: &Value, node: &mut Value, cwd: &Path) -> Result<(
             None => "refs/remotes/origin/HEAD",
         };
         provenant_confinement::repo::GitRevision::new(base).map_err(|_| invalid("base"))?;
-        node["worktree"] = json!(format!(".worktrees/{}", branch.replace('/', "-")));
+        let worktree = ports
+            .managed_writer_path(branch)
+            .map_err(|_| invalid("branch"))?;
+        node["worktree"] = json!(cwd.join(worktree));
         if node.get("attempt").is_none() {
             node["attempt"] = json!({});
         }
@@ -541,17 +841,16 @@ impl Factory {
     fn launch_resolvers_for_tier(
         &self,
         document: Option<&Value>,
-        tier: Option<&Value>,
+        route: Option<&RouteChoice>,
     ) -> Result<BTreeMap<String, Vec<String>>, FacadeError> {
-        let config = provenant_config::read_with_domains(
-            &self.context.roots,
-            &provenant_cli::domains::SECTIONS,
-        )
-        .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        let config = provenant_cli::config_reads::read_for(&self.context.roots, "run")
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         // An unknown tier is refused before panel resolution, so advisory and
         // strict diversity both give this usage error instead of a compile error.
-        if let Some(name) = tier
-            .and_then(Value::as_str)
+        for name in route
+            .map(RouteChoice::tiers)
+            .unwrap_or_default()
+            .into_iter()
             .filter(|name| !name.contains('/'))
         {
             let catalogue = provenant_routing::Catalogue::bundled()
@@ -574,8 +873,8 @@ impl Factory {
                 resolver_document[field] = value.clone();
             }
         }
-        if let Some(tier) = tier.filter(|tier| !tier.is_null()) {
-            resolver_document["review_tier_override"] = tier.clone();
+        if let Some(tier) = route.and_then(|route| route.tier_for("review")) {
+            resolver_document["review_tier_override"] = json!(tier);
         }
         let document: GraphDocument = serde_json::from_value(resolver_document)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
@@ -611,11 +910,22 @@ impl Factory {
             })
             .transpose()
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-        let launch = provenant_cli::fabric::graph_relay::writer_launch_budget(
-            &self.context,
-            &self.clock,
-            budget,
-        );
+        let launch = match &request {
+            provenant_fabric_runtime::graph::relay::RelayOp::Add(child) if child.has_writers() => {
+                let writer = provenant_cli::fabric::graph_relay::writer_launch_budget(
+                    &self.context,
+                    &self.clock,
+                    budget,
+                );
+                WaitBudget::up_to(
+                    self.clock.mono_now(),
+                    budget
+                        .remaining(self.clock.mono_now())
+                        .max(writer.remaining(self.clock.mono_now())),
+                )
+            }
+            _ => budget,
+        };
         let within =
             std::time::Duration::from_micros(launch.remaining(self.clock.mono_now()).as_micros())
                 .saturating_add(std::time::Duration::from_secs(1));
@@ -626,13 +936,38 @@ impl Factory {
             if remaining == 0 {
                 return Ok(json!({"receipt":receipt,"observation_error":"child wait timed out"}));
             }
+            let (interval, configuration_warning) =
+                match provenant_cli::config_reads::read_for(&self.context.roots, "wait") {
+                    Ok(config) => (
+                        std::time::Duration::from_millis(config.domains.wait.local_interval_ms),
+                        None,
+                    ),
+                    Err(error) => (
+                        std::time::Duration::from_millis(
+                            provenant_cli::wait::Settings::default().local_interval_ms,
+                        ),
+                        Some(format!(
+                            "configuration unavailable; compiled default: {error}"
+                        )),
+                    ),
+                };
+            let mut observation =
+                provenant_cli::fabric::graph_relay::child_wait_observation(interval);
+            if let Some(warning) = configuration_warning {
+                observation.push_str(&format!("; {warning}"));
+            }
             return Ok(
                 match provenant_cli::fabric::graph_relay::wait_for_children(
                     cancel,
                     std::time::Duration::from_micros(remaining),
+                    interval,
                 ) {
-                    Ok(children) => json!({"receipt":receipt,"children":children}),
-                    Err(error) => json!({"receipt":receipt,"observation_error":error.to_string()}),
+                    Ok(children) => {
+                        json!({"receipt":receipt,"children":children,"observation":observation})
+                    }
+                    Err(error) => {
+                        json!({"receipt":receipt,"observation_error":error.to_string(),"observation":observation})
+                    }
                 },
             );
         }
@@ -644,7 +979,7 @@ impl Factory {
         input: &Value,
     ) -> Result<provenant_fabric_runtime::graph::relay::ChildRequest, FacadeError> {
         use provenant_fabric_runtime::graph::relay::{ChildLaunch, ChildRequest};
-        let input = launch_input(&run_envelope(input)?)?;
+        let input = launch_input(input)?;
         let input = &input;
         let invalid = || FacadeError::invalid(InvalidInputDetail::Field("document".into()));
         let raw = input.get("document").filter(|value| !value.is_null());
@@ -676,11 +1011,24 @@ impl Factory {
                 }
             }
         }
-        // Distinct calls create distinct children; callers opt into replay with a key.
+        // A name is the child's node id. Distinct unnamed calls create distinct
+        // children; a call replays by an explicit key, or by its name and input.
+        let name = match input.get("name").filter(|value| !value.is_null()) {
+            Some(value) => {
+                let name = value.as_str().ok_or_else(|| {
+                    FacadeError::invalid(InvalidInputDetail::Field("name".into()))
+                })?;
+                if let Some(fault) =
+                    provenant_fabric_runtime::graph::template::graph_name_fault(name)
+                {
+                    return Err(graph_input_reason(fault));
+                }
+                Some(name.to_owned())
+            }
+            None => None,
+        };
         let idempotency_key = match input
-            .get("operation_id")
-            .filter(|value| !value.is_null())
-            .or_else(|| input.get("idempotency_key"))
+            .get("idempotency_key")
             .or_else(|| raw.and_then(|document| document.get("idempotency_key")))
         {
             Some(value) => value
@@ -688,13 +1036,20 @@ impl Factory {
                 .filter(|key| !key.is_empty() && key.len() <= 200)
                 .ok_or_else(invalid)?
                 .to_owned(),
+            None if name.is_some() => submission_digest(input, None, None)?,
             None => provenant_core::hex(
                 &provenant_os::fs::entropy_128().map_err(|_| FacadeError::StateCorrupt)?,
             ),
         };
-        let digest =
-            provenant_records::CanonicalV1::file_digest(idempotency_key.as_bytes()).to_string();
-        let key = format!("child-{}", &digest[7..39]);
+        let key = match &name {
+            Some(name) => name.clone(),
+            None => {
+                let digest =
+                    provenant_records::CanonicalV1::file_digest(idempotency_key.as_bytes())
+                        .to_string();
+                format!("child-{}", &digest[7..39])
+            }
+        };
         let detached = input
             .get("detached")
             .or_else(|| raw.and_then(|document| document.get("detached")))
@@ -708,7 +1063,8 @@ impl Factory {
             fields.remove("detached");
         }
         let raw = launch_document.as_ref();
-        let has_overrides = ["brief", "use", "tier", "over"]
+        let route = route_choice(input, raw)?;
+        let has_overrides = ["brief", "template", "route", "over"]
             .iter()
             .any(|field| input.get(*field).is_some_and(|value| !value.is_null()))
             || input
@@ -741,20 +1097,28 @@ impl Factory {
         };
         let library = self.template_library(Some(&inline))?;
         if full_document.is_none() {
-            for field in ["use", "brief", "tier", "over"] {
+            for field in ["brief", "over"] {
                 if let Some(value) = input.get(field).filter(|value| !value.is_null()) {
                     node[field] = value.clone();
                 }
             }
-            let template = library
-                .resolve(node["use"].as_str().unwrap_or("task"))
-                .map_err(|_| invalid())?;
+            if let Some(name) = input.get("template").filter(|value| !value.is_null()) {
+                node["use"] = name.clone();
+            }
+            if let Some(RouteChoice::Alias(alias)) = &route {
+                node["tier"] = json!(alias);
+            }
+            let template_name = node["use"].as_str().unwrap_or("task").to_owned();
+            let template = library.resolve(&template_name).map_err(|_| invalid())?;
             let mut parameters = node.get("with").cloned().unwrap_or_else(|| json!({}));
             if let Some(overrides) = input.get("set").filter(|value| !value.is_null()) {
-                parameters
-                    .as_object_mut()
-                    .ok_or_else(invalid)?
-                    .extend(overrides.as_object().ok_or_else(invalid)?.clone());
+                let fields = parameters.as_object_mut().ok_or_else(invalid)?;
+                for (name, value) in overrides.as_object().ok_or_else(invalid)? {
+                    fields.insert(
+                        name.clone(),
+                        typed_binding(&template, &template_name, name, value)?,
+                    );
+                }
             }
             if template.parameters.contains_key("brief")
                 && let Some(brief) = input.get("brief").filter(|value| !value.is_null())
@@ -768,26 +1132,22 @@ impl Factory {
             }
             node["with"] = parameters;
         }
-        bind_launch_controls(input, &mut node, &self.cwd)?;
+        bind_launch_controls(input, &mut node, &self.cwd, &self.context.port_table)?;
         node["id"] = json!(key);
-        let resolvers = self.launch_resolvers_for_tier(
-            raw,
-            input
-                .get("tier")
-                .filter(|tier| !tier.is_null())
-                .or_else(|| raw.and_then(|document| document.get("tier"))),
-        )?;
+        let resolvers = self.launch_resolvers_for_tier(raw, route.as_ref())?;
         let mut compiled = provenant_fabric_runtime::graph::template::Compiler {
             library: &library,
             resolvers: &resolvers,
         }
         .lower(&node)
         .map_err(compile_error)?;
-        if let Some(tier) = input.get("tier").filter(|value| !value.is_null()) {
-            let tier = tier.as_str().ok_or_else(invalid)?;
-            let route = serde_json::from_value(json!({"alias":tier})).map_err(|_| invalid())?;
+        if let Some(choice) = input
+            .get("route")
+            .filter(|value| !value.is_null())
+            .and(route.as_ref())
+        {
             let mut typed = serde_json::from_value(compiled).map_err(|_| invalid())?;
-            override_tier(&mut typed, &route);
+            override_tier(&mut typed, choice);
             compiled = encode(typed)?;
         }
         let mut typed = serde_json::from_value(compiled).map_err(|_| invalid())?;
@@ -839,7 +1199,10 @@ impl Factory {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .into(),
-            tier: input.get("tier").and_then(Value::as_str).map(str::to_owned),
+            tier: match &route {
+                Some(RouteChoice::Alias(alias)) => Some(alias.clone()),
+                _ => None,
+            },
             timeout_seconds: None,
             writer,
             write_scope,
@@ -854,8 +1217,21 @@ impl Factory {
     }
 
     fn confine_node(&self, node: &mut Value) -> Result<(), FacadeError> {
+        let worktrees = match crate::graph_support::project_worktrees(&self.cwd) {
+            crate::graph_support::ProjectWorktrees::Registered(paths) => paths,
+            crate::graph_support::ProjectWorktrees::NotRepository => vec![self.cwd.clone()],
+            crate::graph_support::ProjectWorktrees::Unavailable(reason) => {
+                use std::io::Write;
+                let reason = provenant_records::diagnostic::safe_text(&reason);
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: repository worktree inventory unavailable ({reason}); read roots are limited to the current directory"
+                );
+                vec![self.cwd.clone()]
+            }
+        };
         let policy = provenant_fabric_runtime::read_roots::ReadRoots::new(
-            crate::graph_support::project_worktrees(&self.cwd),
+            worktrees,
             &self.context.config.graph.allowed_read_roots,
         );
         crate::graph_support::confine_pattern_roots(node, &policy)
@@ -942,6 +1318,10 @@ impl Factory {
         announce: Option<super::graph_execution::Announce<'_>>,
     ) -> Result<Value, FacadeError> {
         let operation = required(&input, "op")?;
+        // This shared path must not silently drop the retired field.
+        if input.get("operation_id").is_some() {
+            return Err(FacadeError::invalid(InvalidInputDetail::OperationIdRetired));
+        }
         if let Some(wait) = input.get("wait_seconds") {
             let seconds = wait.as_u64().ok_or_else(|| {
                 FacadeError::invalid(InvalidInputDetail::Field("wait_seconds".into()))
@@ -1073,38 +1453,10 @@ impl Factory {
         cancel: &CancelToken,
         announce: Option<super::graph_execution::Announce<'_>>,
     ) -> Result<Value, FacadeError> {
-        let input = launch_input(&run_envelope(input)?)?;
-        let input = &input;
-        let operation = input.get("operation_id").and_then(Value::as_str);
-        if let Some(operation) = operation
-            && input["explain"] != true
-            && input.pointer("/document/graph_id").is_none()
-        {
-            let id = provenant_fabric_runtime::graph::template::SubmissionIdentity::Fresh
-                .graph_id(&Value::Null, "", Some(operation))
-                .map_err(graph_input_reason)?;
-            if FileJournal::read_checkpoint(
-                &self.context.roots.state,
-                self.context.identity.project,
-                &id,
-            )
-            .map_err(graph_journal_error)?
-            .is_some()
-            {
-                let execution = FileJournal::execution(
-                    &self.context.roots.state,
-                    self.context.identity.project,
-                    &id,
-                )
-                .map_err(graph_journal_error)?
-                .ok_or(FacadeError::StateCorrupt)?;
-                return self.launch_submission(execution.document, input, budget, cancel, announce);
-            }
-        }
-        if input["explain"] != true {
-            crate::install::cutover_admission_guard(&self.context.roots.state)?;
-        }
-        let raw = input.get("document");
+        let submitted = input;
+        let mut input = launch_input(input)?;
+        let raw_owned = input.get("document").cloned();
+        let raw = raw_owned.as_ref();
         if let Some(document) = raw {
             provenant_fabric_runtime::graph::template::validate_document_schema_version(document)
                 .map_err(|_| {
@@ -1126,8 +1478,8 @@ impl Factory {
         }
         let has_overrides = [
             "brief",
-            "use",
-            "tier",
+            "template",
+            "route",
             "over",
             "access",
             "worktree",
@@ -1155,44 +1507,40 @@ impl Factory {
             inline["lane-document"] = template;
         }
         let library = self.template_library(Some(&inline))?;
-        let resolver = self.launch_resolvers_for_tier(
-            raw,
-            input
-                .get("tier")
-                .filter(|tier| !tier.is_null())
-                .or_else(|| raw.and_then(|document| document.get("tier"))),
-        )?;
+        let route = route_choice(&input, raw)?;
+        let resolver = self.launch_resolvers_for_tier(raw, route.as_ref())?;
         let context = PatchContext {
             library: &library,
             resolvers: &resolver,
             scan: &patch::scan_for_secrets,
             journal: None,
             limits: &self.context.config.graph.limits,
+            worktree_layout: self.context.port_table.worktree_layout.clone(),
         };
-        let template_name = input["use"]
+        let template_name = input["template"]
             .as_str()
             .or_else(|| lane_document.and_then(|document| document["use"].as_str()))
             .unwrap_or(if lane_document.is_some() {
                 "lane-document"
             } else {
                 "task"
-            });
-        let policy = library
-            .resolve(template_name)
-            .map_err(graph_input_reason)?
-            .identity
-            .unwrap_or_default();
-        let mut submission = input.clone();
-        if let Some(fields) = submission.as_object_mut() {
-            fields.remove("explain");
-            fields.remove("wait_seconds");
+            })
+            .to_owned();
+        let template_name = template_name.as_str();
+        // Type each `--set` value once, by the template's declaration, before
+        // the launch is hashed or compiled.
+        let declared = library.resolve(template_name).map_err(graph_input_reason)?;
+        if let Some(overrides) = input.get("set").and_then(Value::as_object).cloned() {
+            let mut typed = serde_json::Map::new();
+            for (name, value) in &overrides {
+                typed.insert(
+                    name.clone(),
+                    typed_binding(&declared, template_name, name, value)?,
+                );
+            }
+            input["set"] = Value::Object(typed);
         }
-        let mut identity = json!({
-            "submission": submission,
-            "directory": self.cwd,
-            "templates": library.snapshot(),
-            "resolvers": resolver,
-        });
+        let input = &input;
         // Review ranges are launch controls: resolve them on the host before
         // admitting a graph, and bind immutable object IDs into its identity.
         let review_launch = template_name == "review" || template_name.starts_with("review.");
@@ -1221,42 +1569,100 @@ impl Factory {
                 "review requires both subject and review_base".into(),
             )));
         }
+        let git = provenant_os::git::git_executable();
         let mut resolved_head = None;
         let mut resolved_review_base = None;
         if let (Some(subject), Some(base)) = (subject, review_base) {
-            let git = provenant_os::git::git_executable()
+            let git = git
+                .as_deref()
                 .ok_or(FacadeError::InvalidInput { detail: None })?;
             let head =
-                provenant_run::resolve_git_base(&git, &self.cwd, subject).map_err(run_error)?;
-            let base = provenant_run::resolve_git_base(&git, &self.cwd, base).map_err(run_error)?;
+                provenant_run::resolve_git_base(git, &self.cwd, subject).map_err(run_error)?;
+            let base = provenant_run::resolve_git_base(git, &self.cwd, base).map_err(run_error)?;
             if base == head {
                 return Err(FacadeError::invalid(InvalidInputDetail::Field("review_empty_range: base and subject resolve to the same commit; select a subject with changes".into())));
             }
-            identity["head"] = json!(head);
-            identity["review_base"] = json!(base);
             resolved_head = Some(head);
             resolved_review_base = Some(base);
         }
-        if resolved_head.is_none()
-            && policy == provenant_fabric_runtime::graph::template::SubmissionIdentity::Content
-            && raw.and_then(|document| document.get("graph_id")).is_none()
-        {
-            let git = provenant_os::git::git_executable()
-                .ok_or(FacadeError::InvalidInput { detail: None })?;
-            let head =
-                provenant_run::resolve_git_base(&git, &self.cwd, "HEAD").map_err(run_error)?;
-            identity["head"] = json!(head);
-            resolved_head = Some(head);
+        // The commit the launch starts from belongs to its identity. A checkout
+        // with no commit yet simply has none.
+        let source_commit = resolved_head.clone().or_else(|| {
+            git.as_deref()
+                .and_then(|git| provenant_run::resolve_git_base(git, &self.cwd, "HEAD").ok())
+        });
+        if resolved_head.is_none() && raw.and_then(|document| document.get("graph_id")).is_none() {
+            resolved_head = source_commit.clone();
         }
-        let nonce = provenant_fabric_runtime::coordination::generated_operation_id("graph")
-            .map_err(|_| FacadeError::StateCorrupt)?;
-        let generated_id = policy
-            .graph_id(&identity, &nonce, operation)
-            .map_err(graph_input_reason)?;
-        let id = raw
-            .and_then(|document| document.get("graph_id"))
-            .and_then(Value::as_str)
-            .unwrap_or(&generated_id);
+        // The name is a handle; the digest of the launch decides whether it is
+        // the same launch (replay) or a new one (the next free NAME-k).
+        let requested = input.get("name").and_then(Value::as_str).or_else(|| {
+            raw.and_then(|document| document.get("graph_id"))
+                .and_then(Value::as_str)
+        });
+        let (base, named) = match requested {
+            Some(name) => {
+                if let Some(fault) =
+                    provenant_fabric_runtime::graph::template::graph_name_fault(name)
+                {
+                    return Err(graph_input_reason(fault));
+                }
+                (name.to_owned(), true)
+            }
+            None if template_name == "lane-document" => ("graph".to_owned(), false),
+            None => (
+                provenant_fabric_runtime::graph::template::default_graph_base(template_name),
+                false,
+            ),
+        };
+        let templates = effective_templates(&library, template_name, input);
+        let digest = submission_digest(input, source_commit.as_deref(), Some(&templates))?;
+        let explain = input["explain"] == true;
+        let (generated_id, taken) = if explain {
+            (
+                if named {
+                    base.clone()
+                } else {
+                    format!("{base}-1")
+                },
+                None,
+            )
+        } else {
+            use provenant_fabric_runtime::graph::template::{NameDecision, decide_graph_name};
+            let state = &self.context.roots.state;
+            let project = self.context.identity.project;
+            let existing =
+                FileJournal::reserved_graph_ids(state, project).map_err(graph_journal_error)?;
+            let stored = |id: &str| {
+                FileJournal::execution(state, project, id)
+                    .ok()
+                    .flatten()
+                    .and_then(|execution| execution.document.replay_digest().map(str::to_owned))
+            };
+            match decide_graph_name(&base, &digest, named, &existing, stored)
+                .map_err(graph_input_reason)?
+            {
+                NameDecision::Replay(id) => {
+                    // The same input is the same launch: report that graph as
+                    // it stands and start nothing. Advancing it stays with the
+                    // scheduler and explicit recovery.
+                    let run = self.graph(
+                        GraphInput::Status {
+                            extra: Default::default(),
+                            id: id.clone(),
+                        },
+                        budget,
+                        cancel,
+                    )?;
+                    let mut result = encode(run)?;
+                    result["timed_out"] = json!(false);
+                    result["named"] = json!({"requested":requested, "graph":id, "replayed":true});
+                    return Ok(result);
+                }
+                NameDecision::Create { id, taken } => (id, taken),
+            }
+        };
+        let id = generated_id.as_str();
         let mut document = if let Some(raw) = raw.filter(|_| lane_document.is_none()) {
             if raw["nodes"]
                 .as_array()
@@ -1271,7 +1677,9 @@ impl Factory {
                 patch::submit(id, &patch, &context, raw["integration_branch"].as_str())
                     .map_err(graph_patch_error)?
             } else {
-                decode_input::<GraphDocument>(raw.clone(), "document")?
+                let mut document = decode_input::<GraphDocument>(raw.clone(), "document")?;
+                document.graph_id = id.to_owned();
+                document
             }
         } else {
             let mut node = match lane_document {
@@ -1289,13 +1697,16 @@ impl Factory {
             if node.get("id").is_none() {
                 node["id"] = json!("task");
             }
-            if let Some(name) = input.get("use").filter(|value| !value.is_null()) {
+            if let Some(name) = input.get("template").filter(|value| !value.is_null()) {
                 node["use"] = name.clone();
             }
-            for field in ["brief", "tier", "over"] {
+            for field in ["brief", "over"] {
                 if let Some(value) = input.get(field).filter(|value| !value.is_null()) {
                     node[field] = value.clone();
                 }
+            }
+            if let Some(RouteChoice::Alias(alias)) = &route {
+                node["tier"] = json!(alias);
             }
             let template = library
                 .resolve(node["use"].as_str().unwrap_or("task"))
@@ -1309,7 +1720,7 @@ impl Factory {
                     "launch controls require a leaf template".into(),
                 )));
             }
-            bind_launch_controls(input, &mut node, &self.cwd)?;
+            bind_launch_controls(input, &mut node, &self.cwd, &self.context.port_table)?;
             let mut parameters = node.get("with").cloned().unwrap_or_else(|| json!({}));
             let overrides = input
                 .get("set")
@@ -1439,15 +1850,11 @@ impl Factory {
             ));
         }
         if (raw.is_none() || lane_document.is_some())
-            && let Some(tier) = input.get("tier").filter(|value| !value.is_null())
+            && input.get("route").is_some_and(|value| !value.is_null())
+            && let Some(choice) = &route
         {
-            let tier = tier
-                .as_str()
-                .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field("tier".into())))?;
-            let route = serde_json::from_value(json!({"alias":tier}))
-                .map_err(|_| FacadeError::StateCorrupt)?;
             for node in &mut document.nodes {
-                override_tier(node, &route);
+                override_tier(node, choice);
             }
         }
         for node in &mut document.nodes {
@@ -1466,6 +1873,7 @@ impl Factory {
         self.confine_nodes(&mut bound)?;
         document = serde_json::from_value(bound)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        document.set_replay_digest(&digest);
         document
             .admit(&self.context.config.graph.limits)
             .map_err(FacadeError::graph_admission)?;
@@ -1474,6 +1882,7 @@ impl Factory {
             &mut document,
             &submission_key,
             &self.context.config.graph.limits,
+            self.context.port_table.worktree_layout.clone(),
         )
         .map_err(graph_patch_error)?;
         // Patch admission scans nodes and parameters. Graph-wide metadata is
@@ -1484,9 +1893,109 @@ impl Factory {
         patch::scan_for_secrets(&bound_document)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         if input["explain"] == true {
-            return Ok(json!({"document":document}));
+            let skipped = provenant_fabric_runtime::graph::when::skipped_rows(
+                &document,
+                &self.context.config.graph.limits,
+            );
+            let config = provenant_config::read(&self.context.roots).map_err(|error| {
+                FacadeError::DispatchRefused {
+                    fact: None,
+                    disk: None,
+                    reason: error.to_string(),
+                }
+            })?;
+            let run_config = provenant_confinement::run_config::RunConfig::read(
+                self.context.roots.state.as_path(),
+            )
+            .unwrap_or_default();
+            let expanded = document
+                .expanded(&self.context.config.graph.limits)
+                .map_err(|error| FacadeError::DispatchRefused {
+                    fact: None,
+                    disk: None,
+                    reason: error.to_string(),
+                })?;
+            let mut writer_budgets = Vec::new();
+            for node in &expanded.nodes {
+                if node.access != provenant_fabric_runtime::graph::AccessMode::WorktreeWrite {
+                    continue;
+                }
+                let spec = node.attempt.clone().unwrap_or_default();
+                let profile = config
+                    .dispatch_profile(&spec.lane_knobs())
+                    .map_err(|error| FacadeError::DispatchRefused {
+                        fact: None,
+                        disk: None,
+                        reason: error.to_string(),
+                    })?;
+                let mut context = node.context.clone().unwrap_or_default();
+                for (field, configured) in [
+                    ("token_budget", spec.token_budget.is_some()),
+                    ("on_budget", spec.on_budget.is_some()),
+                    ("budget_grace", spec.budget_grace.is_some()),
+                ] {
+                    if configured {
+                        context.budget_sources.insert(
+                            field.into(),
+                            spec.budget_sources
+                                .get(field)
+                                .copied()
+                                .unwrap_or(provenant_records::LimitSource::Template),
+                        );
+                    }
+                }
+                let routes: Vec<Option<&provenant_fabric_runtime::graph::GraphRoute>> = node
+                    .routes
+                    .as_ref()
+                    .map(|routes| routes.iter().map(Some).collect())
+                    .unwrap_or_else(|| vec![node.route.as_ref()]);
+                for route in routes {
+                    let tier = route.and_then(|route| route.alias.as_deref());
+                    let (token_budget, policy) = provenant_run::writer_budget_limits(
+                        &run_config,
+                        &self.context.identity.project.to_string(),
+                        &profile,
+                        Some(&context),
+                        tier,
+                    );
+                    writer_budgets.push(json!({
+                        "node": node.id,
+                        "tier": tier,
+                        "token_budget": token_budget,
+                        "budget_policy": policy,
+                        "gh_budget": provenant_run::gh_budget(&profile),
+                        "ci_scope": provenant_run::ResolvedCiScope::resolve(&profile).receipt(),
+                    }));
+                }
+            }
+            return Ok(
+                json!({"document":document, "skipped":skipped, "writer_budgets":writer_budgets}),
+            );
         }
-        self.launch_submission(document, input, budget, cancel, announce)
+        let mut result = match self.launch_submission(document, input, budget, cancel, announce) {
+            // A concurrent launch bound this name to other input between the
+            // choice and the bind. Choose again: the family now includes it.
+            Err(FacadeError::Conflict) if self.name_taken_by_other_input(id, &digest) => {
+                return self.submit_document(submitted, budget, cancel, announce);
+            }
+            result => result?,
+        };
+        let replayed = result["replayed"].as_bool().unwrap_or(false);
+        if let Some(object) = result.as_object_mut() {
+            object.remove("replayed");
+        }
+        result["named"] = json!({
+            "requested": requested, "graph": id, "replayed": replayed, "taken": taken,
+        });
+        Ok(result)
+    }
+
+    /// Whether graph `id` now exists with a launch digest other than `digest`.
+    fn name_taken_by_other_input(&self, id: &str, digest: &str) -> bool {
+        FileJournal::execution(&self.context.roots.state, self.context.identity.project, id)
+            .ok()
+            .flatten()
+            .is_some_and(|execution| execution.document.replay_digest() != Some(digest))
     }
 
     fn launch_submission(
@@ -1502,7 +2011,8 @@ impl Factory {
             .map_err(scratch_prepare_error)?;
         let path = publish_graph_document(&scratch, &encode(&document)?)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-        let run = self.graph_with_scratch(
+        let mut replayed = false;
+        let run = self.graph_launch_result(
             GraphInput::Run {
                 extra: Default::default(),
                 document: path.clone(),
@@ -1515,9 +2025,15 @@ impl Factory {
                 .and_then(Value::as_u64)
                 .map(|_| budget),
             announce,
+            Some(&mut replayed),
         )?;
-        let run = self.wait_document(run, input, budget, cancel, &path, &scratch)?;
-        let timed_out = input.get("wait_seconds").and_then(Value::as_u64).is_some()
+        let (run, wait_observation, observation_wait, remote_read_allowed) = if replayed {
+            (run, None, None, true)
+        } else {
+            self.wait_document(run, input, budget, cancel, &path, &scratch)?
+        };
+        let timed_out = !replayed
+            && input.get("wait_seconds").and_then(Value::as_u64).is_some()
             && run.status == GraphStatus::Pending
             && !cancel.is_cancelled();
         let target = super::unified::GraphTarget {
@@ -1540,18 +2056,27 @@ impl Factory {
                             && attempt.attempt_ref.as_deref() == row["attempt_id"].as_str()
                     })
         });
-        if !rows.is_empty() {
+        if !rows.is_empty()
+            && remote_read_allowed
+            && !cancel.is_cancelled()
+            && observation_wait
+                .is_none_or(|wait| wait.remaining(self.clock.mono_now()).as_micros() > 0)
+        {
             super::unified::enrich_status_rows_within(
                 &mut rows,
                 &self.context,
                 &self.clock,
                 cancel,
-                budget,
+                observation_wait.unwrap_or(budget),
             )?;
         }
         let mut result = encode(run)?;
+        result["replayed"] = json!(replayed);
         report_launch_refusals(&mut result, &rows);
         result["timed_out"] = json!(timed_out);
+        if let Some(observation) = wait_observation {
+            result["observation"] = json!(observation);
+        }
         Ok(result)
     }
 
@@ -1561,7 +2086,6 @@ impl Factory {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<Value, FacadeError> {
-        crate::install::cutover_admission_guard(&self.context.roots.state)?;
         let selector = required(input, "id")?;
         let id = match self.graph_target(selector)? {
             Some(target) => target.graph,
@@ -1604,6 +2128,7 @@ impl Factory {
                 scan: &patch::scan_for_secrets,
                 journal: None,
                 limits: &self.context.config.graph.limits,
+                worktree_layout: self.context.port_table.worktree_layout.clone(),
             },
         )
         .map_err(graph_input_reason)?;
@@ -1629,7 +2154,6 @@ impl Factory {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<Value, FacadeError> {
-        crate::install::cutover_admission_guard(&self.context.roots.state)?;
         let mut target = self
             .graph_target(required(input, "id")?)?
             .ok_or(FacadeError::NotFound)?;
@@ -1710,6 +2234,7 @@ impl Factory {
                     scan: &patch::scan_for_secrets,
                     journal: None,
                     limits: &self.context.config.graph.limits,
+                    worktree_layout: self.context.port_table.worktree_layout.clone(),
                 },
             )
             .map_err(retry_patch_error)?;
@@ -1738,74 +2263,161 @@ impl Factory {
         cancel: &CancelToken,
         stopping: bool,
     ) -> Result<Value, FacadeError> {
+        let cancellation_request = run.checkpoint.extra.remove("cancellation_request_receipt");
         let mut timed_out = false;
+        let mut observation_report = None;
+        let mut observation_wait = None;
+        let mut remote_read_allowed = true;
         if let Some(seconds) = input.get("wait_seconds").and_then(Value::as_u64) {
             let wait = WaitBudget::cli(self.clock.mono_now(), seconds)
                 .map_err(|_| FacadeError::InvalidInput { detail: None })?
                 .cap_at(budget.deadline().as_mono_time());
-            loop {
-                let unfinished = if stopping {
-                    run.checkpoint
-                        .nodes
-                        .iter()
-                        .filter(|node| {
-                            target.node.as_ref().is_none_or(|id| {
-                                &node.id == id
-                                    || node.extra.get("subtree_cancel").and_then(Value::as_str)
-                                        == Some(id)
-                            })
-                        })
-                        .flat_map(|node| &node.attempts)
-                        .any(|attempt| {
-                            attempt.state != provenant_fabric_runtime::graph::AttemptState::Terminal
-                        })
-                } else {
-                    run.status == GraphStatus::Pending
-                };
-                if !unfinished {
-                    break;
+            let interval = self.wait_interval()?;
+            let mut observation = self.local_graph_observation(&target.graph, interval);
+            let remote_target = if stopping {
+                target.clone()
+            } else {
+                super::unified::GraphTarget {
+                    graph: target.graph.clone(),
+                    node: None,
+                    attempt: None,
                 }
-                let remaining = wait.remaining(self.clock.mono_now());
-                if remaining.as_micros() == 0 || cancel.is_cancelled() {
-                    timed_out = true;
-                    break;
-                }
-                provenant_core::Pause::wait(
-                    &self.backoff,
-                    provenant_core::DurationMicros::from_micros(250_000.min(remaining.as_micros())),
-                    cancel,
-                );
-                run = if stopping && target.node.is_some() {
-                    self.stop_target(
-                        target,
-                        input
-                            .get("reason")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
-                        budget,
-                        cancel,
-                    )?
-                } else {
+            };
+            let (observed, history) = wait_graph_updates(
+                run,
+                wait,
+                &self.clock,
+                cancel,
+                &mut observation,
+                Some(self.context.identity.host),
+                stopping.then_some(target),
+                false,
+                |run| control_receipt_unfinished(run, target, stopping),
+                |_| {
+                    // The original stop request is durable. Rechecking status
+                    // must not append another request while its owner is busy.
                     self.graph(
                         GraphInput::Status {
                             extra: Default::default(),
                             id: target.graph.clone(),
                         },
-                        budget,
+                        wait,
                         cancel,
-                    )?
-                };
-            }
+                    )
+                },
+                |run| self.observe_remote_graph_attempts(run, &remote_target, wait, cancel),
+            )?;
+            run = observed;
+            observation_wait = Some(wait);
+            remote_read_allowed = !history.reader_woken;
+            timed_out = control_receipt_unfinished(&run, target, stopping)
+                && (wait.remaining(self.clock.mono_now()).as_micros() == 0
+                    || cancel.is_cancelled());
+            observation_report = Some(history.report(&observation));
         }
         let mut rows = super::unified::status_rows(&run, target);
+        if remote_read_allowed
+            && !cancel.is_cancelled()
+            && observation_wait
+                .is_none_or(|wait| wait.remaining(self.clock.mono_now()).as_micros() > 0)
+        {
+            super::unified::enrich_status_rows_within(
+                &mut rows,
+                &self.context,
+                &self.clock,
+                cancel,
+                observation_wait.unwrap_or(budget),
+            )?;
+        }
+        let mut receipt = json!({"rows":rows,"timed_out":timed_out});
+        if let Some(observation) = observation_report {
+            receipt["observation"] = json!(observation);
+        }
+        if let Some(request_id) = cancellation_request
+            .as_ref()
+            .and_then(|receipt| receipt.get("request_id"))
+            .and_then(Value::as_str)
+        {
+            let pending = FileJournal::cancellation_request_pending(
+                &self.context.roots.state,
+                self.context.identity.project,
+                &target.graph,
+                request_id,
+            )
+            .map_err(graph_journal_error)?;
+            receipt["cancellation_requested"] = json!({
+                "request_id": request_id,
+                "acknowledged": !pending,
+                "pending_acknowledgement": pending,
+            });
+        }
+        Ok(receipt)
+    }
+
+    fn observe_remote_graph_attempts(
+        &self,
+        run: &provenant_fabric_runtime::graph::GraphRun,
+        target: &super::unified::GraphTarget,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<(), FacadeError> {
+        if cancel.is_cancelled() || budget.remaining(self.clock.mono_now()).as_micros() == 0 {
+            return Ok(());
+        }
+        let mut rows = super::unified::status_rows(run, target);
+        let local_host = self.context.identity.host;
+        rows.retain(|row| {
+            row["kind"] == "attempt"
+                && row["attempt_id"].as_str().is_some_and(|reference| {
+                    reference.split_once('/').is_some_and(|(owner, _)| {
+                        owner
+                            .parse::<provenant_core::HostId>()
+                            .map_or(true, |host| host != local_host)
+                    })
+                })
+        });
+        if rows.is_empty() {
+            return Ok(());
+        }
         super::unified::enrich_status_rows_within(
             &mut rows,
             &self.context,
             &self.clock,
             cancel,
             budget,
-        )?;
-        Ok(json!({"rows":rows,"timed_out":timed_out}))
+        )
+    }
+
+    fn wait_interval(&self) -> Result<std::time::Duration, FacadeError> {
+        let config = provenant_cli::config_reads::read_for(&self.context.roots, "wait")
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        Ok(std::time::Duration::from_millis(
+            config.domains.wait.local_interval_ms,
+        ))
+    }
+
+    fn local_graph_observation(
+        &self,
+        graph: &str,
+        interval: std::time::Duration,
+    ) -> crate::status_wait::LocalObservation {
+        if self.context.in_lane {
+            return crate::status_wait::LocalObservation::paced(
+                interval,
+                "lane graph state is observed through the host relay without a local event log",
+            );
+        }
+        match provenant_fabric_runtime::graph::FileJournal::observation_paths(
+            &self.context.roots.state,
+            self.context.identity.project,
+            graph,
+        ) {
+            Ok(paths) => crate::status_wait::LocalObservation::subscribe(&paths, interval),
+            Err(error) => crate::status_wait::LocalObservation::paced(
+                interval,
+                format!("cannot resolve graph observation paths: {error}"),
+            ),
+        }
     }
 
     fn wait_document(
@@ -1816,9 +2428,17 @@ impl Factory {
         cancel: &CancelToken,
         document: &Path,
         scratch: &Path,
-    ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
+    ) -> Result<
+        (
+            provenant_fabric_runtime::graph::GraphRun,
+            Option<String>,
+            Option<WaitBudget>,
+            bool,
+        ),
+        FacadeError,
+    > {
         let Some(seconds) = input.get("wait_seconds").and_then(Value::as_u64) else {
-            return Ok(run);
+            return Ok((run, None, None, true));
         };
         let now = self.clock.mono_now();
         let deadline = now
@@ -1827,40 +2447,62 @@ impl Factory {
         let wait = WaitBudget::cli(now, seconds)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?
             .cap_at(deadline);
-        wait_submission(run, wait, &self.clock, &self.backoff, cancel, |id| {
-            let observed = self.graph(
-                GraphInput::Status {
-                    extra: Default::default(),
-                    id: id.to_owned(),
-                },
-                budget,
-                cancel,
-            )?;
-            // A waited submission owns admission progress. Status itself remains
-            // read-only; only a due launch retry is advanced under the journal lock.
-            let now = self.clock.wall_now().ok();
-            let due = observed.checkpoint.nodes.iter().any(|node| {
-                node.launch_retry
-                    .as_ref()
-                    .and_then(|retry| retry.wake_at)
-                    .zip(now)
-                    .is_some_and(|(wake, now)| now >= wake)
-            });
-            if !due || budget.remaining(self.clock.mono_now()).as_micros() == 0 {
-                return Ok(observed);
-            }
-            self.graph_with_scratch(
-                GraphInput::Run {
-                    extra: Default::default(),
-                    document: document.to_owned(),
-                },
-                budget,
-                cancel,
-                Some(scratch),
-                None,
-                None,
-            )
-        })
+        let interval = self.wait_interval()?;
+        let mut observation = self.local_graph_observation(&run.checkpoint.graph_id, interval);
+        let (run, observation_report, remote_read_allowed) = wait_submission(
+            run,
+            wait,
+            &self.clock,
+            cancel,
+            &mut observation,
+            Some(self.context.identity.host),
+            |id| {
+                let observed = self.graph(
+                    GraphInput::Status {
+                        extra: Default::default(),
+                        id: id.to_owned(),
+                    },
+                    wait,
+                    cancel,
+                )?;
+                // A waited submission owns admission progress. Status itself remains
+                // read-only; only a due launch retry is advanced under the journal lock.
+                let due =
+                    launch_retry_due(&observed, &self.clock).map_err(observation_clock_error)?;
+                if !due || wait.remaining(self.clock.mono_now()).as_micros() == 0 {
+                    return Ok(observed);
+                }
+                self.graph_with_scratch(
+                    GraphInput::Run {
+                        extra: Default::default(),
+                        document: document.to_owned(),
+                    },
+                    wait,
+                    cancel,
+                    Some(scratch),
+                    None,
+                    None,
+                )
+            },
+            |run| {
+                self.observe_remote_graph_attempts(
+                    run,
+                    &super::unified::GraphTarget {
+                        graph: run.checkpoint.graph_id.clone(),
+                        node: None,
+                        attempt: None,
+                    },
+                    wait,
+                    cancel,
+                )
+            },
+        )?;
+        Ok((
+            run,
+            Some(observation_report),
+            Some(wait),
+            remote_read_allowed,
+        ))
     }
 
     fn graph_trace(&self, selector: &str) -> Result<Value, FacadeError> {
@@ -2041,17 +2683,191 @@ fn bind_read_roots(
     Ok(())
 }
 
-fn override_tier(
-    node: &mut provenant_fabric_runtime::graph::GraphNode,
-    route: &provenant_fabric_runtime::graph::GraphRoute,
-) {
+/// Type one `--set` value by the declaration of the template it binds.
+fn typed_binding(
+    template: &provenant_fabric_runtime::graph::template::Template,
+    template_name: &str,
+    name: &str,
+    value: &Value,
+) -> Result<Value, FacadeError> {
+    template
+        .type_binding(template_name, name, value.clone())
+        .map_err(|refusal| FacadeError::invalid(InvalidInputDetail::Parameter(Box::new(refusal))))
+}
+
+/// The host digest of a launch: everything the caller chose except the name and
+/// how long to wait, the effective templates it runs, and the commit the launch
+/// started from. Equal digests are the same launch.
+fn submission_digest(
+    input: &Value,
+    source_commit: Option<&str>,
+    templates: Option<&Value>,
+) -> Result<String, FacadeError> {
+    let mut submission = input.clone();
+    if let Some(fields) = submission.as_object_mut() {
+        for field in ["explain", "wait_seconds", "name"] {
+            fields.remove(field);
+        }
+    }
+    let mut identity = json!({"submission": submission, "source_commit": source_commit});
+    if let Some(templates) = templates {
+        identity["templates"] = templates.clone();
+    }
+    provenant_records::CanonicalV1::record_digest("graph-replay", 1, &identity)
+        .map(|digest| digest.to_string())
+        .map_err(|_| FacadeError::StateCorrupt)
+}
+
+/// The resolved body of the launched template and of every template it or the
+/// submitted document reaches through `use`, so an edited template file is a
+/// different launch even under the same name. A name that does not resolve is
+/// kept as `null`; compilation reports it.
+fn effective_templates(library: &TemplateLibrary, root: &str, input: &Value) -> Value {
+    fn uses(value: &Value, into: &mut Vec<String>) {
+        match value {
+            Value::Object(fields) => {
+                for (key, value) in fields {
+                    match (key.as_str(), value) {
+                        ("use", Value::String(name)) => into.push(name.clone()),
+                        _ => uses(value, into),
+                    }
+                }
+            }
+            Value::Array(values) => values.iter().for_each(|value| uses(value, into)),
+            _ => {}
+        }
+    }
+    let mut pending = vec![root.to_owned()];
+    uses(input, &mut pending);
+    let mut resolved = serde_json::Map::new();
+    while let Some(name) = pending.pop() {
+        if resolved.contains_key(&name) {
+            continue;
+        }
+        let body = library
+            .resolve(&name)
+            .ok()
+            .and_then(|template| serde_json::to_value(template).ok())
+            .unwrap_or(Value::Null);
+        uses(&body, &mut pending);
+        resolved.insert(name, body);
+    }
+    Value::Object(resolved)
+}
+
+/// The roles a `--route` map can name.
+const ROUTE_ROLES: [&str; 5] = ["writer", "review", "synthesis", "task", "plan"];
+
+/// What `--route` selected: one tier for every launched node, or a tier per role.
+/// A role the map leaves out keeps the tier its template declares.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum RouteChoice {
+    Alias(String),
+    Roles(BTreeMap<String, String>),
+}
+
+impl RouteChoice {
+    /// Read `ROUTE`, `role=tier,role=tier` or a JSON object of roles.
+    pub(super) fn parse(value: &Value) -> Result<Self, FacadeError> {
+        let invalid = || FacadeError::invalid(InvalidInputDetail::Field("route".into()));
+        let mut roles = BTreeMap::new();
+        match value {
+            Value::String(text) if !text.contains('=') => {
+                let alias = text.trim();
+                return if alias.is_empty() {
+                    Err(invalid())
+                } else {
+                    Ok(Self::Alias(alias.to_owned()))
+                };
+            }
+            Value::String(text) => {
+                for pair in text.split(',') {
+                    let (role, tier) = pair.split_once('=').ok_or_else(invalid)?;
+                    roles.insert(role.trim().to_owned(), tier.trim().to_owned());
+                }
+            }
+            Value::Object(fields) => {
+                for (role, tier) in fields {
+                    roles.insert(role.clone(), tier.as_str().ok_or_else(invalid)?.to_owned());
+                }
+            }
+            _ => return Err(invalid()),
+        }
+        if roles.is_empty() || roles.values().any(String::is_empty) {
+            return Err(invalid());
+        }
+        if let Some(role) = roles
+            .keys()
+            .find(|role| !ROUTE_ROLES.contains(&role.as_str()))
+        {
+            return Err(FacadeError::DispatchRefused {
+                fact: None,
+                disk: None,
+                reason: format!(
+                    "unknown route role `{role}`; valid roles: {}",
+                    ROUTE_ROLES.join(", ")
+                ),
+            });
+        }
+        Ok(Self::Roles(roles))
+    }
+
+    /// The tier a node of `role` takes, `None` to keep its declared tier.
+    pub(super) fn tier_for(&self, role: &str) -> Option<&str> {
+        match self {
+            Self::Alias(alias) => Some(alias),
+            Self::Roles(roles) => roles.get(role).map(String::as_str),
+        }
+    }
+
+    fn tiers(&self) -> Vec<&str> {
+        match self {
+            Self::Alias(alias) => vec![alias],
+            Self::Roles(roles) => roles.values().map(String::as_str).collect(),
+        }
+    }
+}
+
+/// The route an envelope or its document asks for: `route` on the envelope, else
+/// the document's own `tier`.
+fn route_choice(input: &Value, raw: Option<&Value>) -> Result<Option<RouteChoice>, FacadeError> {
+    input
+        .get("route")
+        .filter(|value| !value.is_null())
+        .or_else(|| {
+            raw.and_then(|document| document.get("tier"))
+                .filter(|value| !value.is_null())
+        })
+        .map(RouteChoice::parse)
+        .transpose()
+}
+
+/// The role a launched node plays, which `--route role=tier` addresses.
+fn route_role(node: &provenant_fabric_runtime::graph::GraphNode) -> &'static str {
+    use provenant_fabric_runtime::graph::{AccessMode, NodeKind};
+    if node.extra.contains_key("review_behaviour")
+        || provenant_fabric_runtime::graph::is_review_node(node)
+    {
+        "review"
+    } else if node.plan.is_some() {
+        "plan"
+    } else if node.kind == Some(NodeKind::Synthesise) {
+        "synthesis"
+    } else if node.access == AccessMode::WorktreeWrite {
+        "writer"
+    } else {
+        "task"
+    }
+}
+
+fn override_tier(node: &mut provenant_fabric_runtime::graph::GraphNode, choice: &RouteChoice) {
     if let Some(composite) = &mut node.composite {
         for child in &mut composite.nodes {
-            override_tier(child, route);
+            override_tier(child, choice);
         }
     } else if let Some(body) = &mut node.loop_body {
         for child in &mut body.body {
-            override_tier(child, route);
+            override_tier(child, choice);
         }
     } else if !matches!(
         node.kind,
@@ -2060,7 +2876,13 @@ fn override_tier(
                 | provenant_fabric_runtime::graph::NodeKind::Decide
                 | provenant_fabric_runtime::graph::NodeKind::Land
         )
-    ) {
+    ) && let Some(alias) = choice.tier_for(route_role(node))
+    {
+        let Ok(route) = serde_json::from_value::<provenant_fabric_runtime::graph::GraphRoute>(
+            json!({"alias": alias}),
+        ) else {
+            return;
+        };
         let constraints: Vec<_> = node
             .route
             .iter()
@@ -2092,7 +2914,7 @@ fn override_tier(
     }
     if let Some(fallback) = node.plan.as_mut().and_then(|plan| plan.fallback.as_mut()) {
         for child in &mut fallback.nodes {
-            override_tier(child, route);
+            override_tier(child, choice);
         }
     }
 }
@@ -2108,10 +2930,11 @@ fn add(row: &mut Value, key: &str, value: u64) {
     reason = "the custom worktree driver omits libtest functions"
 )]
 mod tests {
+    include!("interface_implement_invariants.rs");
     #[test]
     fn tier_override_preserves_leaf_family_constraints() {
-        use provenant_fabric_runtime::graph::{GraphNode, GraphRoute};
-        let override_route: GraphRoute = serde_json::from_value(json!({"alias":"senior"})).unwrap();
+        use provenant_fabric_runtime::graph::GraphNode;
+        let override_route = super::RouteChoice::Alias("senior".into());
         for fields in [
             json!({"route":{"alias":"junior", "required_family":"openai"}}),
             json!({"routes":[{"alias":"junior", "required_family":"openai"},{"alias":"principal", "required_family":"openai"}]}),
@@ -2127,6 +2950,81 @@ mod tests {
             assert_eq!(route.alias.as_deref(), Some("senior"));
             assert_eq!(route.extra.get("required_family"), Some(&json!("openai")));
         }
+    }
+
+    #[test]
+    fn a_role_map_sets_each_node_to_its_role_tier_or_keeps_the_default() {
+        use provenant_fabric_runtime::graph::GraphNode;
+        let node = |fields: Value| -> GraphNode {
+            let mut value = json!({"id":"n", "access":"read_only", "prompt":"p",
+                "route":{"alias":"declared"}});
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            serde_json::from_value(value).unwrap()
+        };
+        let cases = [
+            ("writer", node(json!({"access":"worktree_write"}))),
+            ("review", node(json!({"review_behaviour":"lens"}))),
+            ("synthesis", node(json!({"kind":"synthesise"}))),
+            ("task", node(json!({}))),
+        ];
+        let choice = super::RouteChoice::parse(&json!("writer=junior, review=senior")).unwrap();
+        for (role, mut node) in cases {
+            assert_eq!(super::route_role(&node), role);
+            super::override_tier(&mut node, &choice);
+            let expected = choice.tier_for(role).unwrap_or("declared");
+            assert_eq!(
+                node.route.unwrap().alias.as_deref(),
+                Some(expected),
+                "{role}"
+            );
+        }
+        assert_eq!(
+            choice,
+            super::RouteChoice::parse(&json!({"writer":"junior","review":"senior"})).unwrap()
+        );
+        assert_eq!(
+            super::RouteChoice::parse(&json!("senior")).unwrap(),
+            super::RouteChoice::Alias("senior".into())
+        );
+    }
+
+    #[test]
+    fn an_unknown_route_role_is_refused_listing_the_valid_roles() {
+        for bad in ["wrter=junior", "writer=junior,=senior", "writer=", "="] {
+            let error = super::RouteChoice::parse(&json!(bad)).unwrap_err();
+            if let FacadeError::DispatchRefused { reason, .. } = &error {
+                assert!(
+                    super::ROUTE_ROLES.iter().all(|role| reason.contains(role)),
+                    "{reason}"
+                );
+            }
+        }
+        assert!(super::RouteChoice::parse(&json!(7)).is_err());
+    }
+
+    #[test]
+    fn attempt_settings_typed_as_text_take_the_first_reading_the_schema_accepts() {
+        for (field, text, expected) in [
+            ("build_heavy", "true", json!(true)),
+            ("provider_timeout", "42", json!(42)),
+            ("host", "'other'", json!("other")),
+            ("host", "workshop", json!("workshop")),
+            ("host", "1", json!("1")),
+        ] {
+            assert_eq!(
+                super::type_attempt_field(field, json!(text)).unwrap(),
+                expected,
+                "{field}={text}"
+            );
+        }
+        assert_eq!(
+            super::type_attempt_field("build_heavy", json!(true)).unwrap(),
+            json!(true)
+        );
+        assert!(super::type_attempt_field("provider_timeout", json!("soon")).is_err());
     }
 
     #[test]
@@ -2217,9 +3115,14 @@ mod tests {
             let restored: FacadeError = serde_json::from_value(serde_json::to_value(&error)?)?;
             assert_eq!(restored.code(), code);
             assert_eq!(restored.diagnostic(), diagnostic);
-            let mcp = ServiceError::Facade(error).structured_error();
-            assert_eq!(mcp["code"], code);
-            assert!(!mcp["message"].as_str().unwrap_or_default().contains(detail));
+            let structured = ServiceError::Facade(error).structured_error();
+            assert_eq!(structured["code"], code);
+            assert!(
+                !structured["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains(detail)
+            );
         }
         Ok(())
     }
@@ -2250,15 +3153,15 @@ mod tests {
                 .ok_or("drain repair")?
                 .contains("--yes cannot bypass")
         );
-        let mcp = ServiceError::Facade(restored).structured_error();
-        assert_eq!(mcp["code"], "UPGRADE_DRAIN_REQUIRED");
+        let structured = ServiceError::Facade(restored).structured_error();
+        assert_eq!(structured["code"], "UPGRADE_DRAIN_REQUIRED");
         assert!(
-            mcp["message"]
+            structured["message"]
                 .as_str()
                 .ok_or("drain message")?
                 .contains("previous release")
         );
-        assert!(!serde_json::to_string(&mcp)?.contains("PROMPT_SENTINEL"));
+        assert!(!serde_json::to_string(&structured)?.contains("PROMPT_SENTINEL"));
         Ok(())
     }
 
@@ -2287,9 +3190,122 @@ mod tests {
             cwd: rig.project.clone(),
             assets: rig.project.clone(),
             host_launch: None,
-            mcp_project: None,
             workers: &Workers,
         })
+    }
+
+    #[test]
+    fn refused_retry_leaves_the_persisted_graph_readable_and_unchanged() -> Result {
+        let rig = TestRig::new()?;
+        let factory = factory(&rig)?;
+        let project = factory.context.identity.project;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../crates/fabric-runtime/src/fixtures/graph-checkpoint.json"
+        ))?;
+        let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+            serde_json::from_value(fixture["checkpoint"].clone())?;
+        let execution: GraphDocument =
+            serde_json::from_value(fixture["execution"]["document"].clone())?;
+        let directory: PathBuf = factory
+            .context
+            .roots
+            .state
+            .as_path()
+            .join("fabric/graphs")
+            .join(project.to_string());
+        let mut journal = FileJournal::open(
+            &factory.context.roots.state,
+            project,
+            &execution.graph_id,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        journal.bind(provenant_fabric_runtime::graph::GraphExecution {
+            extra: Default::default(),
+            bases: None,
+            directory: PathBuf::from("/legacy/project"),
+            document: execution,
+        })?;
+        journal.save(&checkpoint)?;
+        drop(journal);
+        let path = directory.join("graph-g-test.json");
+        let before = std::fs::read(&path)?;
+
+        let error = factory
+            .graph_document(
+                json!({"op":"retry","id":"g-test/reader","brief":"ghp_abcdefghijklmnopqrstuvwxyz0123456789"}),
+                budget,
+                &cancel,
+            )
+            .expect_err("secret replacement brief must be refused");
+        assert!(matches!(error, FacadeError::InvalidInput { .. }));
+        assert_eq!(std::fs::read(&path)?, before);
+        assert_eq!(
+            FileJournal::read_checkpoint(&factory.context.roots.state, project, "g-test")?,
+            Some(checkpoint)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stop_reports_pending_acknowledgement_without_the_graph_lock() -> Result {
+        if super::super::peer_tests::host_test(
+            "fabric::interface::tests::stop_reports_pending_acknowledgement_without_the_graph_lock",
+        )? {
+            return Ok(());
+        }
+        let rig = TestRig::new()?;
+        let factory = factory(&rig)?;
+        let project = factory.context.identity.project;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../crates/fabric-runtime/src/fixtures/graph-checkpoint.json"
+        ))?;
+        let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+            serde_json::from_value(fixture["checkpoint"].clone())?;
+        checkpoint.nodes[0].state = provenant_fabric_runtime::graph::NodeState::Running;
+        checkpoint.nodes[0].attempts[0].state =
+            provenant_fabric_runtime::graph::AttemptState::Running;
+        checkpoint.nodes[0].attempts[0].outcome = None;
+        let execution: GraphDocument =
+            serde_json::from_value(fixture["execution"]["document"].clone())?;
+        let mut journal = FileJournal::open(
+            &factory.context.roots.state,
+            project,
+            &execution.graph_id,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        journal.bind(provenant_fabric_runtime::graph::GraphExecution {
+            extra: Default::default(),
+            bases: None,
+            directory: PathBuf::from("/legacy/project"),
+            document: execution,
+        })?;
+        journal.save(&checkpoint)?;
+
+        let receipt = factory.graph_document(
+            json!({"op":"stop","id":"g-test","wait_seconds":0}),
+            budget,
+            &cancel,
+        )?;
+        assert_eq!(receipt["cancellation_requested"]["acknowledged"], false);
+        assert_eq!(
+            receipt["cancellation_requested"]["pending_acknowledgement"],
+            true
+        );
+        assert_eq!(receipt["timed_out"], true);
+        assert_eq!(
+            FileJournal::read_checkpoint(&factory.context.roots.state, project, "g-test")?
+                .ok_or("checkpoint missing")?,
+            checkpoint
+        );
+        Ok(())
     }
 
     #[test]
@@ -2329,9 +3345,41 @@ mod tests {
     }
 
     #[test]
+    fn branch_control_uses_the_project_worktree_layout() -> Result {
+        let project = tempfile::tempdir()?;
+        std::fs::create_dir(project.path().join(".provenant"))?;
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.worktree_layout.roots = vec![
+            std::path::PathBuf::from(".claude/worktrees"),
+            std::path::PathBuf::from(".worktrees"),
+        ];
+        ports.worktree_layout.default = std::path::PathBuf::from(".claude/worktrees/<branch>");
+        std::fs::write(
+            project.path().join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&ports)?,
+        )?;
+
+        let ports = provenant_config::PortTable::read_for(Some(project.path()), project.path())?;
+        let mut node = json!({"use":"task"});
+        bind_launch_controls(
+            &json!({"branch":"feature/topic"}),
+            &mut node,
+            project.path(),
+            &ports,
+        )?;
+        assert_eq!(node["worktree"], ".claude/worktrees/feature-topic");
+        Ok(())
+    }
+
+    #[test]
     fn branch_without_base_uses_the_remote_default_branch() -> Result {
         let mut node = json!({"use":"task"});
-        bind_launch_controls(&json!({"branch":"topic"}), &mut node, Path::new("/repo"))?;
+        bind_launch_controls(
+            &json!({"branch":"topic"}),
+            &mut node,
+            Path::new("/repo/src"),
+            &provenant_config::PortTable::builtin(),
+        )?;
         assert_eq!(
             node["attempt"]["new_worktree"]["base"],
             "refs/remotes/origin/HEAD"
@@ -2342,6 +3390,7 @@ mod tests {
             &json!({"branch":"topic", "base":"refs/remotes/origin/HEAD"}),
             &mut explicit,
             Path::new("/repo"),
+            &provenant_config::PortTable::builtin(),
         )?;
         assert!(
             explicit["attempt"]["new_worktree"]
@@ -2349,24 +3398,40 @@ mod tests {
                 .is_none()
         );
         assert!(
-            bind_launch_controls(&json!({"base":"HEAD"}), &mut node, Path::new("/repo")).is_err()
+            bind_launch_controls(
+                &json!({"base":"HEAD"}),
+                &mut node,
+                Path::new("/repo"),
+                &provenant_config::PortTable::builtin()
+            )
+            .is_err()
         );
         Ok(())
     }
 
     #[test]
-    fn child_operation_identity_replays_the_same_launch() -> Result {
+    fn a_named_child_replays_by_name_and_input() -> Result {
         let rig = TestRig::new()?;
         let factory = factory(&rig)?;
-        let input = json!({"op":"run", "brief":"Inspect", "operation_id":"child-op"});
+        let input = json!({"op":"run", "brief":"Inspect", "name":"inspect-parser"});
         let first = factory.child_request(&input)?;
         let replay = factory.child_request(&input)?;
-        assert_eq!(first.idempotency_key, "child-op");
+        assert_eq!(first.id, "inspect-parser");
         assert_eq!(first.id, replay.id);
+        assert_eq!(first.idempotency_key, replay.idempotency_key);
         assert_eq!(first.launch, replay.launch);
+        let changed = factory
+            .child_request(&json!({"op":"run", "brief":"Inspect more", "name":"inspect-parser"}))?;
+        assert_ne!(first.idempotency_key, changed.idempotency_key);
+        // Unnamed children stay distinct.
+        let unnamed = json!({"op":"run", "brief":"Inspect"});
+        assert_ne!(
+            factory.child_request(&unnamed)?.idempotency_key,
+            factory.child_request(&unnamed)?.idempotency_key
+        );
         assert!(
             factory
-                .child_request(&json!({"op":"run", "operation_id":"invalid op"}))
+                .child_request(&json!({"op":"run", "name":"Invalid Name"}))
                 .is_err()
         );
         Ok(())
@@ -2385,7 +3450,7 @@ mod tests {
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let result = factory.graph_document(json!({"op":"run","use":"review","brief":"Review","set":{"subject":head,"review_base":"review-target"},"explain":true}), budget, &cancel)?;
+        let result = factory.graph_document(json!({"op":"run","template":"review","brief":"Review","set":{"subject":head,"review_base":"review-target"},"explain":true}), budget, &cancel)?;
         assert_eq!(result["document"]["review_base"], tip);
         Ok(())
     }
@@ -2396,7 +3461,7 @@ mod tests {
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let error = factory.graph_document(json!({"op":"run","use":"review","brief":"Review","set":{"subject":"HEAD","review_base":"HEAD"}}), budget, &cancel).unwrap_err();
+        let error = factory.graph_document(json!({"op":"run","template":"review","brief":"Review","set":{"subject":"HEAD","review_base":"HEAD"}}), budget, &cancel).unwrap_err();
         assert!(
             matches!(error, FacadeError::InvalidInput { detail: Some(InvalidInputDetail::Field(ref message)) } if message.contains("review_empty_range"))
         );
@@ -2404,7 +3469,7 @@ mod tests {
     }
 
     #[test]
-    fn submission_identity_tracks_template_content_head_and_directory() -> Result {
+    fn replay_digest_tracks_launch_input_and_source_commit() -> Result {
         let rig = crate::worktree_tests::repository()?;
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
@@ -2414,26 +3479,31 @@ mod tests {
             let response = factory
                 .graph_document(input, budget, &cancel)
                 .map_err(|error| format!("{label}: {error:?}"))?;
-            Ok(response["document"]["graph_id"]
+            Ok(response["document"]["replay_digest"]
                 .as_str()
-                .ok_or("graph id")?
+                .ok_or("replay digest")?
                 .to_owned())
         };
         let task = json!({"op":"run","brief":"same brief","explain":true});
-        assert_ne!(
+        assert_eq!(
             explain(&factory, task.clone())?,
             explain(&factory, task.clone())?
         );
-        let inline = json!({"op":"run","document":{"identity":"content","brief":"inline task","tier":"senior"},"explain":true});
+        // The name is a handle: it never changes the digest.
+        let mut named = task.clone();
+        named["name"] = json!("handle");
+        assert_eq!(explain(&factory, task.clone())?, explain(&factory, named)?);
+        let inline =
+            json!({"op":"run","document":{"brief":"inline task","tier":"senior"},"explain":true});
         assert_eq!(
             explain(&factory, inline.clone())?,
             explain(&factory, inline)?
         );
-        // Content identity includes launch policy, even when the brief and
-        // pinned repository subject are unchanged.
+        // The digest includes launch policy, even when the brief and the
+        // source commit are unchanged.
         let controlled = json!({
             "op":"run", "explain":true,
-            "document":{"identity":"content", "brief":"Inspect launch policy",
+            "document":{"brief":"Inspect launch policy",
                 "tier":"senior", "access":"read_only"},
             "attempt":{"host":"local", "confidential":true, "provider_timeout":42}
         });
@@ -2450,10 +3520,9 @@ mod tests {
                 serde_json::from_value(changed["attempt"].clone())?;
             let response = factory.graph_document(changed.clone(), budget, &cancel)?;
             let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
-            assert_ne!(document.graph_id, original, "attempt.{field}");
-            assert_eq!(
-                document.graph_id,
-                explain(&factory, changed)?,
+            assert_ne!(
+                explain(&factory, changed.clone())?,
+                original,
                 "attempt.{field}"
             );
             let expanded = document.expanded(&factory.context.config.graph.limits)?;
@@ -2464,7 +3533,7 @@ mod tests {
             );
         }
         let review = factory.graph_document(
-            json!({"op":"run","use":"review","brief":"Review","explain":true}),
+            json!({"op":"run","template":"review","brief":"Review","explain":true}),
             budget,
             &cancel,
         )?;
@@ -2485,16 +3554,16 @@ mod tests {
         crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "review subject"])?;
         let head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
         let pinned = factory.graph_document(
-            json!({"op":"run","use":"review","brief":"Review","set":{"subject":head,"review_base":base},"explain":true}), budget, &cancel,
+            json!({"op":"run","template":"review","brief":"Review","set":{"subject":head,"review_base":base},"explain":true}), budget, &cancel,
         )?;
         assert_eq!(pinned["document"]["review_base"], base);
         assert_eq!(pinned["document"]["nodes"][0]["source"]["commit"], head);
-        let error = factory.graph_document(json!({"op":"run","use":"review","set":{"subject":"missing-ref","review_base":base},"explain":true}), budget, &cancel).unwrap_err();
+        let error = factory.graph_document(json!({"op":"run","template":"review","set":{"subject":"missing-ref","review_base":base},"explain":true}), budget, &cancel).unwrap_err();
         assert!(
             matches!(error, FacadeError::InvalidInput { detail: Some(InvalidInputDetail::UnresolvableBase(ref name)) } if name == "missing-ref")
         );
         for name in ["review", "review.security", "deliver"] {
-            let mut input = json!({"op":"run","use":name,"brief":"same brief","explain":true});
+            let mut input = json!({"op":"run","template":name,"brief":"same brief","explain":true});
             if name == "deliver" {
                 input["set"] = json!({"worktree":rig.project,"write_scope":["src"]});
             }
@@ -2508,27 +3577,7 @@ mod tests {
                 explain(&factory, input.clone())?,
                 explain(&factory, changed)?
             );
-            let mut elsewhere = factory.for_graph_directory(&rig.project)?;
-            let nested = rig.project.join("nested");
-            std::fs::create_dir_all(&nested)?;
-            elsewhere.cwd = nested;
-            assert_ne!(
-                explain(&factory, input.clone())?,
-                explain(&elsewhere, input)?
-            );
         }
-        let nested = json!({"op":"run","document":{"use":"task","brief":"nested","operation_id":"nested-replay"},"explain":true});
-        assert_eq!(
-            explain(&factory, nested.clone())?,
-            explain(&factory, nested)?
-        );
-        let mut replay = task;
-        replay["operation_id"] = json!("repeat-task");
-        let first = explain(&factory, replay.clone())?;
-        crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "later subject"])?;
-        assert_eq!(first, explain(&factory, replay.clone())?);
-        replay["operation_id"] = json!("another-task");
-        assert_ne!(first, explain(&factory, replay)?);
         Ok(())
     }
 
@@ -2538,6 +3587,9 @@ mod tests {
         struct Reviewer(usize);
         impl AttemptOwner for Reviewer {
             type Error = std::convert::Infallible;
+            fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+                provenant_config::PortTable::builtin().worktree_layout
+            }
             fn actor(&self) -> String {
                 "review-fixture".into()
             }
@@ -2560,6 +3612,8 @@ mod tests {
                     result_path: None,
                     branch: None,
                     commit: None,
+                    settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                    stop: None,
                 })
             }
         }
@@ -2567,8 +3621,10 @@ mod tests {
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let input =
-            json!({"op":"run", "use":"review", "brief":"Review the parser", "tier":"senior"});
+        // Only a named launch replays (run.md: without a name the host
+        // assigns the next TEMPLATE-K and never replays).
+        let input = json!({"op":"run", "template":"review", "brief":"Review the parser",
+            "route":"senior", "name":"parser-review"});
         let mut preview = input.clone();
         preview["explain"] = json!(true);
         let document: GraphDocument = serde_json::from_value(
@@ -2586,10 +3642,9 @@ mod tests {
             )?;
             journal.bind(GraphExecution {
                 extra: Default::default(),
+                bases: None,
                 directory: factory.cwd.clone(),
                 document: document.clone(),
-                review_base: None,
-                integration_base: None,
             })?;
             graph::advance_with_budget(
                 &document,
@@ -2601,9 +3656,9 @@ mod tests {
         };
         assert_eq!(first.status, GraphStatus::Complete);
         assert_eq!(reviewer.0, 1);
-        // Submit through the real front door, without an operation ID. A
-        // content-identical review must reuse the terminal journal rather than
-        // entering the host's provider-launch path again.
+        // Submit through the real front door, with and without a wait. A
+        // content-identical named review must reuse the terminal journal
+        // rather than entering the host's provider-launch path again.
         for wait in [None, Some(1)] {
             let mut repeated = input.clone();
             if let Some(seconds) = wait {
@@ -2634,88 +3689,73 @@ mod tests {
     }
 
     #[test]
-    fn explicit_operation_replays_terminal_execution_after_head_and_template_changes() -> Result {
-        use provenant_fabric_runtime::graph::{self, AttemptOwner, GraphExecution};
-        struct Owner;
-        impl AttemptOwner for Owner {
-            type Error = std::convert::Infallible;
-            fn actor(&self) -> String {
-                "rerun-fixture".into()
-            }
-            fn observe_or_start(
-                &mut self,
-                _: &graph::AttemptKey,
-                _: graph::NodeInput<'_>,
-                _: &graph::GraphRoute,
-                _: graph::AccessMode,
-                _: Option<&str>,
-                _: graph::Replay<'_>,
-            ) -> std::result::Result<graph::AttemptObservation, Self::Error> {
-                Ok(graph::AttemptObservation::Terminal {
-                    attempt_ref: Some("fixture/first".into()),
-                    outcome: graph::AttemptOutcome::Succeeded,
-                    launched: true,
-                    result: None,
-                    result_warning: None,
-                    result_path: None,
-                    branch: None,
-                    commit: None,
-                })
-            }
-        }
+    fn a_named_launch_with_the_same_digest_returns_its_graph_without_launching() -> Result {
         let rig = crate::worktree_tests::repository()?;
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let mut input =
-            json!({"op":"run","brief":"Original task","operation_id":"recover-run","explain":true});
-        let document: GraphDocument = serde_json::from_value(
-            factory.graph_document(input.clone(), budget, &cancel)?["document"].clone(),
-        )?;
-        let id = document.graph_id.clone();
-        let mut journal = FileJournal::open(
-            &factory.context.roots.state,
-            factory.context.identity.project,
-            &id,
-            budget,
-            &cancel,
-            &factory.clock,
-        )?;
-        journal.bind(GraphExecution {
-            extra: Default::default(),
-            directory: factory.cwd.clone(),
-            document: document.clone(),
-            review_base: None,
-            integration_base: None,
-        })?;
-        let first = graph::advance_with_budget(
-            &document,
-            &mut Owner,
-            &mut journal,
-            &factory.context.config.graph.limits,
-            &factory.context.config.graph.budget,
-        )?;
-        assert_eq!(first.status, GraphStatus::Complete);
-        drop(journal);
-        crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "move head"])?;
-        let templates = rig.project.join(".provenant/templates");
-        std::fs::create_dir_all(&templates)?;
-        std::fs::write(templates.join("task.toml"), "invalid template")?;
-        input["explain"] = json!(false);
-        let replay = factory.graph_document(input, budget, &cancel)?;
-        assert_eq!(replay["checkpoint"]["graph_id"], id);
-        assert_eq!(replay["status"], "complete");
+        let mut document: GraphDocument = serde_json::from_value(json!({
+            "schema_version":1, "graph_id":"recover-run", "nodes":[{
+                "id":"worker", "access":"read_only", "prompt":"Original task",
+                "route":{"adapter":"fixture", "model":"fixture/model"}
+            }]
+        }))?;
+        document.set_replay_digest("identical-launch-input");
+        // Both submissions chose the same unbound name. Admission is real;
+        // provider execution is deferred at the process boundary.
+        let barrier = std::sync::Barrier::new(2);
+        let launch = || {
+            barrier.wait();
+            provenant_cli::run::with_deferred_provider_launch(|| {
+                factory.launch_submission(document.clone(), &json!({}), budget, &cancel, None)
+            })
+        };
+        let results = std::thread::scope(|scope| {
+            let left = scope.spawn(launch);
+            let right = scope.spawn(launch);
+            [left.join().unwrap(), right.join().unwrap()]
+        });
+        let results = [
+            results[0].as_ref().map_err(|error| error.to_string())?,
+            results[1].as_ref().map_err(|error| error.to_string())?,
+        ];
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result["replayed"] == false)
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result["replayed"] == true)
+                .count(),
+            1
+        );
         let saved = FileJournal::read_checkpoint(
             &factory.context.roots.state,
             factory.context.identity.project,
-            &id,
+            "recover-run",
         )?
         .ok_or("checkpoint")?;
         assert_eq!(saved.nodes[0].attempts.len(), 1);
-        assert_eq!(
-            saved.nodes[0].attempts[0].attempt_ref.as_deref(),
-            Some("fixture/first")
-        );
+        let replay = factory.launch_submission(
+            document,
+            &json!({"wait_seconds":30}),
+            budget,
+            &cancel,
+            None,
+        )?;
+        assert_eq!(replay["replayed"], true);
+        assert_eq!(replay["timed_out"], false);
+        let after = FileJournal::read_checkpoint(
+            &factory.context.roots.state,
+            factory.context.identity.project,
+            "recover-run",
+        )?
+        .ok_or("replayed checkpoint")?;
+        assert_eq!(after, saved);
         Ok(())
     }
 
@@ -2775,7 +3815,9 @@ mod tests {
             json!({"attempt.host":""}),
             json!({"attempt.account":[]}),
             json!({"attempt.build_heavy":1}),
-            json!({"attempt.confidential":"true"}),
+            // `--set` text is typed by the field (cli.md), so "true" binds;
+            // text no field reading accepts is still refused.
+            json!({"attempt.confidential":"maybe"}),
             json!({"attempt.provider_timeout":0}),
             json!({"attempt.provider_timeout":-1}),
             json!({"attempt.provider_timeout":1.5}),
@@ -2874,7 +3916,7 @@ mod tests {
         let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
         let response = factory.graph_document(
             json!({
-                "op":"run", "brief":"Fix the parser", "tier":"senior",
+                "op":"run", "brief":"Fix the parser", "route":"senior",
                 "worktree":rig.project, "write_scope":["src"], "explain":true
             }),
             budget,
@@ -2913,7 +3955,15 @@ mod tests {
         let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
         assert_eq!(document.nodes.len(), 1);
         let node = &document.nodes[0];
-        assert_eq!(node.worktree.as_deref(), Some(".worktrees/fix-parser"));
+        assert_eq!(
+            node.worktree.as_deref(),
+            Some(
+                rig.project
+                    .join(".worktrees/fix-parser")
+                    .to_str()
+                    .ok_or("path")?
+            )
+        );
         let target = node
             .attempt
             .as_ref()
@@ -2925,7 +3975,7 @@ mod tests {
         assert!(
             factory
                 .graph_document(
-                    json!({"op":"run","use":"deliver","worktree":rig.project,"explain":true}),
+                    json!({"op":"run","template":"deliver","worktree":rig.project,"explain":true}),
                     budget,
                     &cancel
                 )
@@ -2952,7 +4002,6 @@ mod tests {
             cwd: rig.project.clone(),
             assets: rig.project.clone(),
             host_launch: None,
-            mcp_project: None,
             workers: &Workers,
         };
         let directory = rig.project.join(".provenant/templates");
@@ -2961,7 +4010,7 @@ mod tests {
         std::fs::write(&path, "accesz = \"read_only\"\n")?;
         let error = factory.template_library(None).unwrap_err();
         let structured =
-            provenant_fabric_mcp::tools::ServiceError::Facade(error.clone()).structured_error();
+            provenant_fabric_runtime::relay::ServiceError::Facade(error.clone()).structured_error();
         assert_eq!(structured["code"], error.diagnostic().code);
         assert!(
             structured["detail"]
@@ -2992,7 +4041,7 @@ mod tests {
         let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
         let error = factory
             .graph_document(
-                json!({"op":"run", "use":"task.typo", "explain":true}),
+                json!({"op":"run", "template":"task.typo", "explain":true}),
                 budget,
                 &cancel,
             )
@@ -3025,7 +4074,7 @@ mod tests {
         );
         let error = factory
             .graph_document(
-                json!({"op":"run", "use":"implement", "brief":"Fix it", "explain":true}),
+                json!({"op":"run", "template":"implement", "brief":"Fix it", "explain":true}),
                 budget,
                 &cancel,
             )
@@ -3062,8 +4111,28 @@ mod tests {
             &json!({"branch":"fix/parser","base":"origin/main"}),
             &mut node,
             cwd,
+            &provenant_config::PortTable::builtin(),
         )?;
-        assert_eq!(node["worktree"], ".worktrees/fix-parser");
+        assert_eq!(node["worktree"], "/fixture/project/.worktrees/fix-parser");
+        let mut explicit = json!({"id":"task","use":"task"});
+        bind_launch_controls(
+            &json!({"worktree":".worktrees/fix-parser"}),
+            &mut explicit,
+            Path::new("/fixture/project"),
+            &provenant_config::PortTable::builtin(),
+        )?;
+        assert_eq!(
+            node["worktree"].as_str().ok_or("branch path")?,
+            explicit["worktree"].as_str().ok_or("explicit worktree")?
+        );
+        let mut relative = json!({"id":"task","use":"task"});
+        bind_launch_controls(
+            &json!({"worktree":"writer"}),
+            &mut relative,
+            Path::new("/fixture/project/src"),
+            &provenant_config::PortTable::builtin(),
+        )?;
+        assert_eq!(relative["worktree"], "/fixture/project/src/writer");
         assert_eq!(
             node["attempt"]["new_worktree"],
             json!({"branch":"fix/parser","base":"origin/main"})
@@ -3076,7 +4145,15 @@ mod tests {
             json!({"access":"unknown"}),
             json!({"write_scope":[1]}),
         ] {
-            assert!(bind_launch_controls(&input, &mut json!({"use":"task"}), cwd).is_err());
+            assert!(
+                bind_launch_controls(
+                    &input,
+                    &mut json!({"use":"task"}),
+                    cwd,
+                    &provenant_config::PortTable::builtin()
+                )
+                .is_err()
+            );
         }
         Ok(())
     }
@@ -3089,7 +4166,8 @@ mod tests {
             json!({"worktree":".worktrees/fix"}),
             json!({"branch":"fix","base":"origin/main"}),
         ] {
-            let mut input = json!({"op":"run","use":"implement","brief":"Fix it"});
+            let mut input =
+                json!({"op":"run","template":"implement","brief":"Fix it","set":{"bounded":true}});
             input
                 .as_object_mut()
                 .unwrap()
@@ -3104,7 +4182,7 @@ mod tests {
             assert_eq!(node["access"], "worktree_write");
         }
 
-        let mut explicit_read = json!({"op":"run","use":"implement","brief":"Fix it","access":"read_only","worktree":".worktrees/fix"});
+        let mut explicit_read = json!({"op":"run","template":"implement","brief":"Fix it","set":{"bounded":true},"access":"read_only","worktree":".worktrees/fix"});
         assert!(factory.child_request(&explicit_read).is_err());
         explicit_read["access"] = json!("worktree_write");
         let explicit_write = factory.child_request(&explicit_read)?;
@@ -3112,7 +4190,7 @@ mod tests {
         let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
         let cancel = CancelToken::new();
         let explicit_read = factory.graph_document(
-            json!({"op":"run","use":"implement","brief":"Inspect","access":"read_only","explain":true}),
+            json!({"op":"run","template":"implement","brief":"Inspect","access":"read_only","explain":true}),
             budget,
             &cancel,
         )?;
@@ -3144,6 +4222,9 @@ mod tests {
         struct Waiting;
         impl AttemptOwner for Waiting {
             type Error = std::convert::Infallible;
+            fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+                provenant_config::PortTable::builtin().worktree_layout
+            }
             fn actor(&self) -> String {
                 "checkpoint-fixture".into()
             }
@@ -3177,7 +4258,7 @@ mod tests {
         let budget = WaitBudget::cli(factory.clock.mono_now(), 60)?;
         let response = factory.graph_document(
             json!({
-                "op":"run", "use":"task-fan-out", "brief":brief,
+                "op":"run", "template":"task-fan-out", "brief":brief,
                 "set":{"items":(0..8).map(|n|format!("slice-{n}")).collect::<Vec<_>>()},
                 "explain":true,
             }),
@@ -3187,10 +4268,9 @@ mod tests {
         let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
         let execution = GraphExecution {
             extra: Default::default(),
+            bases: None,
             directory: factory.cwd.clone(),
             document: document.clone(),
-            review_base: None,
-            integration_base: None,
         };
         // The recovery tests cover publication at each transition. Here the
         // property is the size and round trip of the fully populated snapshot;
@@ -3281,7 +4361,7 @@ mod tests {
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
         let response = factory.graph_document(
-            json!({"op":"run", "use":"task", "over":["alpha","beta"], "explain":true}),
+            json!({"op":"run", "template":"task", "over":["alpha","beta"], "explain":true}),
             budget,
             &cancel,
         )?;
@@ -3328,6 +4408,22 @@ mod tests {
     }
 
     #[test]
+    fn graph_operations_refuse_operation_ids_and_name_the_replacement() -> Result {
+        let rig = TestRig::new()?;
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let input = json!({"op":"run","brief":"Inspect","explain":true,"operation_id":"retired"});
+        let error = factory.graph_document(input, budget, &cancel).unwrap_err();
+        assert_eq!(
+            error,
+            FacadeError::invalid(InvalidInputDetail::OperationIdRetired)
+        );
+        assert!(error.to_string().contains("use `name`"), "{error}");
+        Ok(())
+    }
+
+    #[test]
     fn child_launch_preserves_an_unregistered_selected_project_directory() -> Result {
         let rig = TestRig::new()?;
         let mut factory = factory(&rig)?;
@@ -3356,14 +4452,14 @@ mod tests {
     fn child_launch_retains_writer_access_and_has_a_stable_logical_identity() -> Result {
         let rig = TestRig::new()?;
         let factory = factory(&rig)?;
-        let input = json!({"op":"run", "use":"implement", "brief":"Fix the parser", "idempotency_key":"parser-launch"});
+        let input = json!({"op":"run", "template":"implement", "brief":"Fix the parser", "set":{"bounded":true}, "idempotency_key":"parser-launch"});
         let first = factory.child_request(&input)?;
-        let unkeyed = json!({"op":"run", "use":"implement", "brief":"Fix the parser"});
+        let unkeyed = json!({"op":"run", "template":"implement", "brief":"Fix the parser", "set":{"bounded":true}});
         assert_ne!(
             factory.child_request(&unkeyed)?.id,
             factory.child_request(&unkeyed)?.id
         );
-        let operation = json!({"op":"run","document":{"use":"task","brief":"Nested operation","operation_id":"child-replay"}});
+        let operation = json!({"op":"run","document":{"use":"task","brief":"Nested operation","idempotency_key":"child-replay"}});
         assert_eq!(
             factory.child_request(&operation)?,
             factory.child_request(&operation)?
@@ -3371,11 +4467,6 @@ mod tests {
         assert_eq!(
             factory.child_request(&operation)?.idempotency_key,
             "child-replay"
-        );
-        assert!(
-            factory
-                .child_request(&json!({"op":"run","operation_id":"bad id"}))
-                .is_err()
         );
         assert!(first.writer);
         assert_eq!(
@@ -3389,24 +4480,33 @@ mod tests {
         assert_ne!(
             factory
                 .child_request(
-                    &json!({"op":"run", "use":"implement", "brief":"Fix another parser"})
+                    &json!({"op":"run", "template":"implement", "brief":"Fix another parser"})
                 )?
                 .id,
             first.id
         );
-        let bound = factory.child_request(&json!({"op":"run", "document":{"use":"implement", "brief":"Bound writer", "worktree":".worktrees/existing"}}))?;
-        let controlled = factory.child_request(&json!({"op":"run", "use":"implement",
+        let bound = factory.child_request(&json!({"op":"run", "document":{"use":"implement", "with":{"bounded":true}, "brief":"Bound writer", "worktree":".worktrees/existing"}}))?;
+        let controlled = factory.child_request(&json!({"op":"run", "template":"implement",
             "brief":"Bound controls", "branch":"fix/child", "base":"HEAD",
             "write_scope":["src"], "detached":true}))?;
-        let node = &controlled.launch.as_ref().unwrap().node;
+        // An unbounded implement gains a planner; the launch controls belong
+        // to its writer leaf wherever the plan boundary places it.
+        fn writer_leaf(node: &Value) -> Option<&Value> {
+            match node.pointer("/composite/nodes").and_then(Value::as_array) {
+                Some(children) => children.iter().find_map(writer_leaf),
+                None => (node["access"] == "worktree_write").then_some(node),
+            }
+        }
+        let node = writer_leaf(&controlled.launch.as_ref().unwrap().node).ok_or("writer leaf")?;
         assert_eq!(node["worktree"], ".worktrees/fix-child");
         assert_eq!(
             node["attempt"]["new_worktree"],
             json!({"branch":"fix/child", "base":"HEAD"})
         );
-        assert_eq!(controlled.write_scope, ["src"]);
+        assert_eq!(node["write_scope"], json!(["src"]));
+        assert!(controlled.has_writers());
         assert!(controlled.detached);
-        let nested = json!({"op":"run", "document":{"use":"implement", "brief":"Nested replay",
+        let nested = json!({"op":"run", "document":{"use":"implement", "with":{"bounded":true}, "brief":"Nested replay",
             "idempotency_key":"nested-child", "detached":true}});
         let nested_first = factory.child_request(&nested)?;
         assert_eq!(factory.child_request(&nested)?, nested_first);
@@ -3485,7 +4585,7 @@ mod tests {
             "op":"run", "document":{
                 "parameters":{"subject":{"type":"string", "default":"default"}},
                 "nodes":[{"id":"one", "use":"task", "brief":"Inspect ${subject} ${item}"}]
-            }, "set":{"subject":"code"}, "over":["a","b"], "tier":"junior"
+            }, "set":{"subject":"code"}, "over":["a","b"], "route":"junior"
         }))?;
         assert!(!request.writer);
         let node = &request.launch.as_ref().unwrap().node;
@@ -3520,7 +4620,7 @@ mod tests {
             "Document child"
         );
         let request = factory.child_request(
-            &json!({"op":"run", "use":"implement", "brief":"Fix ${item}", "over":["a","b"]}),
+            &json!({"op":"run", "template":"implement", "brief":"Fix ${item}", "over":["a","b"]}),
         )?;
         assert!(!request.writer);
         let children = request.launch.as_ref().unwrap().node["composite"]["nodes"]
@@ -3594,13 +4694,25 @@ mod tests {
             "nodes":[{"id":"parent", "access":"read_only", "prompt":"Go", "route":{"alias":"senior"}}]
         }))?;
         let reference = format!("{}/caller", factory.context.identity.host);
-        let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
-            "schema_version":1, "graph_id":"g-child-e2e", "plan_digest":"fixture", "bound_integration_base":if explicit_checkout { None } else { Some(&source) },
+        let bases = if explicit_checkout {
+            None
+        } else {
+            Some(
+                provenant_fabric_runtime::graph::GraphBaseBinding::new(
+                    None,
+                    Some(provenant_core::GitOid::parse(&source)?),
+                )
+                .ok_or("integration base")?,
+            )
+        };
+        let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+            "schema_version":2, "graph_id":"g-child-e2e", "plan_digest":"fixture",
             "nodes":[{"id":"parent", "state":"running", "attempts":[{
-                "launched":true, "key":{"graph_id":"g-child-e2e", "node_id":"parent", "route_index":0},
+                "launched":true, "key":{"graph_id":"g-child-e2e", "node_id":"parent", "route_index":0, "attempt": 1},
                 "route":{"alias":"senior"}, "state":"running", "attempt_ref":reference, "outcome":null, "launch_actor":"fixture"
             }]}]
         }))?;
+        checkpoint.bases = bases;
         {
             let mut journal = FileJournal::open(
                 &factory.context.roots.state,
@@ -3611,9 +4723,8 @@ mod tests {
                 &factory.clock,
             )?;
             journal.bind(GraphExecution {
-                review_base: None,
                 extra: Default::default(),
-                integration_base: Some(source.parse()?),
+                bases,
                 directory: rig.project.clone(),
                 document: document.clone(),
             })?;
@@ -3626,7 +4737,7 @@ mod tests {
         let temporary = std::env::temp_dir();
         let relative = rig.root.strip_prefix(std::fs::canonicalize(&temporary)?)?;
         let socket = temporary.join(relative).join("r/s");
-        let _relay = provenant_fabric_mcp::lane::HostRelay::start_with_graph(
+        let _relay = provenant_fabric_runtime::relay::HostRelay::start_with_graph(
             socket.clone(),
             Default::default(),
             |_, _, _| Err(ServiceError::FabricOwnerUnavailable),
@@ -3642,13 +4753,13 @@ mod tests {
         {
             let request = factory.child_request(&input)?;
             let frame = serde_json::to_value(RelayOp::Add(request))?;
-            let receipt = provenant_fabric_mcp::lane::graph(
+            let receipt = provenant_fabric_runtime::relay::graph(
                 &socket,
                 frame.clone(),
                 &cancel,
                 std::time::Duration::from_secs(30),
             )?;
-            let replay = provenant_fabric_mcp::lane::graph(
+            let replay = provenant_fabric_runtime::relay::graph(
                 &socket,
                 frame,
                 &cancel,
@@ -3789,12 +4900,12 @@ mod tests {
     fn child_launch_crosses_the_lane_transport_and_provisions_writer_fanout() -> Result {
         for (input, count, disjoint) in [
             (
-                json!({"op":"run", "use":"implement", "brief":"Fix the parser"}),
+                json!({"op":"run", "template":"implement", "brief":"Fix the parser"}),
                 1,
                 false,
             ),
             (
-                json!({"op":"run", "use":"implement", "brief":"Fix ${item}", "over":["one","two"]}),
+                json!({"op":"run", "template":"implement", "brief":"Fix ${item}", "over":["one","two"]}),
                 2,
                 false,
             ),
@@ -3841,7 +4952,7 @@ mod tests {
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
-        let response = factory.graph_document(json!({"op":"run","brief":"Inspect ${item}","tier":"junior","over":["one","two"],"explain":true}),budget,&cancel)?;
+        let response = factory.graph_document(json!({"op":"run","brief":"Inspect ${item}","route":"junior","over":["one","two"],"explain":true}),budget,&cancel)?;
         let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
         let expanded = document.expanded(&factory.context.config.graph.limits)?;
         let leaves: Vec<_> = expanded
@@ -3879,7 +4990,7 @@ mod tests {
             .collect();
         assert_eq!(prompts, vec!["Inspect code a", "Inspect code b"]);
         let response = factory.graph_document(
-            json!({"op":"run","use":"task-once","brief":"Parameter brief","tier":"junior","set":{},"explain":true}),
+            json!({"op":"run","template":"task-once","brief":"Parameter brief","route":"junior","set":{},"explain":true}),
             budget,
             &cancel,
         )?;
@@ -3976,11 +5087,9 @@ mod tests {
             &cancel,
         )?;
         let compiled = &response["document"];
-        assert!(
-            compiled["graph_id"]
-                .as_str()
-                .is_some_and(|id| id.starts_with("g-"))
-        );
+        assert!(compiled["graph_id"].as_str().is_some_and(|id| {
+            provenant_fabric_runtime::graph::template::graph_name_fault(id).is_none()
+        }));
         for (field, expected) in settings.as_object().ok_or("settings object")? {
             assert_eq!(&compiled[field], expected, "lost graph setting {field}");
         }
@@ -4097,6 +5206,9 @@ mod tests {
         }
         impl AttemptOwner for Owner {
             type Error = std::convert::Infallible;
+            fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+                provenant_config::PortTable::builtin().worktree_layout
+            }
             fn actor(&self) -> String {
                 "template-review-fixture".into()
             }
@@ -4140,6 +5252,8 @@ mod tests {
                     result_path: None,
                     branch: writer.then(|| "slice".into()),
                     commit: writer.then(|| self.commit.clone()),
+                    settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                    stop: None,
                 })
             }
         }
@@ -4157,7 +5271,7 @@ mod tests {
                     "schema_version":2, "graph_id":format!("writer-review-{risk}"),
                     "review_base":original, "context":{"risk_tier":risk},
                     "nodes":[
-                        {"id":"writer", "use":"implement", "worktree":rig.project, "write_scope":["."], "delivery":"push"},
+                        {"id":"writer", "use":"implement", "with":{"bounded":true}, "worktree":rig.project, "write_scope":["."], "delivery":"push"},
                         {"id":"review", "use":"review-panel", "after":["writer"], "source":{"type":"head","node":"writer"}}
                     ]
                 }
@@ -4171,6 +5285,8 @@ mod tests {
                 .nodes
                 .iter()
                 .filter(|node| node.id.starts_with("review--") && node.composite.is_none())
+                // A stage whose `when` does not hold stays as a skipped row and never launches.
+                .filter(|node| node.when.iter().all(graph::WhenTerm::holds))
                 .map(|node| node.id.clone())
                 .collect();
             for stage in ["frame", "verify", "synthesis"] {
@@ -4263,10 +5379,9 @@ mod tests {
         )?;
         journal.bind(provenant_fabric_runtime::graph::GraphExecution {
             extra: Default::default(),
+            bases: None,
             directory: factory.cwd.clone(),
             document,
-            review_base: None,
-            integration_base: None,
         })?;
         journal.save(&checkpoint)?;
         drop(journal);
@@ -4316,16 +5431,18 @@ mod tests {
                 .clone(),
         )?;
         let id = document.graph_id.clone();
-        let attempt = json!({"key":{"graph_id":id,"node_id":"task","route_index":0},"launched":true,"route":{"alias":"senior"},"state":"terminal","attempt_ref":"host/attempt","launch_actor":"actor","usage":{"tokens":100,"cost_micro_usd":25,"wall_time_seconds":3,"cache_read_tokens":60,"input_tokens":80,"queue_time_ms":1500,"outcome":"timed_out","tier":"principal","template":"implement.fix"}});
+        let attempt = json!({"key":{"graph_id":id,"node_id":"task","route_index":0, "attempt": 1},"launched":true,"route":{"alias":"senior"},"state":"terminal","attempt_ref":"host/attempt","launch_actor":"actor","usage":{"tokens":100,"cost_micro_usd":25,"wall_time_seconds":3,"cache_read_tokens":60,"input_tokens":80,"queue_time_ms":1500,"outcome":"timed_out","tier":"principal","template":"implement.fix"}});
+        let mut current_attempt = attempt.clone();
+        current_attempt["key"]["attempt"] = json!(3);
         let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
             serde_json::from_value(
                 json!({"schema_version":1,"graph_id":id,"plan_digest":"test","nodes":[
                     {"id":"group","worktree":null,"state":"succeeded","attempts":[],"children":["task"],"usage":{"tokens":100}},
-                    {"id":"task","worktree":null,"state":"succeeded","attempts":[attempt.clone()],"previous_attempts":[attempt]}
+                    {"id":"task","worktree":null,"state":"succeeded","attempts":[current_attempt],"previous_attempts":[attempt]}
                 ]}),
             )?;
         checkpoint.nodes[1].previous_attempts.push(serde_json::from_value(json!({
-            "key":{"graph_id":id,"node_id":"task","route_index":1},
+            "key":{"graph_id":id,"node_id":"task","route_index":1, "attempt": 2},
             "launched":false,"route":{"alias":"senior"},"state":"terminal",
             "attempt_ref":null,"outcome":"adapter_unavailable","launch_actor":"actor","settled":1
         }))?);
@@ -4339,10 +5456,9 @@ mod tests {
         )?;
         journal.bind(provenant_fabric_runtime::graph::GraphExecution {
             extra: Default::default(),
+            bases: None,
             directory: factory.cwd.clone(),
             document,
-            review_base: None,
-            integration_base: None,
         })?;
         let mut reserved = checkpoint.clone();
         reserved.nodes[1].attempts[0].attempt_ref = None;
@@ -4504,7 +5620,7 @@ mod tests {
             "the actual review legs must retain their required family"
         );
         let mut child = input.clone();
-        child["tier"] = json!("missing-family-pool");
+        child["route"] = json!("missing-family-pool");
         child["document"]["review"]["diversity"] = json!("strict");
         let error = factory.child_request(&child).unwrap_err();
         let FacadeError::DispatchRefused { reason, .. } = error else {
@@ -4567,7 +5683,7 @@ mod tests {
             .family;
         // No `diversity` key: the advisory default must refuse the tier too.
         let child = json!({
-            "op": "run", "tier": "missing-family-pool",
+            "op": "run", "route": "missing-family-pool",
             "document": {
                 "use": "review", "brief": "Review required family coverage",
                 "review": {

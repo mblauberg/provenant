@@ -13,30 +13,41 @@ gate it. Policy and defaults are overridable data
 ## Exact selection, no inference
 
 A request names one exact model or route. No adapter, upgrade, effort or
-downgrade is inferred; a family comes only from provider protocol evidence at
+downgrade is inferred. An adapter may declare that a valid but unsupported
+catalogued model effort is dropped before admission; the applied route and
+launch record retain its warning and source. Invalid controls remain errors.
+A family comes only from provider protocol evidence at
 the catalogue revision, never from a name or output text. A pool draw is seeded
 from the operation, so a retry picks the same member without stored state, and
 the receipt names what ran and why. Capability facts never grant filesystem or
-network authority, and a confidential request admits only models that neither
-train on nor retain prompts.
+network authority, and a confidential request admits only models with an
+explicit catalogue guarantee that they do not train on prompts. Unknown
+training treatment is excluded.
 - Why: the receipt must name exactly what ran, and assurance claims must not be
   forgeable by output.
 - Test: `crates/routing/src/tests/policies.rs::exact_unknown_is_retained_but_requires_availability`;
   `crates/routing/src/tests/selection.rs::table_driven_weighted_pools_record_effort_readiness_roll_and_seed`;
   `crates/routing/src/tests/alternatives.rs::family_requires_provider_answer_evidence_at_the_same_revision`;
-  `crates/routing/src/tests/selection.rs::confidential_pool_excludes_training_models`
+  `crates/routing/src/tests/selection.rs::confidential_pool_excludes_training_models`;
+  `crates/routing/src/tests/policies.rs::opencode_effort_normalisation_is_visible_in_exact_pool_and_launch_routes`
+
+## Repository confidentiality at launch
+
+The host classifies declared inputs and observed changes before route selection.
+Protected inputs require no-training treatment for every candidate, including
+fallback; incomplete evidence cannot silently declassify them. Recovery retains
+the accepted classification. This does not classify arbitrary later file access.
+
+- Why: confidential inputs must not reach a model that may train on them.
+- Test: `crates/cli/src/run/launch_policy.rs::tests::repository_classification_covers_inputs_briefs_diff_and_recovery`; `crates/routing/src/tests/selection.rs::confidential_pool_excludes_training_models`
 
 ## One resolution, bounded alternatives
 
-Resolution runs once against immutable snapshots and returns one route with at
-most two ordered alternatives that pass the same checks; Run never rebuilds
-candidates. A candidate excluded before handoff has not run, so preparation
-moves to the next. `route list` and `route resolve` start no process and mutate
-nothing.
+Resolution selects a route and bounded, ordered eligible alternatives from one
+snapshot. Preparation fallback follows [retry ownership](retry-owner.md).
+
 - Why: the fallback plan is decided once and visible.
-- Test: `crates/routing/src/tests/selection.rs::alternatives_are_bounded_distinct_and_keep_the_callers_order`;
-  `crates/routing/src/fallback.rs::tests::switching_requires_safe_outcome_and_every_guard`;
-  `tests/route.rs::help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates`
+- Test: `crates/routing/src/tests/selection.rs::alternatives_are_bounded_distinct_and_keep_the_callers_order`
 
 ## Policy is overridable data
 
@@ -49,6 +60,22 @@ preference always expires.
 - Test: `crates/routing/src/policy.rs::tests::schedule_validation_refuses_malformed_bounds_windows_and_zones`;
   `crates/routing/src/policy.rs::bundled_fields_and_peak_schedule_can_be_overridden_per_account`;
   `crates/routing/src/tests/preferences.rs::model_choice_selects_only_eligible_pool_members_before_expiry`
+
+## Capability and selection preferences
+
+Capability never excludes a listed pool member. Capability preferences rank
+members alongside account load and outcome priors; configuration can adjust
+those weights. Exact model pins remain explicit choices.
+
+Account load and outcome priors rank eligible members. Priors use attributed,
+comparable quality outcomes, with exploration among eligible members;
+host failures are not quality observations, while a validated successful
+completed-before-budget result remains one. Missing outcome evidence stays
+neutral. Account ranking scales reset-adjusted usable headroom by sourced
+penalties and divides by one plus live lanes.
+
+- Why: capability is a preference, while attributed comparable outcomes supply the evidence that adjusts declared route weights.
+- Test: `crates/routing/src/tests/quality.rs::outcome_priors_and_exploration_rank_eligible_members`; `crates/routing/src/tests/quality.rs::account_ranking_uses_reset_adjusted_headroom_and_live_load_independent_of_order`; `crates/telemetry/src/tests.rs::route_priors_count_only_attributed_comparable_quality_outcomes`
 
 ## Capacity is not quota
 
@@ -77,45 +104,54 @@ publication leaves readiness unknown and never erases held refusals.
   `crates/quota/src/admission.rs::independent_pool_reset_and_refusal_scope`;
   `crates/routing/src/tests/exclusions.rs::persisted_mismatch_excludes_account_and_selects_another`;
   `crates/quota/src/readiness.rs::tests::readiness_ready_evidence_requires_fresh_matching_scope`;
-  `::full_refusal_file_accepts_probe_failure_and_restores_refusals`
+  `crates/quota/src/readiness.rs::tests::full_refusal_file_accepts_probe_failure_and_restores_refusals`
 - Owner: `crates/quota/src/admission.rs`, `crates/quota/src/readiness.rs`
+
+
 
 ## Revisioned, bounded refresh
 
 A quota refresh commits only against the revision it claimed, so stale
-completions are discarded; a tick never sleeps and config cannot raise probe
-limits.
+completions are discarded. Ordinary probes keep their tick deadline. A CLI
+credential rotation has a separate admission budget and, once started, runs to
+completion so its single-use refresh token can be persisted safely. A short
+budget returns a typed deferred result without starting the refresh.
 - Why: the menu bar ticks unattended and concurrently.
 - Test: `crates/quota/src/schedule.rs::competing_claims_and_stale_completions_cannot_overwrite`;
   `tests/quota.rs::configuration_cannot_raise_probe_limits_and_publication_failure_is_io`
 
 ## Providers decide nothing
 
-Providers never signal a process or publish completion. Structured errors
-outrank claimed success, provider prose asserts nothing, and malformed frames
-fail closed. A continuation binds the exact adapter, session, account, model and
-controls. A launch spec is built in memory and persists only redacted.
-- Why: a provider's text must not decide an outcome or switch identity, and the
-  launch spec carries credentials.
-- Test: `crates/providers/src/tests_stream_outcomes.rs::terminal_answer_and_nonzero_exit_remain_separate_facts`;
-  `::continuation_preserves_session_and_rejects_changed_identity_and_grants`;
-  `crates/providers/src/tests_accounts_and_limits.rs::selected_accounts_control_provider_environment_and_exact_authentication_grants`
+Providers do not publish completion or decide outcomes from prose. Structured
+errors outrank claimed success, malformed frames fail closed, and continuation
+preserves its selected identity and controls.
+
+- Why: provider text must not decide an outcome or switch identity.
+- Test: `crates/providers/src/tests_stream_outcomes.rs::terminal_answer_and_nonzero_exit_remain_separate_facts`; `crates/providers/src/tests_stream_outcomes.rs::continuation_preserves_session_and_rejects_changed_identity_and_grants`
 
 ## Accounts and credentials
 
-An account identity is detected, never guessed; an undetectable one is
-`unknown`, and a changed identity around a probe refuses. A pin filters
-eligibility and never switches accounts. Credentials are never copied between
-identity directories, logged, written, put on argv or passed in a child
-environment. The sandbox never refreshes or writes a keychain; a lane that
-holds a registered long-lived lane token is never rotated by the host.
-- Why: misattribution spends or exposes the wrong account, and one login renewal
-  must not end every live lane on it.
-- Test: `crates/providers/src/quota_live/claude.rs::fixed_directory_rejects_changed_account_fingerprint`;
-  `crates/routing/src/tests/availability.rs::account_override_selects_a_pool_member_and_keeps_other_provider_fallbacks`;
-  `crates/providers/src/tests_account_identity.rs::claude_lane_prefers_the_registered_lane_token_and_never_rotates_the_login`.
-  No test asserts tokens are absent from argv and child environments (gap).
-- Owner: `crates/providers/src/identity.rs`, `crates/providers/src/claude.rs`
+Account identity is detected, not guessed; a changed identity around a probe is
+refused. A pin does not switch accounts. Credential custody is owned by
+[supervision](supervisor.md#native-environment-and-sandbox-tool-stores). A registered long-lived lane token is not rotated by the host.
+
+OpenCode models are partitioned by the registered plan, independently of account
+keys and labels. Enumeration keeps one row per registered identity and never
+invents a Zen identity from Go credentials. Plan declarations also own the quota
+source: missing or unrecognised plans retain unknown quota evidence rather than
+using the Go ledger. Free-model pacing and refusals remain
+scoped to the declared free pool.
+
+- Why: misattribution can spend or expose the wrong account.
+- Test: `crates/providers/src/accounts.rs::account_pool_tests::registered_plans_enumerate_once_without_inventing_identities`; `crates/routing/src/tests/availability.rs::registered_opencode_plans_select_independently_of_account_keys`; `crates/providers/src/quota_live/claude.rs::current_registration_requires_its_matching_account_fingerprint`; `crates/routing/src/tests/availability.rs::account_override_selects_a_pool_member_and_keeps_other_provider_fallbacks`; `crates/providers/src/tests_account_identity.rs::claude_lane_prefers_the_registered_lane_token_and_never_rotates_the_login`
+
+## Launch route and role tiers
+
+A role-specific route applies to matching graph nodes; other nodes retain their
+template selection. Template defaults are data.
+
+- Why: callers can choose a route by role without editing a template.
+- Test: `src/fabric/interface.rs::a_role_map_sets_each_node_to_its_role_tier_or_keeps_the_default`
 
 ## Nested lanes
 
@@ -123,7 +159,7 @@ A lane's environment pins its depth, parent attempt and state directory. Inside
 a lane Fabric refuses coordination mutations; graph submission and reads cross
 the attempt-bound host relay.
 - Why: a lane must not move claims or leases.
-- Test: `crates/providers/src/lane.rs::lane_mcp_entries_have_attempt_unique_agent_labels`
+- Test: `crates/providers/src/lane.rs::pinned_environments_have_attempt_unique_agent_labels`
 
 ### The host validates and launches children
 
@@ -136,16 +172,13 @@ Parent settlement closes attached children, never detached ones.
   authoritative.
 - Test: `src/fabric/interface.rs::tests::child_launch_crosses_the_lane_transport_and_provisions_writer_fanout`;
   `crates/fabric-runtime/src/graph/relay_tests.rs::writer_children_get_their_own_worktree_and_depth_is_bounded`;
-  `::successful_parent_closes_attached_children_but_not_detached_children`
+  `crates/fabric-runtime/src/graph/relay_tests.rs::successful_parent_closes_attached_children_but_not_detached_children`
 - Owner: `crates/cli/src/fabric/graph_relay.rs`, `crates/fabric-runtime/src/graph/relay.rs`
 
 ### Host-pinned Git
 
-Git is resolved and validated on the host and pinned as the only Git a lane may
-run; a replaced or loosened target is refused. Writers use a private Git
-directory with the shared object store read-only, and the host imports and
-publishes the result itself.
-- Why: a lane-chosen Git or helper would run with host authority.
-- Test: `crates/os/src/git.rs::override_wins_and_invalid_override_does_not_fall_back`;
-  `crates/confinement/src/utility.rs::executable_pin_keeps_the_locator_and_follows_a_swapped_target`
-- Owner: `crates/os/src/git.rs`
+The host resolves and validates the Git executable pinned for lane use; a
+replaced or loosened target is refused.
+
+- Why: lane-chosen executables must not run with host authority.
+- Test: `crates/os/src/git.rs::override_wins_and_invalid_override_does_not_fall_back`; `crates/confinement/src/utility.rs::executable_pin_keeps_the_locator_and_follows_a_swapped_target`

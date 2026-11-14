@@ -500,7 +500,6 @@ dependencies = [
  "provenant-config",
  "provenant-confinement",
  "provenant-core",
- "provenant-fabric-mcp",
  "provenant-fabric-runtime",
  "provenant-fabric-store",
  "provenant-os",
@@ -535,7 +534,6 @@ dependencies = [
  "provenant-config",
  "provenant-confinement",
  "provenant-core",
- "provenant-fabric-mcp",
  "provenant-fabric-runtime",
  "provenant-fabric-store",
  "provenant-os",
@@ -578,6 +576,7 @@ version = "1.11.2"
 dependencies = [
  "provenant-config",
  "provenant-core",
+ "provenant-fabric-store",
  "provenant-os",
  "provenant-records",
  "provenant-supervisor",
@@ -602,23 +601,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "provenant-fabric-mcp"
-version = "1.11.2"
-dependencies = [
- "provenant-core",
- "provenant-fabric-runtime",
- "provenant-fabric-store",
- "provenant-os",
- "provenant-records",
- "provenant-test-support",
- "regex",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
 name = "provenant-fabric-runtime"
 version = "1.11.2"
 dependencies = [
@@ -629,7 +611,6 @@ dependencies = [
  "provenant-os",
  "provenant-records",
  "provenant-routing",
- "provenant-sqlite",
  "provenant-test-support",
  "rusqlite",
  "serde",
@@ -713,6 +694,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+ "toml_edit",
 ]
 
 [[package]]

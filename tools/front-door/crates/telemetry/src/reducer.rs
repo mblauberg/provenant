@@ -1,5 +1,5 @@
 use crate::{BillingKind, Categories, PriceError, PriceIdentity, PriceTable};
-use provenant_core::{AttemptId, ProjectId, TaskId, WallTime};
+use provenant_core::{AttemptId, ProjectId, WallTime};
 use provenant_records::{AttemptFact, AttemptOutcome, RouteFact, Usage};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
@@ -109,6 +109,7 @@ pub fn quota_usage(
             model: None,
             effort: None,
             account_label: None,
+            account_key: None,
         });
         let key = (route.provider, route.account_label, Some(fact.project_id));
         rows.entry(key).or_default().lane.record_usage(
@@ -127,7 +128,11 @@ pub fn quota_usage(
         if window.project.is_some_and(|p| Some(p) != chair.project) {
             continue;
         }
-        let key = (Some(chair.adapter), Some(chair.account), chair.project);
+        let key = (
+            Some(chair.adapter),
+            Some(chair.account_identity.account_key()),
+            chair.project,
+        );
         if sessions.insert((key.clone(), chair.session)) {
             let row = rows.entry(key).or_default();
             add(&mut row.sessions, 1)?;
@@ -752,7 +757,7 @@ fn stats_inner(
     let mut daily = BTreeMap::<(String, RouteFact), Accumulator>::new();
     let mut attempts = BTreeSet::<AttemptId>::new();
     let mut numbers = BTreeSet::new();
-    let mut latest = BTreeMap::<(ProjectId, TaskId), (u64, AttemptOutcome)>::new();
+    let mut latest = BTreeMap::<(ProjectId, String), (u64, AttemptOutcome)>::new();
     let mut coverage = Coverage::default();
     let mut budget = GroupBudget::default();
     for mut fact in facts {
@@ -772,8 +777,10 @@ fn stats_inner(
                 "time order or zero attempt number",
             ));
         }
+        let work_label = format!("{}/{}", fact.key.graph(), fact.key.node());
+        let work_attempt = u64::from(fact.key.attempt());
         if !attempts.insert(fact.attempt_id)
-            || !numbers.insert((fact.project_id, fact.task_id, fact.attempt_number))
+            || !numbers.insert((fact.project_id, work_label.clone(), work_attempt))
         {
             return Err(TelemetryError::InvalidFact(
                 "duplicate attempt ID or task/attempt number",
@@ -789,6 +796,7 @@ fn stats_inner(
             model: None,
             effort: None,
             account_label: None,
+            account_key: None,
         });
         let cost = priced(
             &fact.usage,
@@ -956,10 +964,10 @@ fn stats_inner(
             )?;
         }
         let current = latest
-            .entry((fact.project_id, fact.task_id))
+            .entry((fact.project_id, work_label))
             .or_insert((0, fact.terminal_state));
-        if fact.attempt_number > current.0 {
-            *current = (fact.attempt_number, fact.terminal_state);
+        if work_attempt > current.0 {
+            *current = (work_attempt, fact.terminal_state);
         }
         total.record(&fact, cost.numerator, cost.missing_cost, cost.subscription)?;
     }
@@ -1054,7 +1062,7 @@ fn chair_stats(
         seen = true;
         if !sessions.insert((
             chair.adapter.clone(),
-            chair.account.clone(),
+            chair.account_identity.account_key(),
             chair.session.clone(),
         )) {
             continue;
@@ -1069,7 +1077,11 @@ fn chair_stats(
                 format!("{}/{}", chair.adapter, model.model)
             };
             let cost = priced(&model.usage, Some(&chair.adapter), Some(&name), prices)?;
-            let key = (chair.adapter.clone(), chair.account.clone(), name);
+            let key = (
+                chair.adapter.clone(),
+                chair.account_identity.account_key(),
+                name,
+            );
             if !groups.contains_key(&key) && groups.len() as u64 >= MAX_GROUPS {
                 return Err(TelemetryError::TooLarge("10,000 groups"));
             }

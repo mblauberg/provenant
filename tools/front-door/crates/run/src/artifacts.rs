@@ -1,5 +1,5 @@
 use crate::*;
-use provenant_core::{RelativePath, RunId};
+use provenant_core::RelativePath;
 use provenant_os::fs::{Directory, FileKind, Metadata, PayloadTree, PublishMode};
 use provenant_records::{CanonicalV1, PathWire};
 use std::{ffi::OsStr, io::Read, path::Component};
@@ -18,10 +18,9 @@ pub(crate) fn subdir(parent: &Directory, name: &OsStr, create: bool) -> Result<D
 }
 
 pub(crate) fn remove_temporary_best_effort(attempt: &Directory) -> provenant_os::fs::Result<()> {
-    // The alias goes first, so `tmp` still marks the attempt for GC if this is
-    // interrupted.
-    crate::short_temporary::remove(attempt);
-    remove_entry_tree(attempt, OsStr::new("tmp"))
+    // Terminal, unreserved scratch is a payload: fixture lock files no longer
+    // guard live data. The same no-follow owner-mode repair is used by GC.
+    remove_unreserved_terminal_temporary(attempt)
 }
 
 /// Reconcile and retention GC may dispose of lock-named payloads after proving the
@@ -130,7 +129,7 @@ impl RunStore {
                 limit: RESULT_LIMIT,
             });
         }
-        let dir = self.attempt_dir(record.run_id, id, false)?;
+        let dir = self.attempt_dir(id, false)?;
         let mut file = dir.open_read(OsStr::new("result.md"))?;
         let before = file.metadata()?;
         if let Some(check) = PathCheck::file(before) {
@@ -212,38 +211,31 @@ impl RunStore {
         Ok(result)
     }
 
-    pub(crate) fn run_dir(&self, run: RunId, create: bool) -> Result<Directory> {
-        let runs = subdir(&self.root, OsStr::new("runs"), create)?;
-        subdir(&runs, OsStr::new(&run.to_string()), create)
-    }
+    /// An attempt's directory: `attempts/<AttemptId>` under the store root.
+    /// Receipt paths are relative to the root, and node ids never appear.
     pub(crate) fn attempt_dir(
         &self,
-        run: RunId,
         attempt: provenant_core::AttemptId,
         create: bool,
     ) -> Result<Directory> {
-        let run = self.run_dir(run, create)?;
-        let attempts = subdir(&run, OsStr::new("attempts"), create)?;
+        let attempts = subdir(&self.root, OsStr::new("attempts"), create)?;
         subdir(&attempts, OsStr::new(&attempt.to_string()), create)
     }
-    pub(crate) fn artifact_bytes(
-        &self,
-        run: RunId,
-        artifact: &ArtifactRecord,
-        limit: u64,
-    ) -> Result<Vec<u8>> {
+    pub(crate) fn artifact_bytes(&self, artifact: &ArtifactRecord, limit: u64) -> Result<Vec<u8>> {
         if artifact.bytes > limit {
             return Err(RunError::TooLarge { limit });
         }
-        let mut dir = self.run_dir(run, false)?;
+        // Receipt paths are relative to the store root.
+        let mut dir: Option<Directory> = None;
         let path = artifact.path.to_relative_path()?;
         let mut parts = path.as_path().components().peekable();
         while let Some(Component::Normal(name)) = parts.next() {
             if parts.peek().is_some() {
-                dir = subdir(&dir, name, false)?;
+                dir = Some(subdir(dir.as_ref().unwrap_or(&self.root), name, false)?);
             } else {
+                let dir = dir.as_ref().unwrap_or(&self.root);
                 if let Some(check) = PathCheck::file(dir.metadata_at(name, false)?) {
-                    return Err(RunError::unsafe_entry(&dir, name, check));
+                    return Err(RunError::unsafe_entry(dir, name, check));
                 }
                 let bytes = dir.read_bounded(name, limit)?;
                 let length = bytes.len() as u64;
@@ -579,14 +571,9 @@ mod tests {
         let call = crate::tests::call(&clock, &cancel);
         let store = RunStore::open(&context, &call)?;
         let run = crate::tests::input();
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         store.create(&run, &call)?;
-        seal(
-            &store.attempt_dir(run.run_id, id, false)?,
-            "result.md",
-            b"hello",
-            1024,
-        )?;
+        seal(&store.attempt_dir(id, false)?, "result.md", b"hello", 1024)?;
         let path = artifact_path(id, "result.md")?;
         let record = |bytes: u64, digest: provenant_records::FileDigest| ArtifactRecord {
             extra: Default::default(),
@@ -597,14 +584,12 @@ mod tests {
             redacted: false,
         };
         let honest = record(5, CanonicalV1::file_digest(b"hello"));
-        assert_eq!(store.artifact_bytes(run.run_id, &honest, 1024)?, b"hello");
+        assert_eq!(store.artifact_bytes(&honest, 1024)?, b"hello");
         let artifact = format!("attempts/{id}/result.md");
         assert_eq!(
-            crate::tests::artifact_provenance(store.artifact_bytes(
-                run.run_id,
-                &record(6, CanonicalV1::file_digest(b"hello")),
-                1024
-            )),
+            crate::tests::artifact_provenance(
+                store.artifact_bytes(&record(6, CanonicalV1::file_digest(b"hello")), 1024)
+            ),
             ArtifactProvenance {
                 check: ArtifactCheck::RecordedLength,
                 artifact: artifact.clone(),
@@ -613,11 +598,9 @@ mod tests {
             }
         );
         assert_eq!(
-            crate::tests::artifact_provenance(store.artifact_bytes(
-                run.run_id,
-                &record(5, CanonicalV1::file_digest(b"hellp")),
-                1024
-            )),
+            crate::tests::artifact_provenance(
+                store.artifact_bytes(&record(5, CanonicalV1::file_digest(b"hellp")), 1024)
+            ),
             ArtifactProvenance {
                 check: ArtifactCheck::RecordedDigest,
                 artifact,
@@ -642,17 +625,14 @@ mod tests {
         let store = RunStore::open(&context, &call)?;
         let run = crate::tests::input();
         store.create(&run, &call)?;
-        let attempt = run.attempts[0].attempt_id;
-        let relative = Path::new("runs")
-            .join(run.run_id.to_string())
-            .join("attempts")
-            .join(attempt.to_string());
+        let attempt = run.attempt_id;
+        let relative = Path::new("attempts").join(attempt.to_string());
         std::fs::set_permissions(
             context.state_root.as_path().join(&relative),
             std::fs::Permissions::from_mode(0o755),
         )?;
         let error = store
-            .attempt_dir(run.run_id, attempt, false)
+            .attempt_dir(attempt, false)
             .expect_err("group-readable attempt directory");
         assert!(
             matches!(

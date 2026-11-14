@@ -26,7 +26,8 @@ fn repository(project: &Path) -> Result<String> {
 
 fn project_id(resolved: &roots::Resolved) -> Result<Option<ProjectId>> {
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
+    let runtime =
+        provenant_confinement::UtilityRuntime::read_only(git, resolved.roots.state.as_path())?;
     let location = runtime
         .project_location(
             &provenant_os::exec::SystemExecutor::new(1)?,
@@ -101,6 +102,16 @@ impl Tracker {
             }
         }
         db.bind(project, branch, &pr, head, &call)?;
+        use provenant_records::custody::{Subject, SubjectKind};
+        if let Err(error) = crate::custody::acquire(
+            &self.resolved,
+            &[
+                Subject::new(SubjectKind::Pr, number.to_string()),
+                Subject::new(SubjectKind::Branch, branch),
+            ],
+        ) {
+            warn(Some(number), &format!("custody pending: {error}"));
+        }
         Ok(())
     }
 
@@ -159,64 +170,6 @@ impl Tracker {
         }
         Ok(())
     }
-}
-
-/// Read the repository's merged PR snapshot for telemetry grouping.
-pub(crate) fn merged_prs(
-    globals: &Globals,
-    since: Option<jiff::Timestamp>,
-    until: Option<jiff::Timestamp>,
-) -> Result<Vec<PullRequest>> {
-    #[derive(serde::Deserialize)]
-    struct Merged {
-        number: u64,
-        #[serde(rename = "mergedAt")]
-        merged_at: Option<String>,
-    }
-    let tracker = Tracker::resolve(globals)?;
-    let mut argv = vec![
-        "gh".to_owned(),
-        "pr".into(),
-        "list".into(),
-        "--repo".into(),
-        tracker.repository.clone(),
-        "--state".into(),
-        "merged".into(),
-        "--json".into(),
-        "number,mergedAt".into(),
-        "--limit".into(),
-        "1001".into(),
-    ];
-    let mut search = Vec::new();
-    if let Some(since) = since {
-        search.push(format!("merged:>={}", since.strftime("%Y-%m-%d")));
-    }
-    if let Some(until) = until {
-        search.push(format!("merged:<={}", until.strftime("%Y-%m-%d")));
-    }
-    if !search.is_empty() {
-        argv.extend(["--search".into(), search.join(" ")]);
-    }
-    let args = argv.iter().map(String::as_str).collect::<Vec<_>>();
-    let bytes = successful(execute(&tracker.resolved.project, &args)?)?;
-    let rows: Vec<Merged> = serde_json::from_slice(&bytes)?;
-    if rows.len() > 1000 {
-        return Err("merged PR snapshot exceeds 1,000 rows; narrow the time window".into());
-    }
-    let mut merged_prs = Vec::new();
-    for row in rows {
-        let raw = row.merged_at.ok_or("merged PR has no merge timestamp")?;
-        let merged_at = raw.parse::<jiff::Timestamp>()?;
-        if since.is_none_or(|since| merged_at >= since)
-            && until.is_none_or(|until| merged_at < until)
-        {
-            merged_prs.push(PullRequest {
-                repository: tracker.repository.clone(),
-                number: row.number,
-            });
-        }
-    }
-    Ok(merged_prs)
 }
 
 /// GitHub reports whole seconds, and the instant is compared with the local
@@ -290,13 +243,9 @@ pub(super) fn projected_lanes(
             if !seen.insert(contribution.attempt) {
                 continue;
             }
-            let target = provenant_cli::Target {
-                selection: None,
-                run: contribution.run,
-                task: None,
-                attempt: Some(contribution.attempt),
-            };
-            lanes.push(provenant_cli::run::project_retained_attempt(&target, &edge).ok()?);
+            lanes.push(
+                provenant_cli::run::project_retained_attempt(contribution.attempt, &edge).ok()?,
+            );
         }
     }
     Some(lanes)
@@ -384,10 +333,7 @@ pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
         } else {
             "captured"
         };
-        let config = provenant_config::read_with_domains(
-            &resolved.roots,
-            &provenant_cli::domains::SECTIONS,
-        )?;
+        let config = provenant_cli::config_reads::read_for(&resolved.roots, "pr contributions")?;
         let local = provenant_config::lookup_host(&resolved.roots)?;
         let peers: Vec<_> = config
             .domains
@@ -418,13 +364,12 @@ pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
                 .weight_millionths
                 .map_or_else(|| "unknown".into(), |value| format!("{value}/1000000"));
             text.push_str(&format!(
-                "{} role={} model={} account={} weight={} run={} outcome={} queued_at={} finished_at={} pr_count={} ambiguous={} truncated={}\n",
+                "{} role={} model={} account={} weight={} outcome={} queued_at={} finished_at={} pr_count={} ambiguous={} truncated={}\n",
                 attempt.attempt,
                 attempt.role.as_deref().unwrap_or("unknown"),
                 attempt.model.as_deref().unwrap_or("unknown"),
                 attempt.account.as_deref().unwrap_or("unknown"),
                 weight,
-                attempt.run.map_or_else(|| "unknown".into(), |id| id.to_string()),
                 attempt.outcome.map_or_else(|| "unknown".into(), |outcome| serde_json::to_value(outcome).ok().and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_else(|| "unknown".into())),
                 attempt.queued_at.map_or_else(|| "unknown".into(), |time| time.to_string()),
                 attempt.finished_at.map_or_else(|| "unknown".into(), |time| time.to_string()),

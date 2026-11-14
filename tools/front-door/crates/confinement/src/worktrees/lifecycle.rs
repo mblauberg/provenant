@@ -1,5 +1,6 @@
 //! Worktree creation, listing, removal and ref pruning.
 use super::*;
+use std::path::Component;
 
 /// Advance a free, registered linked worktree to a pinned descendant commit.
 /// Writer exclusion covers verification and mutation. Local edits, divergence
@@ -323,7 +324,15 @@ pub fn create(
     request: WorktreeCreate,
     cancel: &CancelToken,
 ) -> Result<WorktreeInfo, WorktreeError> {
-    create_with_default(context, request, cancel, None)
+    let (branch, warning) = setup::branch_name(context, &request.branch, cancel);
+    let request = WorktreeCreate { branch, ..request };
+    create_with_default(
+        context,
+        request,
+        cancel,
+        None,
+        warning.into_iter().collect(),
+    )
 }
 
 /// Fetch a remote branch when no local branch exists and return its exact tip.
@@ -355,11 +364,48 @@ pub fn fetch_remote_branch_tip(
     }
 }
 
+fn open_or_create_layout_directory(
+    root: &Directory,
+    relative: &Path,
+    create: bool,
+    device: u64,
+) -> Result<Directory, WorktreeError> {
+    let mut current: Option<Directory> = None;
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(WorktreeError::InvalidRequest);
+        };
+        let parent = current.as_ref().unwrap_or(root);
+        let child = match parent.open_verified_directory(name) {
+            Ok(child) => child,
+            Err(error) if error.is_not_found() && create => {
+                match parent.mkdir(name, 0o700) {
+                    Ok(()) => parent.sync()?,
+                    Err(error) if error.is_exists() => {}
+                    Err(error) => return Err(error.into()),
+                }
+                parent.open_verified_directory(name)?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let identity = child.metadata()?;
+        if identity.uid != provenant_os::fs::effective_uid()
+            || identity.mode & 0o022 != 0
+            || identity.device != device
+        {
+            return Err(WorktreeError::UnknownWriter);
+        }
+        current = Some(child);
+    }
+    current.ok_or(WorktreeError::InvalidRequest)
+}
+
 fn create_with_default(
     context: &WorktreeContext<'_>,
     request: WorktreeCreate,
     cancel: &CancelToken,
     default: Option<(GitOid, Vec<String>)>,
+    naming_warnings: Vec<String>,
 ) -> Result<WorktreeInfo, WorktreeError> {
     validate_binding(context)?;
     let branch = GitRefName::branch(&request.branch).map_err(|_| WorktreeError::InvalidRequest)?;
@@ -434,7 +480,7 @@ fn create_with_default(
         // only the exact commit the remote fetch proved.
         drop(_lock);
         let default = default_creation_base(context, facts, cancel)?;
-        return create_with_default(context, request, cancel, Some(default));
+        return create_with_default(context, request, cancel, Some(default), naming_warnings);
     }
 
     if create_branch {
@@ -469,40 +515,33 @@ fn create_with_default(
     } else {
         default.as_ref().ok_or(WorktreeError::InvalidRequest)?.0
     };
-    let worktree_root = match context
-        .repo
-        .root_dir()
-        .open_verified_directory(OsStr::new(WORKTREE_ROOT))
-    {
-        Ok(root) => root,
-        Err(error) if error.is_not_found() => {
-            context
-                .repo
-                .root_dir()
-                .mkdir(OsStr::new(WORKTREE_ROOT), 0o700)?;
-            context.repo.root_dir().sync()?;
-            context
-                .repo
-                .root_dir()
-                .open_verified_directory(OsStr::new(WORKTREE_ROOT))?
-        }
-        Err(error) => return Err(error.into()),
-    };
-    let root_identity = worktree_root.metadata()?;
-    if root_identity.uid != provenant_os::fs::effective_uid()
-        || root_identity.mode & 0o022 != 0
-        || root_identity.device != context.repo.root_identity().device
-    {
-        return Err(WorktreeError::UnknownWriter);
-    }
-    let path_name = request.branch.replace('/', "-");
-    if path_name.is_empty() || path_name.len() > 240 || path_name.as_bytes().contains(&0) {
-        return Err(WorktreeError::InvalidRequest);
-    }
-    let target = canonicalize(context.repo.root_path())?
-        .join(WORKTREE_ROOT)
-        .join(&path_name);
-    match worktree_root.metadata_at(OsStr::new(&path_name), false) {
+    let state = context
+        .project_state
+        .current_path()
+        .map_err(|_| WorktreeError::InvalidRequest)?
+        .parent()
+        .and_then(Path::parent)
+        .ok_or(WorktreeError::InvalidRequest)?;
+    let ports = provenant_config::PortTable::read_for(Some(context.repo.root_path()), state)
+        .map_err(WorktreeError::PortConfiguration)?;
+    let target_relative = ports
+        .managed_writer_path(&request.branch)
+        .map_err(WorktreeError::PortConfiguration)?;
+    let parent_relative = target_relative
+        .parent()
+        .ok_or(WorktreeError::InvalidRequest)?;
+    let path_name = target_relative
+        .file_name()
+        .ok_or(WorktreeError::InvalidRequest)?;
+    let worktree_parent = open_or_create_layout_directory(
+        context.repo.root_dir(),
+        parent_relative,
+        true,
+        context.repo.root_identity().device,
+    )?;
+    let parent_identity = worktree_parent.metadata()?;
+    let target = canonicalize(context.repo.root_path())?.join(&target_relative);
+    match worktree_parent.metadata_at(path_name, false) {
         Ok(_) => return Err(WorktreeError::InvalidRequest),
         Err(error) if error.is_not_found() => {}
         Err(_) => return Err(WorktreeError::UnknownWriter),
@@ -513,11 +552,13 @@ fn create_with_default(
         }
     }
     let _writer = cache_writer_guard(context.project_state, &target).map_err(custody_refusal)?;
-    let named_root = context
-        .repo
-        .root_dir()
-        .metadata_at(OsStr::new(WORKTREE_ROOT), false)?;
-    if !root_identity.same_identity(&named_root) {
+    let named_parent = open_or_create_layout_directory(
+        context.repo.root_dir(),
+        parent_relative,
+        false,
+        context.repo.root_identity().device,
+    )?;
+    if !parent_identity.same_identity(&named_parent.metadata()?) {
         return Err(WorktreeError::UnknownWriter);
     }
     let primary_head = primary_head(context, facts, cancel)?;
@@ -571,11 +612,10 @@ fn create_with_default(
     // Still under the registry lock, so no sibling create can interleave
     // between the ref mutation and its ownership record. A failed record
     // leaves the branch unobserved, which only ever retains it.
-    let mut warnings = if create_branch && request.base.is_none() {
-        default.map_or_else(Vec::new, |(_, warnings)| warnings)
-    } else {
-        Vec::new()
-    };
+    let mut warnings = naming_warnings;
+    if create_branch && request.base.is_none() {
+        warnings.extend(default.map_or_else(Vec::new, |(_, warnings)| warnings));
+    }
     if let Err(error) = refs::record_local_branch(context, &branch, base, create_branch, cancel) {
         warnings.push(format!(
             "could not record ownership of {}: {error}; it is retained as unobserved",
@@ -585,7 +625,7 @@ fn create_with_default(
     // The mutation and registration checks are complete. The advisory census
     // must not keep other branches from acquiring the repository registry.
     drop(_lock);
-    warnings.extend(setup::run(context, &target, cancel));
+    warnings.extend(setup::run(context, &target, branch.as_str(), cancel));
     // Setup may leave build output or local edits; report those honestly
     // without turning an advisory setup failure into a creation refusal.
     let dirty = verify_probed_worktree(context, &target, cancel)
@@ -856,6 +896,10 @@ pub(super) fn execute_mutation(
     let _ = context.facts.take_inventory(context);
     context.workers.invalidate();
     let operation = match &mutation {
+        GitMutation::BundleCreate { .. } | GitMutation::CreateArchiveRef { .. } => {
+            GitMutationOperation::BundleCreate
+        }
+        GitMutation::DiscardWorktree { .. } => GitMutationOperation::WorktreeRemove,
         GitMutation::FastForward { .. } => GitMutationOperation::FastForward,
         GitMutation::WorktreeAdd { .. } => GitMutationOperation::WorktreeAdd,
         GitMutation::WorktreeRemove { .. } => GitMutationOperation::WorktreeRemove,
@@ -889,6 +933,7 @@ pub(super) fn execute_mutation(
 pub(super) const MAX_PRUNE_BRANCHES: usize = 100;
 
 pub(super) struct RemovedTree {
+    archive: Option<ArchiveInfo>,
     pub(super) info: WorktreeInfo,
     pub(super) lane_cache: Option<PathBuf>,
     pub(super) _writer: LockGuard,
@@ -905,6 +950,8 @@ pub(super) enum Repository<'a> {
     /// Ordinary removal refreshes the census before locking, then rechecks
     /// ownership under the repository lock.
     Remove,
+    /// Explicit destructive authority, requiring an archive before mutation.
+    Discard,
     /// Output is deleted under writer custody alone. The lock is taken for the
     /// final registration recheck and the Git mutation, and returned with the
     /// tree. `lanes` is the cheap fence rechecked under it.
@@ -993,24 +1040,6 @@ pub(super) fn checked_out_elsewhere(
     Ok(false)
 }
 
-pub(super) fn remove_tree(
-    context: &WorktreeContext<'_>,
-    entry: &GitWorktree,
-    expected_head: GitOid,
-    cancel: &CancelToken,
-    output: &provenant_config::ProjectGcSettings,
-) -> Result<RemovedTree, WorktreeError> {
-    remove_tree_when(
-        context,
-        entry,
-        expected_head,
-        cancel,
-        &|| Ok(()),
-        Some(output),
-        Repository::Remove,
-    )
-}
-
 pub(super) fn remove_tree_when(
     context: &WorktreeContext<'_>,
     entry: &GitWorktree,
@@ -1019,6 +1048,34 @@ pub(super) fn remove_tree_when(
     eligible: &dyn Fn() -> Result<(), WorktreeError>,
     output: Option<&provenant_config::ProjectGcSettings>,
     repository: Repository<'_>,
+) -> Result<RemovedTree, WorktreeError> {
+    remove_tree_when_before_delete(
+        context,
+        entry,
+        expected_head,
+        cancel,
+        eligible,
+        output,
+        repository,
+        |_, _, _| Ok(()),
+    )
+}
+
+/// The same fenced removal core with one durable-authority callback after the
+/// final worktree and repository checks and immediately before Git mutation.
+pub(super) fn remove_tree_when_before_delete(
+    context: &WorktreeContext<'_>,
+    entry: &GitWorktree,
+    expected_head: GitOid,
+    cancel: &CancelToken,
+    eligible: &dyn Fn() -> Result<(), WorktreeError>,
+    output: Option<&provenant_config::ProjectGcSettings>,
+    repository: Repository<'_>,
+    before_delete: impl FnOnce(
+        &VerifiedWorktree,
+        &Path,
+        Option<&ArchiveInfo>,
+    ) -> Result<(), WorktreeError>,
 ) -> Result<RemovedTree, WorktreeError> {
     if entry.locked || entry.prunable {
         return Err(WorktreeError::GitEntryHeld {
@@ -1039,7 +1096,7 @@ pub(super) fn remove_tree_when(
     eligible()?;
     let prepared =
         worktree_dirty_at(context, locked.verified.repo(), cancel)? == WorktreeCondition::Ignored;
-    if prepared {
+    if prepared && !matches!(repository, Repository::Discard) {
         let settings = output.cloned().unwrap_or_default();
         gc::prepare_removal(
             context,
@@ -1048,7 +1105,10 @@ pub(super) fn remove_tree_when(
             &settings.keep,
             cancel,
         )?;
-        if matches!(repository, Repository::Held | Repository::Remove) {
+        if matches!(
+            repository,
+            Repository::Held | Repository::Remove | Repository::Discard
+        ) {
             refresh_census_under_custody(context, &canonical)?;
         }
     }
@@ -1056,7 +1116,7 @@ pub(super) fn remove_tree_when(
     // eligibility before removing the tree while writer exclusion is held.
     let repository_guard = match repository {
         Repository::Held => None,
-        Repository::Acquire { .. } | Repository::Remove => {
+        Repository::Acquire { .. } | Repository::Remove | Repository::Discard => {
             // Any slow census happens before the repository lock is taken.
             if prepared {
                 eligible()?;
@@ -1071,7 +1131,7 @@ pub(super) fn remove_tree_when(
         expected_head,
     )?;
     let fenced = match repository {
-        Repository::Held | Repository::Remove => {
+        Repository::Held | Repository::Remove | Repository::Discard => {
             eligible()?;
             true
         }
@@ -1080,15 +1140,33 @@ pub(super) fn remove_tree_when(
     if !fenced {
         return Err(WorktreeError::UnknownWriter);
     }
-    match worktree_cleanliness_at(context, locked.verified.repo(), cancel)? {
+    let (_submodule_guards, submodules) = hold_submodules(context, locked.verified.repo(), cancel)?;
+    let cleanliness = worktree_cleanliness_at(context, locked.verified.repo(), cancel)?;
+    let discard = matches!(repository, Repository::Discard);
+    match &cleanliness {
         WorktreeCleanliness::Clean => {}
-        WorktreeCleanliness::Dirty(paths) => return Err(WorktreeError::Dirty(paths)),
+        WorktreeCleanliness::Dirty(_) | WorktreeCleanliness::Ignored if discard => {}
+        WorktreeCleanliness::Dirty(paths) => return Err(WorktreeError::Dirty(paths.clone())),
         WorktreeCleanliness::Ignored => return Err(WorktreeError::Dirty(String::new())),
         WorktreeCleanliness::GitOperationInProgress => {
             return Err(WorktreeError::GitOperationInProgress);
         }
         WorktreeCleanliness::Unknown => return Err(WorktreeError::UnknownWriter),
     }
+    // Explicit discard always has a durable archive before its retirement intent
+    // and Git mutation; the archive id and exact tip become the S2 proof.
+    let archive = if discard {
+        let captured = archive::capture(context, locked.verified.repo(), expected_head, cancel)?;
+        tree_unchanged(
+            &context.facts.fresh_inventory(context, cancel)?,
+            entry,
+            expected_head,
+        )?;
+        Some(captured)
+    } else {
+        None
+    };
+    before_delete(&locked.verified, &canonical, archive.as_ref())?;
     // A cache that cannot be derived must not block removal; warn and skip it.
     let cargo_cache = crate::permissions::worktree_cargo_cache(context.home, &locked.verified)
         .map_err(|error| warn_cache_removal(&error))
@@ -1096,8 +1174,14 @@ pub(super) fn remove_tree_when(
     let verified_path = locked.verified.path().to_path_buf();
     execute_mutation(
         context,
-        GitMutation::WorktreeRemove {
-            path: verified_path,
+        if discard || !submodules.is_empty() {
+            GitMutation::DiscardWorktree {
+                path: verified_path,
+            }
+        } else {
+            GitMutation::WorktreeRemove {
+                path: verified_path,
+            }
         },
         cancel,
     )?;
@@ -1119,6 +1203,7 @@ pub(super) fn remove_tree_when(
     };
     let writer = locked.writer.take().ok_or(WorktreeError::UnknownWriter)?;
     Ok(RemovedTree {
+        archive,
         info,
         lane_cache: cargo_cache.map(|cache| cache.path),
         _writer: writer,
@@ -1199,7 +1284,7 @@ pub(super) fn pin_integration(
 }
 
 /// The worktree a name refers to: its branch, or its directory name under
-/// `.worktrees/`. Two different worktrees matching one name are ambiguous.
+/// the configured worktree layout. Two different worktrees matching one name are ambiguous.
 pub(super) fn named_worktree<'a>(
     entries: &'a [GitWorktree],
     name: &str,
@@ -1361,22 +1446,31 @@ pub(super) fn settle_branch(
     branch: &GitRefName,
     tip: GitOid,
     disposition: Disposition,
+    landing: Option<&provenant_records::custody::LandedEvidence>,
+    forge: Option<&dyn Fn() -> ForgeObservation>,
     cancel: &CancelToken,
     outcome: &mut RemoveOutcome,
-) -> Result<(), WorktreeError> {
-    let discard = match disposition {
+) -> Result<Option<provenant_records::custody::LandedEvidence>, WorktreeError> {
+    let (discard, completion) = match disposition {
         Disposition::Keep(reason) => {
             retain(outcome, branch, reason);
-            return Ok(());
+            return Ok(None);
         }
-        Disposition::Merged => false,
-        Disposition::Discard => true,
+        Disposition::Merged => {
+            let evidence = landing.ok_or(WorktreeError::RegistrationUnconfirmed)?;
+            if evidence.predicate != provenant_records::custody::LandingPredicate::Landed {
+                return Err(WorktreeError::InvalidRequest);
+            }
+            revalidate_landing_evidence_with_forge(context, tip, evidence, forge, cancel)?;
+            (false, Some(evidence.clone()))
+        }
+        Disposition::Discard => (true, None),
     };
     context.repo.revalidate()?;
     let fresh = context.facts.fresh_inventory(context, cancel)?;
     if checked_out_elsewhere(&fresh, branch, None)? {
         retain(outcome, branch, RetainReason::CheckedOut);
-        return Ok(());
+        return Ok(None);
     }
     match context
         .facts
@@ -1385,14 +1479,17 @@ pub(super) fn settle_branch(
         Ok(current) if current == tip => {}
         Ok(_) | Err(WorktreeError::NotFound) => {
             retain(outcome, branch, RetainReason::Changed);
-            return Ok(());
+            return Ok(None);
         }
         Err(error) => {
             retain(outcome, branch, retain_reason(&error));
-            return Ok(());
+            return Ok(None);
         }
     }
     context.repo.revalidate()?;
+    if let Some(evidence) = &completion {
+        revalidate_landing_evidence_with_forge(context, tip, evidence, forge, cancel)?;
+    }
     let _ = context.facts.take_inventory(context);
     let deleted = execute_git_mutation(
         context.executor,
@@ -1415,10 +1512,11 @@ pub(super) fn settle_branch(
         } else {
             outcome.pruned_refs.push(short);
         }
+        Ok(completion)
     } else {
         retain(outcome, branch, RetainReason::Changed);
+        Ok(None)
     }
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1432,6 +1530,7 @@ pub(super) fn remove_merged_candidate(
     outcome: &mut RemoveOutcome,
     detached: &mut Vec<RemovedTree>,
     output: &provenant_config::ProjectGcSettings,
+    retirement: Option<(&dyn RetirementPort, provenant_core::ActorId)>,
 ) -> Result<(), WorktreeError> {
     let Some(tip) = branch_tips.get(branch).copied() else {
         retain(outcome, branch, RetainReason::Changed);
@@ -1449,9 +1548,44 @@ pub(super) fn remove_merged_candidate(
             return Ok(());
         }
     };
+    let evidence = provenant_records::custody::LandedEvidence {
+        predicate: provenant_records::custody::LandingPredicate::Landed,
+        source: provenant_records::custody::LandingSource::IntegrationTarget {
+            reference: range.integration.as_str().to_owned(),
+            commit: range.tip,
+        },
+    };
+    let completion = provenant_records::custody::RemovalEvidence::Landing {
+        evidence: evidence.clone(),
+    };
+    let decision =
+        retirement.map(
+            |(_, authority)| provenant_records::custody::RetirementDecision::Discard {
+                authority,
+                evidence: provenant_records::custody::RemovalEvidence::Landing {
+                    evidence: evidence.clone(),
+                },
+            },
+        );
+    // A ref-only retirement has no worktree writer lock to keep the local
+    // generation stable. Take repository custody before its durable intent and
+    // hold it through the exact-tip branch settlement below.
+    let repository = if entry.is_none() {
+        Some(repository_lock(context, LockMode::Exclusive, cancel)?)
+    } else {
+        None
+    };
     // Held until the ref is settled, so the writer lock covers the deletion.
+    let mut record = None;
     let mut held = match entry {
-        None => None,
+        None => {
+            if let (Some((port, _)), Some(decision)) = (retirement, decision.clone()) {
+                record = Some(super::gc::begin_reference_retirement(
+                    context, port, branch, tip, decision, cancel,
+                )?);
+            }
+            None
+        }
         Some(entry) => {
             if entry.head != tip {
                 retain(outcome, branch, RetainReason::Changed);
@@ -1461,31 +1595,142 @@ pub(super) fn remove_merged_candidate(
                 retain(outcome, branch, RetainReason::LockedOrPrunable);
                 return Ok(());
             }
-            match remove_tree(context, entry, tip, cancel, output) {
-                Ok(removed) => {
-                    outcome.removed.push(removed.info.clone());
-                    Some(removed)
+            let canonical = canonicalize(&entry.path)?;
+            let eligible = || {
+                let refs = retained_refs(context, Some(branch), None, &[], cancel)?;
+                if matches!(
+                    removal_evidence(context, tip, &refs, cancel)?,
+                    LandingAssessment::Proven(_)
+                ) {
+                    Ok(())
+                } else {
+                    Err(WorktreeError::IdentityChanged)
                 }
+            };
+            let mut record_started = None;
+            let removed = remove_tree_when_before_delete(
+                context,
+                entry,
+                tip,
+                cancel,
+                &eligible,
+                Some(output),
+                Repository::Remove,
+                |verified, path, _archive| {
+                    if path != canonical {
+                        return Err(WorktreeError::IdentityChanged);
+                    }
+                    revalidate_landing_evidence(context, tip, &evidence, cancel)?;
+                    if let (Some((port, authority)), Some(decision)) =
+                        (retirement, decision.clone())
+                    {
+                        let owner = load_owner(verified)?;
+                        let lane = WorktreeInfo {
+                            warnings: Vec::new(),
+                            path: path.to_path_buf(),
+                            branch: Some(branch.as_str().to_owned()),
+                            head: tip,
+                            dirty: WorktreeCondition::Clean,
+                            owner: Ok(owner),
+                            primary: false,
+                            occupancy: Occupancy::Available,
+                        };
+                        record_started = Some(super::gc::begin_worktree_retirement(
+                            context, port, &lane, verified, decision, cancel,
+                        )?);
+                    }
+                    Ok(())
+                },
+            );
+            let mut removed = match removed {
+                Ok(removed) => removed,
                 Err(error) => {
+                    if let (Some((port, _)), Some(record)) = (retirement, record_started.as_ref()) {
+                        super::gc::fail_worktree_retirement(
+                            port,
+                            record,
+                            &canonical,
+                            error.to_string(),
+                        )?;
+                    }
                     retain(outcome, branch, retain_reason(&error));
                     return Ok(());
                 }
+            };
+            if let Some(archive) = removed.archive.take() {
+                outcome.archives.push(archive);
             }
+            outcome.removed.push(removed.info.clone());
+            if let (Some((port, _)), Some(record_started)) = (retirement, record_started.as_ref()) {
+                match super::gc::finish_worktree_retirement(
+                    port,
+                    record_started,
+                    &removed.info.path,
+                    completion.clone(),
+                ) {
+                    Ok(finished) => record = Some(finished),
+                    Err(error) => {
+                        removed.repository = None;
+                        detached.push(removed);
+                        return Err(error);
+                    }
+                }
+            } else if retirement.is_some() {
+                removed.repository = None;
+                detached.push(removed);
+                return Err(WorktreeError::RegistrationUnconfirmed);
+            }
+            Some(removed)
         }
     };
-    // A branch without a worktree still needs exclusion for ref settlement.
-    let repository = if held.is_none() {
-        Some(repository_lock(context, LockMode::Exclusive, cancel)?)
-    } else {
-        None
+    let result = settle_branch(
+        context,
+        branch,
+        tip,
+        disposition,
+        Some(&evidence),
+        None,
+        cancel,
+        outcome,
+    );
+    let completion = result
+        .as_ref()
+        .ok()
+        .and_then(|evidence| evidence.as_ref())
+        .map(
+            |evidence| provenant_records::custody::RemovalEvidence::Landing {
+                evidence: evidence.clone(),
+            },
+        )
+        .unwrap_or(completion);
+    let reference_removed = outcome
+        .pruned_refs
+        .iter()
+        .any(|name| name == branch.short_name())
+        || outcome
+            .discarded
+            .iter()
+            .any(|discarded| discarded.branch == branch.short_name());
+    let reference_update = match (retirement, record.as_ref()) {
+        (Some((port, _)), Some(record)) => Some(super::gc::finish_reference_retirement(
+            port,
+            record,
+            reference_removed,
+            completion,
+        )),
+        (Some(_), None) => Some(Err(WorktreeError::RegistrationUnconfirmed)),
+        (None, _) => None,
     };
-    let result = settle_branch(context, branch, tip, disposition, cancel, outcome);
     drop(repository);
     if let Some(mut removed) = held.take() {
         removed.repository = None;
         detached.push(removed);
     }
-    result
+    result?;
+    if let Some(update) = reference_update {
+        update?;
+    }
+    Ok(())
 }
 
 /// The integration branch the primary checkout is on, pinned to its tip. A
@@ -1528,27 +1773,121 @@ pub fn check_removal_preconditions(
     }
 }
 
-/// Remove one clean managed linked worktree, or prune a caller-scoped set of
-/// merged managed worktrees and their exact expected-old local refs.
-pub fn remove(
-    context: &WorktreeContext<'_>,
-    request: WorktreeRemove,
-    cancel: &CancelToken,
-) -> Result<RemoveOutcome, WorktreeError> {
-    remove_with_output(context, request, cancel, &Default::default())
+fn retirement_decision_for_removal(
+    authority: provenant_core::ActorId,
+    remove_reference: bool,
+    landing: Option<provenant_records::custody::LandedEvidence>,
+    archive: Option<&ArchiveInfo>,
+    expected_tip: GitOid,
+) -> Result<provenant_records::custody::RetirementDecision, WorktreeError> {
+    use provenant_records::custody::{ArchiveProof, RemovalEvidence, RetirementDecision};
+    let evidence = if let Some(archive) = archive {
+        let proof = ArchiveProof {
+            id: archive.id.clone(),
+            tip: archive.tip,
+        };
+        if !proof.valid_for(expected_tip) {
+            return Err(WorktreeError::IdentityChanged);
+        }
+        RemovalEvidence::ExplicitDiscard {
+            archive: Some(proof),
+        }
+    } else if let Some(evidence) = landing {
+        RemovalEvidence::Landing { evidence }
+    } else {
+        return Err(WorktreeError::RegistrationUnconfirmed);
+    };
+    Ok(if remove_reference {
+        RetirementDecision::Discard {
+            authority,
+            evidence,
+        }
+    } else {
+        RetirementDecision::RetireWorktree {
+            authority,
+            evidence,
+        }
+    })
 }
 
-pub fn remove_with_output(
+fn revalidate_landing_evidence(
+    context: &WorktreeContext<'_>,
+    tip: GitOid,
+    evidence: &provenant_records::custody::LandedEvidence,
+    cancel: &CancelToken,
+) -> Result<(), WorktreeError> {
+    use provenant_records::custody::LandingSource;
+
+    let target = match &evidence.source {
+        LandingSource::RetainedRef { commit, .. }
+        | LandingSource::IntegrationTarget { commit, .. } => *commit,
+        LandingSource::TreeEquivalent { target, .. } => *target,
+        LandingSource::ForgeMerged {
+            merge_commit: Some(commit),
+            ..
+        } => *commit,
+        LandingSource::ForgeMerged {
+            merge_commit: None, ..
+        } => return Err(WorktreeError::IdentityChanged),
+    };
+    if super::gc::verify_retirement_landing_evidence(context, tip, target, evidence, cancel)? {
+        Ok(())
+    } else {
+        Err(WorktreeError::IdentityChanged)
+    }
+}
+
+fn revalidate_landing_evidence_with_forge(
+    context: &WorktreeContext<'_>,
+    tip: GitOid,
+    evidence: &provenant_records::custody::LandedEvidence,
+    forge: Option<&dyn Fn() -> ForgeObservation>,
+    cancel: &CancelToken,
+) -> Result<(), WorktreeError> {
+    use provenant_records::custody::LandingSource;
+
+    if let LandingSource::ForgeMerged {
+        pr,
+        head,
+        merge_commit: None,
+    } = &evidence.source
+    {
+        return match forge.map(|read| read()) {
+            Some(ForgeObservation::Merged {
+                pr: current_pr,
+                head: current_head,
+                ..
+            }) if current_pr == *pr && *current_head == *head && *head == tip => Ok(()),
+            _ => Err(WorktreeError::IdentityChanged),
+        };
+    }
+
+    revalidate_landing_evidence(context, tip, evidence, cancel)
+}
+
+/// Remove one named worktree or prune a caller-scoped set of merged refs.
+/// Durable retirement intent is written before any worktree or ref mutation.
+pub fn remove_with_retirement(
     context: &WorktreeContext<'_>,
     request: WorktreeRemove,
     cancel: &CancelToken,
     output: &provenant_config::ProjectGcSettings,
+    port: &dyn RetirementPort,
+    authority: provenant_core::ActorId,
 ) -> Result<RemoveOutcome, WorktreeError> {
-    remove_with_owner(context, request, cancel, output, None)
+    remove_with_owner(
+        context,
+        request,
+        cancel,
+        output,
+        None,
+        Some((port, authority)),
+    )
 }
 
 /// Remove a freshly created lane only while it is still owned by this operation.
 /// The owner is checked again under repository and writer custody.
+#[cfg(test)]
 pub fn remove_created_by_operation(
     context: &WorktreeContext<'_>,
     name: String,
@@ -1567,6 +1906,7 @@ pub fn remove_created_by_operation(
         cancel,
         &Default::default(),
         Some(operation),
+        None,
     )
 }
 
@@ -1576,6 +1916,7 @@ fn remove_with_owner(
     cancel: &CancelToken,
     output: &provenant_config::ProjectGcSettings,
     operation: Option<&provenant_core::OperationId>,
+    retirement: Option<(&dyn RetirementPort, provenant_core::ActorId)>,
 ) -> Result<RemoveOutcome, WorktreeError> {
     validate_binding(context)?;
     let mut detached = Vec::new();
@@ -1590,6 +1931,9 @@ fn remove_with_owner(
                 integration,
                 expected_head,
             } => {
+                if discard && retirement.is_none() {
+                    return Err(WorktreeError::RegistrationUnconfirmed);
+                }
                 let (integration, integration_tip) = match integration {
                     Some(text) => pin_integration(context, &text, cancel)?,
                     None => primary_integration(context, cancel)?,
@@ -1597,8 +1941,22 @@ fn remove_with_owner(
                 let branch_tips = read_branch_tips(context, cancel)?;
                 let entry = named_worktree(&entries, &name, context.repo.root_path())?;
                 let tip = entry.head;
-                let remove_named = || {
+
+                let remove_named = |retirement_plan: Option<(
+                    bool,
+                    Option<provenant_records::custody::LandedEvidence>,
+                )>| {
                     let eligible = || {
+                        if !discard {
+                            let refs =
+                                retained_refs(context, entry.branch.as_ref(), None, &[], cancel)?;
+                            if !matches!(
+                                removal_evidence(context, tip, &refs, cancel)?,
+                                LandingAssessment::Proven(_)
+                            ) {
+                                return Err(WorktreeError::IdentityChanged);
+                            }
+                        }
                         if let Some(operation) = operation {
                             let tree = verify_worktree(context.repo, &entry.path)?;
                             let owner = load_owner(&tree)?.ok_or(WorktreeError::UnknownWriter)?;
@@ -1610,15 +1968,123 @@ fn remove_with_owner(
                         }
                         Ok(())
                     };
-                    remove_tree_when(
+                    let canonical = canonicalize(&entry.path)?;
+                    let mut retirement_record = None;
+                    let mut retirement_completion = None;
+                    let result = remove_tree_when_before_delete(
                         context,
                         entry,
                         tip,
                         cancel,
                         &eligible,
                         Some(output),
-                        Repository::Remove,
-                    )
+                        if discard {
+                            Repository::Discard
+                        } else {
+                            Repository::Remove
+                        },
+                        |verified, path, archive| {
+                            if let Some((port, authority)) = retirement {
+                                if path != canonical {
+                                    return Err(WorktreeError::IdentityChanged);
+                                }
+                                let (remove_reference, landing) = retirement_plan
+                                    .as_ref()
+                                    .ok_or(WorktreeError::RegistrationUnconfirmed)?;
+                                let decision = retirement_decision_for_removal(
+                                    authority,
+                                    *remove_reference,
+                                    landing.clone(),
+                                    archive,
+                                    tip,
+                                )?;
+                                let completion = if let Some(archive) = archive {
+                                    let proof = provenant_records::custody::ArchiveProof {
+                                        id: archive.id.clone(),
+                                        tip: archive.tip,
+                                    };
+                                    if !proof.valid_for(tip) {
+                                        return Err(WorktreeError::IdentityChanged);
+                                    }
+                                    provenant_records::custody::RemovalEvidence::ExplicitDiscard {
+                                        archive: Some(proof),
+                                    }
+                                } else {
+                                    let evidence = landing
+                                        .as_ref()
+                                        .ok_or(WorktreeError::RegistrationUnconfirmed)?;
+                                    revalidate_landing_evidence(context, tip, evidence, cancel)?;
+                                    provenant_records::custody::RemovalEvidence::Landing {
+                                        evidence: evidence.clone(),
+                                    }
+                                };
+                                retirement_completion = Some(completion);
+                                let owner = load_owner(verified)?;
+                                let lane = WorktreeInfo {
+                                    warnings: Vec::new(),
+                                    path: path.to_path_buf(),
+                                    branch: entry
+                                        .branch
+                                        .as_ref()
+                                        .map(|branch| branch.as_str().to_owned()),
+                                    head: tip,
+                                    dirty: WorktreeCondition::Clean,
+                                    owner: Ok(owner),
+                                    primary: false,
+                                    occupancy: Occupancy::Available,
+                                };
+                                retirement_record = Some(super::gc::begin_worktree_retirement(
+                                    context, port, &lane, verified, decision, cancel,
+                                )?);
+                            }
+                            Ok(())
+                        },
+                    );
+                    let removed = match result {
+                        Ok(removed) => removed,
+                        Err(error) => {
+                            if let (Some((port, _)), Some(record)) =
+                                (retirement, retirement_record.as_ref())
+                            {
+                                super::gc::fail_worktree_retirement(
+                                    port,
+                                    record,
+                                    &canonical,
+                                    error.to_string(),
+                                )?;
+                            }
+                            return Err(error);
+                        }
+                    };
+                    let retirement_completion = retirement_completion;
+                    let (retirement_record, finish_error) = match (
+                        retirement,
+                        retirement_record,
+                        retirement_completion.as_ref(),
+                    ) {
+                        (Some((port, _)), Some(record), Some(completion)) => {
+                            match super::gc::finish_worktree_retirement(
+                                port,
+                                &record,
+                                &removed.info.path,
+                                completion.clone(),
+                            ) {
+                                Ok(record) => (Some(record), None),
+                                Err(error) => (Some(record), Some(error)),
+                            }
+                        }
+                        (Some(_), None, _) => (None, Some(WorktreeError::RegistrationUnconfirmed)),
+                        (Some(_), Some(record), None) => {
+                            (Some(record), Some(WorktreeError::RegistrationUnconfirmed))
+                        }
+                        (None, _, _) => (None, None),
+                    };
+                    Ok::<_, WorktreeError>((
+                        removed,
+                        retirement_record,
+                        retirement_completion,
+                        finish_error,
+                    ))
                 };
                 // `remove_tree` rechecks this tip under the worktree lock, so
                 // a commit made after the caller's check cannot be removed.
@@ -1633,10 +2099,24 @@ fn remove_with_owner(
                     if !discard && !landed::landed_on(context, tip, &target, cancel)? {
                         return Err(WorktreeError::DetachedUnmerged { head: tip });
                     }
-                    let mut removed = remove_named()?;
+                    let landing = (!discard).then(|| provenant_records::custody::LandedEvidence {
+                        predicate: provenant_records::custody::LandingPredicate::Landed,
+                        source: provenant_records::custody::LandingSource::IntegrationTarget {
+                            reference: integration.as_str().to_owned(),
+                            commit: integration_tip,
+                        },
+                    });
+                    let plan = retirement.map(|_| (false, landing));
+                    let (mut removed, _, _, finish_error) = remove_named(plan)?;
+                    if let Some(archive) = removed.archive.take() {
+                        outcome.archives.push(archive);
+                    }
                     outcome.removed.push(removed.info.clone());
                     removed.repository = None;
                     detached.push(removed);
+                    if let Some(error) = finish_error {
+                        return Err(error);
+                    }
                     return Ok(outcome);
                 };
                 if branch_tips.get(branch) != Some(&tip) {
@@ -1654,15 +2134,95 @@ fn remove_with_owner(
                     cancel,
                 );
                 // A dirty or live worktree fails here, before any branch changes.
-                let mut removed = remove_named()?;
+                let plan = if retirement.is_none() {
+                    None
+                } else if discard {
+                    Some((true, None))
+                } else if matches!(disposition, Disposition::Merged) {
+                    Some((
+                        true,
+                        Some(provenant_records::custody::LandedEvidence {
+                            predicate: provenant_records::custody::LandingPredicate::Landed,
+                            source: provenant_records::custody::LandingSource::IntegrationTarget {
+                                reference: integration.as_str().to_owned(),
+                                commit: integration_tip,
+                            },
+                        }),
+                    ))
+                } else {
+                    let refs = retained_refs(context, Some(branch), None, &[], cancel)?;
+                    let evidence = match removal_evidence(context, tip, &refs, cancel)? {
+                        LandingAssessment::Proven(evidence) => evidence,
+                        _ => return Err(WorktreeError::IdentityChanged),
+                    };
+                    Some((false, Some(evidence)))
+                };
+                let (mut removed, record, completion, finish_error) = remove_named(plan)?;
+                if let Some(archive) = removed.archive.take() {
+                    outcome.archives.push(archive);
+                }
                 outcome.removed.push(removed.info.clone());
-                let settled =
-                    settle_branch(context, branch, tip, disposition, cancel, &mut outcome);
+                if let Some(error) = finish_error {
+                    removed.repository = None;
+                    detached.push(removed);
+                    return Err(error);
+                }
+                let settled = settle_branch(
+                    context,
+                    branch,
+                    tip,
+                    disposition,
+                    completion.as_ref().and_then(|completion| match completion {
+                        provenant_records::custody::RemovalEvidence::Landing { evidence } => {
+                            Some(evidence)
+                        }
+                        _ => None,
+                    }),
+                    None,
+                    cancel,
+                    &mut outcome,
+                );
+                let completion = settled
+                    .as_ref()
+                    .ok()
+                    .and_then(|evidence| evidence.as_ref())
+                    .map(
+                        |evidence| provenant_records::custody::RemovalEvidence::Landing {
+                            evidence: evidence.clone(),
+                        },
+                    )
+                    .or(completion);
+                let reference_removed = outcome
+                    .pruned_refs
+                    .iter()
+                    .any(|name| name == branch.short_name())
+                    || outcome
+                        .discarded
+                        .iter()
+                        .any(|discarded| discarded.branch == branch.short_name());
+                let retirement_update = match (retirement, record.as_ref(), completion.as_ref()) {
+                    (Some((port, _)), Some(record), Some(completion)) => {
+                        Some(super::gc::finish_reference_retirement(
+                            port,
+                            record,
+                            reference_removed,
+                            completion.clone(),
+                        ))
+                    }
+                    (Some(_), _, _) => Some(Err(WorktreeError::RegistrationUnconfirmed)),
+                    (None, _, _) => None,
+                };
                 removed.repository = None;
                 detached.push(removed);
                 settled?;
+                if let Some(update) = retirement_update {
+                    update?;
+                }
             }
             WorktreeRemove::Merged { integration, scope } => {
+                if retirement.is_none() {
+                    return Err(WorktreeError::RegistrationUnconfirmed);
+                }
                 let (integration, integration_tip) =
                     pin_integration(context, &integration, cancel)?;
                 let branch_tips = read_branch_tips(context, cancel)?;
@@ -1716,6 +2276,7 @@ fn remove_with_owner(
                         &mut outcome,
                         &mut detached,
                         output,
+                        retirement,
                     )?;
                 }
             }

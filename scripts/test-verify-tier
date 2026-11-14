@@ -8,6 +8,7 @@ import unittest
 from unittest import mock
 import io
 import json
+import copy
 import os
 import shlex
 import subprocess
@@ -21,6 +22,12 @@ def load_script(name, script):
 
 
 verify = load_script("verify_tier", "verify-tier")
+
+
+def write_ports(root, verify_values):
+    ports = copy.deepcopy(verify.BUILTIN_PORTS)
+    ports["verify"].update(verify_values)
+    (root / "config/ports.json").write_text(json.dumps(ports))
 
 
 class Selection(unittest.TestCase):
@@ -44,25 +51,68 @@ class Selection(unittest.TestCase):
         self.assertEqual(crates, ["provenant"])
         self.assertEqual(targets, [])
 
-    def test_override_preserves_other_defaults(self):
+    def test_effective_verify_owner_uses_project_and_host_overlay_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "selected-project"
+            workspace = root / "host-workspace"
+            workspace.mkdir(parents=True)
+            ambient_project = Path(tmp) / "ambient-project"
+            ambient_project.mkdir()
+            effective = copy.deepcopy(verify.DEFAULTS)
+            effective.update({
+                "source": "host",
+                "workspace": "host-workspace",
+                "default_tier": "host/default",
+                "tiers": {
+                    "host/default": {"commands": ["default-check"], "selection": "all", "warn_for_host_load": False},
+                    "host/custom": {"commands": ["host-check"], "selection": "all", "warn_for_host_load": False},
+                },
+            })
+            with self.assertRaises(ValueError):
+                verify.config(root, json.dumps({
+                    "schema_version": 2,
+                    "verify": effective,
+                    "tracker": {"backend": "private-host-command"},
+                }))
+            environment = {
+                "PROVENANT_VERIFY_PROJECT_ROOT": str(ambient_project),
+                "PROVENANT_VERIFY_EFFECTIVE_CONFIG_JSON": json.dumps(effective),
+                "PROVENANT_VERIFY_TIER": "host/custom",
+            }
+            with mock.patch.dict(os.environ, environment, clear=False), \
+                 mock.patch.object(verify.subprocess, "check_output", return_value="fixture-commit\n") as check_output, \
+                 mock.patch.object(verify.subprocess, "run", return_value=mock.Mock(returncode=0)) as run, \
+                 mock.patch.object(verify.sys, "argv", ["verify-tier", "--project", str(root)]), \
+                 mock.patch.object(verify.sys, "stdout", new_callable=io.StringIO), \
+                 mock.patch.object(verify.sys, "stderr", new_callable=io.StringIO):
+                self.assertEqual(verify.main(), 0)
+            self.assertEqual(run.call_args.args[0], ["host-check"])
+            self.assertEqual(run.call_args.kwargs["cwd"], workspace)
+            self.assertEqual(check_output.call_args.kwargs["cwd"], root)
+            for call in check_output.call_args_list + run.call_args_list:
+                self.assertFalse(set(verify.BRIDGE_ENV).intersection(call.kwargs["env"]))
+
+    def test_free_form_tiers_do_not_inject_builtin_tier_names(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / ".provenant").mkdir()
-            (root / ".provenant/verify.json").write_text('{"tiers": {"1": ["custom test"]}}')
+            (root / "config").mkdir()
+            write_ports(root, {"default_tier": "assurance/linux", "tiers": {"assurance/linux": {"commands": ["custom test"], "selection": "all", "warn_for_host_load": False}}})
+            self.assertFalse((root / ".provenant").exists())
             cfg = verify.config(root)
-            self.assertEqual(cfg["tiers"]["1"], ["custom test"])
-            self.assertTrue(cfg["tiers"]["2"])
+            self.assertEqual(cfg["tiers"]["assurance/linux"]["commands"], ["custom test"])
+            self.assertNotIn("0", cfg["tiers"])
+            self.assertEqual(cfg["tiers"]["assurance/linux"]["selection"], "all")
 
 
     def test_entry_point_runs_repository_override(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / ".provenant").mkdir()
-            (root / ".provenant/verify.json").write_text('{"tiers": {"2": ["custom-check --full"]}}')
+            (root / "config").mkdir()
+            write_ports(root, {"default_tier": "assurance/full", "tiers": {"assurance/full": {"commands": ["custom-check --full"], "selection": "all", "warn_for_host_load": False}}})
             with mock.patch.object(verify, "ROOT", root), \
                  mock.patch.object(verify.subprocess, "check_output", return_value="abc\n"), \
                  mock.patch.object(verify.subprocess, "run", return_value=mock.Mock(returncode=0)) as run, \
-                 mock.patch.object(verify.sys, "argv", ["verify-tier", "--tier", "2"]), \
+                 mock.patch.object(verify.sys, "argv", ["verify-tier", "--tier", "assurance/full"]), \
                  mock.patch.object(verify.sys, "stdout", new_callable=io.StringIO), \
                  mock.patch.object(verify.sys, "stderr", new_callable=io.StringIO):
                 self.assertEqual(verify.main(), 0)
@@ -89,7 +139,9 @@ class Selection(unittest.TestCase):
 
     def test_t1_prints_matching_path_and_runs_named_binary(self):
         path = "workspace/src/parser.rs"
-        cfg = dict(verify.DEFAULTS, integrations=[{"paths": ["workspace/src/*"], "package": "root", "binary": "parser"}])
+        tiers = dict(verify.DEFAULTS["tiers"])
+        tiers["1"] = {"commands": ["scripts/verify-nextest --profile lane --locked {integration_args}"], "selection": "integrations", "warn_for_host_load": False}
+        cfg = dict(verify.DEFAULTS, integrations=[{"paths": ["workspace/src/*"], "package": "root", "binary": "parser"}], tiers=tiers)
         metadata = json.dumps({"packages": [], "workspace_members": []})
         with mock.patch.object(verify, "config", return_value=cfg), \
              mock.patch.object(verify, "changed_paths", return_value=[path]), \
@@ -103,14 +155,14 @@ class Selection(unittest.TestCase):
         self.assertIn("--test", run.call_args.args[0])
 
     def test_high_load_warns_and_runs_configured_tier(self):
-        cfg = dict(verify.DEFAULTS, local_max_tier=3, runners={"peer": ["runner"]}, tiers={"2": ["true"]})
+        cfg = dict(verify.DEFAULTS, runners={"peer": ["runner"]}, tiers={"full-run": {"commands": ["true"], "selection": "all", "warn_for_host_load": True}})
         metadata = json.dumps({"packages": [], "workspace_members": []})
         with mock.patch.object(verify, "config", return_value=cfg), \
              mock.patch.object(verify, "changed_paths", return_value=[]), \
              mock.patch.object(verify.os, "getloadavg", return_value=(10000, 0, 0)), \
              mock.patch.object(verify.subprocess, "check_output", side_effect=["abc\n", metadata]), \
              mock.patch.object(verify.subprocess, "run", return_value=mock.Mock(returncode=0)) as run, \
-             mock.patch.object(verify.sys, "argv", ["verify-tier", "--tier", "2"]), \
+             mock.patch.object(verify.sys, "argv", ["verify-tier", "--tier", "full-run"]), \
              mock.patch.object(verify.sys, "stdout", new_callable=io.StringIO), \
              mock.patch.object(verify.sys, "stderr", new_callable=io.StringIO) as err:
             self.assertEqual(verify.main(), 0)
@@ -150,21 +202,40 @@ class Selection(unittest.TestCase):
         self.assertEqual(shlex.split(command[3]), ["sh", "-s", "--", "https://example.invalid/repo.git", "abc", "2"])
         self.assertEqual(run.call_args.kwargs["input"], peer.REMOTE)
 
-    def test_dispatched_ci_receipt_is_bound_to_commit(self):
+    def test_dispatched_ci_receipt_is_bound_to_commit_and_tier_task(self):
         ci = load_script("verify_ci", "verify-ci-runner")
+        for tier in ("assurance/linux", "lane"):
+            with self.subTest(tier=tier):
+                run = {"databaseId": 5, "displayTitle": "verify-unique", "headSha": "abc", "status": "completed", "conclusion": "success"}
+                with mock.patch.object(ci.sys, "argv", ["verify-ci-runner", "upstream", "abc", tier]), \
+                     mock.patch.object(ci.uuid, "uuid4", return_value=mock.Mock(hex="unique")), \
+                     mock.patch.object(ci.subprocess, "check_output", side_effect=["abc\trefs/heads/test\n", "https://example.com/owner/repo.git\n", "https://github.com/owner/repo\n", json.dumps([run])]), \
+                     mock.patch.object(ci.subprocess, "run") as dispatch, \
+                     mock.patch.object(ci.sys, "stdout", new_callable=io.StringIO) as out, \
+                     mock.patch.object(ci.sys, "stderr", new_callable=io.StringIO):
+                    with self.assertRaises(SystemExit) as result:
+                        ci.main()
+                self.assertEqual(result.exception.code, 0)
+                self.assertEqual(json.loads(out.getvalue()), {"commit": "abc", "tier": tier, "exit_status": 0})
+                command = dispatch.call_args.args[0]
+                self.assertIn("commit=abc", command)
+                self.assertIn("task=tier", command)
+                self.assertIn(f"tier={tier}", command)
+                self.assertEqual(command[command.index("--repo") + 1], "github.com/owner/repo")
+
+    def test_lane_check_dispatches_the_lane_task_separately(self):
+        lane = load_script("lane_check", "lane-check")
         run = {"databaseId": 5, "displayTitle": "verify-unique", "headSha": "abc", "status": "completed", "conclusion": "success"}
-        with mock.patch.object(ci.sys, "argv", ["verify-ci-runner", "upstream", "abc", "2"]), \
-             mock.patch.object(ci.uuid, "uuid4", return_value=mock.Mock(hex="unique")), \
-             mock.patch.object(ci.subprocess, "check_output", side_effect=["abc\trefs/heads/test\n", "https://example.com/owner/repo.git\n", "https://github.com/owner/repo\n", json.dumps([run])]), \
-             mock.patch.object(ci.subprocess, "run") as dispatch, \
-             mock.patch.object(ci.sys, "stdout", new_callable=io.StringIO) as out, \
-             mock.patch.object(ci.sys, "stderr", new_callable=io.StringIO):
-            with self.assertRaises(SystemExit) as result:
-                ci.main()
-        self.assertEqual(result.exception.code, 0)
-        self.assertEqual(json.loads(out.getvalue()), {"commit": "abc", "tier": "2", "exit_status": 0})
-        self.assertIn("commit=abc", dispatch.call_args.args[0])
-        self.assertEqual(dispatch.call_args.args[0][dispatch.call_args.args[0].index("--repo") + 1], "github.com/owner/repo")
+        with mock.patch.object(lane, "output", side_effect=[
+                 "abc\trefs/heads/test\n", "https://github.com/owner/repo.git",
+                 "https://github.com/owner/repo", json.dumps([run])]), \
+             mock.patch.object(lane.uuid, "uuid4", return_value=mock.Mock(hex="unique")), \
+             mock.patch.object(lane.subprocess, "run") as dispatch, \
+             mock.patch.object(lane.sys, "argv", ["lane-check", "test"]):
+            lane.main()
+        command = dispatch.call_args.args[0]
+        self.assertIn("task=lane", command)
+        self.assertNotIn("tier=lane", command)
 
     def test_nextest_build_and_execution_are_separate_commands(self):
         nextest = load_script("verify_nextest", "verify-nextest")
@@ -191,14 +262,17 @@ class Selection(unittest.TestCase):
     def test_quarantine_and_thread_cap_reach_nextest_run(self):
         cfg = dict(verify.DEFAULTS, workspace=".", test_threads=2,
                    quarantine_command=["quarantine"],
-                   tiers={"2": ["verify-nextest --profile ci {quarantine_args}"]})
-        with mock.patch.object(verify, "config", return_value=cfg), \
-             mock.patch.object(verify.subprocess, "check_output", side_effect=["abc\n", "test(=flaky)\n"]), \
+                   tiers={"2": {"commands": ["verify-nextest --profile ci {quarantine_args}"], "selection": "all", "warn_for_host_load": True}})
+        with mock.patch.dict(os.environ, {name: "private-bridge" for name in verify.BRIDGE_ENV}), \
+             mock.patch.object(verify, "config", return_value=cfg), \
+             mock.patch.object(verify.subprocess, "check_output", side_effect=["abc\n", "test(=flaky)\n"]) as query, \
              mock.patch.object(verify.subprocess, "run", return_value=mock.Mock(returncode=0)) as run, \
-             mock.patch.object(verify.sys, "argv", ["verify-tier", "--tier", "2"]), \
+             mock.patch.object(verify.sys, "argv", ["verify-tier", "--project", str(verify.ROOT), "--tier", "2"]), \
              mock.patch.object(verify.sys, "stdout", new_callable=io.StringIO), \
              mock.patch.object(verify.sys, "stderr", new_callable=io.StringIO):
             self.assertEqual(verify.main(), 0)
+        for call in query.call_args_list + run.call_args_list:
+            self.assertFalse(set(verify.BRIDGE_ENV).intersection(call.kwargs["env"]))
         args = run.call_args.args[0][1:]
         self.assertEqual(args[-2:], ["-E", "not (test(=flaky))"])
         nextest = load_script("nextest_filter", "verify-nextest")
@@ -210,7 +284,7 @@ class Selection(unittest.TestCase):
         self.assertEqual(commands[-1][-2:], ["--test-threads", "2"])
 
     def test_commands_keep_literal_braces(self):
-        cfg = dict(verify.DEFAULTS, tiers={"2": ["command '{literal}'"]})
+        cfg = dict(verify.DEFAULTS, tiers={"2": {"commands": ["command '{literal}'"], "selection": "all", "warn_for_host_load": True}})
         with mock.patch.object(verify, "config", return_value=cfg), \
              mock.patch.object(verify.subprocess, "check_output", return_value="abc\n"), \
              mock.patch.object(verify.subprocess, "run", return_value=mock.Mock(returncode=0)) as run, \
@@ -250,7 +324,7 @@ class Selection(unittest.TestCase):
         cfg = verify.config(verify.ROOT)
         self.assertEqual(cfg["quarantine_command"], ["scripts/flaky-quarantine"])
         for tier in ("2", "3"):
-            self.assertTrue(any("{quarantine_args}" in command for command in cfg["tiers"][tier]))
+            self.assertTrue(any("{quarantine_args}" in command for command in cfg["tiers"][tier]["commands"]))
 
     def test_peer_tier_receives_eof(self):
         peer = load_script("peer_stdin", "verify-peer-runner")

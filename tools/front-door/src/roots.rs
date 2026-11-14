@@ -233,7 +233,8 @@ pub fn resolve(
     inputs.environment_state_dir =
         std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).map(PathBuf::from);
     inputs.workspaces.push(project.clone());
-    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let roots = provenant_os::fs::bind_roots(&inputs)?;
+    report_warnings(&roots);
     Ok(Resolved {
         assets,
         home,
@@ -244,12 +245,27 @@ pub fn resolve(
     })
 }
 
+/// Resolve a new state candidate with every captured root input intact.
+pub fn state_candidate(context: &Roots, candidate: PathBuf) -> Result<Roots, RootError> {
+    let roots = context.with_state_dir(candidate, &provenant_os::fs::SystemPathResolver)?;
+    report_warnings(&roots);
+    Ok(roots)
+}
+
+fn report_warnings(roots: &Roots) {
+    for warning in roots.state.warnings() {
+        eprintln!("warning: {}", warning.message());
+    }
+}
+
 /// Bind a child store's `state_dir` with its resolved parent's `home` and
 /// `assets`. No environment is read.
 pub fn child(home: &Path, assets: &Path, state_dir: PathBuf) -> Result<Roots, RootError> {
     let mut inputs = RootInputs::new(home.to_owned(), assets.to_owned());
     inputs.state_dir = Some(state_dir);
-    Ok(inputs.resolve(&provenant_os::fs::SystemPathResolver)?)
+    let roots = provenant_os::fs::bind_roots(&inputs)?;
+    report_warnings(&roots);
+    Ok(roots)
 }
 /// Canonical home used by root selection and home-relative Fabric identity.
 fn home() -> Result<PathBuf, RootError> {
@@ -266,6 +282,64 @@ fn home() -> Result<PathBuf, RootError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn git_boundaries_use_existing_metadata_and_preserve_installed_release_roots()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let home = base.join("home");
+        let state = base.join("state");
+        let assets = state.join("releases/current");
+        let project = base.join("project");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&assets)?;
+        std::fs::create_dir_all(&project)?;
+        let mut inputs = RootInputs::new(home, assets);
+        inputs.state_dir = Some(state.clone());
+        inputs.workspaces.push(project.clone());
+        let roots = provenant_os::fs::bind_roots(&inputs)?;
+        assert_eq!(roots.state.as_path(), state);
+        assert!(
+            roots
+                .state
+                .warnings()
+                .iter()
+                .any(|warning| warning.protected == inputs.checkout)
+        );
+
+        assert!(state_candidate(&roots, project.clone()).is_ok());
+        let workspace_state = project.join(".agent-run");
+        std::fs::create_dir(&workspace_state)?;
+        let roots = provenant_os::fs::bind_roots(&inputs)?;
+        assert!(matches!(
+            state_candidate(&roots, workspace_state),
+            Err(RootError::State(provenant_core::RootError::Protected {
+                boundary: provenant_core::RootBoundary::DataIntegrity,
+                ..
+            }))
+        ));
+
+        // A worktree marker can point outside the checkout, and its common
+        // directory can be separate again. Every actual Git boundary holds.
+        let common = base.join("metadata");
+        let private = common.join("worktrees/lane");
+        std::fs::create_dir_all(&private)?;
+        std::fs::write(project.join(".git"), "gitdir: ../metadata/worktrees/lane\n")?;
+        std::fs::write(private.join("commondir"), "../..\n")?;
+        let roots = provenant_os::fs::bind_roots(&inputs)?;
+        for metadata in [project.join(".git"), private, common] {
+            assert!(matches!(
+                state_candidate(&roots, metadata),
+                Err(RootError::State(provenant_core::RootError::Protected {
+                    boundary: provenant_core::RootBoundary::GitIsolation,
+                    ..
+                }))
+            ));
+        }
+        Ok(())
+    }
+
     #[test]
     fn discovery_canonicalize_error_remains_io() {
         let cause = provenant_os::git::DiscoveryError::Canonicalize(std::io::Error::from(

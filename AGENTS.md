@@ -5,7 +5,8 @@ This repository is the source of Provenant's global agent rules. They live in
 harness. If your harness did not already load them, read `GLOBAL-AGENTS.md`
 now; they apply here unchanged.
 
-Repository process (tracker, merge policy, verify and release, what a test may
-pin, ambient doctrine rules) is in `MAINTAINING.md`. Task procedures are in
+Repository process (tracker, merge policy, verify and release, ambient doctrine
+rules) is in `MAINTAINING.md`; test invariants live in `skills/test-design/SKILL.md`.
+Task procedures are in
 `docs/runbooks/`; start with `github-workflow.md` for branches, pull requests
 and landing.

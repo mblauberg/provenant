@@ -301,22 +301,6 @@ impl ReadinessFile {
         if scoped.state == ReadinessState::Unavailable {
             return scoped;
         }
-        if let Some(login) = &self.login
-            && login.scope.host == scope.host
-            && login.scope.adapter == scope.adapter
-            && login.scope.account_key == scope.account_key
-            && login.state(now, 0) == LoginExpiryState::Expired
-        {
-            return ReadinessRead {
-                observed_scope: Some(login.scope.clone()),
-                state: ReadinessState::Unavailable,
-                reason: Some(ReadinessReason::LoginExpired),
-                observed_unix_seconds: Some(login.observed_unix_seconds),
-                expires_unix_seconds: Some(login.valid_until_unix_seconds),
-                reset_unix_seconds: None,
-                evidence_ref: Some("login-expiry".into()),
-            };
-        }
         scoped
     }
 
@@ -472,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_expiry_excludes_only_after_expiration_and_expires_with_evidence() {
+    fn login_expiry_metadata_never_synthesizes_a_routing_veto() {
         let file = ReadinessFile {
             login: Some(LoginObservation {
                 scope: ReadinessScope {
@@ -498,15 +482,9 @@ mod tests {
             Some(ReadinessReason::NotProbed)
         );
         let expired = file.get(&route, 200);
-        assert_eq!(expired.state, ReadinessState::Unavailable);
-        assert_eq!(expired.reason, Some(ReadinessReason::LoginExpired));
-        assert!(matches!(
-            expired.project(),
-            provenant_records::RouteReadiness::Unavailable {
-                reason: provenant_records::RouteExclusionReason::LoginExpired,
-                ..
-            }
-        ));
+        assert_eq!(expired.state, ReadinessState::Unknown);
+        assert_eq!(expired.reason, Some(ReadinessReason::NotProbed));
+        assert!(expired.project().is_unknown());
         assert_eq!(
             file.get(&route, 300).reason,
             Some(ReadinessReason::NotProbed)
@@ -909,64 +887,5 @@ mod tests {
         );
         // The file refuses another account's records.
         assert!(ReadinessFile::decode(&bytes, "claude", "other").is_err());
-    }
-
-    #[test]
-    fn poolless_grouped_refusal_clears_from_newer_family_snapshot() {
-        let account = crate::AccountScope {
-            adapter: "agy".into(),
-            account_key: "key".into(),
-            label: "label".into(),
-        };
-        let mut record = crate::AccountRecord::empty(account.clone());
-        record.refusals.push(crate::Refusal {
-            extra: Default::default(),
-            account: account.clone(),
-            model: "gemini-3.8-flash".into(),
-            pool: None,
-            observed_unix_seconds: 100,
-            resets_unix_seconds: Some(500),
-        });
-        record.snapshot = Some(crate::QuotaSnapshot {
-            schema_version: 1,
-            account: account.clone(),
-            revision: 0,
-            status: crate::QuotaStatus::Available,
-            observed_unix_seconds: 190,
-            source_ref: "fixture".into(),
-            authority_ref: None,
-            details: None,
-            windows: vec![crate::QuotaWindow {
-                window_seconds: Some(604800),
-                pool: "gemini.weekly".into(),
-                used_basis_points: 1000,
-                resets_unix_seconds: Some(900),
-            }],
-        });
-        let admission = crate::Admission {
-            policies: crate::source::TEST_POLICIES,
-            now_unix_seconds: 200,
-            records: std::slice::from_ref(&record),
-            pools: &[],
-        };
-        let mut file = ReadinessFile::default();
-        file.sync_refusals(&record, LOCAL_HOST, &admission).unwrap();
-        let scope = ReadinessScope {
-            host: LOCAL_HOST.into(),
-            adapter: "agy".into(),
-            account_key: "key".into(),
-            route: "agy/gemini-3.8-flash".into(),
-        };
-        assert_eq!(file.get(&scope, 200).state, ReadinessState::Unknown);
-
-        record.snapshot.as_mut().unwrap().windows[0].used_basis_points = 10000;
-        let admission = crate::Admission {
-            policies: crate::source::TEST_POLICIES,
-            now_unix_seconds: 200,
-            records: std::slice::from_ref(&record),
-            pools: &[],
-        };
-        file.sync_refusals(&record, LOCAL_HOST, &admission).unwrap();
-        assert_eq!(file.get(&scope, 200).state, ReadinessState::Unavailable);
     }
 }

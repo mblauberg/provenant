@@ -1,10 +1,12 @@
 //! `[domains.run]`: host-owned settings for worktree-write lanes: extra write
 //! paths, and the repository paths a writer may change without forcing review.
 use crate::permissions::{
-    HostPolicySettings, LanePolicy, MandatoryRoots, PathGrant, PathScope, is_credential_root,
+    Availability, HostPolicySettings, LanePolicy, MandatoryRoots, NetworkAccess, OptionalPolicy,
+    PathGrant, PathScope, is_credential_root,
 };
 use crate::review_exempt::{MAX_PATTERNS, ReviewExempt, valid_pattern};
 use provenant_config::{DomainConfig, DomainSection, FieldMetadata, SectionError};
+use provenant_records::{BudgetAction, BudgetGrace, Limit, LimitSource, LimitStrength};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -78,6 +80,15 @@ pub struct RunConfig {
     /// number.
     #[serde(default)]
     pub writer_token_budget: Option<u64>,
+    /// Per-routing-tier writer token budget overrides.
+    #[serde(default)]
+    pub writer_budget_tiers: BTreeMap<String, WriterBudgetTier>,
+    /// Default response when a writer passes its token budget.
+    #[serde(default)]
+    pub writer_budget_action: Option<BudgetAction>,
+    /// Fraction above the token budget allowed before the host acts.
+    #[serde(default)]
+    pub writer_budget_grace: Option<BudgetGrace>,
     /// Warning threshold for encoded bytes in the applied write-grant ledger.
     #[serde(default = "default_write_grant_limit_bytes")]
     pub write_grant_limit_bytes: u64,
@@ -102,6 +113,9 @@ pub struct RunConfig {
     /// Maximum total file bytes in one pinned source view.
     #[serde(default = "default_source_view_bytes")]
     pub source_view_bytes: u64,
+    /// Interval between advisory CPU and process-tree observations (default 5s).
+    #[serde(default = "default_resource_sample_interval_ms")]
+    pub resource_sample_interval_ms: u64,
     /// Route prefixes (`adapter/model`) whose lanes run sandboxed under default
     /// configuration. Empty by default; users can add routes (e.g. OpenCode Zen tier
     /// `opencode/opencode/`). An explicit `lanes.sandbox = "off"` / `--no-sandbox`
@@ -133,17 +147,36 @@ pub enum SandboxSource {
     Parent,
     /// The route matches `domains.run.sandboxed_routes`.
     Route,
-    /// The lane's network is narrower than open; only the sandbox holds it.
-    Network,
-    /// The platform has no unsandboxed launch: Linux keeps refusing lanes.
+    /// Explicit network or path denials require kernel enforcement.
+    Restriction,
+    /// The host platform does not implement sandbox confinement.
     Platform,
     /// The `lanes.sandbox` knob, from the run, graph node or host `[knobs]`.
     Knob,
-    /// A read-only lane under legacy `auto`.
-    ReadOnly,
     /// Default resolution: lanes run unsandboxed like the CLI started by hand.
     Default,
 }
+// One declaration owns restriction discovery and the backend-selection matrix.
+macro_rules! sandbox_restrictions {
+    ($network:ident, $policy:ident; $($name:ident => ($label:literal, $condition:expr)),+ $(,)?) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum SandboxRestriction { $($name),+ }
+        impl SandboxRestriction {
+            pub const ALL: &'static [Self] = &[$(Self::$name),+];
+            pub fn label(self) -> &'static str { match self { $(Self::$name => $label),+ } }
+            pub fn for_policy($network: NetworkAccess, $policy: &OptionalPolicy) -> Vec<Self> {
+                [$(($condition, Self::$name)),+].into_iter()
+                    .filter_map(|(active, restriction)| active.then_some(restriction)).collect()
+            }
+        }
+    };
+}
+sandbox_restrictions! { network, policy;
+    Network => ("network", network != NetworkAccess::Open),
+    ReadScope => ("read scope", !policy.deny_read.is_empty()),
+    WriteScope => ("write scope", !policy.deny_write.is_empty()),
+}
+
 /// What decides one attempt's sandbox.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SandboxInputs<'a> {
@@ -151,12 +184,10 @@ pub struct SandboxInputs<'a> {
     pub route: &'a str,
     /// The sealed `lanes.sandbox` value, if any.
     pub knob: Option<&'a str>,
-    /// The host found the submitting lane sandboxed (or could not tell).
+    /// The shared admission-floor policy requires parent sandbox retention.
     pub parent_sandboxed: bool,
-    /// The lane's effective network is `provider` or `local`.
-    pub network_narrowed: bool,
-    /// The lane cannot write its checkout.
-    pub read_only: bool,
+    /// Resolved explicit denials, discovered from the policy declaration above.
+    pub restrictions: &'a [SandboxRestriction],
     /// The current process is already inside an operating-system sandbox (e.g. Seatbelt).
     pub os_sandboxed: bool,
     /// Whether the host platform supports sandbox confinement (true on macOS).
@@ -169,8 +200,6 @@ pub struct SandboxMode {
     pub requested: bool,
     /// Whether the lane effectively runs under a sandbox.
     pub effective: bool,
-    /// Legacy alias for `effective`.
-    pub sandboxed: bool,
     /// Why the lane runs with or without the sandbox.
     pub source: SandboxSource,
     /// Warning emitted when an explicit request overrides a restriction or cannot be honored.
@@ -178,6 +207,39 @@ pub struct SandboxMode {
     pub warning: Option<String>,
 }
 impl SandboxMode {
+    /// Finalise a selected profile against the actual backend before sealing
+    /// its receipt. Unavailable enforcement warns and leaves the lane runnable.
+    pub fn resolve_backend(
+        &mut self,
+        availability: Availability,
+        restrictions: &[SandboxRestriction],
+        inherited: bool,
+    ) {
+        if !self.effective {
+            return;
+        }
+        if let Availability::Unavailable { reason } = availability {
+            self.effective = inherited;
+            let names = restrictions
+                .iter()
+                .map(|restriction| restriction.label())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let requested = if names.is_empty() {
+                "sandbox profile"
+            } else {
+                &names
+            };
+            let warning = format!(
+                "{requested} restriction not enforced: {reason}; launching without an additional sandbox profile"
+            );
+            self.warning = Some(match self.warning.take() {
+                Some(previous) => format!("{previous}; {warning}"),
+                None => warning,
+            });
+        }
+    }
+
     /// The `PROVENANT_SANDBOX` value.
     pub fn env_value(&self) -> &'static str {
         if self.effective { "on" } else { "off" }
@@ -189,7 +251,7 @@ pub fn current_process_is_sandboxed() -> bool {
     provenant_os::sys::profile::current_process_is_sandboxed()
 }
 /// Default writer token budget.
-pub const DEFAULT_WRITER_TOKEN_BUDGET: u64 = 500_000;
+pub const DEFAULT_WRITER_TOKEN_BUDGET: u64 = 1_000_000;
 fn default_profile_limit_bytes() -> usize {
     512 * 1024
 }
@@ -220,6 +282,9 @@ fn default_source_view_entries() -> u32 {
 fn default_source_view_bytes() -> u64 {
     512 << 20
 }
+fn default_resource_sample_interval_ms() -> u64 {
+    provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL_MS
+}
 fn default_true() -> bool {
     true
 }
@@ -237,9 +302,23 @@ pub struct ProjectRunConfig {
     /// Replaces the host writer token budget for this project.
     #[serde(default)]
     pub writer_token_budget: Option<u64>,
+    /// Replaces the host writer budget action for this project.
+    #[serde(default)]
+    pub writer_budget_action: Option<BudgetAction>,
+    /// Replaces the host writer budget grace for this project.
+    #[serde(default)]
+    pub writer_budget_grace: Option<BudgetGrace>,
     /// Replaces the host `sandbox_cache_reads` for this project.
     #[serde(default)]
     pub sandbox_cache_reads: Option<Vec<PathBuf>>,
+}
+/// Host defaults for a writer's token budget at one routing tier.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WriterBudgetTier {
+    pub token_budget: Option<u64>,
+    pub on_budget: Option<BudgetAction>,
+    pub budget_grace: Option<BudgetGrace>,
 }
 fn default_review_exempt() -> Vec<String> {
     DEFAULT_REVIEW_EXEMPT
@@ -258,6 +337,9 @@ impl Default for RunConfig {
             profile_limit_bytes: default_profile_limit_bytes(),
             grant_limit: default_grant_limit(),
             writer_token_budget: None,
+            writer_budget_tiers: BTreeMap::new(),
+            writer_budget_action: None,
+            writer_budget_grace: None,
             write_grant_limit_bytes: default_write_grant_limit_bytes(),
             argv_prompt_limit_bytes: default_argv_prompt_limit_bytes(),
             continuation_copy_limit_bytes: default_continuation_copy_limit_bytes(),
@@ -266,6 +348,7 @@ impl Default for RunConfig {
             source_view_seconds: default_source_view_seconds(),
             source_view_entries: default_source_view_entries(),
             source_view_bytes: default_source_view_bytes(),
+            resource_sample_interval_ms: default_resource_sample_interval_ms(),
             sandboxed_routes: default_sandboxed_routes(),
             sandbox_cache_reads: Vec::new(),
             projects: BTreeMap::new(),
@@ -301,20 +384,10 @@ impl RunConfig {
             .map(PathBuf::as_path)
     }
 
-    /// Resolve one attempt's sandbox mode.
-    ///
-    /// By default (`lanes.sandbox` unset or `"auto"`), every lane kind (including read-only)
-    /// runs unsandboxed.
-    ///
-    /// An explicit `--no-sandbox` / knob `"off"` takes precedence over the route floor
-    /// (`sandboxed_routes`), narrowed-network floor, and parent floor where Provenant decides it,
-    /// with a one-line warning naming the dropped restriction(s).
-    ///
-    /// An OS-inherited sandbox (the process is already inside Seatbelt) cannot be removed by
-    /// a child process and is always reported honestly as effective (`sandboxed: true`, `source: Parent`).
-    ///
-    /// Off macOS (or when platform confinement is unsupported), every lane resolves as sandboxed
-    /// (`source: Platform`).
+    /// Resolve one attempt's sandbox mode. Ambient launches default off.
+    /// Explicit denials always select a profile, even with an off knob or an
+    /// unsupported platform: backend resolution warns if it cannot enforce it.
+    /// The off knob may still override advisory route and parent floors.
     pub fn sandbox_for(&self, inputs: SandboxInputs<'_>) -> SandboxMode {
         let listed = self
             .sandboxed_routes
@@ -325,26 +398,8 @@ impl RunConfig {
             Some("off") => false,
             Some("on") => true,
             None | Some("auto") => false,
-            Some(_) => true,
+            Some(_) => false,
         };
-
-        if !inputs.platform_supported {
-            let warning = if inputs.knob == Some("off") {
-                Some(
-                    "platform does not support unsandboxed launch; lane remains sandboxed"
-                        .to_string(),
-                )
-            } else {
-                None
-            };
-            return SandboxMode {
-                requested,
-                effective: true,
-                sandboxed: true,
-                source: SandboxSource::Platform,
-                warning,
-            };
-        }
 
         if inputs.os_sandboxed {
             let warning = if inputs.knob == Some("off") {
@@ -355,9 +410,35 @@ impl RunConfig {
             return SandboxMode {
                 requested,
                 effective: true,
-                sandboxed: true,
                 source: SandboxSource::Parent,
                 warning,
+            };
+        }
+
+        if !inputs.restrictions.is_empty() {
+            return SandboxMode {
+                requested,
+                effective: true,
+                source: SandboxSource::Restriction,
+                warning: if inputs.knob == Some("off") {
+                    Some(
+                        "explicit restrictions select a sandbox profile despite sandbox=off".into(),
+                    )
+                } else {
+                    None
+                },
+            };
+        }
+
+        if !inputs.platform_supported {
+            let effective =
+                requested || inputs.parent_sandboxed || (listed && inputs.knob != Some("off"));
+            return SandboxMode {
+                requested,
+                effective,
+                source: SandboxSource::Platform,
+                warning: effective
+                    .then(|| "requested sandbox is unavailable on this platform".into()),
             };
         }
 
@@ -365,9 +446,6 @@ impl RunConfig {
             let mut dropped = Vec::new();
             if listed {
                 dropped.push(format!("route '{}'", inputs.route));
-            }
-            if inputs.network_narrowed {
-                dropped.push("network restriction".to_string());
             }
             if inputs.parent_sandboxed {
                 dropped.push("parent sandbox floor".to_string());
@@ -383,17 +461,15 @@ impl RunConfig {
             return SandboxMode {
                 requested: false,
                 effective: false,
-                sandboxed: false,
                 source: SandboxSource::Knob,
                 warning,
             };
         }
 
-        if matches!(inputs.knob, Some(k) if k != "auto") {
+        if inputs.knob == Some("on") {
             return SandboxMode {
                 requested: true,
                 effective: true,
-                sandboxed: true,
                 source: SandboxSource::Knob,
                 warning: None,
             };
@@ -403,7 +479,6 @@ impl RunConfig {
             SandboxMode {
                 requested: false,
                 effective: true,
-                sandboxed: true,
                 source: SandboxSource::Parent,
                 warning: None,
             }
@@ -411,25 +486,18 @@ impl RunConfig {
             SandboxMode {
                 requested: false,
                 effective: true,
-                sandboxed: true,
                 source: SandboxSource::Route,
-                warning: None,
-            }
-        } else if inputs.network_narrowed {
-            SandboxMode {
-                requested: false,
-                effective: true,
-                sandboxed: true,
-                source: SandboxSource::Network,
                 warning: None,
             }
         } else {
             SandboxMode {
                 requested: false,
                 effective: false,
-                sandboxed: false,
                 source: SandboxSource::Default,
-                warning: None,
+                warning: inputs
+                    .knob
+                    .filter(|value| !matches!(*value, "auto" | "off" | "on"))
+                    .map(|_| "invalid lanes.sandbox; using default off".into()),
             }
         }
     }
@@ -459,24 +527,57 @@ impl RunConfig {
             .or(self.admission_seconds)
     }
 
-    /// The writer token budget for `project`, with where it came from. A
-    /// per-run override wins over the project, then the host setting, then
-    /// the default.
-    pub fn writer_token_budget_for(&self, project: &str, per_run: Option<u64>) -> TokenBudget {
-        let (tokens, source) = if let Some(tokens) = per_run {
-            (tokens, TokenBudgetSource::Run)
-        } else if let Some(tokens) = self
+    /// The writer token budget for `project`, 0 meaning none: the project
+    /// setting, then the host setting, then the default.
+    pub fn writer_token_budget_for(&self, project: &str) -> Limit {
+        let layers = [
+            Some((LimitSource::Default, DEFAULT_WRITER_TOKEN_BUDGET)),
+            self.writer_token_budget
+                .map(|tokens| (LimitSource::Host, tokens)),
+            self.projects
+                .get(project)
+                .and_then(|settings| settings.writer_token_budget)
+                .map(|tokens| (LimitSource::Project, tokens)),
+        ];
+        Limit::resolve(layers.into_iter().flatten(), LimitStrength::Default)
+            .unwrap_or_else(|| Limit::new(0, LimitSource::Default, LimitStrength::Default))
+    }
+
+    /// The action and its source for `project`, with project taking precedence
+    /// over host and the compiled `wrap_up` default.
+    pub fn writer_budget_action_for(&self, project: &str) -> (BudgetAction, LimitSource) {
+        if let Some(action) = self
             .projects
             .get(project)
-            .and_then(|settings| settings.writer_token_budget)
+            .and_then(|settings| settings.writer_budget_action)
         {
-            (tokens, TokenBudgetSource::Project)
-        } else if let Some(tokens) = self.writer_token_budget {
-            (tokens, TokenBudgetSource::Host)
+            (action, LimitSource::Project)
+        } else if let Some(action) = self.writer_budget_action {
+            (action, LimitSource::Host)
         } else {
-            (DEFAULT_WRITER_TOKEN_BUDGET, TokenBudgetSource::Default)
-        };
-        TokenBudget { tokens, source }
+            (BudgetAction::default(), LimitSource::Default)
+        }
+    }
+
+    /// The action grace and its source for `project`, with project taking
+    /// precedence over host and the compiled 0.10 default.
+    pub fn writer_budget_grace_for(&self, project: &str) -> (BudgetGrace, LimitSource) {
+        if let Some(grace) = self
+            .projects
+            .get(project)
+            .and_then(|settings| settings.writer_budget_grace)
+        {
+            (grace, LimitSource::Project)
+        } else if let Some(grace) = self.writer_budget_grace {
+            (grace, LimitSource::Host)
+        } else {
+            (BudgetGrace::default(), LimitSource::Default)
+        }
+    }
+
+    /// The explicitly configured host override for `tier`, if one exists.
+    pub fn writer_budget_tier_for(&self, tier: &str) -> Option<&WriterBudgetTier> {
+        self.writer_budget_tiers.get(tier)
     }
 
     /// The review-exempt paths that apply to `project`: its own list when it
@@ -491,41 +592,6 @@ impl RunConfig {
     /// The compiled matcher for `project`.
     pub fn review_exempt(&self, project: &str) -> ReviewExempt {
         ReviewExempt::new(&self.review_exempt_for(project))
-    }
-
-    /// The matcher a writer settlement uses. A config that cannot be read
-    /// exempts nothing, which may report uncommitted changes.
-    pub fn review_exempt_at(state: &Path, project: &str) -> ReviewExempt {
-        Self::read(state).map_or_else(
-            |_| ReviewExempt::none(),
-            |config| config.review_exempt(project),
-        )
-    }
-}
-/// A resolved writer token budget. `tokens` of 0 means no budget.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub struct TokenBudget {
-    pub tokens: u64,
-    pub source: TokenBudgetSource,
-}
-/// Where a writer token budget was set, for `--explain` and receipts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TokenBudgetSource {
-    Run,
-    Project,
-    Host,
-    Default,
-}
-impl TokenBudgetSource {
-    /// The name shown in `--explain` and receipts.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Run => "run",
-            Self::Project => "project",
-            Self::Host => "host",
-            Self::Default => "default",
-        }
     }
 }
 fn valid_writer_write(path: &Path) -> bool {
@@ -721,6 +787,14 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("profile_limit_bytes", "int"),
     FieldMetadata::new("grant_limit", "int"),
     FieldMetadata::new("writer_token_budget", "int"),
+    FieldMetadata::new("writer_budget_tiers.{tier}.token_budget", "int"),
+    FieldMetadata::enumeration(
+        "writer_budget_tiers.{tier}.on_budget",
+        &["wrap_up", "warn", "stop"],
+    ),
+    FieldMetadata::new("writer_budget_tiers.{tier}.budget_grace", "fraction"),
+    FieldMetadata::enumeration("writer_budget_action", &["wrap_up", "warn", "stop"]),
+    FieldMetadata::new("writer_budget_grace", "fraction"),
     FieldMetadata::int(
         "write_grant_limit_bytes",
         1,
@@ -733,6 +807,7 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("source_view_seconds", "int"),
     FieldMetadata::new("source_view_entries", "int"),
     FieldMetadata::new("source_view_bytes", "int"),
+    FieldMetadata::int("resource_sample_interval_ms", 1, 60000),
     FieldMetadata::new("push_conflict_markers", "bool"),
     FieldMetadata::new("admission_seconds", "integer"),
     FieldMetadata::new("writer_writes", "array"),
@@ -836,8 +911,7 @@ mod tests {
             route,
             knob: None,
             parent_sandboxed: false,
-            network_narrowed: false,
-            read_only: false,
+            restrictions: &[],
             os_sandboxed: false,
             platform_supported: true,
         }
@@ -852,94 +926,103 @@ mod tests {
             toml_edit::de::from_str("sandboxed_routes = [\"opencode/opencode/\"]").unwrap();
         let default_config = RunConfig::default();
 
-        // 1. Invariant: Default is off for every lane kind when no floor applies.
-        for read_only in [false, true] {
-            let input = SandboxInputs {
-                read_only,
-                ..lane_input("codex/gpt-5.5")
-            };
-            let res = default_config.sandbox_for(input);
-            assert_eq!(
-                (res.requested, res.effective, res.source),
-                (false, false, SandboxSource::Default),
-                "default off for read_only={read_only}"
-            );
-            assert_eq!(res.env_value(), "off");
-        }
-
-        // 2. Invariant: Explicit knob beats default and floors (property: explicit beats default).
+        // Ambient defaults and advisory floors remain overridable.
         for config in [&default_config, &config_with_routes] {
             for route in ["codex/gpt-5.5", "opencode/opencode/glm-5.3-flash-free"] {
-                for network_narrowed in [false, true] {
-                    for parent_sandboxed in [false, true] {
-                        for read_only in [false, true] {
-                            let base = SandboxInputs {
-                                route,
-                                knob: None,
-                                parent_sandboxed,
-                                network_narrowed,
-                                read_only,
-                                os_sandboxed: false,
-                                platform_supported: true,
-                            };
+                for parent_sandboxed in [false, true] {
+                    let listed = config.sandboxed_routes.iter().any(|p| route.starts_with(p));
+                    for knob in [None, Some("auto"), Some("off"), Some("on")] {
+                        let mode = config.sandbox_for(SandboxInputs {
+                            knob,
+                            parent_sandboxed,
+                            ..lane_input(route)
+                        });
+                        assert_eq!(mode.requested, knob == Some("on"));
+                        assert_eq!(
+                            mode.effective,
+                            knob == Some("on")
+                                || (knob != Some("off") && (parent_sandboxed || listed))
+                        );
+                    }
+                }
+            }
+        }
 
-                            // Explicit off beats all Provenant floors:
-                            let off_input = SandboxInputs {
-                                knob: Some("off"),
-                                ..base
-                            };
-                            let off_mode = config.sandbox_for(off_input);
-                            assert!(
-                                !off_mode.effective && !off_mode.sandboxed,
-                                "explicit off must always be unsandboxed on macos"
-                            );
-                            assert_eq!(off_mode.source, SandboxSource::Knob);
-                            assert!(!off_mode.requested);
-                            assert_eq!(off_mode.env_value(), "off");
-
-                            let listed =
-                                config.sandboxed_routes.iter().any(|p| route.starts_with(p));
-                            let had_restriction = listed || network_narrowed || parent_sandboxed;
-                            assert_eq!(
-                                off_mode.warning.is_some(),
-                                had_restriction,
-                                "warning expected when restrictions are dropped"
-                            );
-
-                            // Explicit on always sandboxes:
-                            let on_input = SandboxInputs {
-                                knob: Some("on"),
-                                ..base
-                            };
-                            let on_mode = config.sandbox_for(on_input);
-                            assert!(
-                                on_mode.effective && on_mode.sandboxed,
-                                "explicit on must always sandbox"
-                            );
-                            assert_eq!(on_mode.source, SandboxSource::Knob);
-                            assert!(on_mode.requested);
-                            assert_eq!(on_mode.env_value(), "on");
-
-                            // Default behavior (knob is None or auto):
-                            for knob in [None, Some("auto")] {
-                                let def_input = SandboxInputs { knob, ..base };
-                                let def_mode = config.sandbox_for(def_input);
-                                assert!(!def_mode.requested);
-                                if parent_sandboxed {
-                                    assert!(def_mode.effective);
-                                    assert_eq!(def_mode.source, SandboxSource::Parent);
-                                } else if listed {
-                                    assert!(def_mode.effective);
-                                    assert_eq!(def_mode.source, SandboxSource::Route);
-                                } else if network_narrowed {
-                                    assert!(def_mode.effective);
-                                    assert_eq!(def_mode.source, SandboxSource::Network);
-                                } else {
-                                    assert!(!def_mode.effective);
-                                    assert_eq!(def_mode.source, SandboxSource::Default);
-                                }
+        // Every declared restriction is enforced by an available backend or
+        // explicitly warns with its name and the backend's reason. Absence of
+        // a backend never refuses a lane or silently drops a restriction.
+        for restriction in SandboxRestriction::ALL {
+            let restrictions = std::slice::from_ref(restriction);
+            for availability in [
+                Availability::Available {
+                    backend: crate::permissions::BackendKind::MacOsSbpl,
+                },
+                Availability::Unavailable {
+                    reason: crate::permissions::AvailabilityReason::UnsupportedPlatform,
+                },
+                Availability::Unavailable {
+                    reason: crate::permissions::AvailabilityReason::SandboxExecutableMissing,
+                },
+                Availability::Unavailable {
+                    reason: crate::permissions::AvailabilityReason::SandboxExecutableUntrusted,
+                },
+                Availability::Unavailable {
+                    reason: crate::permissions::AvailabilityReason::ProbeFailed,
+                },
+            ] {
+                for inherited in [false, true] {
+                    for knob in [None, Some("auto"), Some("off"), Some("on")] {
+                        let mut mode = default_config.sandbox_for(SandboxInputs {
+                            restrictions,
+                            knob,
+                            ..lane_input("command/probe")
+                        });
+                        assert!(mode.effective, "{restriction:?} selects a profile");
+                        mode.resolve_backend(availability, restrictions, inherited);
+                        match availability {
+                            Availability::Available { .. } => assert!(mode.effective),
+                            Availability::Unavailable { reason } => {
+                                assert_eq!(mode.effective, inherited);
+                                let warning = mode
+                                    .warning
+                                    .as_deref()
+                                    .expect("unavailable enforcement must be disclosed");
+                                assert!(warning.contains(restriction.label()));
+                                assert!(warning.contains(&reason.to_string()));
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        for network in [
+            NetworkAccess::Open,
+            NetworkAccess::Local,
+            NetworkAccess::Provider,
+        ] {
+            for deny_read in [false, true] {
+                for deny_write in [false, true] {
+                    let grant = PathGrant {
+                        path: "/fixture/restricted".into(),
+                        scope: PathScope::Subtree,
+                    };
+                    let policy = OptionalPolicy {
+                        network,
+                        deny_read: deny_read.then_some(grant.clone()).into_iter().collect(),
+                        deny_write: deny_write.then_some(grant).into_iter().collect(),
+                    };
+                    let restrictions = SandboxRestriction::for_policy(network, &policy);
+                    for platform_supported in [false, true] {
+                        let mode = default_config.sandbox_for(SandboxInputs {
+                            restrictions: &restrictions,
+                            platform_supported,
+                            ..lane_input("command/probe")
+                        });
+                        assert_eq!(
+                            mode.effective,
+                            network != NetworkAccess::Open || deny_read || deny_write
+                        );
                     }
                 }
             }
@@ -956,7 +1039,7 @@ mod tests {
                 };
                 let mode = default_config.sandbox_for(input);
                 assert!(
-                    mode.effective && mode.sandboxed,
+                    mode.effective,
                     "inherited OS sandbox must always be reported effective"
                 );
                 assert_eq!(mode.source, SandboxSource::Parent);
@@ -969,7 +1052,7 @@ mod tests {
             }
         }
 
-        // 4. Invariant: Unsupported platform always resolves sandboxed.
+        // 4. Unsupported platforms never turn an implicit sandbox on.
         for knob in [None, Some("auto"), Some("off"), Some("on")] {
             let input = SandboxInputs {
                 knob,
@@ -977,12 +1060,23 @@ mod tests {
                 ..lane_input("codex/gpt-5.5")
             };
             let mode = default_config.sandbox_for(input);
-            assert!(
-                mode.effective && mode.sandboxed,
-                "unsupported platform must always resolve sandboxed"
-            );
+            assert_eq!(mode.effective, knob == Some("on"));
+            assert_eq!(mode.requested, knob == Some("on"));
             assert_eq!(mode.source, SandboxSource::Platform);
         }
+    }
+    #[test]
+    fn a_recorded_mode_names_effectiveness_once() -> Result<(), Box<dyn std::error::Error>> {
+        let mode = RunConfig::default().sandbox_for(writer("codex/gpt-6-luna"));
+        let value = serde_json::to_value(&mode)?;
+        let fields: Vec<_> = value
+            .as_object()
+            .into_iter()
+            .flat_map(|o| o.keys())
+            .collect();
+        assert!(fields.contains(&&"effective".to_string()), "{value}");
+        assert!(!fields.contains(&&"sandboxed".to_string()), "{value}");
+        Ok(())
     }
     #[test]
     fn sandboxed_routes_and_cache_reads_are_configurable_and_validated()
@@ -992,16 +1086,16 @@ mod tests {
         assert!(
             !open
                 .sandbox_for(writer("opencode/opencode/glm-5.3-flash-free"))
-                .sandboxed
+                .effective
         );
         let wider: RunConfig =
             toml_edit::de::from_str("sandboxed_routes = [\"opencode/\", \"cursor/\"]")?;
         assert!(
             wider
                 .sandbox_for(writer("opencode/opencode-go/x"))
-                .sandboxed
+                .effective
         );
-        assert!(wider.sandbox_for(writer("cursor/grok-4.7")).sandboxed);
+        assert!(wider.sandbox_for(writer("cursor/grok-4.7")).effective);
         let bad: RunConfig = toml_edit::de::from_str("sandboxed_routes = [\"\", \"has space/\"]")?;
         let fields: Vec<_> = bad.validate().into_iter().map(|e| e.field).collect();
         assert_eq!(fields, ["sandboxed_routes.0", "sandboxed_routes.1"]);
@@ -1025,19 +1119,22 @@ mod tests {
     }
     #[test]
     fn a_host_setting_equal_to_the_default_still_reports_host() {
-        let unset = RunConfig::default().writer_token_budget_for("p", None);
+        let unset = RunConfig::default().writer_token_budget_for("p");
         assert_eq!(
-            (unset.tokens, unset.source),
-            (DEFAULT_WRITER_TOKEN_BUDGET, TokenBudgetSource::Default)
+            (unset.value, unset.source),
+            (DEFAULT_WRITER_TOKEN_BUDGET, LimitSource::Default)
         );
-        let host: RunConfig = toml_edit::de::from_str("writer_token_budget = 500000\n").unwrap();
-        let budget = host.writer_token_budget_for("p", None);
+        let host: RunConfig = toml_edit::de::from_str(&format!(
+            "writer_token_budget = {DEFAULT_WRITER_TOKEN_BUDGET}\n"
+        ))
+        .unwrap();
+        let budget = host.writer_token_budget_for("p");
         assert_eq!(
-            (budget.tokens, budget.source),
-            (500_000, TokenBudgetSource::Host)
+            (budget.value, budget.source),
+            (DEFAULT_WRITER_TOKEN_BUDGET, LimitSource::Host)
         );
         let off: RunConfig = toml_edit::de::from_str("writer_token_budget = 0\n").unwrap();
-        assert_eq!(off.writer_token_budget_for("p", None).tokens, 0);
+        assert_eq!(off.writer_token_budget_for("p").value, 0);
     }
     #[test]
     fn accepts_absolute_directories() {
@@ -1192,7 +1289,7 @@ writer_writes = []
     }
 
     #[test]
-    fn read_uses_the_state_config_and_fails_closed_to_no_exemption() -> std::io::Result<()> {
+    fn read_resolves_review_exemptions_and_rejects_invalid_values() -> std::io::Result<()> {
         let state = tempfile::tempdir()?;
         assert_eq!(RunConfig::read(state.path())?, RunConfig::default());
         let write = |text: &str| std::fs::write(state.path().join("config.toml"), text);
@@ -1202,16 +1299,13 @@ writer_writes = []
         assert_eq!(RunConfig::read(state.path())?.review_exempt, ["a/"]);
         write("schema_version = 1\n[domains.run.projects.p]\nreview_exempt = false\n")?;
         assert!(RunConfig::read(state.path()).is_err());
-        write("schema_version = 1\n[domains.run]\nreview_exempt = ['a/']\n")?;
-        assert!(RunConfig::review_exempt_at(state.path(), "p").covers(b"a/b"));
         // Other domains are not this reader's business.
         write("schema_version = 1\n[domains.other]\nfuture = true\n")?;
         assert_eq!(RunConfig::read(state.path())?, RunConfig::default());
         write("schema_version = 1\n[domains.run]\nreview_exempt = ['../x']\n")?;
         assert!(RunConfig::read(state.path()).is_err());
-        assert!(RunConfig::review_exempt_at(state.path(), "p").is_empty());
         write("not toml [")?;
-        assert!(RunConfig::review_exempt_at(state.path(), "p").is_empty());
+        assert!(RunConfig::read(state.path()).is_err());
         Ok(())
     }
 

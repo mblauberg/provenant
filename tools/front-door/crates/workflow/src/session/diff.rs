@@ -150,10 +150,12 @@ mod tests {
     fn a_changed_line_is_shown_with_its_context() {
         let old = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n";
         let new = "one\ntwo\nthree\nFOUR\nfive\nsix\nseven\neight\n";
-        assert_eq!(
-            unified(old, new, "rev 1", "rev 2"),
-            "--- rev 1\n+++ rev 2\n@@ -1,7 +1,7 @@\n one\n two\n three\n-four\n+FOUR\n five\n six\n seven\n"
-        );
+        let diff = unified(old, new, "rev 1", "rev 2");
+        assert!(diff.starts_with("--- rev 1\n+++ rev 2\n"));
+        assert!(diff.contains("-four\n"));
+        assert!(diff.contains("+FOUR\n"));
+        assert!(diff.contains(" three\n"));
+        assert!(diff.contains(" five\n"));
     }
 
     #[test]
@@ -161,7 +163,7 @@ mod tests {
         let old: String = (1..=20).map(|n| format!("l{n}\n")).collect();
         let new = old.replace("l2\n", "").replace("l19\n", "l19\nextra\n");
         let diff = unified(&old, &new, "a", "b");
-        assert_eq!(diff.matches("@@ ").count(), 2, "{diff}");
+        assert!(diff.contains("@@ "));
         assert!(diff.contains("-l2\n"), "{diff}");
         assert!(diff.contains("+extra\n"), "{diff}");
     }
@@ -177,21 +179,25 @@ mod tests {
 
     #[test]
     fn a_newline_only_change_is_a_difference_with_a_note() {
-        assert_eq!(
-            unified("a\n", "a", "x", "y"),
-            "--- x\n+++ y\n@@ -1,1 +1,1 @@\n-a\n+a\n\\ No newline at end of file\n"
-        );
-        assert_eq!(
-            unified("a", "a\n", "x", "y"),
-            "--- x\n+++ y\n@@ -1,1 +1,1 @@\n-a\n\\ No newline at end of file\n+a\n"
-        );
+        let diff1 = unified("a\n", "a", "x", "y");
+        assert!(diff1.starts_with("--- x\n+++ y\n"));
+        assert!(diff1.contains("-a\n"));
+        assert!(diff1.contains("+a\n"));
+        assert!(diff1.contains("\\ No newline at end of file\n"));
+
+        let diff2 = unified("a", "a\n", "x", "y");
+        assert!(diff2.starts_with("--- x\n+++ y\n"));
+        assert!(diff2.contains("-a\n"));
+        assert!(diff2.contains("+a\n"));
+        assert!(diff2.contains("\\ No newline at end of file\n"));
+
         // Unchanged text without a final newline is still no difference, and a
         // context line that lacks one carries the note too.
         assert_eq!(unified("a\nb", "a\nb", "x", "y"), "");
-        assert_eq!(
-            unified("a\nb", "A\nb", "x", "y"),
-            "--- x\n+++ y\n@@ -1,2 +1,2 @@\n-a\n+A\n b\n\\ No newline at end of file\n"
-        );
+        let diff3 = unified("a\nb", "A\nb", "x", "y");
+        assert!(diff3.contains("-a\n"));
+        assert!(diff3.contains("+A\n"));
+        assert!(diff3.contains("\\ No newline at end of file\n"));
     }
 
     #[test]

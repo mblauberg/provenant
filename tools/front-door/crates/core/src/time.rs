@@ -10,7 +10,7 @@ pub enum TimeError {
     WallRange,
     #[error("wall time must use canonical RFC3339 UTC with six fractional digits")]
     WallSpelling,
-    #[error("wait budget must be between 1 and {maximum_seconds} seconds")]
+    #[error("wait budget must be at most {maximum_seconds} seconds")]
     WaitLimit { maximum_seconds: u64 },
     #[error("the host monotonic clock or boot identity cannot be read")]
     HostClock,
@@ -192,13 +192,14 @@ pub const MAX_LANE_RUNTIME_SECONDS: u64 = 14_400;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitTransport {
     Cli,
-    Mcp,
+    /// The lane relay: bounded frames and short waits.
+    Relay,
 }
 impl WaitTransport {
     pub const fn maximum_seconds(self) -> u64 {
         match self {
             Self::Cli => MAX_LANE_RUNTIME_SECONDS,
-            Self::Mcp => 55,
+            Self::Relay => 55,
         }
     }
 }
@@ -228,7 +229,10 @@ impl WaitBudget {
         transport: WaitTransport,
     ) -> Result<Self, TimeError> {
         let maximum_seconds = transport.maximum_seconds();
-        if duration.0 < 1_000_000 || duration.0 > maximum_seconds * 1_000_000 {
+        if duration.0 == 0 {
+            return Ok(Self::nonblocking(now));
+        }
+        if duration.0 > maximum_seconds * 1_000_000 {
             return Err(TimeError::WaitLimit { maximum_seconds });
         }
         Ok(Self {
@@ -237,8 +241,8 @@ impl WaitBudget {
         })
     }
     /// A wait of up to `duration`, shortened to the CLI maximum. Unlike
-    /// [`Self::new`] it accepts sub-second waits, for internal lock bounds
-    /// rather than requested waits.
+    /// [`Self::new`] it caps an oversized bound instead of rejecting it and
+    /// preserves zero as an expired ordinary deadline.
     pub fn up_to(now: MonoTime, duration: DurationMicros) -> Self {
         let maximum = DurationMicros(MAX_LANE_RUNTIME_SECONDS * 1_000_000);
         Self {
@@ -256,11 +260,11 @@ impl WaitBudget {
             WaitTransport::Cli,
         )
     }
-    pub fn mcp(now: MonoTime, seconds: u64) -> Result<Self, TimeError> {
+    pub fn relay(now: MonoTime, seconds: u64) -> Result<Self, TimeError> {
         Self::new(
             now,
             DurationMicros::from_seconds(seconds)?,
-            WaitTransport::Mcp,
+            WaitTransport::Relay,
         )
     }
     /// Shorten a validated budget to an external deadline, including subsecond
@@ -383,7 +387,7 @@ mod tests {
     fn external_deadline_caps_subsecond_waits_without_reopening_a_probe() {
         let now = MonoTime::from_micros(1_000_000);
         let later = MonoTime::from_micros(1_250_000);
-        let budget = WaitBudget::mcp(now, 5).unwrap().cap_at(later);
+        let budget = WaitBudget::relay(now, 5).unwrap().cap_at(later);
         assert_eq!(budget.remaining(now).as_micros(), 250_000);
         assert_eq!(budget.remaining(later).as_micros(), 0);
         assert!(!budget.is_nonblocking());
@@ -470,28 +474,31 @@ mod tests {
             MAX_LANE_RUNTIME_SECONDS * 1_000_000
         );
         assert!(WaitBudget::cli(now, MAX_LANE_RUNTIME_SECONDS + 1).is_err());
-        assert!(WaitBudget::mcp(now, 55).is_ok());
-        assert!(WaitBudget::mcp(now, 56).is_err());
+        assert!(WaitBudget::relay(now, 55).is_ok());
+        assert!(WaitBudget::relay(now, 56).is_err());
         assert!(
             WaitBudget::new(
                 now,
                 DurationMicros::from_micros(55_000_001),
-                WaitTransport::Mcp
+                WaitTransport::Relay
             )
             .is_err()
         );
         assert!(WaitBudget::cli(MonoTime::from_micros(u64::MAX), 1).is_err());
         assert!(DurationMicros::from_seconds(u64::MAX).is_err());
-        assert!(WaitBudget::cli(now, 0).is_err());
-        assert!(
-            WaitBudget::new(
-                now,
-                DurationMicros::from_micros(999_999),
-                WaitTransport::Mcp
-            )
-            .is_err()
-        );
-        let wait = WaitBudget::mcp(now, 1).unwrap();
+        let zero_wait = WaitBudget::cli(now, 0).unwrap();
+        assert!(zero_wait.is_nonblocking());
+        assert_eq!(zero_wait.deadline().as_mono_time(), now);
+        assert_eq!(zero_wait.remaining(now), DurationMicros::ZERO);
+        let subsecond_wait = WaitBudget::new(
+            now,
+            DurationMicros::from_micros(999_999),
+            WaitTransport::Relay,
+        )
+        .unwrap();
+        assert!(!subsecond_wait.is_nonblocking());
+        assert_eq!(subsecond_wait.remaining(now).as_micros(), 999_999);
+        let wait = WaitBudget::relay(now, 1).unwrap();
         assert!(wait.deadline().is_expired(MonoTime::from_micros(1_000_010)));
         assert_eq!(
             wait.remaining(MonoTime::from_micros(1_000_011)),

@@ -1,4 +1,4 @@
-//! Local human inbox service, shared by CLI and MCP. No provider or app dependency.
+//! Local human inbox service, used by the CLI. No provider or app dependency.
 use crate::{
     coordination::{
         CoordinationError,
@@ -62,8 +62,7 @@ pub fn overview(
     let page = Store::open_existing(root, &call)
         .and_then(|store| store.pending_human_requests(100, max_bytes, &call))
         .map_err(|error| match error {
-            provenant_fabric_store::Error::SchemaVersion(_)
-            | provenant_fabric_store::Error::UnversionedDatabase => OverviewError::Incompatible,
+            provenant_fabric_store::Error::SchemaVersion(_) => OverviewError::Incompatible,
             _ => OverviewError::Unavailable,
         })?;
     Ok(OverviewBatch {
@@ -561,7 +560,7 @@ impl InboxInput {
             _ => None,
         }
     }
-    /// Structural bounds are shared with MCP's schema. Relationships are checked
+    /// Structural bounds are shared with the CLI grammar. Relationships are checked
     /// by the service, where the authoritative request is available.
     fn validate_fields(&self) -> Result<(), InboxError> {
         match self {

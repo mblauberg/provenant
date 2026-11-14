@@ -6,17 +6,20 @@
       "lanes.max_concurrency_read_only",
       "lanes.max_depth",
       "lanes.silence_seconds",
-      "lanes.slot_wait_seconds",
       "lanes.context_handoff_tokens",
+      "lanes.token_budget",
+      "lanes.budget_action",
+      "lanes.budget_grace",
       "lanes.publish",
       "lanes.local_cargo",
+      "lanes.ci_scope",
+      "lanes.gh_budget",
       "lanes.isolation",
       "lanes.supervision",
       "lanes.receipts",
       "routing.exclude",
       "routing.graph_exclude",
       "fabric.accept_handoff",
-      "fabric.mcp_server",
       "usage.project_attribution",
       "domains.run.writer_token_budget",
       "domains.pr.land.integration",
@@ -29,7 +32,6 @@
       "domains.fabric.graph.limits.expansion_depth",
       "domains.fabric.graph.limits.concurrency",
       "domains.fabric.lanes.max_concurrent_builds",
-      "domains.fabric.lanes.build_wait_minutes",
       "providers.{provider}.update",
       "providers.{provider}.runtime_deadline_seconds",
       "gc.graph_checkpoint_days"
@@ -40,7 +42,8 @@
       "graph_checkpoint_days": {"type": "int", "allowed": "1 to 3650 days", "default": "90", "effect": "Retain terminal graph checkpoints for at least this many days after their last save"},
       "schedule": {"type": "bool", "allowed": "true or false", "default": "true", "effect": "Run the daily scheduled sweep. false also skips admission collection; completion cleanup and landing cleanup still run"},
       "idle_days": {"type": "int", "allowed": "1 to 3650 days", "default": "7", "effect": "Minimum idle age before a lane cache or declared output is collected"},
-      "free_floor": {"type": "size", "allowed": "whole B, K, M, G, T or KiB to TiB; a plain number means GiB", "default": "10% of the state volume, at least 50 GiB", "effect": "Free-space floor for admission, build pauses and pressure collection; below it GC removes further eligible caches oldest first"},
+      "free_floor": {"type": "size", "allowed": "whole B, K, M, G, T or KiB to TiB; a plain number means GiB", "default": "1% of the state volume, capped at 5 GiB", "effect": "Advisory free-space floor for admission, new builds and pressure collection; below it GC removes further eligible caches oldest first"},
+      "critical_free": {"type": "size", "allowed": "same syntax as free_floor; 0B disables the critical stop", "default": "2G", "effect": "Stop dispatch and new builds only below this critical free space. Below free_floor, warn and proceed. Both effective thresholds and sources are reported."},
       "lane_cargo_cache_max": {"type": "size", "allowed": "same syntax as free_floor", "default": "32G", "effect": "Cap all marked lane Cargo caches; evict oldest eligible caches first while retaining live, foreign and unobserved custody"},
       "alert_below": {"type": "size", "allowed": "same syntax as free_floor", "default": "free_floor", "effect": "Free space below which an applied collection emits one gc.low_disk note per dip"},
       "projects.{project}.regenerable": {"type": "string_list", "allowed": "directory names; not .git, .worktrees, absolute or parent paths", "default": "[\"target\"] with a root Cargo.toml, otherwise []", "effect": "Git-ignored directory names collected at any depth in the project's linked worktrees; `.provenant/scratch` is collected in addition without a declaration"},
@@ -106,15 +109,22 @@
     "path": "domains.run",
     "settings": {
       "profile_limit_bytes": {"type": "int", "allowed": "1 or more bytes", "default": "524288", "effect": "Maximum rendered macOS sandbox profile size. Increase for lanes with many grants; profiles pass through argv and may still hit OS limits."},
-      "writer_token_budget": {"type": "int", "allowed": "0 or more tokens", "default": "500000", "effect": "Tokens a writer attempt may use, from the fresh usage its provider reports, before it is ended so a continuation can pick it up. The host then attempts to commit and publish the lane's work; it does not when custody is not absent, when a merge, cherry-pick, revert or rebase is in progress, or when the commit fails, and settlement notes say which. 0 turns the budget off. Cache reads do not count. Enforced for Claude from live usage and for Codex at completed-turn boundaries. Codex reports usage in turn.completed frames, so the host can stop it after a turn passes the budget but cannot interrupt a turn mid-flight. Other providers without live usage are not enforced. Launch warnings or receipt notes say so. Current lane adapters cannot receive a live steer: the 90% warning records an unsupported control receipt. After custody is absent the host attempts a bounded commit only when no Git operation is in progress; an in-progress merge is preserved for stopped-merge handling, a cherry-pick, revert or rebase in progress is left uncommitted, and a skipped or failed commit is reported without replacing the budget outcome. Time queued for a build slot does not count towards the wall-clock deadline, up to lanes.slot_wait_seconds in total. The source (run, project, host or default) is shown with the budget."},
+      "writer_token_budget": {"type": "int", "allowed": "0 or more tokens", "default": "1000000", "effect": "Default fresh-token budget for writer attempts. 0 turns the budget off. Run and template settings may override it; project and host settings supply lower layers, and the winning source is recorded with the limit."},
       "projects.{project}.writer_token_budget": {"type": "int", "allowed": "0 or more tokens", "default": "host writer_token_budget", "effect": "Replace the host writer token budget for this project."},
+      "writer_budget_action": {"type": "enum", "values": ["wrap_up", "warn", "stop"], "default": "wrap_up", "effect": "Default response when a writer passes its token budget. A project's setting replaces the host setting; omitted settings use the compiled wrap_up default."},
+      "writer_budget_grace": {"type": "fraction", "allowed": "0 or more", "default": "0.1", "effect": "Fraction of the writer token budget allowed as grace before applying the budget action. A project's setting replaces the host setting; omitted settings use the compiled 0.1 default."},
+      "projects.{project}.writer_budget_action": {"type": "enum", "values": ["wrap_up", "warn", "stop"], "default": "host writer_budget_action", "effect": "Replace the host writer budget action for this project."},
+      "projects.{project}.writer_budget_grace": {"type": "fraction", "allowed": "0 or more", "default": "host writer_budget_grace", "effect": "Replace the host writer budget grace for this project."},
+      "writer_budget_tiers.{tier}.token_budget": {"type": "int", "allowed": "0 or more tokens", "default": "unset", "effect": "Override the host writer token budget for this routing tier; omitted values inherit lower layers."},
+      "writer_budget_tiers.{tier}.on_budget": {"type": "enum", "values": ["wrap_up", "warn", "stop"], "default": "unset", "effect": "Override the writer budget action for this routing tier; omitted values inherit lower layers."},
+      "writer_budget_tiers.{tier}.budget_grace": {"type": "fraction", "allowed": "0 or more", "default": "unset", "effect": "Override the writer budget grace for this routing tier; omitted values inherit lower layers."},
       "grant_limit": {"type": "int", "allowed": "1 or more", "default": "128", "effect": "Maximum total plan roots and entries in each provider profile family; authentication and native-control families retain minimum caps of 16 and 64. Increase for lanes needing more roots."},
       "write_grant_limit_bytes": {"type": "int", "allowed": "1 to 8388608 bytes", "default": "262144", "effect": "Maximum encoded bytes of applied write grants recorded for a lane. Increase when an otherwise valid grant ledger exceeds the default; terminal records retain bounded headroom."},
       "argv_prompt_limit_bytes": {"type": "int", "allowed": "1 or more bytes", "default": "65536", "effect": "Maximum prompt bytes passed directly to argv adapters. Larger top-level prompts spill to an attempt-owned file; nested attempts refuse rather than use a parent-writable spill. The overall 1 MiB prompt bound and operating-system argument limits still apply."},
       "continuation_copy_limit_bytes": {"type": "int", "allowed": "1 or more bytes", "default": "4294967296", "effect": "Maximum retained provider state bytes copied into a continuation. Available disk space may lower the effective copy budget. Refusals report the setting and source; raise it or reduce state before retrying."},
       "continuation_copy_entries": {"type": "int", "allowed": "1 to 4294967295 entries", "default": "100000", "effect": "Maximum entries searched or copied from retained provider state for a continuation. Refusals report the setting and source; raise it or reduce state before retrying."},
       "continuation_copy_depth": {"type": "int", "allowed": "1 to 4294967295 directories", "default": "32", "effect": "Maximum directory depth searched or copied from retained provider state for a continuation. Raising it does not relax credential, hard-link, filesystem or worktree-overlap guards."},
-      "source_view_seconds": {"type": "int", "allowed": "1 or more seconds", "default": "300", "effect": "Total time allowed to build the pinned source view of a `--use review` lane. The view is built with one batched object read, so a healthy large repository needs far less. Raise it on a slow disk or a heavily loaded host."},
+      "source_view_seconds": {"type": "int", "allowed": "1 or more seconds", "default": "300", "effect": "Total time allowed to build the pinned source view of a `review` lane. The view is built with one batched object read, so a healthy large repository needs far less. Raise it on a slow disk or a heavily loaded host."},
       "source_view_entries": {"type": "int", "allowed": "1 to 4294967295 files", "default": "100000", "effect": "Maximum files in a pinned source view. A larger tree is refused, naming this limit."},
       "source_view_bytes": {"type": "int", "allowed": "1 or more bytes", "default": "536870912", "effect": "Maximum total file bytes in a pinned source view. A larger tree is refused, naming this limit."},
       "writer_writes": {"type": "string_list", "allowed": "up to 16 absolute, safe directory paths outside credential roots", "default": "[]", "effect": "Directories writer lanes may read, write and execute as subtrees; read-only lanes are unchanged"},
@@ -129,7 +139,7 @@
   "host_land_settings": {
     "path": "domains.pr.land",
     "settings": {
-      "poll_seconds": {"type": "int", "allowed": "seconds, 1 or more", "default": "30", "effect": "Initial delay between pending land CI samples; later delays double up to four times this value. A per-command --poll overrides it."},
+      "poll_seconds": {"type": "int", "allowed": "seconds, 1 or more", "default": "30", "effect": "The bundled default leaves adapter cadence in control; any configured value or --poll selects a fixed interval for CI, gate, and post-merge waits, even when it equals the bundled default."},
       "integration": {"type": "enum", "allowed": "batch, single or forge_queue", "default": "batch", "effect": "Integration strategy."},
       "batch_size": {"type": "int", "allowed": "1 or more", "default": "8", "effect": "Maximum pull requests in a batch."},
       "batch_wait_seconds": {"type": "int", "allowed": "0 or more seconds", "default": "30", "effect": "Maximum batch collection time."},
@@ -163,7 +173,7 @@
       "local_gate.mode": {"type": "enum", "allowed": "warn, enforce or off", "default": "warn", "effect": "Fast pre-push gate behaviour."},
       "local_gate.commands": {"type": "string_list", "allowed": "commands", "default": "empty", "effect": "Fast pre-push command plan."},
       "local_gate.timeout_seconds": {"type": "int", "allowed": "1 or more seconds", "default": "60", "effect": "Fast pre-push gate timeout."},
-      "projects.{project}.poll_seconds": {"type": "int", "allowed": "seconds, 1 or more", "default": "inherited", "effect": "Override poll_seconds for this project; omitted fields inherit lower layers."},
+      "projects.{project}.poll_seconds": {"type": "int", "allowed": "seconds, 1 or more", "default": "inherited", "effect": "Set a fixed interval for CI, gate, and post-merge waits; omitted fields inherit lower layers."},
       "projects.{project}.integration": {"type": "enum", "allowed": "batch, single or forge_queue", "default": "inherited", "effect": "Override integration for this project; omitted fields inherit lower layers."},
       "projects.{project}.batch_size": {"type": "int", "allowed": "1 or more", "default": "inherited", "effect": "Override batch_size for this project; omitted fields inherit lower layers."},
       "projects.{project}.batch_wait_seconds": {"type": "int", "allowed": "0 or more seconds", "default": "inherited", "effect": "Override batch_wait_seconds for this project; omitted fields inherit lower layers."},
@@ -197,7 +207,7 @@
       "projects.{project}.local_gate.mode": {"type": "enum", "allowed": "warn, enforce or off", "default": "inherited", "effect": "Override local_gate.mode for this project; omitted fields inherit lower layers."},
       "projects.{project}.local_gate.commands": {"type": "string_list", "allowed": "commands", "default": "inherited", "effect": "Override local_gate.commands for this project; omitted fields inherit lower layers."},
       "projects.{project}.local_gate.timeout_seconds": {"type": "int", "allowed": "1 or more seconds", "default": "inherited", "effect": "Override local_gate.timeout_seconds for this project; omitted fields inherit lower layers."},
-      "tiers.{tier}.poll_seconds": {"type": "int", "allowed": "seconds, 1 or more", "default": "inherited", "effect": "Override poll_seconds for this risk tier; omitted fields inherit lower layers."},
+      "tiers.{tier}.poll_seconds": {"type": "int", "allowed": "seconds, 1 or more", "default": "inherited", "effect": "Set a fixed interval for CI, gate, and post-merge waits; omitted fields inherit lower layers."},
       "tiers.{tier}.integration": {"type": "enum", "allowed": "batch, single or forge_queue", "default": "inherited", "effect": "Override integration for this risk tier; omitted fields inherit lower layers."},
       "tiers.{tier}.batch_size": {"type": "int", "allowed": "1 or more", "default": "inherited", "effect": "Override batch_size for this risk tier; omitted fields inherit lower layers."},
       "tiers.{tier}.batch_wait_seconds": {"type": "int", "allowed": "0 or more seconds", "default": "inherited", "effect": "Override batch_wait_seconds for this risk tier; omitted fields inherit lower layers."},
@@ -273,8 +283,6 @@
       "defaults.lane.max_context": {"type": "int", "allowed": "tokens, 1 or more", "default": "unset", "effect": "Enforced largest context for a lane on this model."},
       "defaults.lane.max_turns": {"type": "int", "allowed": "turns, 1 or more", "default": "unset", "effect": "Enforced most turns for a lane on this model."},
       "defaults.lane.stop_early_ok": {"type": "bool", "allowed": "true or false", "default": "false", "effect": "false asks writers to report completion through the shared handoff."},
-      "defaults.lane.max_continuations": {"type": "int", "allowed": "0 to 8", "default": "2", "effect": "Maximum automatic writer continuations after a stopped_early handoff; 0 disables continuation."},
-      "defaults.lane.resume_continuations": {"type": "bool", "default": "false", "effect": "Resume the retained provider session for automatic writer continuations when available; otherwise start a fresh attempt on the same worktree with the handoff and original brief. Overridable per model and project."},
       "defaults.lane.user_skills": {"type": "enum", "allowed": "discover or off", "default": "inherit domains.lanes.user_skills", "effect": "Override host and project user skill discovery for matching routes. rules.policy.lane.user_skills uses the same values."},
       "defaults.lane.read_only": {"type": "bool", "allowed": "true or false", "default": "per model", "effect": "true refuses write lanes on this model."},
       "defaults.result.check": {"type": "bool", "allowed": "true or false", "default": "per model", "effect": "Check the result for the required sections before accepting it."},
@@ -345,23 +353,22 @@
   "host_lane_build_settings": {
     "path": "domains.fabric.lanes",
     "settings": {
-      "start_spacing_ms": {"type": "int", "min": 0, "max": 600000, "default": 0, "effect": "Milliseconds between starts of the same lane class, for both writers and read-only lanes. Build slots gate heavy runs independently."},
-      "memory_pressure_threshold": {"type": "enum", "allowed": "critical, warning or never", "default": "critical", "effect": "Kernel memory pressure level at which new lanes wait on macOS. warning also defers at critical; never disables the pressure gate. The disk floor still applies; the memory floor is advisory."},
-      "max_concurrent_builds": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": "max(1, min(cores / cargo_build_jobs, GiB of RAM / 6))", "effect": "A build throttle, not a hard cap: cargo builds, tests, checks and lints that a lane's cargo shim runs at once across the host and every project that shares the state directory. Lanes are not capped by it; a command that compiles waits for a free slot. Direct ~/.cargo/bin/cargo, rustc and non-cargo builds are not gated."},
-      "build_wait_minutes": {"type": "int", "min": 1, "max": 1440, "auto_value": -1, "default": 30, "effect": "Minutes a build waits for a build slot or another build's Cargo lock before it gives up with an error."},
+      "start_spacing_ms": {"type": "int", "min": 0, "max": 600000, "default": 0, "effect": "Advisory spacing window between starts of the same class, enforced through policy.ADMISSION_SPACING (warn by default)."},
+      "memory_pressure_threshold": {"type": "enum", "allowed": "critical, warning or never", "default": "critical", "effect": "Kernel memory pressure threshold for policy.ADMISSION_PRESSURE. The rule defaults to warn; never disables its observation."},
+      "max_concurrent_builds": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": "max(1, min(cores / cargo_build_jobs, GiB of RAM / 6))", "effect": "A build throttle, not a hard cap: cargo builds, tests, checks and lints that a lane's cargo shim runs at once across the host and every project that shares the state directory. Slots are advisory: a compiling command tries once, then warns and proceeds when busy. Cargo owns its build-lock queue. Direct ~/.cargo/bin/cargo, rustc and non-cargo builds are not gated."},
       "lane_port_base": {"type": "int", "min": 1024, "max": 65535, "auto_value": -1, "default": 30000, "effect": "First port of the range split into per-writer-lane blocks. A writer with an allocated block holds it for its lifetime and sees PROVENANT_LANE_PORT_BASE and PROVENANT_LANE_PORT_COUNT. Unreadable lane-port settings or allocation I/O errors warn and skip allocation."},
       "lane_port_block": {"type": "int", "min": 1, "max": 1024, "auto_value": -1, "default": 16, "effect": "Ports in each writer lane's block (PROVENANT_LANE_PORT_COUNT)."},
       "lane_port_blocks": {"type": "int", "min": 0, "max": 1024, "auto_value": -1, "default": 64, "effect": "Blocks in the range, so the most writer lanes that hold a block at once; the base plus blocks times block size must be at most 65536. 0 turns allocation off. A writer launched while every block is held is not started and reports no free port block."},
-      "max_lanes": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": "unset (no limit)", "effect": "Most lanes of any class live at once across the host; a lane beyond it queues and is refused with the limit and source."},
-      "max_project_lanes": {"type": "int", "min": 1, "max": 32, "auto_value": -1, "default": "unset (no limit)", "effect": "Most lanes of any class live at once for one project; at most max_lanes."},
-      "max_writer_lanes": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": "unset (no limit)", "effect": "Most writer lanes live at once across the host; a writer beyond it queues and is then refused with a reason naming the cap."},
-      "max_project_writer_lanes": {"type": "int", "min": 1, "max": 32, "auto_value": -1, "default": "unset (no limit)", "effect": "Most writer lanes live at once for one project; at most max_writer_lanes."},
+      "max_lanes": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": "unset (no limit)", "effect": "Observed host-wide lane threshold."},
+      "max_project_lanes": {"type": "int", "min": 1, "max": 32, "auto_value": -1, "default": "unset (no limit)", "effect": "Observed project lane threshold."},
+      "max_writer_lanes": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": "unset (no limit)", "effect": "Observed host-wide writer threshold."},
+      "max_project_writer_lanes": {"type": "int", "min": 1, "max": 32, "auto_value": -1, "default": "unset (no limit)", "effect": "Observed project writer threshold."},
       "cargo_build_jobs": {"type": "int", "min": 1, "max": 1024, "auto_value": -1, "default": "Half the available cores, at least 1", "effect": "Default CARGO_BUILD_JOBS for lanes; an inherited value takes precedence."},
       "cargo_incremental": {"type": "bool", "allowed": "true or false", "default": "false", "effect": "CARGO_INCREMENTAL for lanes. Incremental sessions grow a lane's target without bound and are rarely reused; a value already in the lane environment takes precedence."},
+      "cargo_source_writes": {"type": "bool", "default": false, "effect": "Allow lanes to download and update sources in the host CARGO_HOME. Otherwise registry/index, registry/cache, registry/src, git/db and git/checkouts are read-only and Cargo runs offline. Cargo lock/tracking files remain writable; credentials and host Cargo config are never writable. Launch diagnostics show the setting and its source."},
       "cargo_debug": {"type": "string", "allowed": "none, line-directives-only, line-tables-only, limited, full, 0, 1, 2, true or false", "default": "line-tables-only", "effect": "CARGO_PROFILE_DEV_DEBUG for lanes. Line tables keep backtraces at a fraction of the size of full debug information; a value already in the lane environment takes precedence."},
-      "build_dir_max_bytes": {"type": "int", "allowed": "bytes, 0 or more", "default": "21474836480 (20 GiB)", "effect": "Cap on the allocated bytes of all Cargo profile directories in lane caches, idle and busy alike. Collection removes idle directories, least recently used first, during manual or scheduled GC, when admission finds the disk below gc.free_floor, and in `provenant gc`; a directory whose Cargo locks are held is never removed. When busy directories alone exceed the cap, every eligible idle directory is removed and the total stays over."},
-      "build_dir_grace_seconds": {"type": "int", "allowed": "seconds, 0 or more", "default": "900 (15 minutes)", "effect": "A profile directory whose newest file or directory modification is within this many seconds is never removed, even when its Cargo locks are free: test and run binaries execute after Cargo drops its locks, and Cargo may be opening its lock files. Zero removes the protection. It protects only recently written directories: a test or run binary that runs longer than the grace without writing under target/ is unprotected unless a Cargo lock is still held."},
-      "build_dir_survey_interval_seconds": {"type": "int", "allowed": "seconds, 0 or more", "default": "300 (5 minutes)", "effect": "Legacy survey interval, retained for readable existing configurations. Settlement no longer surveys lane caches; manual and scheduled GC own those surveys."}
+      "build_dir_max_bytes": {"type": "int", "allowed": "bytes, 0 or more", "default": "21474836480 (20 GiB)", "effect": "Cap on the allocated bytes of all Cargo profile directories in lane caches, idle and busy alike. Collection removes idle directories, least recently used first, during manual or scheduled GC, in `provenant gc`; a directory whose Cargo locks are held is never removed. When busy directories alone exceed the cap, every eligible idle directory is removed and the total stays over."},
+      "build_dir_grace_seconds": {"type": "int", "allowed": "seconds, 0 or more", "default": "900 (15 minutes)", "effect": "A profile directory whose newest file or directory modification is within this many seconds is never removed, even when its Cargo locks are free: test and run binaries execute after Cargo drops its locks, and Cargo may be opening its lock files. Zero removes the protection. It protects only recently written directories: a test or run binary that runs longer than the grace without writing under target/ is unprotected unless a Cargo lock is still held."}
     }
   },
   "host_review_settings": {
@@ -402,8 +409,8 @@
     "routing.allow_unknown_partial_headroom": {
       "type": "bool", "default": false, "strict": true, "safe": false, "host_only": true, "status": "wired",
       "reader": "tools/front-door/crates/cli/src/route.rs",
-      "effect": "Allow uncalibrated partial quota headroom below the limit.",
-      "trade_off": "Partial coverage cannot prove remaining allowance; exhausted lower bounds still block selection."
+      "effect": "Remove the ranking penalty for uncalibrated partial quota headroom below the limit.",
+      "trade_off": "Unknown coverage warns and stays eligible by default. Accepting it removes the preference penalty; measured exhausted lower bounds still refuse."
     },
     "routing.workload": {
       "type": "enum", "values": ["general", "read_heavy", "edit_heavy", "review"], "default": "general", "status": "wired",
@@ -441,12 +448,6 @@
       "reader": "tools/front-door/src/handoff.rs",
       "effect": "Let a Fabric peer start a Claude session on this host through a session hand-off.",
       "trade_off": "Off refuses every hand-off with HANDOFF_DISABLED; on lets a peer open an unconfined session under a registered account."
-    },
-    "fabric.mcp_server": {
-      "type": "bool", "default": false, "status": "wired",
-      "reader": "tools/front-door/crates/config/src/harness.rs",
-      "effect": "Register the Fabric MCP server (`provenant fabric mcp`) in installed harness configurations and launch lanes with it, for clients without a shell.",
-      "trade_off": "Off keeps every default session and lane free of the MCP tool surface, since the `provenant fabric` CLI covers each tool; on adds the server and its tool schemas to every session context."
     },
     "config.history_max_entries": {
       "type": "int",
@@ -528,17 +529,29 @@
       "effect": "Mark a provider observation silent after this many seconds without output or CPU progress; never kill it for silence.",
       "trade_off": "Lower marks silence sooner; the process census and observation cadence stays unchanged."
     },
-    "lanes.slot_wait_seconds": {
-      "type": "int", "min": 0, "max": 86400, "default": 7200, "status": "wired",
-      "reader": "tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/supervisor/src/guardian.rs",
-      "effect": "Most time in total that a lane's build-slot waits keep off its wall-clock deadline. Beyond it the wall deadline runs while the lane waits, so a stuck lane cannot wait forever. 0 keeps no waiting off the deadline.",
-      "trade_off": "Higher tolerates longer queues for build slots; lower ends a stuck lane sooner."
-    },
     "lanes.context_handoff_tokens": {
       "type": "int", "min": 0, "max": 2000000, "default": 0, "status": "wired",
       "reader": "tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/supervisor/src/guardian.rs",
-      "effect": "Context size, in tokens one provider call sent, at which the host stops a writer so a fresh attempt continues from its handoff on the same worktree. The stop settles as a declared stop and uses the graph's one automatic continuation; commits and uncommitted edits stay in place. 0 is off. Suggested setting 200000. Only providers that report each call's context (Claude) are stopped; others keep today's behaviour.",
+      "effect": "Context size, in tokens one provider call sent, at which the host stops a writer so the graph restarts it on a new route in the same worktree, from its handoff. The stop settles as a declared stop and follows the node's `on_stop` and the graph-wide `limits.continuations`; a node with no other route goes to the chair. Commits and uncommitted edits stay in place. 0 is off. Suggested setting 200000. Only providers that report each call's context (Claude) are stopped; others keep today's behaviour.",
       "trade_off": "Lower stops paying for very large contexts sooner but restarts more often, and a restart may lose working state that the handoff does not record; off until a trial shows restart does not lower completion."
+    },
+    "lanes.token_budget": {
+      "type": "int", "min": 0, "default": 1000000, "status": "wired",
+      "reader": "tools/front-door/crates/run/src/limits.rs, tools/front-door/crates/supervisor/src/guardian.rs",
+      "effect": "Default fresh-token budget for writer lanes. 0 disables the budget. A run or template may set `attempt.token_budget`; project and host defaults come from domains.run.",
+      "trade_off": "Lower budgets limit spend sooner; higher budgets give writers more room to finish."
+    },
+    "lanes.budget_action": {
+      "type": "enum", "values": ["wrap_up", "warn", "stop"], "default": "wrap_up", "status": "wired",
+      "reader": "tools/front-door/crates/run/src/limits.rs, tools/front-door/crates/supervisor/src/guardian.rs",
+      "effect": "What a writer lane does after passing its fresh-token budget. wrap_up allows one continuation through the existing resume path; warn records the crossing and keeps the lane running; stop ends it immediately.",
+      "trade_off": "wrap_up gives the writer one clean chance to finish, warn prioritises completion, and stop prioritises a hard spend limit."
+    },
+    "lanes.budget_grace": {
+      "type": "fraction", "min": 0, "default": 0.1, "status": "wired",
+      "reader": "tools/front-door/crates/run/src/limits.rs, tools/front-door/crates/supervisor/src/guardian.rs",
+      "effect": "Fraction of the token budget the host allows as grace before applying lanes.budget_action. 0.1 allows ten percent above the configured budget.",
+      "trade_off": "A larger grace gives the writer more room to finish a clean step; zero applies the action at the configured threshold."
     },
     "lanes.max_concurrency": {
       "type": "int", "min": 1, "max": 8, "default": 8, "status": "wired",
@@ -560,6 +573,24 @@
       "reader": "tools/front-door/src/build_slot.rs",
       "effect": "Which cargo subcommands a lane may run locally, enforced in the lane's cargo shim for every provider. all runs everything; check allows only `cargo check` (and subcommands that do not compile, such as fmt and metadata); none refuses every compiling command, `cargo check` included. A refused command exits non-zero with one line saying CI runs it. Set per run with --knob lanes.local_cargo=check, per graph node with `attempt.local_cargo`, or for the host under [knobs].",
       "trade_off": "check or none saves the build slot, CPU and about 1 GB of memory per rustc a lane would spend, and leaves tests and lints to CI; a lane cannot confirm its own change passes them before pushing. The shim is a cooperative control: a lane that runs rustc or ~/.cargo/bin/cargo directly bypasses it."
+    },
+    "lanes.ci_scope": {
+      "type": "enum",
+      "values": ["none", "targeted", "full"],
+      "default": "none",
+      "status": "wired",
+      "reader": "tools/front-door/crates/run/src/ci_scope.rs",
+      "effect": "What CI a writer lane runs or waits for, stated in its preamble and recorded with its value and source in the launch receipt and status. none: push the branch and report without dispatching, rerunning or waiting for CI; the chair runs CI once for the integrated batch. targeted: wait only for the checks that cover the change. full: wait for the full CI on the lane's pull request and fix what it reports. Set per run with --knob lanes.ci_scope=targeted, per graph node with `attempt.ci_scope` (`--set attempt.ci_scope=full`), or for the host under [knobs].",
+      "trade_off": "Advisory guidance, not enforcement: it grants no CI dispatch authority and removes none. none saves runner minutes and the chair's waits; targeted or full lets a writer find its own CI failures before handoff at the cost of a CI run per lane."
+    },
+    "lanes.gh_budget": {
+      "type": "int",
+      "min": 0,
+      "default": 100,
+      "status": "wired",
+      "reader": "tools/front-door/crates/run/src/limits.rs, tools/front-door/crates/providers/src/lane.rs",
+      "effect": "Advisory gh invocation budget per lane. The lane's gh wrapper counts each gh command; at the budget and each multiple of it the wrapper prints one warning and the command still runs. The count is recorded at settlement; the budget and its source appear in run --explain, the receipt and status. 0 turns the warning off; the count is still recorded.",
+      "trade_off": "Never stops a lane and is not an API request cap: one paginated gh call is one invocation, and direct API clients or the real gh path bypass the count. Lower values warn sooner about quota-heavy polling."
     },
     "lanes.isolation": {
       "type": "enum",
@@ -609,15 +640,19 @@
       "effect": "Let every lane with open network, read-only lanes included, use the host's gh login, a git credential helper and gh to push their own branch and read or update issues and pull requests.",
       "trade_off": "On (default) gives every networked lane your GitHub credential, so a malicious lane can extract the token and act outside the wrapper. false keeps publishing with the chair through host-side delivery."
     },
+    "lanes.sandbox_floor": {
+      "type": "enum", "values": ["off", "warn", "strict"], "default": "warn", "status": "wired",
+      "reader": "tools/front-door/crates/records/src/run.rs, tools/front-door/crates/cli/src/run/provider/confinement.rs",
+      "effect": "Admission policy for children of an explicitly sandboxed parent, including continuations and fallback. warn proceeds with the selected sandbox toggle and reports a lowered floor; strict retains the parent's sandbox; off disables the advisory. This is policy with boundary None, not an authority boundary. The sealed receipt records the effective value and its source.",
+      "trade_off": "Warn keeps sandboxing opt-in; strict requires children to retain a sandbox the user enabled on their parent."
+    },
     "lanes.sandbox": {
-      "strict": true,
-      "safe": "on",
       "type": "enum",
       "values": ["auto", "on", "off"],
       "default": "auto",
       "status": "wired",
       "reader": "tools/front-door/crates/cli/src/run/provider/confinement.rs",
-      "effect": "Whether a macOS lane runs under the Seatbelt sandbox. The default auto runs every lane kind (including read-only) unsandboxed unless a configured route, narrowed network or parent floor requires sandboxing. Explicit off / --no-sandbox takes precedence over route, narrowed-network and parent floors where Provenant decides them, with a one-line warning naming the dropped restriction; an inherited operating-system sandbox is always reported honestly as effective. Off macOS every lane resolves as sandboxed, so Linux keeps refusing lanes. on / --sandbox explicitly opts into sandboxing. Set per run with --sandbox or --no-sandbox, per graph node or template with attempt.sandbox, or as the host default in [knobs]. The lane sees PROVENANT_SANDBOX=on or off, and status and the receipt show requested and effective mode and its source (parent, route, network, platform, knob, read_only or default).",
+      "effect": "Whether a lane runs under the operating-system sandbox. auto (default) and off run unsandboxed unless the user configured a sandboxed route or selected lanes.sandbox_floor=strict for an explicitly sandboxed parent. on opts into sandboxing. An inherited operating-system sandbox remains effective. Unsupported hosts warn and proceed without a sandbox; the requested and effective mode and source remain visible. Set per run with --sandbox or --no-sandbox, per node with attempt.sandbox, or in the host [knobs].",
       "trade_off": "Unsandboxed lanes work like the same CLI started by hand: they share host build caches and services, and can read on-disk credential stores and write outside their worktree. The environment is still rebuilt from an allowlist with hosted-cloud keys stripped, Git delivery stays host-owned with one writer per worktree, and host_policy path denials apply only to sandboxed lanes. A sandboxed lane reads domains.run.sandbox_cache_reads and never writes there."
     }
   },

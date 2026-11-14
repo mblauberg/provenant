@@ -6,7 +6,7 @@ use provenant_cli as cli;
 use provenant_config::shared_settings::SharedSettings;
 use provenant_config::{
     AccountHome, Action, HarnessTarget, InstallContext, InstallError, InstallFinding,
-    InstallOutcome, InstallReporter, ManualInclude, Targets,
+    InstallOutcome, InstallReporter, ManualInclude, ReleaseSmoke, Targets,
 };
 use provenant_core::{CancelToken, Clock, WaitBudget};
 use provenant_fabric_runtime::peer_agent::{AgentError, launchctl};
@@ -30,9 +30,6 @@ fn prepare_agents(targets: &mut Targets) -> Result<(), EdgeError> {
     let state = targets.roots.state.as_path();
     if provenant_fabric_runtime::peer_agent::eligible(state, &targets.home) {
         let program = targets.bin_dir.join("provenant");
-        let previous = provenant_config::installed_binary(targets)
-            .map_err(EdgeError::Install)?
-            .unwrap_or_else(|| program.clone());
         targets.peer_agent = Some(
             provenant_fabric_runtime::peer_agent::install_plist(
                 &program,
@@ -41,9 +38,6 @@ fn prepare_agents(targets: &mut Targets) -> Result<(), EdgeError> {
             )
             .map_err(EdgeError::Peer)?,
         );
-        targets.peer_agent_previous =
-            provenant_fabric_runtime::peer_agent::previous_plist(&previous, state, &targets.home)
-                .map_err(EdgeError::Peer)?;
     }
     if super::tick_agent::eligible(state, &targets.home) {
         let program = targets.bin_dir.join("provenant");
@@ -114,7 +108,7 @@ fn account_config(
     roots: &provenant_core::Roots,
     home: &Path,
 ) -> Result<(Vec<AccountHome>, Option<SharedSettings>), InstallError> {
-    let config = provenant_config::read_with_domains(roots, &cli::domains::SECTIONS)?;
+    let config = provenant_cli::config_reads::read_for(roots, "install")?;
     let accounts = &config.domains.accounts;
     Ok((
         cli::accounts::homes(accounts),
@@ -263,16 +257,100 @@ fn receipt_targets(
 #[derive(Default)]
 struct PreviewReporter {
     home: Option<PathBuf>,
+    stopped_agents: std::collections::BTreeSet<&'static str>,
+    uncertain_agents: std::collections::BTreeSet<&'static str>,
 }
 impl PreviewReporter {
+    fn stopped(&mut self, agent: &'static str) {
+        self.stopped_agents.insert(agent);
+    }
+
+    fn record_stop(&mut self, agent: &'static str, result: io::Result<bool>) -> io::Result<()> {
+        match result {
+            Ok(true) => {
+                self.stopped(agent);
+                self.uncertain_agents.remove(agent);
+            }
+            Ok(false) => {
+                self.uncertain_agents.remove(agent);
+            }
+            Err(error) => {
+                self.stopped_agents.remove(agent);
+                self.uncertain_agents.insert(agent);
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn stopped_report(&self, state: &Path) -> Option<String> {
+        if self.stopped_agents.is_empty() && self.uncertain_agents.is_empty() {
+            return None;
+        }
+        let state = format!("'{}'", state.display().to_string().replace('\'', "'\\''"));
+        let mut report = String::new();
+        if !self.stopped_agents.is_empty() {
+            report.push_str(&format!(
+                "Agents stopped: {}. ",
+                self.stopped_agents
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !self.uncertain_agents.is_empty() {
+            report.push_str(&format!(
+                "Agents may still be running: {}. ",
+                self.uncertain_agents
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        report.push_str(&format!(
+            "State directory: {state}. To finish installation and restart agents, rerun your original install command; preserve its source and destination options. See docs/runbooks/install.md, Upgrade section.",
+        ));
+        Some(report)
+    }
+
+    /// Stops every agent a 1.x install may run, by label. A stopped peer or
+    /// tick agent is restarted from the new root once the install is done.
+    fn stop_legacy_agents(&mut self, state: &Path, home: &Path) -> io::Result<()> {
+        if provenant_fabric_runtime::peer_agent::eligible(state, home) {
+            crate::state_reset::quiesce_launch_agents(
+                home,
+                crate::state_handoff::LEGACY_AGENT_LABELS,
+                launchctl,
+                |label, result| {
+                    // Retired labels must stay absent. Only current agents
+                    // need restart/recovery guidance after a successful stop.
+                    self.record_stop(
+                        label,
+                        result.map(|stopped| {
+                            stopped && matches!(label, "dev.provenant.peer" | "dev.provenant.tick")
+                        }),
+                    )
+                },
+            )?;
+        } else if super::tick_agent::eligible(state, home) {
+            self.record_stop(
+                "dev.provenant.tick",
+                super::tick_agent::stop_for_reset(home).map_err(io::Error::other),
+            )?;
+        }
+        Ok(())
+    }
+
     fn before_remove_with(
-        &self,
+        &mut self,
         action: &Action,
-        stop: impl FnOnce(&Path) -> io::Result<()>,
+        stop: impl FnOnce(&Path) -> io::Result<bool>,
     ) -> io::Result<()> {
         if matches!(
             action.selector.as_str(),
-            "peer-agent" | "tick-agent" | "tick-service" | "gc-agent"
+            "peer-agent" | "tick-agent" | "tick-service"
         ) {
             let home = self
                 .home
@@ -283,14 +361,20 @@ impl PreviewReporter {
                 "tick-agent" if cfg!(target_os = "linux") => super::tick_agent::timer(&home),
                 "tick-agent" => super::tick_agent::plist(&home),
                 "tick-service" => super::tick_agent::service(&home),
-                "gc-agent" => home.join("Library/LaunchAgents/dev.provenant.gc.plist"),
                 _ => provenant_fabric_runtime::peer_agent::plist(&home),
             };
             if action.before.is_some() && action.path.to_path_buf().ok().as_ref() != Some(&expected)
             {
                 return Err(io::Error::other("unexpected agent plist path"));
             }
-            stop(&home)?;
+            self.record_stop(
+                if action.selector == "peer-agent" {
+                    "dev.provenant.peer"
+                } else {
+                    "dev.provenant.tick"
+                },
+                stop(&home),
+            )?;
         }
         Ok(())
     }
@@ -301,7 +385,6 @@ impl InstallReporter for PreviewReporter {
             "tick-agent" | "tick-service" => {
                 super::tick_agent::stop(home).map_err(io::Error::other)
             }
-            "gc-agent" => super::tick_agent::retire_gc(home).map_err(io::Error::other),
             _ => provenant_fabric_runtime::peer_agent::stop(home).map_err(io::Error::other),
         })
     }
@@ -327,6 +410,9 @@ struct InstallData {
     peer_agent: Option<provenant_fabric_runtime::peer_agent::Installed>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tick_agent: Option<super::tick_agent::Installed>,
+    /// The 1.x configuration this install copied, or would copy in a dry run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state_copy: Option<crate::state_handoff::Handoff>,
 }
 impl InstallData {
     fn empty() -> Self {
@@ -336,6 +422,7 @@ impl InstallData {
             remaining: Vec::new(),
             peer_agent: None,
             tick_agent: None,
+            state_copy: None,
         }
     }
     fn success(outcome: InstallOutcome) -> Self {
@@ -345,6 +432,7 @@ impl InstallData {
             remaining: Vec::new(),
             peer_agent: None,
             tick_agent: None,
+            state_copy: None,
         }
     }
     fn failure(error: &InstallError) -> Self {
@@ -359,6 +447,7 @@ impl InstallData {
                 remaining: remaining.clone(),
                 peer_agent: None,
                 tick_agent: None,
+                state_copy: None,
             },
             _ => Self::empty(),
         }
@@ -478,16 +567,22 @@ fn context<'a>(
         cancel,
     })
 }
-fn output_install(
-    command: &str,
-    summaries: &[HarnessTarget],
-    result: Result<InstallOutcome, InstallError>,
-    peer_agent: Option<provenant_fabric_runtime::peer_agent::Installed>,
-    tick_agent: Option<super::tick_agent::Installed>,
-    globals: &cli::Globals,
-) -> u8 {
-    output_install_noted(
-        "", command, summaries, result, peer_agent, tick_agent, globals,
+fn output_install(command: &str, applied: Applied, globals: &cli::Globals) -> u8 {
+    let notes = applied
+        .state_copy
+        .as_ref()
+        .map(crate::state_handoff::Handoff::note)
+        .unwrap_or_default();
+    let state_copy = applied.state_copy;
+    output_install_with(
+        &notes,
+        command,
+        &applied.summaries,
+        applied.result,
+        applied.peer_agent,
+        applied.tick_agent,
+        |data| data.state_copy = state_copy,
+        globals,
     )
 }
 /// `notes` lead the human output, for steps that ran before the install.
@@ -500,15 +595,38 @@ fn output_install_noted(
     tick_agent: Option<super::tick_agent::Installed>,
     globals: &cli::Globals,
 ) -> u8 {
+    output_install_with(
+        notes,
+        command,
+        summaries,
+        result,
+        peer_agent,
+        tick_agent,
+        |_| {},
+        globals,
+    )
+}
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one renderer behind both entry points"
+)]
+fn output_install_with(
+    notes: &str,
+    command: &str,
+    summaries: &[HarnessTarget],
+    result: Result<InstallOutcome, InstallError>,
+    peer_agent: Option<provenant_fabric_runtime::peer_agent::Installed>,
+    tick_agent: Option<super::tick_agent::Installed>,
+    extend: impl FnOnce(&mut InstallData),
+    globals: &cli::Globals,
+) -> u8 {
     match result {
         Ok(outcome) => {
-            let (mut links, mut hooks, mut mcp) = (0, 0, 0);
+            let (mut links, mut hooks) = (0, 0);
             for action in &outcome.actions {
                 let selector = action.selector.to_ascii_lowercase();
                 if selector.contains("hook") {
                     hooks += 1;
-                } else if selector.contains("mcp") {
-                    mcp += 1;
                 } else if matches!(
                     action.before.as_ref().or(action.after.as_ref()),
                     Some(provenant_records::OwnedValue::Link { .. })
@@ -517,7 +635,7 @@ fn output_install_noted(
                 }
             }
             let mut human = format!(
-                "{notes}{command}: {} changes ({links} links, {hooks} hooks, {mcp} MCP); {} targets",
+                "{notes}{command}: {} changes ({links} links, {hooks} hooks); {} targets",
                 outcome.actions.len(),
                 summaries.len(),
             );
@@ -602,6 +720,7 @@ fn output_install_noted(
             let mut data = InstallData::success(outcome);
             data.peer_agent = peer_agent;
             data.tick_agent = tick_agent;
+            extend(&mut data);
             super::emit(
                 &CommandResult::new(command, Outcome::Ok, data),
                 globals,
@@ -616,17 +735,23 @@ fn output_install_noted(
 fn read_install_receipt(
     targets: &Targets,
 ) -> Result<Option<provenant_records::InstallReceipt>, InstallError> {
-    let path = targets.roots.state.as_path().join("install/receipt.json");
-    match std::fs::File::open(&path) {
-        Ok(file) => provenant_records::decode_v1(file, provenant_records::Limits::CONFIG)
-            .map(Some)
-            .map_err(InstallError::ReceiptDecode),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(InstallError::Fs(provenant_os::fs::FsError::Io {
-            operation: "read install receipt",
-            path,
-            source,
-        })),
+    let path = targets.roots.state.as_path().join("install");
+    let directory = match provenant_os::fs::Directory::open_anchor(&path) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(InstallError::Fs(error)),
+    };
+    match directory.read_stable(
+        OsStr::new("receipt.json"),
+        provenant_records::Limits::CONFIG.max_bytes,
+    ) {
+        Ok(bytes) => {
+            provenant_records::decode_v1(bytes.as_slice(), provenant_records::Limits::CONFIG)
+                .map(Some)
+                .map_err(InstallError::ReceiptDecode)
+        }
+        Err(error) if error.is_not_found() => Ok(None),
+        Err(error) => Err(InstallError::Fs(error)),
     }
 }
 
@@ -771,7 +896,7 @@ fn detected_batches(
                     Ok(HarnessTarget {
                         harness: record.harness,
                         skills_dir: record.skills_dir.to_path_buf()?,
-                        mcp_file: record.mcp_file.to_path_buf()?,
+                        config_file: record.config_file.to_path_buf()?,
                         hook_file: record
                             .hook_file
                             .map(|path| path.to_path_buf())
@@ -879,6 +1004,7 @@ struct Applied {
     summaries: Vec<HarnessTarget>,
     peer_agent: Option<provenant_fabric_runtime::peer_agent::Installed>,
     tick_agent: Option<super::tick_agent::Installed>,
+    state_copy: Option<crate::state_handoff::Handoff>,
 }
 
 /// What a sync does beyond reapplying the release.
@@ -889,49 +1015,12 @@ struct SyncOptions {
 }
 
 pub(super) fn run_install(args: cli::Install, globals: &cli::Globals) -> u8 {
+    let mut args = args;
     if args.upgrade_preflight {
-        return match upgrade_preflight(globals) {
-            Ok(outcome) if outcome.is_empty() => 0,
-            Ok(outcome) => {
-                let mut output = io::stdout().lock();
-                for warning in &outcome.warnings {
-                    if writeln!(output, "Warning: {warning}").is_err() {
-                        return 1;
-                    }
-                }
-                if outcome.blocking.is_empty() {
-                    return 0;
-                }
-                for finding in &outcome.blocking {
-                    if writeln!(output, "{finding}").is_err() {
-                        return 1;
-                    }
-                }
-                if writeln!(
-                    output,
-                    "Finish or cancel pending graphs, drain lanes and port presets by hand; rerun with --yes to proceed anyway."
-                )
-                .is_err()
-                {
-                    return 1;
-                }
-                2
-            }
-            Err(error) => {
-                let _ = writeln!(io::stderr().lock(), "Upgrade preflight failed: {error}");
-                1
-            }
-        };
+        args.dry_run = true;
     }
     match apply_install(args, globals, true, SyncOptions::default()) {
-        Ok(applied) => output_install(
-            "install",
-            &applied.summaries,
-            applied.result,
-            applied.peer_agent,
-            applied.tick_agent,
-            globals,
-        ),
+        Ok(applied) => output_install("install", applied, globals),
         Err(refused) => refused.emit("install", globals),
     }
 }
@@ -944,6 +1033,8 @@ fn apply_install(
     agents: bool,
     options: SyncOptions,
 ) -> Result<Applied, Refused> {
+    // Receipt errors and downgrade attempts are refusals, never guessed formats.
+    refuse_newer_state(globals)?;
     args.source = provenant_core::PathResolver::resolve_existing_ancestor(
         &provenant_os::fs::SystemPathResolver,
         &args.source,
@@ -955,6 +1046,58 @@ fn apply_install(
             source,
         })
     })?;
+    let mut reporter = PreviewReporter::default();
+    // The first install at a fresh default root copies the 1.x owner
+    // configuration before anything reads it: targets, accounts and previews
+    // all come from the copied files.
+    let environment = environment(globals)?;
+    let state_copy =
+        crate::state_handoff::plan(environment.roots.state.as_path(), &environment.home)
+            .map_err(|error| Refused::Fail(Outcome::Error, "STATE_COPY", error.to_string()))?;
+    let state_copy = match state_copy {
+        Some(plan) if args.dry_run => {
+            // Until the copy exists every 1.x link reads as foreign, so a
+            // preview would only report conflicts. Check the release alone.
+            let cancel = CancelToken::new();
+            let smoke = SystemSmoke::new(None).map_err(|error| {
+                Refused::Fail(Outcome::Error, "SMOKE_EXECUTOR", error.to_string())
+            })?;
+            verify_release(&args.source, &smoke, &cancel)?;
+            return Ok(Applied {
+                result: Ok(InstallOutcome {
+                    actions: Vec::new(),
+                    findings: Vec::new(),
+                    manual_includes: Vec::new(),
+                    dry_run: true,
+                }),
+                summaries: Vec::new(),
+                peer_agent: None,
+                tick_agent: None,
+                state_copy: Some(plan),
+            });
+        }
+        Some(plan) => {
+            // Preflight and stage all handoff inputs before stopping 1.x.
+            // A failed preflight stops nothing; a failed stop publishes nothing.
+            let home = environment.home.clone();
+            match crate::state_handoff::run(&plan, &environment.roots, || {
+                reporter.stop_legacy_agents(&plan.to, &home)
+            }) {
+                Ok(copied) => Some(copied),
+                Err(error) => {
+                    if let Some(message) = reporter.stopped_report(&plan.to) {
+                        let _ = writeln!(io::stderr().lock(), "{message}");
+                    }
+                    return Err(Refused::Fail(
+                        Outcome::Error,
+                        "STATE_COPY",
+                        error.to_string(),
+                    ));
+                }
+            }
+        }
+        None => None,
+    };
     let Batches {
         targets: mut batches,
         findings: skipped,
@@ -998,10 +1141,8 @@ fn apply_install(
     let home = targets.home.clone();
     prepare_agents(&mut targets)?;
     let tick_enabled = targets.tick_agent.is_some();
-    let mut reporter = PreviewReporter {
-        home: Some(home.clone()),
-    };
-    let result = (|| {
+    reporter.home = Some(home.clone());
+    let result: Result<_, Refused> = (|| {
         let mut combined = InstallOutcome {
             actions: Vec::new(),
             findings: skipped,
@@ -1023,7 +1164,7 @@ fn apply_install(
             })
         };
         if matches!(args.hooks, Some(cli::Switch::On)) && !batches.iter().any(supports_hooks) {
-            return Err(InstallError::HooksUnavailable);
+            return Err(InstallError::HooksUnavailable.into());
         }
         let batch_args = |batch: &Targets, dry_run| cli::Install {
             bin_dir: Some(batch.bin_dir.clone()),
@@ -1045,6 +1186,9 @@ fn apply_install(
                 env!("PROVENANT_TARGET_TRIPLE"),
             )?;
         }
+        // A dry-run install does not execute smoke checks. Complete the real
+        // release checks after every target preview and before destructive work.
+        verify_release(&args.source, &smoke, &cancel)?;
         if agents && !args.dry_run && provenant_fabric_runtime::peer_agent::eligible(&state, &home)
         {
             retire_disk_guard(&home)
@@ -1092,7 +1236,7 @@ fn apply_install(
                 &cancel,
             )?;
             if let Some(error) = inspection.error {
-                return Err(error);
+                return Err(error.into());
             }
             combined.findings.extend(inspection.findings);
         }
@@ -1107,6 +1251,18 @@ fn apply_install(
         });
         Ok(combined)
     })();
+    // Covers receipt publication and final inspection failures alike.
+    // The tracked set also covers partial shutdown and earlier agent removals.
+    if result.is_err()
+        && let Some(message) = reporter.stopped_report(&state)
+    {
+        let _ = writeln!(io::stderr().lock(), "{message}");
+    }
+    let result = match result {
+        Ok(outcome) => Ok(outcome),
+        Err(Refused::Install(error)) => Err(error),
+        Err(error) => return Err(error),
+    };
     if let Ok(outcome) = &result
         && !outcome.dry_run
     {
@@ -1119,35 +1275,58 @@ fn apply_install(
     }
     // The release is installed first; the agent then serves the new binary.
     let peer_agent = match &result {
-        Ok(outcome) if agents && !outcome.dry_run => {
+        Ok(outcome)
+            if !outcome.dry_run
+                && (agents || reporter.stopped_agents.contains("dev.provenant.peer")) =>
+        {
             Some(provenant_fabric_runtime::peer_agent::install(
                 &state,
                 &home,
                 outcome
                     .actions
                     .iter()
-                    .any(|action| action.selector == "peer-agent"),
+                    .any(|action| action.selector == "peer-agent")
+                    || reporter.stopped_agents.contains("dev.provenant.peer"),
             ))
         }
         _ => None,
     };
     let tick_agent = match &result {
-        Ok(outcome) if agents && !outcome.dry_run => Some(super::tick_agent::install(
-            &state,
-            &home,
-            outcome
-                .actions
-                .iter()
-                .any(|action| matches!(action.selector.as_str(), "tick-agent" | "tick-service")),
-            tick_enabled,
-        )),
+        Ok(outcome)
+            if !outcome.dry_run
+                && (agents || reporter.stopped_agents.contains("dev.provenant.tick")) =>
+        {
+            Some(super::tick_agent::install(
+                &state,
+                &home,
+                outcome.actions.iter().any(|action| {
+                    matches!(action.selector.as_str(), "tick-agent" | "tick-service")
+                }) || reporter.stopped_agents.contains("dev.provenant.tick"),
+                tick_enabled,
+            ))
+        }
         _ => None,
     };
+    if matches!(
+        peer_agent,
+        Some(provenant_fabric_runtime::peer_agent::Installed::Started)
+    ) {
+        reporter.stopped_agents.remove("dev.provenant.peer");
+    }
+    if matches!(tick_agent, Some(super::tick_agent::Installed::Started)) {
+        reporter.stopped_agents.remove("dev.provenant.tick");
+    }
+    if result.is_ok()
+        && let Some(message) = reporter.stopped_report(&state)
+    {
+        let _ = writeln!(io::stderr().lock(), "{message}");
+    }
     Ok(Applied {
         result,
         summaries,
         peer_agent,
         tick_agent,
+        state_copy,
     })
 }
 
@@ -1320,7 +1499,7 @@ fn adopt_settings(globals: &cli::Globals, account: &str) -> Result<Vec<String>, 
         .shared_settings
         .as_ref()
         .ok_or("no shared settings are configured")?;
-    let config = provenant_config::read_with_domains(&targets.roots, &cli::domains::SECTIONS)
+    let config = provenant_cli::config_reads::read_for(&targets.roots, "install")
         .map_err(|error| error.to_string())?;
     let accounts = &config.domains.accounts;
     let id = cli::accounts::resolve(accounts, account)?;
@@ -1416,6 +1595,7 @@ fn prune_orphans(globals: &cli::Globals) -> Result<Vec<String>, String> {
             .map_err(|e| e.to_string())?;
         let mut reporter = PreviewReporter {
             home: Some(targets.home.clone()),
+            ..Default::default()
         };
         let outcome = cli::install::execute_uninstall(
             &cli::Uninstall {
@@ -1537,130 +1717,41 @@ struct UpgradeRunner {
     cwd: PathBuf,
 }
 
-fn pending_upgrade_findings(
-    state: &provenant_core::StateRoot,
-    legacy_only: bool,
-) -> Result<provenant_fabric_runtime::graph::cutover::ClassifiedFindings, String> {
-    provenant_fabric_runtime::graph::cutover::classified_pending_findings(state, legacy_only)
-}
-
-fn installed_state_format_version(targets: &Targets) -> Option<u64> {
-    match read_install_receipt(targets) {
-        Ok(Some(receipt)) => Some(receipt.state_format_version),
-        _ => None,
+/// Refuses to install over state a newer binary wrote. A missing or older
+/// receipt is fine: 2.0 never reads 1.x stores, which stay in the 1.x root.
+fn refuse_newer_state(globals: &cli::Globals) -> Result<(), Refused> {
+    let (_, targets) = selected_targets(globals, &[])?;
+    let receipt = read_install_receipt(&targets)?.map(|receipt| receipt.state_format_version);
+    if receipt.is_some_and(|version| version > provenant_records::STATE_FORMAT_VERSION) {
+        return Err(Refused::Fail(
+            Outcome::Refused,
+            "STATE_FORMAT_NEWER",
+            "The installed state format is newer than this binary; downgrade refused".into(),
+        ));
     }
+    Ok(())
 }
 
-#[derive(Debug, Default)]
-struct PreflightOutcome {
-    blocking: Vec<String>,
-    warnings: Vec<String>,
-}
-
-impl PreflightOutcome {
-    fn is_empty(&self) -> bool {
-        self.blocking.is_empty() && self.warnings.is_empty()
-    }
-}
-
-/// Carry the cutover guard's bounded findings into admission diagnostics.
-pub(crate) fn cutover_admission_guard(
-    state: &provenant_core::StateRoot,
-) -> Result<(), provenant_fabric_runtime::coordination::facade::FacadeError> {
-    use provenant_fabric_runtime::coordination::facade::{FacadeError, InvalidInputDetail};
-    cutover_pending_guard(state).map_err(|error| FacadeError::GraphRelayRefused {
-        refusal_code: "UPGRADE_DRAIN_REQUIRED".into(),
-        detail: Some(InvalidInputDetail::CutoverFindings(error)),
-    })
-}
-
-pub(crate) fn cutover_pending_guard(state: &provenant_core::StateRoot) -> Result<(), String> {
-    provenant_fabric_runtime::graph::cutover::pending_guard(state)
-}
-
-/// Inspect the old state with the staged release before it replaces the binary.
-fn upgrade_preflight(globals: &cli::Globals) -> Result<PreflightOutcome, String> {
-    let (environment, targets) = selected_targets(globals, &[]).map_err(|e| format!("{e:?}"))?;
-    let classified = pending_upgrade_findings(&targets.roots.state, false)?;
-    let mut outcome = PreflightOutcome::default();
-
-    outcome.blocking.extend(classified.unreadable);
-
-    // A host without a receipt predates format declarations and gets baseline 1.
-    let installed_version = installed_state_format_version(&targets)
-        .unwrap_or(provenant_records::BASELINE_STATE_FORMAT_VERSION);
-    let legacy = pending_upgrade_findings(&targets.roots.state, true)?;
-    let legacy_graphs: std::collections::BTreeSet<_> = legacy.pending_graphs.into_iter().collect();
-    let legacy_lanes: std::collections::BTreeSet<_> = legacy.live_lanes.into_iter().collect();
-    let declared_break = installed_version != provenant_records::STATE_FORMAT_VERSION;
-
-    for (project, id) in classified.pending_graphs {
-        if declared_break || legacy_graphs.contains(&(project.clone(), id.clone())) {
-            outcome.blocking.push(format!(
-                "Pending graph {project}/{id}: finish or cancel it with the previous release before upgrading"
-            ));
-        } else {
-            outcome
-                .warnings
-                .push(format!("Pending graph {project}/{id} in flight"));
-        }
-    }
-    for lane in classified.live_lanes {
-        if declared_break || legacy_lanes.contains(&lane) {
-            outcome.blocking.push(lane);
-        } else {
-            outcome.warnings.push(lane);
-        }
-    }
-
-    let config = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| environment.home.join(".config"));
-    if !config.is_absolute() {
-        return Err("XDG_CONFIG_HOME must be absolute".into());
-    }
-    let mut repositories = crate::graph_support::project_worktrees(&environment.project);
-    for binding in
-        provenant_config::registered_projects(&targets.roots).map_err(|e| e.to_string())?
+/// The release at `source` is whole and its binary is the one it describes.
+fn verify_release(
+    source: &Path,
+    smoke: &SystemSmoke,
+    cancel: &CancelToken,
+) -> Result<(), InstallError> {
+    let release = provenant_config::Release::read(source, env!("PROVENANT_TARGET_TRIPLE"))?;
+    let identity = smoke.check(&release, cancel).map_err(InstallError::Smoke)?;
+    if identity.source_digest != release.manifest().source_digest
+        || identity.asset_digest != release.manifest().asset_digest
+        || identity.target != release.manifest().target
+        || identity.toolchain != release.manifest().toolchain
     {
-        // Bindings name the canonical Git common directory, including bare repos.
-        if let Some(repository) = binding.common_dir().parent().filter(|_| {
-            binding
-                .common_dir()
-                .file_name()
-                .is_some_and(|name| name == ".git")
-        }) {
-            repositories.extend(crate::graph_support::project_worktrees(repository));
-        }
+        return Err(InstallError::Manifest(
+            "binary identity differs from release manifest",
+        ));
     }
-    repositories.sort();
-    repositories.dedup();
-    let mut directories = vec![("User", config.join("provenant/presets"))];
-    directories.extend(
-        repositories
-            .into_iter()
-            .map(|repository| ("Repository", repository.join(".provenant/presets"))),
-    );
-    for (kind, presets) in directories {
-        match std::fs::read_dir(&presets) {
-            Ok(entries) => {
-                for entry in entries {
-                    let entry = entry.map_err(|e| e.to_string())?;
-                    if entry.path().extension().is_some_and(|ext| ext == "toml") {
-                        outcome
-                            .blocking
-                            .push(format!("{kind} preset to port: {}", entry.path().display()));
-                    }
-                }
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("{}: {error}", presets.display())),
-        }
-    }
-    outcome.blocking.sort();
-    outcome.warnings.sort();
-    Ok(outcome)
+    Ok(())
 }
+
 impl UpgradeRunner {
     fn execute(
         &self,
@@ -1727,7 +1818,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
         Err(error) => return install_error("upgrade", &error, globals),
     }
     let upgraded = (|| -> Result<Vec<HostUpgrade>, String> {
-        let config = provenant_config::read_with_domains(&targets.roots, &cli::domains::SECTIONS)
+        let config = provenant_cli::config_reads::read_for(&targets.roots, "install")
             .map_err(|error| error.to_string())?;
         let fabric = config.domains.fabric;
         let runner = UpgradeRunner {
@@ -1737,7 +1828,8 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
             cwd: targets.home.clone(),
         };
         // Resolve latest once so every host downloads the same tag, even during a release.
-        let mut install_args: Vec<std::ffi::OsString> = vec!["--upgrade".into()];
+        let mut install_args: Vec<std::ffi::OsString> =
+            vec!["--upgrade".into(), "--non-interactive".into()];
         if args.yes {
             install_args.push("--yes".into());
         }
@@ -1745,7 +1837,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
         let script;
         if let Some(source) = &args.from_source {
             script = std::fs::read(source.join("install.sh")).map_err(|error| error.to_string())?;
-            install_args.extend(["--from-source".into(), source.as_os_str().to_owned()]);
+            install_args.extend(["--source".into(), source.as_os_str().to_owned()]);
             if !fabric.peers.is_empty() {
                 let files = runner.execute(
                     &[
@@ -1843,26 +1935,21 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                 output,
             },
         };
-        let mut results = vec![report(
-            "local".into(),
-            runner.execute(&local, None, 1_048_576, 3600),
-        )];
-        if !results[0].success {
-            return Ok(results);
-        }
-        // SSH uses Fabric's validated destination, batch mode and connection deadline.
+        let mut commands: Vec<(String, Vec<std::ffi::OsString>, &[u8])> =
+            vec![("local".to_owned(), local, &[])];
+        // Construct the entire fleet before running either phase.
         for (name, peer) in fabric.peers {
             let (command, input) = if let Some(archive) = &source_archive {
                 (
                     format!(
-                        "set -eu; scratch=$(mktemp -d); trap 'rm -rf \"$scratch\"' 0; tar -xzf - -C \"$scratch\"; git -C \"$scratch\" init -q </dev/null; git -C \"$scratch\" add -f . </dev/null; sh \"$scratch/install.sh\" --upgrade {} --from-source \"$scratch\" </dev/null",
-                        if args.yes { "--yes" } else { "" }
+                        "set -eu; scratch=$(mktemp -d); trap 'rm -rf \"$scratch\"' 0; tar -xzf - -C \"$scratch\"; git -C \"$scratch\" init -q </dev/null; git -C \"$scratch\" add -f . </dev/null; sh \"$scratch/install.sh\" --upgrade --non-interactive {} --source \"$scratch\"",
+                        if args.yes { "--yes" } else { "" },
                     ),
                     archive.as_slice(),
                 )
             } else {
                 let command = format!(
-                    "sh -c '{}' install.sh {} </dev/null",
+                    "sh -c '{}' install.sh {}",
                     script.replace('\'', "'\\''"),
                     install_args
                         .iter()
@@ -1886,6 +1973,29 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                 peer.destination.into(),
                 command.into(),
             ];
+            commands.push((name, argv, input));
+        }
+        // No host installs until every host's source, target previews and
+        // smoke checks have passed.
+        let mut results = Vec::new();
+        for (name, argv, input) in &commands {
+            let mut preflight = argv.clone();
+            if name == "local" {
+                preflight.push("--preflight-only".into());
+            } else {
+                let last = preflight.last_mut().ok_or("missing SSH command")?;
+                last.push(" --preflight-only </dev/null");
+            }
+            let host = report(
+                name.clone(),
+                runner.execute(&preflight, Some(*input), 1_048_576, 3600),
+            );
+            if !host.success {
+                results.push(host);
+                return Ok(results);
+            }
+        }
+        for (name, argv, input) in commands {
             results.push(report(
                 name,
                 runner.execute(&argv, Some(input), 1_048_576, 3600),
@@ -1955,6 +2065,7 @@ pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 
     };
     let mut reporter = PreviewReporter {
         home: Some(targets.home.clone()),
+        ..Default::default()
     };
     if provenant_fabric_runtime::peer_agent::eligible(targets.roots.state.as_path(), &targets.home)
         && let Err(error) = retire_disk_guard(&targets.home)
@@ -1977,249 +2088,8 @@ pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
     // The worktree driver includes this module without registering these tests.
     #[allow(dead_code)]
-    fn cutover_roots(base: &Path) -> Result<provenant_core::Roots, Box<dyn std::error::Error>> {
-        let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-        inputs.state_dir = Some(base.join("state"));
-        Ok(inputs.resolve(&provenant_os::fs::SystemPathResolver)?)
-    }
-
-    #[test]
-    fn cutover_empty_state_is_marked() -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let roots = cutover_roots(temp.path())?;
-        super::cutover_pending_guard(&roots.state)?;
-        assert!(
-            roots
-                .state
-                .as_path()
-                .join("graph-template-cutover-complete")
-                .is_file()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn cutover_reads_wal_and_closed_databases_without_mutation()
-    -> Result<(), Box<dyn std::error::Error>> {
-        const CHILD: &str = "PROVENANT_TEST_CUTOVER_READ";
-        if let Some(path) = std::env::var_os(CHILD) {
-            let reader =
-                provenant_fabric_runtime::graph::cutover::read_connection(Path::new(&path))?;
-            assert_eq!(
-                reader.query_row(
-                    "SELECT COUNT(*) FROM attempts WHERE terminal=0",
-                    [],
-                    |row| row.get::<_, i64>(0)
-                )?,
-                1
-            );
-            return Ok(());
-        }
-        let observe = |path: &Path| -> Result<(), Box<dyn std::error::Error>> {
-            use provenant_os::exec::{
-                ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
-            };
-            let argv = [
-                std::env::current_exe()?.into_os_string(),
-                "--exact".into(),
-                "install::tests::cutover_reads_wal_and_closed_databases_without_mutation".into(),
-            ];
-            let mut environment: Vec<_> = std::env::vars_os()
-                .filter(|(key, _)| key != CHILD)
-                .collect();
-            environment.push((CHILD.into(), path.as_os_str().to_owned()));
-            let cwd = std::env::current_dir()?;
-            let mut options = ExecOptions::new(&argv, &cwd, std::time::Duration::from_secs(30));
-            options.env = Some(&environment);
-            options.stdout = StreamPolicy::Capture { limit: 65536 };
-            options.stderr = StreamPolicy::Capture { limit: 65536 };
-            let output = SystemExecutor::new(1)?.execute(options)?;
-            assert_eq!(
-                output.termination,
-                Termination::Exit(0),
-                "{}{}",
-                String::from_utf8_lossy(&output.stdout.bytes),
-                String::from_utf8_lossy(&output.stderr.bytes)
-            );
-            assert!(!output.timed_out && !output.cancelled);
-            Ok(())
-        };
-        let temp = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root))?;
-        let path = temp.path().join("run.sqlite3");
-        let writer = rusqlite::Connection::open(&path)?;
-        writer.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER); INSERT INTO attempts VALUES ('project','run','attempt',X'7b7d',0);")?;
-        let snapshot = || -> Result<std::collections::BTreeMap<std::ffi::OsString, Vec<u8>>, std::io::Error> {
-            std::fs::read_dir(temp.path())?.map(|entry| {
-                let entry = entry?;
-                Ok((entry.file_name(), std::fs::read(entry.path())?))
-            }).collect()
-        };
-        let before = snapshot()?;
-        observe(&path)?;
-        assert_eq!(snapshot()?, before);
-        drop(writer);
-        assert!(!path.with_extension("sqlite3-wal").exists());
-        assert!(!path.with_extension("sqlite3-shm").exists());
-        let before = snapshot()?;
-        observe(&path)?;
-        assert_eq!(snapshot()?, before);
-        std::fs::write(&path, b"not a database")?;
-        assert!(provenant_fabric_runtime::graph::cutover::read_connection(&path).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn cutover_remote_template_provenance_is_current_but_upgrade_still_drains()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let roots = cutover_roots(temp.path())?;
-        std::fs::create_dir_all(roots.state.as_path())?;
-        let db = rusqlite::Connection::open(roots.state.as_path().join("run.sqlite3"))?;
-        db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER);")?;
-        let record = serde_json::json!({"context":{"graph_id":"remote", "node_id":"task", "graph_template_launch":true}});
-        db.execute(
-            "INSERT INTO attempts VALUES ('project','run','attempt',?1,0)",
-            [serde_json::to_vec(&record)?],
-        )?;
-        let attempt = roots.state.as_path().join("runs/run/attempts/attempt");
-        std::fs::create_dir_all(&attempt)?;
-        let directory = provenant_os::fs::Directory::open_anchor(&attempt)?;
-        let _lock = directory.try_lock(
-            std::ffi::OsStr::new("custody.lock"),
-            provenant_os::fs::LockMode::Exclusive,
-        )?;
-        super::cutover_pending_guard(&roots.state)?;
-        assert_eq!(
-            super::pending_upgrade_findings(&roots.state, false)?.len(),
-            1
-        );
-        let legacy = serde_json::json!({"context":{"graph_id":"remote", "node_id":"task"}});
-        db.execute(
-            "UPDATE attempts SET record=?1",
-            [serde_json::to_vec(&legacy)?],
-        )?;
-        std::fs::remove_file(
-            roots
-                .state
-                .as_path()
-                .join("graph-template-cutover-complete"),
-        )?;
-        let error =
-            super::cutover_admission_guard(&roots.state).expect_err("legacy admission must refuse");
-        assert_eq!(error.code(), "UPGRADE_DRAIN_REQUIRED");
-        assert!(!format!("{error:?}").contains(temp.path().to_str().ok_or("path")?));
-        assert!(
-            error
-                .diagnostic()
-                .detail
-                .unwrap_or_default()
-                .contains("Live lane project/run/attempt")
-        );
-        assert_eq!(
-            super::pending_upgrade_findings(&roots.state, true)?.len(),
-            1
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn cutover_distinguishes_template_runs_and_preserves_child_stores()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use std::os::unix::fs::PermissionsExt;
-        let temp = tempfile::tempdir()?;
-        let roots = cutover_roots(temp.path())?;
-        let project = "11111111111111111111111111111111";
-        let directory = roots
-            .state
-            .as_path()
-            .join(format!("fabric/graphs/{project}"));
-        std::fs::create_dir_all(&directory)?;
-        for path in [
-            roots.state.as_path().to_path_buf(),
-            roots.state.as_path().join("fabric"),
-            roots.state.as_path().join("fabric/graphs"),
-            directory.clone(),
-        ] {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-        }
-        let path = directory.join("graph-old-pending-fixture.json");
-        let original = include_bytes!("../tests/fixtures/install/old-pending-checkpoint.json");
-        std::fs::write(&path, original)?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-        assert!(super::cutover_pending_guard(&roots.state).is_err());
-        assert_eq!(std::fs::read(&path)?, original);
-        let mut record: serde_json::Value = serde_json::from_slice(original)?;
-        record["execution"]["document"]["template_library"] = serde_json::json!({});
-        record["digest"] = serde_json::json!(
-            provenant_records::CanonicalV1::record_digest(
-                "fabric-graph-checkpoint",
-                2,
-                &(&record["checkpoint"], &record["execution"])
-            )?
-            .to_string()
-        );
-        std::fs::write(&path, serde_json::to_vec(&record)?)?;
-        super::cutover_pending_guard(&roots.state)?;
-        let database = roots.state.as_path().join("run.sqlite3");
-        let db = rusqlite::Connection::open(&database)?;
-        db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER);")?;
-        let current =
-            serde_json::to_vec(&serde_json::json!({"context":{"graph_id":"old-pending-fixture"}}))?;
-        db.execute(
-            "INSERT INTO attempts VALUES (?1, 'run', 'attempt', ?2, 0)",
-            rusqlite::params![project, current],
-        )?;
-        let attempt = roots.state.as_path().join("runs/run/attempts/attempt");
-        std::fs::create_dir_all(&attempt)?;
-        let root_directory = provenant_os::fs::Directory::open_anchor(&attempt)?;
-        let _root_lock = root_directory.try_lock(
-            std::ffi::OsStr::new("custody.lock"),
-            provenant_os::fs::LockMode::Exclusive,
-        )?;
-        super::cutover_pending_guard(&roots.state)?;
-        // A completed parent can still have a detached live attempt. Its
-        // retained template snapshot remains authoritative after settlement.
-        record["checkpoint"]["nodes"][0]["state"] = serde_json::json!("succeeded");
-        record["digest"] = serde_json::json!(
-            provenant_records::CanonicalV1::record_digest(
-                "fabric-graph-checkpoint",
-                2,
-                &(&record["checkpoint"], &record["execution"])
-            )?
-            .to_string()
-        );
-        std::fs::write(&path, serde_json::to_vec(&record)?)?;
-        super::cutover_pending_guard(&roots.state)?;
-        assert!(!directory.join("pending").exists());
-        let child = roots.state.as_path().join("children/legacy");
-        std::fs::create_dir_all(&child)?;
-        let child_attempt = child.join("runs/run/attempts/attempt");
-        std::fs::create_dir_all(&child_attempt)?;
-        let child_directory = provenant_os::fs::Directory::open_anchor(&child_attempt)?;
-        let _child_lock = child_directory.try_lock(
-            std::ffi::OsStr::new("custody.lock"),
-            provenant_os::fs::LockMode::Exclusive,
-        )?;
-        let child_database = child.join("run.sqlite3");
-        let db = rusqlite::Connection::open(&child_database)?;
-        db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER); INSERT INTO attempts VALUES ('project', 'run', 'attempt', X'7b7d', 0);")?;
-        std::fs::remove_file(
-            roots
-                .state
-                .as_path()
-                .join("graph-template-cutover-complete"),
-        )?;
-        assert!(super::cutover_pending_guard(&roots.state).is_err());
-        assert!(child_database.exists());
-        db.execute("UPDATE attempts SET terminal=1", [])?;
-        super::cutover_pending_guard(&roots.state)?;
-        assert!(child_database.exists());
-        Ok(())
-    }
-
     #[test]
     fn home_refusal_has_install_repair() {
         let result = super::home_error_result("install", "HOME must be absolute");
@@ -2264,7 +2134,7 @@ mod tests {
                     extra: Default::default(),
                     harness: Harness::Claude,
                     skills_dir: AbsolutePath::new(&dir.join("skills"))?,
-                    mcp_file: AbsolutePath::new(&dir.join("mcp.json"))?,
+                    config_file: AbsolutePath::new(&dir.join("settings.json"))?,
                     hook_file: None,
                     instruction: None,
                     hooks_relinquished: false,
@@ -2308,6 +2178,24 @@ mod tests {
     }
 
     #[test]
+    fn post_shutdown_recovery_preserves_original_command() {
+        use super::*;
+        let mut reporter = PreviewReporter::default();
+        assert!(reporter.stopped_report(Path::new("/state")).is_none());
+        reporter.stopped("dev.provenant.peer");
+        reporter.stopped("dev.provenant.tick");
+        let report = reporter
+            .stopped_report(Path::new("/state's data"))
+            .expect("stopped agents");
+        for name in ["dev.provenant.peer", "dev.provenant.tick"] {
+            assert!(report.contains(name));
+        }
+        assert!(report.contains("'/state'\\''s data'"));
+        assert!(report.contains("original install command"));
+        assert!(!report.contains("--source"));
+    }
+
+    #[test]
     fn peer_agent_removal_accepts_canonical_home_and_refuses_other_paths()
     -> Result<(), Box<dyn std::error::Error>> {
         use super::*;
@@ -2318,7 +2206,10 @@ mod tests {
         std::fs::create_dir(&home)?;
         let alias = tmp.path().join("home-alias");
         std::os::unix::fs::symlink(&home, &alias)?;
-        let reporter = PreviewReporter { home: Some(alias) };
+        let mut reporter = PreviewReporter {
+            home: Some(alias),
+            ..Default::default()
+        };
         let mut action = Action {
             path: AbsolutePath::new(&provenant_fabric_runtime::peer_agent::plist(&home))?,
             disposition: Disposition::Remove,
@@ -2328,18 +2219,30 @@ mod tests {
             identity: None,
             edits: Vec::new(),
         };
+        assert!(
+            reporter
+                .before_remove_with(&action, |_| Err(io::Error::other("stop failed")))
+                .is_err()
+        );
+        assert!(reporter.stopped_agents.is_empty());
+        let report = reporter
+            .stopped_report(Path::new("/state"))
+            .expect("uncertain stop");
+        assert!(report.contains("may still be running") && report.contains("dev.provenant.peer"));
+        reporter.before_remove_with(&action, |_| Ok(false))?;
+        assert!(reporter.stopped_agents.is_empty());
         let mut stops = 0;
         reporter.before_remove_with(&action, |cwd| {
             assert_eq!(cwd, home);
             stops += 1;
-            Ok(())
+            Ok(true)
         })?;
         assert_eq!(stops, 1);
         action.path = AbsolutePath::new(&home.join("foreign.plist"))?;
         reporter.before_remove_with(&action, |cwd| {
             assert_eq!(cwd, home);
             stops += 1;
-            Ok(())
+            Ok(true)
         })?;
         assert_eq!(stops, 2);
         action.before = Some(provenant_records::OwnedValue::File {
@@ -2351,7 +2254,7 @@ mod tests {
             reporter
                 .before_remove_with(&action, |_| {
                     stops += 1;
-                    Ok(())
+                    Ok(true)
                 })
                 .is_err()
         );

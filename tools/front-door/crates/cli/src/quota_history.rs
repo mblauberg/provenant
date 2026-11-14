@@ -1,4 +1,4 @@
-//! Edge for quota history: append under `quota.lock`, rotate by size, read back.
+//! Edge for quota history: dedupe, append and rotate, then read back.
 //!
 //! One JSON-lines file per account and adapter at
 //! `quota/history/<account_key>.<adapter>.jsonl`, with one rotated predecessor
@@ -6,11 +6,11 @@
 //! come from snapshots the existing refresh already obtained; nothing here
 //! calls a provider or opens a credential.
 use crate::quota::{EdgeError, child};
-use provenant_os::fs::Directory;
+use provenant_os::fs::{Directory, ledger::Ledger};
 use provenant_quota::{HistoryRecord, QuotaSnapshot, decode_lines, encode_line};
 use std::{
     ffi::{OsStr, OsString},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{Read, Seek, SeekFrom},
     path::Path,
 };
 
@@ -104,8 +104,8 @@ fn last_reading(
 }
 
 /// Append the snapshot as one record unless it repeats the last reading.
-/// The caller holds `quota.lock`, so lines never interleave. Returns whether
-/// a record was written.
+/// The caller owns the quota update opportunity and returns whether a record
+/// was written. The shared ledger appends each complete JSONL record once.
 pub(crate) fn record(
     quota: &Directory,
     snapshot: &QuotaSnapshot,
@@ -126,32 +126,17 @@ pub(crate) fn record(
         return Ok(false);
     };
     let line = encode_line(&next)?;
-    let size = directory
-        .open_read(&current)
-        .ok()
-        .and_then(|file| file.metadata().ok())
-        .map_or(0, |meta| meta.size);
-    // Rotate before the append, so the newest record always lands in `current`.
-    let rotated_now = size > 0 && size.saturating_add(line.len() as u64) > half;
-    if rotated_now {
-        directory.replace(&current, &directory, &rotated)?;
-        directory.sync()?;
-    }
+    let ledger = Ledger::new(&directory, &current);
+    let rotated_now = ledger.rotate(half, line.len() as u64, &[&rotated])?;
     // Rotation left an empty file. Otherwise a crashed writer may have left an
     // unterminated fragment, which the new line would glue onto and spoil.
     let torn = !rotated_now && torn;
-    let mut file = directory.open_append(&current)?;
-    if torn {
-        file.write_all(b"\n").map_err(|source| EdgeError::Read {
-            path: current.clone().into(),
-            source,
-        })?;
+    let mut append = Vec::with_capacity(line.len() + usize::from(torn));
+    if torn && !rotated_now {
+        append.push(b'\n');
     }
-    file.write_all(&line).map_err(|source| EdgeError::Read {
-        path: current.clone().into(),
-        source,
-    })?;
-    file.sync()?;
+    append.extend_from_slice(&line);
+    ledger.append(&append)?;
     Ok(true)
 }
 
@@ -219,10 +204,8 @@ pub(crate) fn read(state: &Path, query: &Query) -> Result<Vec<HistoryRecord>, Ed
 mod tests {
     use super::*;
     use crate::quota::private;
-    use provenant_core::{CancelToken, Clock, WaitBudget};
-    use provenant_os::{clock::SystemClock, fs::LockMode};
     use provenant_quota::{AccountScope, MarkerKind, QuotaDetails, QuotaStatus, QuotaWindow};
-    use std::os::unix::fs::PermissionsExt;
+    use std::{io::Write as _, os::unix::fs::PermissionsExt};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -322,65 +305,6 @@ mod tests {
             &snapshot(5_000, None, u64::try_from(count - 1)?, 99_999),
             cap
         )?);
-        Ok(())
-    }
-
-    #[test]
-    fn locked_concurrent_appenders_never_tear_a_line() -> TestResult {
-        let (temp, quota) = state()?;
-        let cap = provenant_quota::DEFAULT_HISTORY_MAX_BYTES;
-        // The first lock creates the lock file; contenders then queue on it.
-        {
-            let clock = SystemClock::new();
-            let budget = WaitBudget::cli(clock.mono_now(), 30)?;
-            let _first = quota.lock(
-                OsStr::new("quota.lock"),
-                LockMode::Exclusive,
-                budget,
-                &CancelToken::new(),
-                &clock,
-            )?;
-        }
-        let quota = std::sync::Arc::new(quota);
-        let clockwork = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
-        let mut workers = Vec::new();
-        for _ in 0..4 {
-            let quota = quota.clone();
-            let ticks = clockwork.clone();
-            workers.push(std::thread::spawn(move || -> Result<(), String> {
-                for _ in 0..25 {
-                    let clock = SystemClock::new();
-                    let cancel = CancelToken::new();
-                    let budget =
-                        WaitBudget::cli(clock.mono_now(), 30).map_err(|e| format!("{e:?}"))?;
-                    let _lock = quota
-                        .lock(
-                            OsStr::new("quota.lock"),
-                            LockMode::Exclusive,
-                            budget,
-                            &cancel,
-                            &clock,
-                        )
-                        .map_err(|e| e.to_string())?;
-                    // Read under the lock so observed times rise in append order.
-                    let n = ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    let used = u64::try_from(n).map_err(|e| e.to_string())?;
-                    record(&quota, &snapshot(10_000 + n, None, used, 99_999), cap)
-                        .map_err(|e| e.to_string())?;
-                }
-                Ok(())
-            }));
-        }
-        for worker in workers {
-            worker.join().map_err(|_| "worker panicked")??;
-        }
-        let bytes = std::fs::read(temp.path().join("quota/history/k1.claude.jsonl"))?;
-        let lines = bytes
-            .split(|b| *b == b'\n')
-            .filter(|l| !l.is_empty())
-            .count();
-        assert_eq!(lines, 100);
-        assert_eq!(decode_lines(&bytes).len(), 100);
         Ok(())
     }
 

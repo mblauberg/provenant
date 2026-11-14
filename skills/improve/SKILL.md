@@ -5,21 +5,18 @@ description: "Use to learn from runs and incidents, evaluate agents or prompts, 
 
 # Improve
 
-Change process only on evidence, by the smallest change that would have
-prevented the observed cost. A clean routine cycle returns `no change`.
+Change process on evidence, choosing the best-supported remedy for the
+observed cause. A clean routine cycle returns `no change`.
 
 ## Retrospect
 
-Read what exists and mark what is absent `unknown`, never success inferred from
-a clean final answer: `provenant telemetry stats --by preset` (or `pr`,
-`issue`, `role`), `telemetry cost --by route`, `telemetry value`, `telemetry
-trace`, `telemetry experiments show NAME`, `quota history`; review and repair
-history, escaped defects, PR threads and human corrections of unattended runs;
-test-suite health (added against removed, mock ratio, loosened assertions). A
-suite that only grows is a finding.
+Read available telemetry, review and repair history, escaped defects, PR threads,
+human corrections and test-suite health. Mark absent evidence `unknown`, never
+success inferred from a clean final answer. Use `provenant help telemetry` to
+choose the cost, value and trace views. A suite that only grows is a finding.
 
 Cluster failures by cause (spec, test, skill, instructions, routing, tool,
-context, authority) and propose per cluster the smallest change with evidence,
+context, authority) and propose per cluster the best-evidenced change with its rationale,
 owner, destination and success measure. Turn a representative failure into a
 deterministic test or fixture before claiming improvement. `improved` needs a
 passing regression gate and comparable later runs; underpowered or confounded

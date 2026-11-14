@@ -13,13 +13,14 @@ slow-timeout = { period = "10s", terminate-after = 3 }
 # One test drives sixteen delivery restarts through real Git fixtures; it already
 # ran past ten seconds before the writer-admission change and reaches the
 # default limit on a loaded runner.
-[[profile.ci.overrides]]
+[[profile.default.overrides]]
 filter = 'package(=provenant-run) & test(=delivery_tests::restart::delivery_restart_drives_pending_retryable_and_uncertain_receipts)'
 slow-timeout = { period = "10s", terminate-after = 9 }
 
-# Three independent Git/worktree fixtures each launch and continue a provider.
-[[profile.ci.overrides]]
-filter = 'test(=graph_writer_automatically_continues_retained_or_fresh)'
+# Three independent Git/worktree fixtures each launch a provider and restart the
+# stopped writer in place, so one test makes six launches.
+[[profile.default.overrides]]
+filter = 'package(=provenant) & binary(=graph_provider) & test(=graph_writer_restarts_fresh)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 [profile.ci.junit]
@@ -56,7 +57,6 @@ not (
         test(=permissions::tests::grants::linked_worktree_grants_derive_from_verified_git_paths_and_ref) |
         test(=permissions::tests::escape::native_sandbox_blocks_path_escape_probes)
     )) |
-    (package(=provenant-fabric-runtime) & test(=fetch::tests::cleanup_refuses_hard_links)) |
     (package(=provenant-os) & (
         test(=disk::tests::measurement_counts_hard_links_once_and_sizes_target_contents) |
         test(=fs::tests::owner_lock_refuses_cancelled_requests_hardlinks_and_writable_anchors)
@@ -92,37 +92,21 @@ serial-process = { max-threads = 1 }
 filter = 'package(=provenant) & binary(=graph_provider) & test(=uncatalogued_cli_model_launches_and_surfaces_provider_failure)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
-[[profile.ci.overrides]]
-filter = 'package(=provenant) & binary(=graph_provider) & test(=uncatalogued_cli_model_launches_and_surfaces_provider_failure)'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
 # Two data-home variants each launch four real graph providers against an open
 # WAL. Allow for shared-host contention without dropping session-read cases.
 [[profile.default.overrides]]
 filter = 'package(=provenant) & binary(=graph_provider) & test(=graph_opencode_observes_v2_wal_session)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
-[[profile.ci.overrides]]
-filter = 'package(=provenant) & binary(=graph_provider) & test(=graph_opencode_observes_v2_wal_session)'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
-# Six real writer launches queue on one registry lock and each settles a fixture
+# Two rounds of simultaneous real writer launches each settle a fixture
 # provider, which takes about 30 seconds on a developer Mac.
 [[profile.default.overrides]]
-filter = 'package(=provenant) & binary(=graph_provider) & test(=simultaneous_writer_launches_create_attempts)'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
-[[profile.ci.overrides]]
-filter = 'package(=provenant) & binary(=graph_provider) & test(=simultaneous_writer_launches_create_attempts)'
+filter = 'package(=provenant) & binary(=graph_provider) & test(=simultaneous_writer_launches_are_admitted_or_scheduled_for_retry)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 # One real writer launch from a fetched remote branch takes about 20 seconds on
 # an idle macOS runner and passes 30 seconds under shared-runner load.
 [[profile.default.overrides]]
-filter = 'package(=provenant) & binary(=graph_provider) & test(=remote_only_writer_cli_starts_at_remote_tip)'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
-[[profile.ci.overrides]]
 filter = 'package(=provenant) & binary(=graph_provider) & test(=remote_only_writer_cli_starts_at_remote_tip)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
@@ -133,16 +117,8 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 filter = 'package(=provenant) & (test(=fabric::interface::tests::eight_lane_composite_with_a_file_brief_fits_the_checkpoint_limit) | test(=fabric::peer_tests::peer_graph_submission::graph_submission_pins_the_integration_base_across_replay) | test(=fabric::peer_tests::peer_graph_tests::peer_hosted_lane_collection_preserves_origin_status) | test(=fabric::peer_tests::peer_graph_tests::peer_hosted_lane_subtree_pages_are_bounded_complete_and_private))'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
-[[profile.ci.overrides]]
-filter = 'package(=provenant) & (test(=fabric::interface::tests::eight_lane_composite_with_a_file_brief_fits_the_checkpoint_limit) | test(=fabric::peer_tests::peer_graph_submission::graph_submission_pins_the_integration_base_across_replay) | test(=fabric::peer_tests::peer_graph_tests::peer_hosted_lane_collection_preserves_origin_status) | test(=fabric::peer_tests::peer_graph_tests::peer_hosted_lane_subtree_pages_are_bounded_complete_and_private))'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
 # This fixture provisions and replays four graph-control variants.
 [[profile.default.overrides]]
-filter = 'package(=provenant) & test(=fabric::peer_tests::peer_graph_lifecycle::graph_run_controls_reach_the_sealed_attempt)'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
-[[profile.ci.overrides]]
 filter = 'package(=provenant) & test(=fabric::peer_tests::peer_graph_lifecycle::graph_run_controls_reach_the_sealed_attempt)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
@@ -153,11 +129,7 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 # descriptor makes that exec fail with ETXTBSY. Other suites use per-test
 # temporary directories and pass their environment explicitly, so they run in
 # parallel.
-[[profile.ci.overrides]]
-filter = 'package(provenant-supervisor) | (package(=provenant) & binary(=worktrees))'
-test-group = "serial-process"
-
-[[profile.lane.overrides]]
+[[profile.default.overrides]]
 filter = 'package(provenant-supervisor) | (package(=provenant) & binary(=worktrees))'
 test-group = "serial-process"
 
@@ -166,23 +138,9 @@ test-group = "serial-process"
 filter = 'test(=lane_builds_and_tests_swift_in_a_registered_worktree)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
-# The nightly CI-profile run carries the real Swift writer build.
-[[profile.ci.overrides]]
-filter = 'test(=lane_builds_and_tests_swift_in_a_registered_worktree)'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
 [[profile.default.overrides]]
 filter = 'test(=read_only_lane_builds_and_tests_swift_in_scratch) | test(=read_only_lane_builds_and_tests_cargo_in_scratch)'
 slow-timeout = { period = "30s", terminate-after = 4 }
-
-# Creates and settles over a thousand durable lanes to exercise a stale cursor.
-[[profile.default.overrides]]
-filter = 'test(=run::tests::wait_handles_a_stale_default_cursor)'
-slow-timeout = { period = "60s", terminate-after = 5 }
-
-[[profile.ci.overrides]]
-filter = 'test(=run::tests::wait_handles_a_stale_default_cursor)'
-slow-timeout = { period = "60s", terminate-after = 5 }
 
 # Creating 100 real worktrees for the repository-facts counting test is slow
 # on shared hosts; keep the test bounded without terminating it at 30 seconds.
@@ -190,21 +148,9 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 filter = 'test(gc_does_not_inspect_status_of_out_of_scope_worktrees)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
-[[profile.ci.overrides]]
-filter = 'test(gc_does_not_inspect_status_of_out_of_scope_worktrees)'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
-[[profile.lane.overrides]]
-filter = 'test(gc_does_not_inspect_status_of_out_of_scope_worktrees)'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
 # This functional paging fixture seals 102 runs and repeatedly verifies their
 # observations and cursor snapshots. Preserve its assertions on slower hosts.
 [[profile.default.overrides]]
-filter = 'package(=provenant-cli) & test(=console::board::tests::board_paging_end_to_end)'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
-[[profile.ci.overrides]]
 filter = 'package(=provenant-cli) & test(=console::board::tests::board_paging_end_to_end)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
@@ -216,25 +162,9 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 filter = 'package(=provenant) & ((binary(=graph_cli) & test(=every_bundled_template_is_listed_shown_and_explained)) | (binary(=fabric_transport) & test(=peer_dispatch_refuses_an_oversized_frame_before_contact)))'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
-[[profile.ci.overrides]]
-filter = 'package(=provenant) & ((binary(=graph_cli) & test(=every_bundled_template_is_listed_shown_and_explained)) | (binary(=fabric_transport) & test(=peer_dispatch_refuses_an_oversized_frame_before_contact)))'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
-[[profile.lane.overrides]]
-filter = 'package(=provenant) & ((binary(=graph_cli) & test(=every_bundled_template_is_listed_shown_and_explained)) | (binary(=fabric_transport) & test(=peer_dispatch_refuses_an_oversized_frame_before_contact)))'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
 # Three isolated credential layouts each run real writer preparation. Retain
 # every layout and assertion while allowing their combined time on shared hosts.
 [[profile.default.overrides]]
-filter = 'package(=provenant-cli) & test(=run::provider::tests::writer_plan_stages_scratch_in_private_temporary_directory)'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
-[[profile.ci.overrides]]
-filter = 'package(=provenant-cli) & test(=run::provider::tests::writer_plan_stages_scratch_in_private_temporary_directory)'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
-[[profile.lane.overrides]]
 filter = 'package(=provenant-cli) & test(=run::provider::tests::writer_plan_stages_scratch_in_private_temporary_directory)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
@@ -244,54 +174,16 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 filter = '(package(=provenant) & binary(=worktrees) & (test(=gc_fetches_default_and_removes_only_clean_merged_worktrees) | test(=pr_contribution_roundtrip) | test(=pr_land_writer_lock_preserves_dirty_and_output_cases))) | (package(=provenant-confinement) & test(=worktrees::lifecycle_tests::remote_creation::doctor_admission_and_list_share_one_inventory_with_100_worktrees))'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
-[[profile.ci.overrides]]
-filter = '(package(=provenant) & binary(=worktrees) & (test(=gc_fetches_default_and_removes_only_clean_merged_worktrees) | test(=pr_contribution_roundtrip) | test(=pr_land_writer_lock_preserves_dirty_and_output_cases))) | (package(=provenant-confinement) & test(=worktrees::lifecycle_tests::remote_creation::doctor_admission_and_list_share_one_inventory_with_100_worktrees))'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
-[[profile.lane.overrides]]
-filter = '(package(=provenant) & binary(=worktrees) & (test(=gc_fetches_default_and_removes_only_clean_merged_worktrees) | test(=pr_contribution_roundtrip) | test(=pr_land_writer_lock_preserves_dirty_and_output_cases))) | (package(=provenant-confinement) & test(=worktrees::lifecycle_tests::remote_creation::doctor_admission_and_list_share_one_inventory_with_100_worktrees))'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
 # Exercise a relay response beyond the former 55-second socket ceiling.
 [[profile.default.overrides]]
 filter = 'package(=provenant) & binary(=fabric_lane) & test(=child_relay_honours_launch_allowance_longer_than_fifty_five_seconds)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
-[[profile.ci.overrides]]
-filter = 'package(=provenant) & binary(=fabric_lane) & test(=child_relay_honours_launch_allowance_longer_than_fifty_five_seconds)'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
-[[profile.lane.overrides]]
-filter = 'package(=provenant) & binary(=fabric_lane) & test(=child_relay_honours_launch_allowance_longer_than_fifty_five_seconds)'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
-# This real registry-lock fixture crosses the former 55-second socket ceiling.
-[[profile.default.overrides]]
-filter = 'package(=provenant-cli) & test(=fabric::graph_relay::provisioning_tests::child_launch_receipt_and_refusal_follow_the_confirmed_launch_deadline)'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
-# This real registry-lock fixture crosses the former 55-second socket ceiling.
-[[profile.ci.overrides]]
-filter = 'package(=provenant-cli) & test(=fabric::graph_relay::provisioning_tests::child_launch_receipt_and_refusal_follow_the_confirmed_launch_deadline)'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
-# This real registry-lock fixture crosses the former 55-second socket ceiling.
-[[profile.lane.overrides]]
-filter = 'package(=provenant-cli) & test(=fabric::graph_relay::provisioning_tests::child_launch_receipt_and_refusal_follow_the_confirmed_launch_deadline)'
-slow-timeout = { period = "30s", terminate-after = 4 }
 
 # This native timeout/replay fixture prepares a backend and Git repository,
 # submits twice, permits a 30-second status wait, then checks descendant
 # cleanup. Its outer deadline must include those phases around the inner wait.
 # Keep the provider's five-second deadline and status wait unchanged.
 [[profile.default.overrides]]
-filter = 'package(=provenant) & binary(=command_adapter) & test(=command_timeout_cleans_descendants_and_running_replay_keeps_one_attempt)'
-slow-timeout = { period = "30s", terminate-after = 3 }
-
-[[profile.ci.overrides]]
-filter = 'package(=provenant) & binary(=command_adapter) & test(=command_timeout_cleans_descendants_and_running_replay_keeps_one_attempt)'
-slow-timeout = { period = "30s", terminate-after = 3 }
-
-[[profile.lane.overrides]]
 filter = 'package(=provenant) & binary(=command_adapter) & test(=command_timeout_cleans_descendants_and_running_replay_keeps_one_attempt)'
 slow-timeout = { period = "30s", terminate-after = 3 }

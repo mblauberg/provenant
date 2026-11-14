@@ -8,13 +8,33 @@ pub struct EligiblePr {
     pub number: u64,
     pub head: String,
     pub approval: String,
+    pub approval_evidence: Vec<ApprovalEvidence>,
     pub base_branch: String,
-    /// Paths changed after the review, none of them production code.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub carried_paths: Vec<String>,
     /// Set when the chair landed the pull request without a covering review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted: Option<Accepted>,
+}
+impl EligiblePr {
+    /// Keep every observed approval; source priority and arrival order do not
+    /// overwrite evidence already attached to the pinned head.
+    pub fn extend_approval_evidence(
+        &mut self,
+        evidence: impl IntoIterator<Item = ApprovalEvidence>,
+    ) {
+        for proof in evidence {
+            if !self.approval_evidence.contains(&proof) {
+                self.approval_evidence.push(proof);
+            }
+        }
+    }
+}
+/// The source and execution/reviewer that approved the pinned head.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalEvidence {
+    pub source: provenant_cli::domains::ApprovalSource,
+    pub reference: String,
+    pub reviewer: String,
+    pub head: String,
 }
 /// A delta landed on the chair's word, with who gave it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,37 +56,7 @@ pub struct Candidate {
     pub tree: String,
     pub ref_name: String,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GateDefinition {
-    pub kind: provenant_cli::domains::GateKind,
-    pub digest: String,
-    pub checks: Vec<String>,
-    pub commands: Vec<String>,
-    pub issuer: Option<String>,
-    pub executor: Option<String>,
-    pub coverage: Vec<String>,
-    pub timeout_seconds: u64,
-    #[serde(default)]
-    pub pool: Option<String>,
-    #[serde(default)]
-    pub env_passthrough: Vec<String>,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GateResult {
-    Passed,
-    Failed,
-    Pending,
-    Missing,
-    Skipped,
-    Neutral,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CheckEvidence {
-    pub name: String,
-    pub issuer: Option<String>,
-    pub result: GateResult,
-}
+pub use provenant_records::landing::{CheckEvidence, GateDefinition, GateResult};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GateEvidence {
     pub commit: String,
@@ -84,6 +74,7 @@ pub struct GateEvidence {
 pub enum PublishMode {
     FastForward,
     RestOrdered,
+    Command,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublishDecision {
@@ -103,6 +94,15 @@ pub enum Outcome {
     Conflicted,
     Excluded,
     PendingUnknown,
+    /// Still waiting on CI or another lander; a resubmission resumes it.
+    Pending,
+}
+/// The head and base a landing request pinned for one pull request. A
+/// member whose live head or base differs is excluded, never landed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pin {
+    pub head: Option<String>,
+    pub base: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Alarm {
@@ -128,7 +128,7 @@ pub struct PendingAttempt {
     pub cost: CostEstimate,
     #[serde(default)]
     pub settled: Option<SettledAttempt>,
-    /// Members for which dispatch was prepared; absent on older markers.
+    /// Members for which dispatch was prepared, recorded before submission.
     #[serde(default)]
     pub dispatched: Option<Vec<u64>>,
     #[serde(default)]
@@ -145,7 +145,6 @@ pub struct SettledAttempt {
     pub receipt_pending: bool,
     pub tree_pending: bool,
     pub follow_pending: bool,
-    #[serde(default)]
     pub local_follow_pending: bool,
     pub cleanup_pending: bool,
 }
@@ -170,7 +169,6 @@ pub struct LandingReceipt {
     pub gate_evidence: GateEvidence,
     pub publish: PublishDecision,
     pub outcomes: BTreeMap<u64, Outcome>,
-    #[serde(default)]
     pub split: Vec<Vec<u64>>,
     pub approved_to_landed: BTreeMap<String, String>,
     pub cost: CostEstimate,

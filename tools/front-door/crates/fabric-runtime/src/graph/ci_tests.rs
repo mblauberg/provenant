@@ -50,6 +50,9 @@ impl CiStatus for Owner {
 }
 impl AttemptOwner for Owner {
     type Error = Infallible;
+    fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+        provenant_config::PortTable::builtin().worktree_layout
+    }
     fn wall_now(&self) -> Option<provenant_core::WallTime> {
         provenant_core::WallTime::from_micros(self.wall_seconds.saturating_mul(1_000_000)).ok()
     }
@@ -93,6 +96,8 @@ impl AttemptOwner for Owner {
             result_path: None,
             branch: self.branch.clone(),
             commit: self.commit.clone(),
+            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+            stop: None,
         })
     }
 }
@@ -305,7 +310,7 @@ fn ci_and_ask_deadlines_share_the_earliest_wake() {
     doc.nodes.push(
         serde_json::from_value(serde_json::json!({
             "id": "choose", "kind": "decide", "access": "read_only",
-            "decide": {
+            "decide": {"on_unanswered":"block_dependants",
                 "question": "Continue?", "default": "yes", "timeout_seconds": 30,
                 "options": [{"id": "yes", "label": "Continue"}, {"id": "no", "label": "Stop"}]
             }
@@ -331,7 +336,7 @@ fn ci_and_ask_deadlines_share_the_earliest_wake() {
     let decision = advance(&doc, &mut owner, &mut journal).unwrap();
     assert_eq!(decision.checkpoint.wake_at.unwrap().as_micros(), 60_000_000);
     assert_eq!(owner.targets.len(), 1);
-    assert!(decision.checkpoint.asks.iter().all(|ask| ask.resolved));
+    assert!(decision.checkpoint.asks.is_empty());
     owner.wall_seconds = 60;
     let done = advance(&doc, &mut owner, &mut journal).unwrap();
     assert_eq!(done.status, GraphStatus::Complete);
@@ -531,44 +536,48 @@ fn ci_document_checks_reach_host_query() {
 }
 
 #[test]
-fn ci_backwards_clock_reanchors_are_bounded() {
+fn ci_clock_reanchors_do_not_override_the_configured_timeout() {
+    let mut doc = document();
+    let Some(GateCondition::Ci {
+        timeout_seconds, ..
+    }) = &mut doc.nodes[0].condition
+    else {
+        unreachable!()
+    };
+    let configured_timeout_seconds = 5;
+    *timeout_seconds = configured_timeout_seconds;
     let mut owner = Owner {
-        observations: VecDeque::from(vec![observation(CiState::Pending, "waiting"); 5]),
+        observations: VecDeque::from(vec![observation(CiState::Pending, "waiting"); 6]),
         monotonic_micros: 100,
         ..Default::default()
     };
     let mut journal = Journal::default();
-    advance(&document(), &mut owner, &mut journal).unwrap();
-    for count in 1..=3 {
+    advance(&doc, &mut owner, &mut journal).unwrap();
+    for _ in 1..=4 {
         owner.monotonic_micros -= 1;
-        let result = advance(&document(), &mut owner, &mut journal).unwrap();
+        let result = advance(&doc, &mut owner, &mut journal).unwrap();
         assert_eq!(result.status, GraphStatus::Pending);
-        assert_eq!(
+        assert!(
             result.checkpoint.nodes[0]
                 .ci
                 .as_ref()
                 .unwrap()
-                .clock_reanchors,
-            count
+                .clock_reanchors
+                > 0
         );
         journal.0 =
             Some(serde_json::from_slice(&serde_json::to_vec(&result.checkpoint).unwrap()).unwrap());
     }
-    owner.monotonic_micros -= 1;
-    let result = advance(&document(), &mut owner, &mut journal).unwrap();
+    owner.monotonic_micros += 5_000_000;
+    let result = advance(&doc, &mut owner, &mut journal).unwrap();
     let node = &result.checkpoint.nodes[0];
     assert_eq!(node.state, NodeState::Failed);
-    assert_eq!(
-        node.gate.as_ref().unwrap().reason.as_deref(),
-        Some("timeout: clock re-anchor limit (3) exceeded")
-    );
-    let evidence = node.ci.as_ref().unwrap();
-    assert_eq!(evidence.clock_reanchors, 4);
-    assert_eq!(
-        evidence.clock_reanchor_reason.as_deref(),
-        Some("host monotonic clock moved backwards")
-    );
-    assert_eq!(owner.targets.len(), 5);
+    assert_eq!(result.outcome, Some(GraphOutcome::Failed));
+    assert!(!node.gate.as_ref().unwrap().passed);
+    let ci = node.ci.as_ref().unwrap();
+    assert_eq!(ci.state, CiState::Pending);
+    assert!(ci.elapsed_seconds >= configured_timeout_seconds);
+    assert!(ci.clock_reanchors > 0);
 }
 
 #[test]

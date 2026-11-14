@@ -361,6 +361,7 @@ fn assert_gc_settings_parse_defaults_and_warnings() {
         ("graph_checkpoint_days=3651", "graph_checkpoint_days_range"),
         ("schedule='yes'", "type"),
         ("free_floor='bad'", "invalid_cache_size"),
+        ("critical_free='bad'", "invalid_cache_size"),
         ("alert_below='bad'", "invalid_cache_size"),
         (
             "projects.p.regenerable=['../target']",
@@ -1547,6 +1548,35 @@ fn set_knob_is_written_atomically_and_shown_with_its_source() {
     );
 }
 #[test]
+fn dispatch_profiles_preserve_fractional_policy_in_canonical_snapshots() {
+    use provenant_records::{BudgetGrace, BudgetPolicy, CanonicalV1, run::HarnessProfile};
+    let config = load::<&[u8]>(&roots(), None).unwrap();
+    for overrides in [vec![], vec!["lanes.budget_grace=0.125".into()]] {
+        let profile = config.dispatch_profile(&overrides).unwrap();
+        let expected = if overrides.is_empty() {
+            BudgetGrace::DEFAULT
+        } else {
+            BudgetGrace::from_fraction(0.125).unwrap()
+        };
+        let raw = CanonicalV1::bytes(&profile).unwrap();
+        let decoded: HarnessProfile = serde_json::from_slice(raw.as_bytes()).unwrap();
+        assert_eq!(decoded, profile);
+        let grace: BudgetGrace =
+            serde_json::from_value(decoded.knobs["lanes.budget_grace"].clone()).unwrap();
+        assert_eq!(grace, expected);
+        let policy = BudgetPolicy {
+            grace,
+            ..Default::default()
+        };
+        let raw = CanonicalV1::bytes(&policy).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<BudgetPolicy>(raw.as_bytes()).unwrap(),
+            policy
+        );
+    }
+}
+
+#[test]
 fn writer_publishing_knob_defaults_on_and_can_be_disabled_per_dispatch() {
     let config = load::<&[u8]>(&roots(), None).unwrap();
     let profile = config.dispatch_profile(&[]).unwrap();
@@ -1658,63 +1688,6 @@ fn knob_edit_preserves_unknown_keys_while_applying_the_edit() {
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains("unknown = 1"));
     assert_eq!(read(&roots).unwrap().profile, Profile::Economy);
-}
-#[test]
-fn migrate_drops_rigorous_profile_and_refused_knobs() {
-    let dir = tempfile::tempdir().unwrap();
-    let roots = state_roots(dir.path());
-    let path = dir.path().join("config.toml");
-    let content = "schema_version = 1\nprofile = 'rigorous'\n[knobs]\n'review.polish' = 'always'\n'domains.routing.capacity_cooldown_seconds' = 30\n'confinement.census_host_list_complete' = true\n'lanes.max_concurrency' = 4\n";
-    std::fs::write(&path, content).unwrap();
-    assert!(read(&roots).is_err());
-
-    let report = crate::migrate(&roots, &crate::domains::NO_DOMAINS, false).unwrap();
-    assert_eq!(report.migrations.len(), 2);
-    let profile_m = report
-        .migrations
-        .iter()
-        .find(|m| m.location == "profile")
-        .unwrap();
-    assert_eq!(profile_m.action, "dropped");
-    assert_eq!(profile_m.keys, vec!["rigorous"]);
-    let knobs_m = report
-        .migrations
-        .iter()
-        .find(|m| m.location == "knobs")
-        .unwrap();
-    assert_eq!(knobs_m.action, "dropped");
-    assert!(knobs_m.keys.contains(&"review.polish".to_owned()));
-    assert!(
-        knobs_m
-            .keys
-            .contains(&"domains.routing.capacity_cooldown_seconds".to_owned())
-    );
-    assert!(
-        knobs_m
-            .keys
-            .contains(&"confinement.census_host_list_complete".to_owned())
-    );
-
-    let loaded = read(&roots).unwrap();
-    assert_eq!(loaded.profile, Profile::Balanced);
-    assert_eq!(loaded.knobs["lanes.max_concurrency"].value, 4);
-    let after_text = std::fs::read_to_string(&path).unwrap();
-    assert!(!after_text.contains("rigorous"));
-    assert!(!after_text.contains("review.polish"));
-    assert!(after_text.contains("lanes.max_concurrency"));
-}
-#[test]
-fn migrate_preserves_unrecognised_knobs() {
-    let dir = tempfile::tempdir().unwrap();
-    let roots = state_roots(dir.path());
-    let path = dir.path().join("config.toml");
-    let original =
-        "schema_version = 1\n[knobs]\n'review.polish' = 'always'\n'domains.routing.future' = 1\n";
-    std::fs::write(&path, original).unwrap();
-    crate::migrate(&roots, &crate::domains::NO_DOMAINS, false).unwrap();
-    let text = std::fs::read_to_string(path).unwrap();
-    assert!(!text.contains("review.polish"));
-    assert!(text.contains("domains.routing.future"));
 }
 #[test]
 fn set_creates_a_missing_private_state_directory() {
@@ -1859,114 +1832,106 @@ fn owner_marked_tables_replace_defaults_and_allow_empty_overrides() {
     }
 }
 
+/// Misplaced routing knobs name their exact domain field; unrelated unknown
+/// knob keys remain ordinary unknown-key warnings.
 #[test]
-fn registered_knobs_have_production_readers() {
-    fn production_only(text: &str) -> String {
-        let mut result = String::new();
-        let mut skip = false;
-        let mut depth = 0_i32;
-        let mut opened = false;
-        for line in text.lines() {
-            if line.trim() == "#[cfg(test)]" {
-                skip = true;
-                depth = 0;
-                opened = false;
-                continue;
-            }
-            if skip {
-                depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
-                opened |= line.contains('{');
-                if (opened && depth == 0) || (!opened && line.trim_end().ends_with(';')) {
-                    skip = false;
-                }
-            } else if !line.trim_start().starts_with("//") {
-                result.push_str(line);
-                result.push('\n');
-            }
-        }
-        result
-    }
-    assert!(
-        !production_only("#[cfg(test)]\nmod tests {\n get(\"unread.knob\");\n}\n")
-            .contains("unread.knob")
-    );
-    fn sources(path: &std::path::Path, output: &mut String) {
-        for entry in std::fs::read_dir(path).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                sources(&path, output);
-            } else if path.extension().is_some_and(|ext| ext == "rs")
-                && path.file_name().unwrap() != "knobs.rs"
-                && !path.file_name().unwrap().to_string_lossy().contains("test")
-            {
-                let text = std::fs::read_to_string(path).unwrap();
-                output.push_str(&production_only(&text));
-                output.push('\n');
-            }
-        }
-    }
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mut source = String::new();
-    sources(&root.join("src"), &mut source);
-    for entry in std::fs::read_dir(root.join("crates")).unwrap() {
-        let src = entry.unwrap().path().join("src");
-        if src.is_dir() {
-            sources(&src, &mut source);
-        }
-    }
-    let source: String = source.chars().filter(|c| !c.is_whitespace()).collect();
-    fn has_reader(source: &str, name: &str) -> bool {
-        // Confinement knobs are read through typed accessors on the config.
-        if let Some(accessor) = name.strip_prefix("confinement.") {
-            return source.contains(&format!(".{accessor}()"));
-        }
-        // Graph isolation is consumed from the typed per-node attempt before
-        // dispatch, when deciding whether to create a pinned source view.
-        if name == "lanes.isolation" {
-            return source.contains(".effective_isolation()");
-        }
-        // The Fabric MCP opt-in is read through a typed accessor.
-        if name == "fabric.mcp_server" {
-            return source.contains(".fabric_mcp_server()");
-        }
-        [".get(", "get(", "knob(", ".knob_u64(", ".knob_is_set("]
-            .iter()
-            .any(|call| source.contains(&format!("{call}\"{name}\"")))
-            || (name.starts_with("routing.") && source.contains(&format!("(\"{name}\",")))
-    }
-    assert!(!has_reader("log(\"unread.knob\", value)", "unread.knob"));
-    assert!(has_reader(
-        "config.knobs.get(\"unread.knob\")",
-        "unread.knob"
-    ));
-    for name in crate::knobs::registry().unwrap().knobs.keys() {
+fn misplaced_routing_knobs_name_their_current_domain_fields() {
+    for field in [
+        "capacity_cooldown_seconds",
+        "settlement_retries",
+        "capacity_retry_seconds",
+        "capacity_retry_max_seconds",
+        "retry_delay_ceiling_seconds",
+    ] {
+        let key = format!("domains.routing.{field}");
+        let text = format!("schema_version=1\n[knobs]\n'{key}'=30");
+        let config = load(&roots(), Some(text.as_bytes())).unwrap();
+        assert_warning(&config, "unknown_key");
+        let message = &config.warnings[0].message;
+        assert!(message.contains(&format!("knobs.{key}")), "{message}");
         assert!(
-            has_reader(&source, name),
-            "registered knob {name} has no reader"
+            message.contains(&format!("set `{field}` in `[domains.routing]`")),
+            "{message}"
         );
     }
+    let text = "schema_version=1\n[knobs]\n'domains.routing.future'=30";
+    let config = load(&roots(), Some(text.as_bytes())).unwrap();
+    assert_warning(&config, "unknown_key");
+    assert!(!config.warnings[0].message.contains("retired setting"));
 }
 
 #[test]
-fn misplaced_domain_knob_warns_with_the_migrate_repair() {
-    let config = load(
-        &roots(),
-        Some(&b"schema_version=1\n[knobs]\n'domains.routing.capacity_cooldown_seconds'=30"[..]),
-    )
-    .unwrap();
-    assert_warning(&config, "unknown_key");
-    assert!(config.warnings[0].message.contains("config migrate"));
-}
-
-#[test]
-fn unknown_domain_knob_warns_without_the_migrate_repair() {
-    let config = load(
-        &roots(),
-        Some(&b"schema_version=1\n[knobs]\n'domains.routing.future'=1"[..]),
-    )
-    .unwrap();
-    assert_warning(&config, "unknown_key");
-    assert!(!config.warnings[0].message.contains("config migrate"));
+fn removed_model_policy_lane_keys_warn_with_current_controls() {
+    #[derive(Debug, Default, Deserialize, serde::Serialize)]
+    #[serde(default, deny_unknown_fields)]
+    struct Routing {
+        model_policy: ModelPolicy,
+    }
+    impl DomainConfig for Routing {}
+    #[derive(Debug, Default, Deserialize, serde::Serialize)]
+    #[serde(default, deny_unknown_fields)]
+    struct Aggregate {
+        routing: Routing,
+    }
+    #[derive(Debug, Default, Deserialize, serde::Serialize)]
+    #[serde(default, deny_unknown_fields)]
+    struct ModelPolicy {
+        defaults: Defaults,
+    }
+    #[derive(Debug, Default, Deserialize, serde::Serialize)]
+    #[serde(default, deny_unknown_fields)]
+    struct Defaults {
+        lane: Lane,
+    }
+    #[derive(Debug, Default, Deserialize, serde::Serialize)]
+    #[serde(default, deny_unknown_fields)]
+    struct Lane {
+        max_context: Option<u64>,
+    }
+    fn defaults(_: Profile) -> &'static str {
+        ""
+    }
+    const SECTIONS: DomainSections<Aggregate> =
+        DomainSections::new(&[DomainSection::new::<Routing>("routing", defaults)]);
+    let current_text =
+        "schema_version=1\n[domains.routing.model_policy.defaults.lane]\nmax_context=2048";
+    let current = load_with_domains(&roots(), Some(current_text.as_bytes()), &SECTIONS).unwrap();
+    assert_eq!(
+        current
+            .domains
+            .routing
+            .model_policy
+            .defaults
+            .lane
+            .max_context,
+        Some(2048)
+    );
+    for (key, value, remedy) in [
+        (
+            "max_continuations",
+            "2",
+            "graph `limits.continuations` to bound restarts",
+        ),
+        (
+            "resume_continuations",
+            "true",
+            "automatic restarts use fresh sessions",
+        ),
+    ] {
+        let text = format!(
+            "schema_version=1\n[domains.routing.model_policy.defaults.lane]\n{key}={value}"
+        );
+        let config = load_with_domains(&roots(), Some(text.as_bytes()), &SECTIONS).unwrap();
+        assert_warning(&config, "unknown_key");
+        let full_key = format!("domains.routing.model_policy.defaults.lane.{key}");
+        assert!(
+            config.warnings.iter().any(|warning| {
+                warning.message.contains(&full_key) && warning.message.contains(remedy)
+            }),
+            "{key}: {:?}",
+            config.warnings
+        );
+    }
 }
 
 #[test]

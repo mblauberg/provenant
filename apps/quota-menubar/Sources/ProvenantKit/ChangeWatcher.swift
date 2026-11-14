@@ -1,11 +1,11 @@
 import Foundation
 
-/// Where the CLI keeps its state: `$PROVENANT_STATE_DIR` when absolute, else `~/.local/share/provenant/v1`.
+/// Where the CLI keeps its state: `$PROVENANT_STATE_DIR` when absolute, else `~/.local/share/provenant/v2`.
 public enum StateDirectory {
     public static func resolve(environment: [String: String] = ProcessInfo.processInfo.environment,
                                home: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
         if let dir = environment["PROVENANT_STATE_DIR"], dir.hasPrefix("/") { return URL(fileURLWithPath: dir) }
-        return home.appending(path: ".local/share/provenant/v1")
+        return home.appending(path: ".local/share/provenant/v2")
     }
 
     /// The owner's change signal file inside a state directory.

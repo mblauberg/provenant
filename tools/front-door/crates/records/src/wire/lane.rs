@@ -24,8 +24,8 @@ macro_rules! lane_row {
 lane_row! {
     required {
         project_id: String => string();
-        run_id: String => string();
-        task_id: String => string();
+        graph: String => string();
+        node: String => string();
         attempt_id: String => string();
         attempt_number: u64 => unsigned();
         retry_of: Option<String> => nullable(string());
@@ -66,10 +66,11 @@ lane_row! {
     optional {
         git_import_failure: Value => object(&[("reason", string()), ("head", nullable(string())), ("retained_objects", nullable(super::schema::worktree_path()))], &[]);
         write_grants: Value => nullable(array(grant_schema()));
-        terminal_cause: crate::run::TerminalCause => choices(&["preparation_refused", "source_view_refused", "account_login_required", "route_resolution_refused", "access_policy_refused", "disk_floor", "disk_observation_unavailable", "stored_prompt_unreadable", "cloud_placement_removed", "write_grants_refused", "worktree_busy", "handoff_refused", "retained_writer_import", "unsupported_platform", "unknown_pacing_account", "unregistered_account", "delivery_prepare_credential_helper", "spawn_failure", "process_crash", "token_budget", "settlement_failure", "provider_early_stop", "free_pool_quota", "command_unavailable", "host_native_unconfigured", "identity_unobserved", "stopped_no_work", "context_handoff", "lane_token_lost"]);
+        terminal_cause: crate::run::TerminalCause => choices(&["source_view_refused", "account_login_required", "route_resolution_refused", "access_policy_refused", "disk_floor", "disk_observation_unavailable", "stored_prompt_unreadable", "cloud_placement_removed", "write_grants_refused", "worktree_busy", "handoff_refused", "retained_writer_import", "unsupported_platform", "unknown_pacing_account", "unregistered_account", "delivery_prepare_credential_helper", "spawn_failure", "process_crash", "token_budget", "settlement_failure", "provider_early_stop", "free_pool_quota", "command_unavailable", "host_native_unconfigured", "identity_mismatch", "stopped_no_work", "context_handoff", "blocked", "lane_token_lost"]);
         host: String => string();
         title: String => string();
         requested_priority: i64 => integer();
+        limits: Value => any();
         provider_seconds: f64 => nullable(number());
         handoff: Value => any();
         provider_error: String => string();
@@ -229,15 +230,12 @@ impl LaneRow {
         {
             use crate::run::SettlementReason;
             let detail = match reason {
-                SettlementReason::HandoffMissing => match &lane.state {
-                    AttemptState::Terminal { extra, .. }
-                        if extra.get("terminal_cause")
-                            == Some(&json!(crate::run::TerminalCause::EmptyWriterResult)) =>
-                    {
-                        Some(crate::run::TerminalCause::EmptyWriterResult.detail())
-                    }
-                    _ => Some("the lane finished without a handoff; inspect its result"),
-                },
+                SettlementReason::HandoffMissing => {
+                    Some("the lane finished without a handoff; inspect its result")
+                }
+                SettlementReason::EmptyResult => {
+                    Some(crate::run::TerminalCause::EmptyWriterResult.detail())
+                }
                 SettlementReason::DeclaredStop => match &lane.state {
                     AttemptState::Terminal { extra, .. }
                         if extra.get("terminal_cause")
@@ -267,8 +265,8 @@ impl LaneRow {
             }
         ) {
             terminal_reason = Some(format!(
-                "the lane outcome is uncertain; inspect status for operation {} before retrying",
-                lane.operation_id
+                "the lane outcome is uncertain; inspect `provenant status {}` before retrying",
+                lane.key
             ));
         }
         let git_import_failure =
@@ -365,8 +363,8 @@ impl LaneRow {
             });
         Self {
             project_id: lane.project_id.to_string(),
-            run_id: lane.run_id.to_string(),
-            task_id: lane.task_id.to_string(),
+            graph: lane.key.graph().to_owned(),
+            node: lane.key.node().to_owned(),
             attempt_id: lane.attempt_id.to_string(),
             attempt_number: lane.attempt_number,
             retry_of: lane.retry_of.map(|id| id.to_string()),
@@ -455,6 +453,7 @@ impl LaneRow {
                 .filter(|priority| Some(i32::from(*priority)) != lane.priority)
                 .map(i64::from),
             provider_seconds: facts.provider_seconds,
+            limits: lane.limits.as_ref().map(|limits| json!(limits)),
             handoff: None,
             provider_error: None,
             capabilities: None,
@@ -521,7 +520,7 @@ pub fn lane_list_schema() -> Value {
     )
 }
 
-/// MCP's `provider_seconds`: the record's whole milliseconds as fractional
+/// The relay's `provider_seconds`: the record's whole milliseconds as fractional
 /// seconds. The single definition of the conversion `fabric-runtime` applies
 /// when it encodes an attempt, so the two cannot disagree.
 pub fn provider_seconds(provider_ms: Option<u64>) -> Option<f64> {
@@ -536,7 +535,6 @@ mod terminal_cause_tests {
     #[test]
     fn terminal_reasons_use_typed_causes_without_provider_text() {
         for cause in [
-            TerminalCause::PreparationRefused,
             TerminalCause::SourceViewRefused,
             TerminalCause::AccountLoginRequired,
             TerminalCause::RouteResolutionRefused,
@@ -561,9 +559,10 @@ mod terminal_cause_tests {
             TerminalCause::FreePoolQuota,
             TerminalCause::CommandUnavailable,
             TerminalCause::HostNativeUnconfigured,
-            TerminalCause::IdentityUnobserved,
+            TerminalCause::IdentityMismatch,
             TerminalCause::StoppedNoWork,
             TerminalCause::ContextHandoff,
+            TerminalCause::Blocked,
             TerminalCause::LaneTokenLost,
         ] {
             let mut extra = crate::ExtraFields::default();

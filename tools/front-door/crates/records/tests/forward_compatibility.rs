@@ -81,13 +81,13 @@ fn writer_delivery_request() -> Value {
     json!({"remote":"origin","branch":"work","open_pr":true})
 }
 fn task() -> Value {
-    json!({"task_id":ID,"prompt_digest":digest(),"route":requested_route(),
+    json!({"prompt_digest":digest(),"route":requested_route(),
         "fallback":[route_record()],"authority_digest":digest(),
         "provider_timeout_seconds":60,"delivery_id":null,
         "writer":{"project":"/repo","worktree":"/repo/work"},"deliver":writer_delivery_request()})
 }
 fn request() -> Value {
-    json!({"schema_version":1,"tasks":[task()],"concurrency":1,"parent":null,
+    json!({"schema_version":1,"task":task(),"parent":null,
         "chair":{"host":ID,"actor":ID}})
 }
 fn readiness() -> Value {
@@ -154,13 +154,13 @@ fn skipped_route() -> Value {
     json!({"route":"codex/other","kind":"unavailable","detail":"unavailable"})
 }
 fn attempt() -> Value {
-    json!({"schema_version":1,"attempt_id":ID,"run_id":ID,"project_id":ID,
-        "task_id":ID,"operation_id":"operation","attempt_number":1,"revision":1,"generation":1,
+    json!({"schema_version":1,"attempt_id":ID,"project_id":ID,
+        "key":{"project":ID,"graph":"g","node":"n","attempt":1},"attempt_number":1,"revision":1,"generation":1,
         "requested_route":requested_route(),"resolved_route":route_record(),
         "applied_route":route_record(),"observed_route":route_record(),"authority_digest":digest(),
-        "write_grants":[write_grant()],"protected_paths":[path()],"delivery":writer_delivery_record(),
+        "read_only_writable":[],"write_grants":[write_grant()],"protected_paths":[path()],"delivery":writer_delivery_record(),
         "queued_at":NOW,"state":terminal_state(),"usage":{},"prompt":artifact(),"result":artifact(),
-        "exit_evidence":artifact(),"skipped_routes":[skipped_route()],"trace":{"host":ID,"run":ID}})
+        "exit_evidence":artifact(),"skipped_routes":[skipped_route()],"trace":{"host":ID,"attempt":ID}})
 }
 fn evidence() -> Value {
     json!({"path":path(),"digest":digest()})
@@ -191,7 +191,7 @@ fn receipt() -> Value {
         "review_attempts":[],"decision":accepted_decision(),"created_at":10,"updated_at":10})
 }
 fn request_work() -> Value {
-    json!({"run_id":ID,"repository":absolute_path(),"head":null})
+    json!({"graph":"g","node":null,"repository":absolute_path(),"head":null})
 }
 fn request_option() -> Value {
     json!({"id":"continue","label":"Continue","description":"Proceed"})
@@ -233,7 +233,7 @@ fn owned_entry() -> Value {
         "expected":{"kind":"file","digest":digest(),"mode":384}})
 }
 fn harness_target() -> Value {
-    json!({"harness":"codex","skills_dir":absolute_path(),"mcp_file":absolute_path()})
+    json!({"harness":"codex","skills_dir":absolute_path(),"config_file":absolute_path()})
 }
 fn install_receipt() -> Value {
     json!({"schema_version":1,"state_format_version":1,"source_digest":source_digest(),"manifest_digest":digest(),
@@ -243,7 +243,7 @@ fn install_receipt() -> Value {
 
 cases! {
     work_context_preserves_digest: run::WorkContext => json!({"work_item":"issue-2268","role":"reviewer"});
-    chair_binding_preserves_digest: run::ChairBinding => json!({"host":ID,"actor":ID});
+    chair_binding_preserves_digest: provenant_records::custody::Chair => json!({"host":ID,"actor":ID});
     canonical_request_preserves_digest: run::CanonicalRequest => request();
     harness_profile_preserves_digest: run::HarnessProfile => profile();
     task_request_preserves_digest: run::TaskRequest => task();
@@ -263,9 +263,8 @@ cases! {
     requested_review_preserves_digest: run::RequestedRoute => json!({"kind":"review","name":"senior","effort":null,"excluded_families":[],"distinct_families":false});
     route_record_preserves_digest: run::RouteRecord => route_record();
     usage_record_preserves_digest: run::UsageRecord => json!({});
-    run_record_preserves_digest: run::RunRecord => json!({"schema_version":1,"run_id":ID,"project_id":ID,"actor_id":ID,"operation_id":"operation","request_digest":digest(),"task_ids":[ID],"children":[],"revision":1,"generation":1,"created_at":NOW,"closure":"open"});
-    operation_record_preserves_digest: run::OperationRecord => json!({"schema_version":1,"project_id":ID,"actor_id":ID,"operation_id":"operation","kind":"dispatch","request_digest":digest(),"run_id":ID,"state":"accepted"});
-    refused_operation_preserves_digest: run::OperationRecord => json!({"schema_version":1,"project_id":ID,"actor_id":ID,"operation_id":"operation","kind":"dispatch","request_digest":digest(),"run_id":ID,"state":"refused","refusal":{"code":"REFUSED","detail":"not admitted"},"worktree":"lane-branch","refused_at":NOW,"refusal_chair":{"host":ID,"actor":ID}});
+    operation_record_preserves_digest: run::OperationRecord => json!({"schema_version":1,"project_id":ID,"actor_id":ID,"operation_id":"operation","kind":"dispatch","request_digest":digest(),"state":"accepted"});
+    refused_operation_preserves_digest: run::OperationRecord => json!({"schema_version":1,"project_id":ID,"actor_id":ID,"operation_id":"operation","kind":"dispatch","request_digest":digest(),"state":"refused","refusal":{"code":"REFUSED","detail":"not admitted"},"worktree":"lane-branch","refused_at":NOW,"refusal_chair":{"host":ID,"actor":ID}});
     queued_state_preserves_digest: run::AttemptState => json!({"state":"queued"});
     starting_state_preserves_digest: run::AttemptState => json!({"state":"starting"});
     running_state_preserves_digest: run::AttemptState => json!({"state":"running"});
@@ -274,10 +273,9 @@ cases! {
     skipped_route_preserves_digest: run::SkippedRoute => skipped_route();
     artifact_record_preserves_digest: run::ArtifactRecord => artifact();
     write_grant_record_preserves_digest: run::WriteGrantRecord => write_grant();
-    attempt_record_preserves_digest: run::AttemptRecord => attempt();
     lane_wait_preserves_digest: run::LaneWait => json!({"attempt_id":ID,"lane_class":"writer","waiting_for":"capacity"});
-    admission_ticket_preserves_digest: run::AdmissionTicket => json!({"schema_version":1,"operation_id":"operation","attempt_id":ID,"project_id":ID,"sequence":1,"generation":1,"active":true,"memory_floor_basis_points":1000,"disk_floor_bytes":1,"startup_spacing_ms":1,"run_concurrency":1,"admission_deadline":NOW});
-    run_event_preserves_digest: run::RunEvent => json!({"schema_version":1,"sequence":1,"project_id":ID,"run_id":ID,"attempt_id":ID,"revision":1,"change":terminal_state(),"trace":{}});
+    admission_ticket_preserves_digest: run::AdmissionTicket => json!({"schema_version":1,"operation_id":"operation","attempt_id":ID,"project_id":ID,"sequence":1,"generation":1,"active":true,"lane_class":"writer","memory_floor_basis_points":1000,"startup_spacing_ms":1,"run_concurrency":1,"runtime_seconds":60,"admission_deadline":NOW});
+    run_event_preserves_digest: run::RunEvent => json!({"schema_version":1,"sequence":1,"project_id":ID,"attempt_id":ID,"revision":1,"change":terminal_state(),"trace":{}});
 
     resolved_route_preserves_digest: ResolvedRoute => resolved_route();
     route_selection_receipt_preserves_digest: RouteSelectionReceipt => selection();
@@ -335,6 +333,17 @@ cases! {
 }
 
 #[test]
+fn attempt_record_preserves_digest() -> TestResult {
+    let mut value = normalise::<run::AttemptRecord>(attempt())?;
+    // WorkKey has exactly four identity fields; unlike record payloads, it
+    // deliberately discards unknown fields (covered by format2_tests).
+    let key = value["key"].clone();
+    add_future_fields(&mut value);
+    value["key"] = key;
+    assert_preserved::<run::AttemptRecord>("run-attempt", value)
+}
+
+#[test]
 fn request_digest_matches_the_newer_writers_canonical_record() -> TestResult {
     let mut value = normalise::<run::CanonicalRequest>(request())?;
     add_future_fields(&mut value);
@@ -359,7 +368,7 @@ fn unknown_profile_and_access_fields_survive_parent_skip_rules() -> TestResult {
     task["access"] = empty_access;
     assert_preserved::<run::TaskRequest>("run-task-with-future-policy", task.clone())?;
     let mut request = normalise::<run::CanonicalRequest>(request())?;
-    request["tasks"][0] = task;
+    request["task"] = task;
     assert_preserved::<run::CanonicalRequest>("run-request", request)?;
     let mut attempt = normalise::<run::AttemptRecord>(attempt())?;
     assert!(attempt.get("profile").is_none());
@@ -427,7 +436,7 @@ fn older_install_receipt_defaults_state_format_version() -> TestResult {
         "asset_digest":source_digest(),"target":"target","toolchain":"toolchain","bin_dir":absolute_path(),
         "harnesses":["codex"],"harness_targets":[harness_target()],"entries":[owned_entry()]});
     let receipt: InstallReceipt = serde_json::from_value(old)?;
-    assert_eq!(receipt.state_format_version, STATE_FORMAT_VERSION);
+    assert_eq!(receipt.state_format_version, BASELINE_STATE_FORMAT_VERSION);
     Ok(())
 }
 

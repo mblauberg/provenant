@@ -62,8 +62,7 @@ const LAYERS: &[(&str, &[&str])] = &[
     ("fabric-store", &["core", "records", "os", "sqlite"]),
     (
         "fabric-runtime",
-        // Graph patches use confinement scanners; cutover reads legacy run stores
-        // through the shared read-only SQLite boundary.
+        // Graph patches use confinement scanners.
         &[
             "core",
             "records",
@@ -72,11 +71,8 @@ const LAYERS: &[(&str, &[&str])] = &[
             "confinement",
             "fabric-store",
             "routing",
-            "sqlite",
         ],
     ),
-    // The relay validates its socket directory against the effective UID.
-    ("fabric-mcp", &["core", "records", "os", "fabric-runtime"]),
     // Chair logs use the lower-level SQLite helper for their durable receipt store.
     ("workflow", &["core", "records", "os", "sqlite"]),
     (
@@ -92,7 +88,6 @@ const LAYERS: &[(&str, &[&str])] = &[
             "routing",
             "run",
             "fabric-runtime",
-            "fabric-mcp",
             "fabric-store",
             "workflow",
             "os",
@@ -118,7 +113,6 @@ const LAYERS: &[(&str, &[&str])] = &[
             // The binary sets the process-wide store busy timeout at startup.
             "sqlite",
             "fabric-runtime",
-            "fabric-mcp",
             "workflow",
             "cli",
         ],
@@ -448,205 +442,9 @@ fn is_test_source(name: &str) -> bool {
         || stem.ends_with("_tests")
 }
 
-// Test waits use the shared bounded helper, an injected clock, or an explicit
-// synchronisation primitive. Tokenise first so examples and comments do not
-// count; also catch imported and renamed sleep functions.
-fn fixture_sleep_violation(source: &str, test_file: bool) -> bool {
-    selected_test_scopes(source, test_file, true)
-        .iter()
-        .any(|scope| {
-            let tokens = rust_tokens(scope);
-            for (index, token) in tokens.iter().enumerate() {
-                if *token == "use" {
-                    let end = tokens[index..]
-                        .iter()
-                        .position(|token| *token == ";")
-                        .map_or(tokens.len(), |offset| index + offset);
-                    let import = &tokens[index..end];
-                    if import.contains(&"sleep")
-                        && (import.contains(&"thread") || import.contains(&"time"))
-                    {
-                        return true;
-                    }
-                }
-                if *token == "sleep" && tokens.get(index + 1) == Some(&"(") {
-                    let previous = index.checked_sub(1).and_then(|i| tokens.get(i));
-                    if previous != Some(&".") && previous != Some(&"fn") {
-                        return true;
-                    }
-                }
-                if *token == "sleep" && index >= 2 && tokens[index - 2..index] == [":", ":"] {
-                    return true;
-                }
-            }
-            false
-        })
-}
-
-fn is_fixture_source(name: &str) -> bool {
-    let stem = Path::new(name)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or_default();
-    is_test_source(name)
-        || matches!(
-            stem,
-            "fixture" | "fixtures" | "fake" | "fakes" | "test_support"
-        )
-        || stem.starts_with("fixture_")
-        || stem.starts_with("fake_")
-        || stem.ends_with("_fake")
-        || stem.ends_with("_fakes")
-        || name.contains("/fixtures/")
-        || name.contains("/test-support/")
-}
-
-// Resolve out-of-line modules declared in a fixture or directly under cfg(test).
-fn fixture_module_paths(path: &Path, source: &str, fixture: bool) -> Vec<PathBuf> {
-    let tokens = rust_tokens(source);
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default();
-    let Some(parent) = path.parent() else {
-        return Vec::new();
-    };
-    let module_dir = if matches!(stem, "lib" | "main" | "mod") {
-        parent.to_path_buf()
-    } else {
-        parent.join(stem)
-    };
-    let mut paths = Vec::new();
-    let selected = selected_test_scopes(source, false, true);
-    for (i, token) in tokens.iter().enumerate() {
-        if *token != "mod" || tokens.get(i + 2) != Some(&";") {
-            continue;
-        }
-        let offset = token.as_ptr() as usize;
-        let cfg_test = selected.iter().any(|scope| {
-            let start = scope.as_ptr() as usize;
-            (start..start + scope.len()).contains(&offset)
-        });
-        if fixture || cfg_test {
-            let name = tokens[i + 1];
-            paths.push(module_dir.join(format!("{name}.rs")));
-            paths.push(module_dir.join(name).join("mod.rs"));
-        }
-    }
-    paths
-}
-
-#[test]
-fn fixtures_do_not_call_direct_sleep() -> Result<(), Box<dyn Error>> {
-    for (source, expected) in [
-        ("std::thread::sleep(delay);", true),
-        ("use std::thread::{sleep as pause}; pause(delay);", true),
-        ("use std::thread::sleep; sleep(delay);", true),
-        ("clock.sleep(delay);", false),
-        (
-            "// std::thread::sleep(delay);\nlet example = \"sleep()\";",
-            false,
-        ),
-    ] {
-        assert_eq!(fixture_sleep_violation(source, true), expected, "{source}");
-    }
-    assert!(is_fixture_source("crates/os/src/fixture_git.rs"));
-    assert!(is_fixture_source("crates/run/src/test_support.rs"));
-    assert!(!fixture_sleep_violation(
-        "fn production() { std::thread::sleep(delay); }",
-        false
-    ));
-    assert!(fixture_sleep_violation(
-        "#[cfg(test)] mod tests { fn fixture() { std::thread::sleep(delay); } }",
-        false
-    ));
-    assert!(fixture_sleep_violation(
-        "#[cfg(all(test, unix))] fn fixture() { std::thread::sleep(delay); }",
-        false
-    ));
-    assert!(fixture_sleep_violation(
-        "#[cfg(feature = \"fixture\")] fn fixture() { std::thread::sleep(delay); }",
-        false
-    ));
-    assert!(!fixture_sleep_violation(
-        "#[cfg(any(test, unix))] fn production() { std::thread::sleep(delay); }",
-        false
-    ));
-    assert!(is_fixture_source("src/pr/fakes.rs"));
-    let mut sources = Vec::new();
-    for root in source_roots() {
-        rust_sources(&root, &mut sources)?;
-    }
-    assert!(
-        fixture_module_paths(Path::new("src/lib.rs"), "#[cfg(test)] mod hidden;", false)
-            .contains(&PathBuf::from("src/hidden.rs"))
-    );
-    assert!(
-        fixture_module_paths(Path::new("src/hidden.rs"), "mod nested;", true)
-            .contains(&PathBuf::from("src/hidden/nested.rs"))
-    );
-    assert!(fixture_module_paths(Path::new("src/lib.rs"), "mod production;", false).is_empty());
-    let adjacent = fixture_module_paths(
-        Path::new("src/lib.rs"),
-        "#[cfg(test)] mod hidden; pub mod production;",
-        false,
-    );
-    assert!(adjacent.contains(&PathBuf::from("src/hidden.rs")));
-    assert!(!adjacent.contains(&PathBuf::from("src/production.rs")));
-    // Follow test-only module declarations transitively.
-    let mut test_modules = std::collections::HashSet::new();
-    loop {
-        let before = test_modules.len();
-        for path in &sources {
-            let source = fs::read_to_string(path)?;
-            let fixture = is_fixture_source(&path.to_string_lossy()) || test_modules.contains(path);
-            test_modules.extend(fixture_module_paths(path, &source, fixture));
-        }
-        if test_modules.len() == before {
-            break;
-        }
-    }
-    for path in sources {
-        let mut source = fs::read_to_string(&path)?;
-        // The shared bounded polling primitive is the sole direct-sleep exception.
-        if path.ends_with("crates/test-support/src/lib.rs") {
-            let tokens = rust_tokens(&source);
-            if let Some(start) = tokens.windows(2).position(|w| w == ["fn", "wait_for"]) {
-                let Some(open) = (start..tokens.len()).find(|&i| tokens[i] == "{") else {
-                    return Err("wait_for has no body".into());
-                };
-                let mut depth = 0;
-                let mut end = open;
-                for (i, token) in tokens.iter().enumerate().skip(open) {
-                    if *token == "{" {
-                        depth += 1;
-                    }
-                    if *token == "}" {
-                        depth -= 1;
-                        if depth == 0 {
-                            end = i;
-                            break;
-                        }
-                    }
-                }
-                let begin = tokens[start].as_ptr() as usize - source.as_ptr() as usize;
-                let finish = tokens[end].as_ptr() as usize - source.as_ptr() as usize + 1;
-                source.replace_range(begin..finish, "");
-            }
-        }
-        if fixture_sleep_violation(
-            &source,
-            is_fixture_source(&path.to_string_lossy()) || test_modules.contains(&path),
-        ) {
-            return Err(format!(
-                "{} calls or imports direct sleep in a fixture",
-                path.display()
-            )
-            .into());
-        }
-    }
-    Ok(())
-}
+// Method-level bans (including direct sleep) live in clippy.toml. The remaining
+// scanners express contextual rules: Git arguments/environment, reserved OS
+// namespaces, and adapter identity comparisons; Clippy cannot model those.
 
 // Counts for the tokens owned by one function body (innermost function wins).
 #[derive(Default)]
@@ -1030,10 +828,8 @@ fn check_internal_dependencies(
             if internal == "os" && alias != "provenant-os" {
                 return Err("provenant-os must keep its name for source policy checks".into());
             }
-            let dev_exception = kind == "dev-dependencies"
-                && (internal == name
-                    || internal == "test-support"
-                    || (name == "fabric-mcp" && internal == "fabric-store"));
+            let dev_exception =
+                kind == "dev-dependencies" && (internal == name || internal == "test-support");
             let fixture_exception = internal == "test-support"
                 && kind == "dependencies"
                 && declared.get("optional").and_then(Item::as_bool) == Some(true)
@@ -1155,11 +951,7 @@ fn routing_cannot_depend_on_run() -> Result<(), Box<dyn Error>> {
 #[test]
 fn internal_dev_exceptions_do_not_allow_production_edges() -> Result<(), Box<dyn Error>> {
     let workspace: DocumentMut = "".parse()?;
-    for (member, dependency) in [
-        ("os", "os"),
-        ("supervisor", "supervisor"),
-        ("fabric-mcp", "fabric-store"),
-    ] {
+    for (member, dependency) in [("os", "os"), ("supervisor", "supervisor")] {
         for kind in ["dependencies", "dev-dependencies", "build-dependencies"] {
             for scope in [String::new(), "target.'cfg(unix)'.".to_owned()] {
                 let manifest: DocumentMut = format!(

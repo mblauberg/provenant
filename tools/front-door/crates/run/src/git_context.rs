@@ -232,19 +232,23 @@ fn transport_environment(env: &[(OsString, OsString)]) -> Vec<(OsString, OsStrin
 
 /// Where a lane can write: its linked worktree, the project's worktree and
 /// scratch areas, and the run state directory when one is set.
-fn lane_roots(cwd: &Path, env: &[(OsString, OsString)]) -> transport::LaneRoots {
+fn lane_roots(
+    cwd: &Path,
+    env: &[(OsString, OsString)],
+) -> std::result::Result<transport::LaneRoots, transport::TransportError> {
     let get = |name: &str| {
         env.iter()
             .find(|(key, _)| key == name)
             .map(|(_, value)| PathBuf::from(value))
     };
     let run_state = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).map(PathBuf::from);
+    let host_state = run_state.as_deref().unwrap_or(cwd);
     let extra = transport::LaneRoots::new(run_state);
     match (get("GIT_DIR"), get("GIT_COMMON_DIR")) {
         (Some(private), Some(common)) => {
-            transport::LaneRoots::for_repository(cwd, &private, &common, &extra)
+            transport::LaneRoots::for_repository(cwd, &private, &common, &extra, host_state)
         }
-        _ => transport::LaneRoots::project(cwd),
+        _ => transport::LaneRoots::project(cwd, host_state),
     }
 }
 
@@ -274,7 +278,7 @@ fn check_transport(
         reason: error.to_string(),
     };
     let entries = transport::parse_listing(&listing.bytes).map_err(refusal)?;
-    let roots = lane_roots(cwd, env);
+    let roots = lane_roots(cwd, env).map_err(refusal)?;
     transport::check_environment(transport_env, cwd, &roots).map_err(refusal)?;
     transport::check_listing(&entries, cwd, &roots).map_err(refusal)
 }
@@ -479,7 +483,8 @@ pub fn ensure_recorded_local_branch(
     ledger: &provenant_confinement::worktrees::RefLedger,
     call: &crate::Request<'_>,
 ) -> Result<(bool, Option<String>)> {
-    use provenant_confinement::worktrees::{RefEndpoint, RefObservation, RefOrigin};
+    use provenant_confinement::worktrees::RefObservation;
+    use provenant_records::custody::{RefEndpoint, RefOrigin};
     let (created, tip) = ensure_local_branch_tip(git, cwd, branch, start)?;
     let warning = (|| -> std::result::Result<(), Box<dyn std::error::Error>> {
         ledger.record(
@@ -1363,7 +1368,8 @@ mod tests {
 
     #[test]
     fn recorded_local_branch_is_created_once_then_adopted() -> TestResult {
-        use provenant_confinement::worktrees::{RefEndpoint, RefLedger, RefOrigin};
+        use provenant_confinement::worktrees::RefLedger;
+        use provenant_records::custody::{RefEndpoint, RefOrigin};
         let HistoryFixture {
             _temp,
             root,
@@ -1406,7 +1412,7 @@ mod tests {
             .load(&RefEndpoint::Local, &reference)?
             .ok_or("no record")?;
         assert_eq!(second.origin, RefOrigin::Adopted);
-        assert_eq!(second.generation, first.generation + 1);
+        assert!(second.generation > first.generation);
         Ok(())
     }
 

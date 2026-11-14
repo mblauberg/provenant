@@ -33,6 +33,8 @@ pub enum QuotaError {
     InvalidTimestamp,
     #[error("quota revision or refresh claim changed")]
     Conflict,
+    #[error("quota admission refused: allowance exhausted")]
+    AllowanceExhausted,
     #[error("quota admission refused: {0}")]
     Refused(&'static str),
 }

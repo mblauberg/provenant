@@ -987,7 +987,7 @@ fn main() -> Result<()> {
     })?;
     let selected_ref = GitRefName::branch(BRANCH)?;
     let git = std::fs::canonicalize(which("git").ok_or("git")?)?;
-    let runtime = UtilityRuntime::new(git.clone(), &layout.home_git)?;
+    let runtime = UtilityRuntime::new(git.clone(), &layout.home_git, &layout.state)?;
     let worktree = if args.writer {
         let repo = runtime.open_repo(
             &executor,
@@ -1013,7 +1013,7 @@ fn main() -> Result<()> {
     let mut inputs = provenant_core::RootInputs::new(home.clone(), std::env::current_dir()?);
     inputs.environment_state_dir =
         std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).map(PathBuf::from);
-    let host_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let host_roots = provenant_os::fs::bind_roots(&inputs)?;
     let accounts: provenant_providers::accounts::Settings =
         provenant_config::read_domain(host_roots.state.as_path(), "accounts")?;
     let mut credentials = host_credential_roots(|name| std::env::var_os(name));
@@ -1227,6 +1227,7 @@ fn main() -> Result<()> {
             prompt: &prompt,
             continuation: continuation.as_ref(),
             grant_digest: "recording",
+            policy: &provenant_records::policy::Policy::default(),
             executable: &args.executable,
             home: &home,
             user: &user,
@@ -1245,7 +1246,6 @@ fn main() -> Result<()> {
                 depth: 1,
                 attempt: provenant_core::AttemptId::from_bytes(nonce),
                 assets: &args.assets,
-                fabric_mcp: true,
             },
         })?;
         if let Some(policy) = plan.policy_mut()

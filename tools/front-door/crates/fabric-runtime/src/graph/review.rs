@@ -173,8 +173,6 @@ pub(super) fn contract_error(
                 matches!(triage.decision.as_str(), "confirmed" | "rejected")
                     && !triage.reason.trim().is_empty()
                     && !triage.root_cause.trim().is_empty()
-                    && triage.root_cause.len() <= OUTPUT_FIELD_BYTES
-                    && triage.reason.len() <= OUTPUT_FIELD_BYTES
                     && matches!(
                         triage.blocking_class.as_str(),
                         "acceptance" | "default_path_defect" | "boundary" | "data_loss" | "none"
@@ -270,8 +268,9 @@ pub(super) fn correct_verdict(
     plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
     limits: &crate::config::GraphLimits,
+    worktree_layout: &provenant_config::WorktreeLayoutPort,
 ) -> Result<Option<GraphCheckpoint>, PatchError> {
-    if checkpoint.cancelled || checkpoint.pause_reason.is_some() {
+    if checkpoint.cancelled || checkpoint.pause.is_some() {
         return Ok(None);
     }
     let Some((index, node)) = plan.nodes.iter().enumerate().find(|(index, node)| {
@@ -311,6 +310,7 @@ pub(super) fn correct_verdict(
             limits,
             scan: &patch::scan_for_secrets,
             journal: None,
+            worktree_layout: worktree_layout.clone(),
         },
     ) {
         // Admission is atomic: keep the failed attempt and fence further

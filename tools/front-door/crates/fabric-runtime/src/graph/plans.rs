@@ -18,8 +18,7 @@ pub(super) fn set_expansion_pause(
         fragment_error,
     });
     checkpoint.activate_expansion_pause(index);
-    checkpoint.pause_reason = Some(reason);
-    checkpoint.pause_code = Some("invalid_plan_expansion".into());
+    checkpoint.set_pause(PauseCause::InvalidPlanExpansion, &reason);
 }
 
 pub(super) fn clear_expansion_pause(checkpoint: &mut GraphCheckpoint, index: usize, refresh: bool) {
@@ -48,8 +47,10 @@ pub(super) fn clear_expansion_pause(checkpoint: &mut GraphCheckpoint, index: usi
                     .map(|reason| (index, reason.clone()))
             });
         checkpoint.deactivate_expansion_pauses();
-        checkpoint.pause_reason = next.as_ref().map(|(_, reason)| reason.clone());
-        checkpoint.pause_code = next.as_ref().map(|_| "invalid_plan_expansion".into());
+        checkpoint.pause = None;
+        if let Some((_, reason)) = &next {
+            checkpoint.set_pause(PauseCause::InvalidPlanExpansion, reason);
+        }
         if let Some((next, _)) = next {
             checkpoint.activate_expansion_pause(next);
         }
@@ -68,9 +69,10 @@ pub struct PlanSpec {
     /// authority they declare. Any other node is held to the planner's own.
     #[serde(default, rename = "patterns", skip_serializing_if = "Vec::is_empty")]
     pub templates: Vec<Template>,
-    /// Fragment units that no dependency orders form one wave, and the writers
-    /// of one wave must hold disjoint scopes. Without it, overlapping writers
-    /// share a checkout and run in turn.
+    /// Fragment units that no dependency orders form one wave. With this set,
+    /// writers in the same worktree must be ordered; relative scopes are only
+    /// advisory settlement metadata. Without it, shared worktrees are admitted
+    /// and serialized by the writer lease.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disjoint_waves: bool,
     /// Consumers of the plan node also read what the fragment's template
@@ -108,7 +110,6 @@ pub struct Expansion {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     pub source: String,
-    pub continuation: bool,
     #[serde(with = "expanded_nodes")]
     pub nodes: Vec<GraphNode>,
     /// Template uses whose boundaries this expansion retains.
@@ -244,7 +245,7 @@ pub fn prompt(node: &GraphNode) -> String {
             .and_then(serde_json::Value::as_u64)
             .and_then(|n| usize::try_from(n).ok())
             .unwrap_or(spec.max_nodes);
-        prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes, holding a patch: {{\"schema_version\":1,\"nodes\":[...],\"templates\":{{...}}}}. Emit 1..{planner_limit} nodes. A node is either `use` of a template with `with` parameters and overrides (`brief`, `tier`, `after`, `inputs`, `over`, `min_ok`, `repeat`), or compiled-node fields with a `kind` of task, composite, loop, gate, decide, synthesise or land (use `plan` for a planning brief); composites, loops and further plan nodes are allowed. `over` copies a node once per named item with `${{item}}`; `repeat = {{\"until\":\"gate\",\"max_rounds\":N}}` loops a composite until its gate passes. Bundled templates: task, plan, explore, research, design, implement, implement.fix, review, review.security, verify, synthesise, repair; `templates` may define more inline. Each agent node requires id, a `brief` (or `goal`), `acceptance_checks` and local `after` or depends_on. `access` defaults to read_only; writers set worktree_write and also require `write_scope` (relative literal files/directories) ; omit `worktree` for a host-provisioned checkout or name an existing registered worktree; read-only agents may omit `write_scope`. The tier defaults to senior. Synthesise nodes require `inputs` selecting dependency outputs, either as `{{\"node\":\"id\",\"outputs\":[\"result\"]}}` or the shorthand `\"id\"` (which selects `result`). Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 200 bytes."));
+        prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes, holding a patch: {{\"schema_version\":1,\"nodes\":[...],\"templates\":{{...}}}}. Emit 1..{planner_limit} nodes. A node is either `use` of a template with `with` parameters and overrides (`brief`, `tier`, `after`, `inputs`, `over`, `min_ok`, `repeat`), or compiled-node fields with a `kind` of task, composite, loop, gate, decide, synthesise or land (use `plan` for a planning brief); composites, loops and further plan nodes are allowed. `over` copies a node once per named item with `${{item}}`; `repeat = {{\"until\":\"gate\",\"max_rounds\":N}}` loops a composite until its gate passes. Bundled templates: task, plan, explore, research, design, implement, implement.fix, review, review.security, verify, synthesise, repair; `templates` may define more inline. Each agent node requires id, a `brief` (or `goal`), `acceptance_checks` and local `after` or depends_on. `access` defaults to read_only; writers set worktree_write and may include optional write_scope metadata, which the WRITE_SCOPE policy checks when the writer settles; omit `worktree` for a host-provisioned checkout or name an existing registered worktree. The tier defaults to senior. Synthesise nodes require `inputs` selecting dependency outputs, either as `{{\"node\":\"id\",\"outputs\":[\"result\"]}}` or the shorthand `\"id\"` (which selects `result`). Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 200 bytes."));
         if !spec.templates.is_empty() {
             prompt.push_str(&format!(
                 " Host templates with their declared authority: {}.",
@@ -288,9 +289,13 @@ pub(super) fn validate_spec(node: &GraphNode) -> Result<(), &'static str> {
 /// occupy once stored in a checkpoint.
 const BLOCK_BYTES: usize = 12 * 1024;
 pub(super) const STORED_BLOCK_BYTES: usize = 2 * BLOCK_BYTES;
-/// A stopped-early handoff is stored whole: its fenced block plus escapes.
-pub(super) const STORED_HANDOFF_BYTES: usize =
-    2 * (provenant_records::handoff::HANDOFF_BYTES + "```handoff\n\n```".len());
+/// A stopped-early handoff is stored whole, as the typed record.
+pub(super) const STORED_HANDOFF_BYTES: usize = provenant_records::handoff::HANDOFF_BYTES;
+/// Review decisions stored on review nodes, counted in the checkpoint size bound.
+pub(super) const STORED_DECISION_BYTES: usize =
+    provenant_records::finding_decision::FINDING_ID_BYTES
+        + provenant_records::finding_decision::DECISION_REASON_BYTES
+        + 256;
 
 fn block<'a>(
     capture: &'a crate::result_capture::CapturedResult,
@@ -363,20 +368,17 @@ fn block<'a>(
 
 pub(super) fn handoff(
     capture: &crate::result_capture::CapturedResult,
-) -> Result<Option<String>, String> {
+) -> Result<Option<provenant_records::handoff::Handoff>, String> {
     let handoff = capture.handoff.clone().map_err(str::to_owned)?;
-    let Some(fenced) = handoff
-        .filter(provenant_records::handoff::Handoff::unfinished)
-        .map(|handoff| handoff.fenced())
-    else {
+    let Some(handoff) = handoff.filter(provenant_records::handoff::Handoff::unfinished) else {
         return Ok(None);
     };
-    if encoded_len(&fenced) > STORED_HANDOFF_BYTES {
+    if serde_json::to_vec(&handoff).map_or(usize::MAX, |bytes| bytes.len()) > STORED_HANDOFF_BYTES {
         return Err(format!(
             "handoff block has too many escaped characters to store in {STORED_HANDOFF_BYTES} bytes"
         ));
     }
-    Ok(Some(fenced))
+    Ok(Some(handoff))
 }
 
 pub(super) fn agent(node: &PlannedNode) -> bool {
@@ -688,7 +690,7 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
                     .map(|n| n.id.clone()),
             );
 
-            if !expansion.continuation && expansion.closes_producer() {
+            if expansion.closes_producer() {
                 wire_exports(node, &expansion.source, &exported);
                 if let Some(composite) = &mut node.composite
                     && (composite.reduce_verdict || review_minimum.is_some())
@@ -719,23 +721,6 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
                         .extend(exported.iter().map(|item| item.node.clone()));
                 }
             }
-            if expansion.continuation {
-                if let Some(composite) = &mut node.composite {
-                    for export in &mut composite.exports {
-                        if export.node == expansion.source {
-                            export.node = expansion.nodes[0].id.clone();
-                        }
-                    }
-                }
-                for input in &mut node.inputs {
-                    if input.node == expansion.source {
-                        input.node = expansion.nodes[0].id.clone();
-                        if !node.depends_on.contains(&input.node) {
-                            node.depends_on.push(input.node.clone());
-                        }
-                    }
-                }
-            }
         }
     }
     document
@@ -760,6 +745,7 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
             }
         }
     }
+    composites::resolve_writer_targets(document);
 }
 
 /// Rounds of a loop that a patch added are derived again from their names,
@@ -901,34 +887,10 @@ fn wire_exports(node: &mut GraphNode, source: &str, exported: &[GraphInput]) {
     }
 }
 
-fn valid_scope(scope: &str) -> bool {
-    scope == "."
-        || (!scope.is_empty()
-            && !scope
-                .split('/')
-                .any(|part| part.is_empty() || part == "." || part == "..")
-            && !scope.contains(['\\', '*', '?', '[', ']']))
-}
-
-fn overlaps(left: &[String], right: &[String]) -> bool {
-    left.is_empty()
-        || right.is_empty()
-        || left.iter().chain(right).any(|scope| !valid_scope(scope))
-        || left.iter().any(|a| {
-            right.iter().any(|b| {
-                a == "."
-                    || b == "."
-                    || a == b
-                    || a.starts_with(&format!("{b}/"))
-                    || b.starts_with(&format!("{a}/"))
-            })
-        })
-}
-
 pub(super) fn writers_conflict(left: &PlannedNode, right: &PlannedNode) -> bool {
     left.access == AccessMode::WorktreeWrite
         && right.access == AccessMode::WorktreeWrite
-        && (left.worktree == right.worktree || overlaps(&left.write_scope, &right.write_scope))
+        && left.worktree == right.worktree
 }
 
 pub(super) fn prepare(
@@ -1058,12 +1020,13 @@ fn prepare_nested(
                 model: None,
                 effort: None,
                 account: None,
+                tier: None,
             });
         }
         return Ok(());
     }
     // Gate evidence lives in its condition and a decision in its question.
-    // Writer nodes carry explicit scope; all agents carry acceptance prose.
+    // Write scope is optional review metadata; all agents carry acceptance prose.
     if !matches!(
         child.kind,
         Some(NodeKind::Gate | NodeKind::Decide | NodeKind::Composite | NodeKind::Loop)
@@ -1071,16 +1034,17 @@ fn prepare_nested(
         if child.prompt.trim().is_empty()
             || child.acceptance_checks.is_empty()
             || child.acceptance_checks.iter().any(|s| s.trim().is_empty())
-            || child.access == AccessMode::WorktreeWrite && child.write_scope.is_empty()
-            || child.write_scope.iter().any(|s| !valid_scope(s))
         {
-            return Err("fragment agent requires goal or brief and acceptance_checks; writers also require relative literal write_scope".into());
+            return Err("fragment agent requires goal or brief and acceptance_checks".into());
         }
         child.prompt.push_str("\n\n");
         if !child.write_scope.is_empty() {
             child
                 .prompt
-                .push_str(&format!("Write scope: {}\n", child.write_scope.join(", ")));
+                .push_str(&format!(
+                    "Advisory write-scope paths: {}. The whole worktree remains writable; list out-of-scope edits in the handoff.\n",
+                    child.write_scope.join(", ")
+                ));
         }
         child.prompt.push_str(&format!(
             "Acceptance checks:\n{}",
@@ -1095,6 +1059,7 @@ fn prepare_nested(
                 model: None,
                 effort: None,
                 account: None,
+                tier: None,
             });
         }
     }
@@ -1143,6 +1108,7 @@ fn fragment(
     checkpoint: &GraphCheckpoint,
     json: &str,
     limits: &crate::config::GraphLimits,
+    worktree_layout: &provenant_config::WorktreeLayoutPort,
     safe_reason: &mut PlanFailureFact,
 ) -> Result<Expansion, String> {
     let default_spec = PlanSpec {
@@ -1223,6 +1189,7 @@ fn fragment(
         scan: &super::patch::scan_for_secrets,
         journal: None,
         limits,
+        worktree_layout: worktree_layout.clone(),
     };
     match super::patch::prepare(
         source,
@@ -1349,6 +1316,7 @@ pub(super) fn flatten_fragment(
     spec: Option<&PlanSpec>,
     document: &GraphDocument,
     checkpoint: &GraphCheckpoint,
+    worktree_layout: &provenant_config::WorktreeLayoutPort,
 ) -> Result<Vec<GraphNode>, String> {
     let units: BTreeMap<String, Vec<String>> = local_nodes
         .iter()
@@ -1375,7 +1343,12 @@ pub(super) fn flatten_fragment(
         BTreeSet::new()
     };
     let mut local_nodes = local_nodes;
-    fn provision_paths(nodes: &mut [GraphNode], graph: &str, prefix: &str) {
+    fn provision_paths(
+        nodes: &mut [GraphNode],
+        graph: &str,
+        prefix: &str,
+        worktree_layout: &provenant_config::WorktreeLayoutPort,
+    ) -> Result<(), String> {
         for child in nodes {
             let id = if prefix.is_empty() {
                 child.id.clone()
@@ -1383,22 +1356,51 @@ pub(super) fn flatten_fragment(
                 format!("{prefix}--{}", child.id)
             };
             if child.access == AccessMode::WorktreeWrite && child.worktree.is_none() {
-                child.worktree = Some(super::relay::child_worktree(graph, &id));
+                child.worktree = Some(
+                    super::relay::child_worktree(worktree_layout, graph, &id)
+                        .map_err(|error| error.to_string())?,
+                );
                 child.extra.insert("provision_worktree".into(), true.into());
             }
             if let Some(composite) = &mut child.composite {
-                provision_paths(&mut composite.nodes, graph, &id);
+                // A composite exporting one member writer's commit (a planned
+                // implementation) names that checkout after itself, as a
+                // relayed add of the same child does.
+                let mut exported = composite
+                    .exports
+                    .iter()
+                    .filter(|export| export.outputs.contains(&OutputKind::Commit));
+                if let (Some(export), None) = (exported.next(), exported.next())
+                    && let Some(writer) = composite.nodes.iter_mut().find(|member| {
+                        member.id == export.node
+                            && member.access == AccessMode::WorktreeWrite
+                            && member.worktree.is_none()
+                            && member.composite.is_none()
+                            && member.loop_body.is_none()
+                    })
+                {
+                    writer.worktree = Some(
+                        super::relay::child_worktree(worktree_layout, graph, &id)
+                            .map_err(|error| error.to_string())?,
+                    );
+                    writer
+                        .extra
+                        .insert("provision_worktree".into(), true.into());
+                }
+                provision_paths(&mut composite.nodes, graph, &id, worktree_layout)?;
             }
             if let Some(body) = &mut child.loop_body {
-                provision_paths(&mut body.body, graph, &id);
+                provision_paths(&mut body.body, graph, &id, worktree_layout)?;
             }
         }
+        Ok(())
     }
     provision_paths(
         &mut local_nodes,
         &document.graph_id,
         parent.map_or("", |parent| parent.id.as_str()),
-    );
+        worktree_layout,
+    )?;
     for existing in document
         .nodes
         .iter()
@@ -1446,6 +1448,7 @@ pub(super) fn flatten_fragment(
                 model: None,
                 effort: None,
                 account: None,
+                tier: None,
             });
         }
     }
@@ -1474,15 +1477,14 @@ pub(super) fn flatten_fragment(
     if spec.is_some_and(|spec| spec.disjoint_waves) {
         check_waves(&units, &nodes)?;
     }
-    // Union overlapping writer scopes, including transitive overlaps. Every
-    // component uses one checkout; admission fences serialise its writers.
+    // Writers sharing a worktree use one checkout; admission fences serialise
+    // them. Relative path metadata does not connect otherwise isolated trees.
     let mut components: Vec<usize> = (0..nodes.len()).collect();
     for i in 0..nodes.len() {
         for j in 0..i {
             if nodes[i].access == AccessMode::WorktreeWrite
                 && nodes[j].access == AccessMode::WorktreeWrite
-                && (nodes[i].worktree == nodes[j].worktree
-                    || overlaps(&nodes[i].write_scope, &nodes[j].write_scope))
+                && nodes[i].worktree == nodes[j].worktree
             {
                 let old = components[i].max(components[j]);
                 let new = components[i].min(components[j]);
@@ -1498,7 +1500,7 @@ pub(super) fn flatten_fragment(
         if components[i] != i {
             let first = nodes[components[i]].clone();
             if document.integration_branch.is_none() {
-                return Err("overlapping writers require an integration_branch".into());
+                return Err("writers sharing a worktree require an integration_branch".into());
             }
             nodes[i].worktree = first.worktree;
         }
@@ -1588,7 +1590,7 @@ pub(super) fn flatten_fragment(
     Ok(nodes)
 }
 
-/// Refuse a wave whose units write overlapping scopes. A unit is a fragment
+/// Refuse a wave whose units write to the same worktree. A unit is a fragment
 /// node or pattern instance; two units are in one wave when neither depends,
 /// directly or through other units, on the other.
 fn check_waves(units: &BTreeMap<String, Vec<String>>, nodes: &[GraphNode]) -> Result<(), String> {
@@ -1623,11 +1625,9 @@ fn check_waves(units: &BTreeMap<String, Vec<String>>, nodes: &[GraphNode]) -> Re
             {
                 continue;
             }
-            if a.iter()
-                .any(|x| b.iter().any(|y| overlaps(&x.write_scope, &y.write_scope)))
-            {
+            if a.iter().any(|x| b.iter().any(|y| x.worktree == y.worktree)) {
                 return Err(format!(
-                    "{left} and {right} write overlapping scopes in one wave; order one after the other with depends_on or split their write scopes"
+                    "{left} and {right} write to the same worktree in one wave; order one after the other with depends_on"
                 ));
             }
         }
@@ -1659,9 +1659,7 @@ fn coordinate(
                         progress.id == n.id
                             && matches!(progress.state, NodeState::Skipped | NodeState::Blocked)
                     })
-                    && members.iter().any(|child| {
-                        n.worktree == child.worktree || overlaps(&n.write_scope, &child.write_scope)
-                    })
+                    && members.iter().any(|child| n.worktree == child.worktree)
             })
             .collect();
         let checkouts: std::collections::BTreeSet<_> = existing
@@ -1684,7 +1682,7 @@ fn coordinate(
                 })
             });
             if document.integration_branch.is_none() && !continues_settled_branch {
-                return Err("overlapping writers require an integration_branch".into());
+                return Err("writers sharing a worktree require an integration_branch".into());
             }
             for child in nodes
                 .iter_mut()
@@ -1708,99 +1706,18 @@ pub(super) fn generous() -> crate::config::GraphLimits {
     }
 }
 
-/// Automatic retries and added continuation nodes share the host allowance.
+/// Host restarts after a stop share the graph-wide allowance.
 pub(super) fn continuation_count(checkpoint: &GraphCheckpoint) -> usize {
     checkpoint
         .expansions
         .iter()
         .filter(|expansion| {
-            expansion.continuation
-                || expansion
-                    .patch
-                    .as_ref()
-                    .is_some_and(patch::is_no_work_continuation)
+            expansion
+                .patch
+                .as_ref()
+                .is_some_and(|record| record.restart.is_some())
         })
         .count()
-}
-
-fn continuation(
-    node: &PlannedNode,
-    document: &GraphDocument,
-    checkpoint: &GraphCheckpoint,
-    note: &str,
-    limits: &crate::config::GraphLimits,
-) -> Result<Expansion, String> {
-    if continuation_count(checkpoint) >= limits.continuations {
-        return Err(format!(
-            "limits.continuations={} reached; extend the continuation budget",
-            limits.continuations
-        ));
-    }
-    if no_work::handoff_requires_chair(note) {
-        return Err(
-            "writer needs an owner decision, capability or external change; inspect its handoff"
-                .into(),
-        );
-    }
-    let progress = checkpoint
-        .nodes
-        .iter()
-        .find(|row| row.id == node.id)
-        .ok_or("continuation progress missing")?;
-    let routes = no_work::restart_routes(node, progress);
-    if routes.is_empty() {
-        return Err("writer stopped; no different route is available; return to the chair".into());
-    }
-    let mut child = document
-        .nodes
-        .iter()
-        .find(|n| n.id == node.id)
-        .cloned()
-        .ok_or("continuation source missing")?;
-    let generation = checkpoint
-        .nodes
-        .iter()
-        .find(|n| n.id == node.id)
-        .and_then(|n| n.extra.get("retry_generation"));
-    child.id = format!("{}--continue", generation_namespace(&node.id, generation));
-    if child.id.len() > 200 {
-        return Err(format!(
-            "continuation {} exceeds the node ID limit of 200 bytes; shorten the source ID",
-            child.id
-        ));
-    }
-    child.route = None;
-    child.routes = Some(routes);
-    child.title = None;
-    child.depends_on = vec![node.id.clone()];
-    child.after_expansion.clear();
-    child.inputs.clear();
-    if child.access == AccessMode::WorktreeWrite && child.source.is_some() {
-        child.source = Some(SourceBinding::Node {
-            node: node.id.clone(),
-        });
-    }
-    child.prompt.push_str(&format!(
-        "\n\nContinue this work in the same worktree. Stopped-early handoff:\n{note}"
-    ));
-    // Integrate retains the shared checkout and leaves the graph owning its PR.
-    if child.delivery == Some(provenant_records::run::DeliveryMode::Pr) {
-        return Err("honest-stop continuation requires integrate or no delivery".into());
-    }
-    if let Some(target) = &document.integration_branch {
-        child.delivery = Some(provenant_records::run::DeliveryMode::Integrate(
-            target.clone(),
-        ));
-    }
-    child.round = None;
-    Ok(Expansion {
-        extra: Default::default(),
-        source: node.id.clone(),
-        continuation: true,
-        nodes: vec![child],
-        uses: Vec::new(),
-        patch: None,
-    })
 }
 
 pub(super) fn remaining(
@@ -1839,6 +1756,7 @@ pub(super) fn settle(
     checkpoint: &mut GraphCheckpoint,
     capture: Option<&crate::result_capture::CapturedResult>,
     limits: &crate::config::GraphLimits,
+    worktree_layout: &provenant_config::WorktreeLayoutPort,
 ) -> Option<(
     GraphDocument,
     PlannedGraph,
@@ -1993,31 +1911,19 @@ pub(super) fn settle(
                 checkpoint,
                 &json,
                 limits,
+                worktree_layout,
                 &mut safe_reason,
             )
         })
-    } else if writer(node) {
-        let handoff = capture
-            .map(handoff)
-            .unwrap_or_else(|| Ok(checkpoint.nodes[index].handoff.clone()));
-        match handoff {
-            Ok(Some(note)) => {
-                checkpoint.nodes[index].handoff = Some(note.clone());
-                continuation(node, document, checkpoint, &note, limits).inspect_err(|_| {
-                    safe_reason = PlanFailureFact::InvalidContinuation;
-                })
-            }
-            Ok(None) => return None,
-            Err(_) => {
-                if let Some(outputs) = &mut checkpoint.nodes[index].outputs {
-                    outputs.warnings.push(
-                        "ignored optional handoff: invalid handoff; inspect the result".into(),
-                    );
-                }
-                return None;
-            }
-        }
     } else {
+        if writer(node)
+            && capture.is_some_and(|capture| handoff(capture).is_err())
+            && let Some(outputs) = &mut checkpoint.nodes[index].outputs
+        {
+            outputs
+                .warnings
+                .push("ignored optional handoff: invalid handoff; inspect the result".into());
+        }
         return None;
     };
     let result = addition.and_then(|mut addition| {
@@ -2270,7 +2176,6 @@ pub(super) fn fallback_expansion(
     Ok(Expansion {
         extra: Default::default(),
         source: node_id.to_owned(),
-        continuation: false,
         nodes: expanded
             .nodes
             .into_iter()

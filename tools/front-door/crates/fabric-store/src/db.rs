@@ -13,34 +13,22 @@ use std::{
     rc::Rc,
 };
 
-// Index + 1 is the schema version; each migration commits independently.
-pub(crate) const MIGRATIONS: &[&str] = &[
-    include_str!("schema.sql"),
-    include_str!("migrations/002-import-skips.sql"),
-    include_str!("migrations/003-claims-landing.sql"),
-    include_str!("migrations/004-claim-lookup.sql"),
-    include_str!("migrations/005-coordination-operations.sql"),
-    include_str!("migrations/006-federation.sql"),
-    include_str!("migrations/007-remove-legacy-import.sql"),
-    include_str!("migrations/008-human-inbox.sql"),
-    include_str!("migrations/009-run-chairs.sql"),
-    include_str!("migrations/010-local-delivery.sql"),
-    include_str!("migrations/011-queued-delivery.sql"),
-    include_str!("migrations/012-hook-delivery.sql"),
-    include_str!("migrations/013-viewer-state.sql"),
-    include_str!("migrations/014-remove-viewer-state.sql"),
-    include_str!("migrations/015-remove-tasks.sql"),
-];
+/// The only schema this release opens, for `fabric.sqlite3` and `host.sqlite3`.
+pub(crate) const SCHEMA: provenant_sqlite::Schema = provenant_sqlite::Schema {
+    sql: include_str!("schema.sql"),
+    version: 18,
+};
 
-/// Most recent database schema supported by this release.
-pub const CURRENT_SCHEMA_VERSION: usize = MIGRATIONS.len();
-fn schema_version(db: &Connection) -> Result<usize> {
-    match provenant_sqlite::read_version(db, MIGRATIONS.len()) {
-        Ok(version) => Ok(version),
-        Err(provenant_sqlite::VersionError::Unsupported(version)) => {
-            Err(Error::SchemaVersion(version))
+/// The database schema version this release opens.
+pub const CURRENT_SCHEMA_VERSION: usize = SCHEMA.version as usize;
+
+/// Refuse a database at any other version, leaving it unchanged.
+fn check_version(db: &Connection) -> Result<()> {
+    match provenant_sqlite::check_version(db, SCHEMA) {
+        Ok(()) => Ok(()),
+        Err(provenant_sqlite::VersionError::Refused { found, .. }) => {
+            Err(Error::SchemaVersion(found))
         }
-        Err(provenant_sqlite::VersionError::Unversioned) => Err(Error::UnversionedDatabase),
         Err(provenant_sqlite::VersionError::Sqlite(error)) => Err(error.into()),
     }
 }
@@ -71,7 +59,8 @@ impl Request<'_> {
 
 pub struct Store {
     pub(crate) db: Connection,
-    pub(crate) state_root: std::path::PathBuf,
+    pub(crate) state_root: StateRoot,
+    database_path: std::path::PathBuf,
     // SQLite supports movable connections, but Fabric requires worker ownership.
     _owner: PhantomData<Rc<()>>,
 }
@@ -148,6 +137,7 @@ impl Store {
             Error::UnsafePath(path.join(name))
         })?;
         let path = path.join(database);
+        let database_path = path.clone();
         let mut db = if writable {
             provenant_sqlite::open_connection(&path, false)?
         } else if read_only_wal {
@@ -171,10 +161,11 @@ impl Store {
         }
         let store = Self {
             db,
-            state_root: root.as_path().to_owned(),
+            state_root: root.clone(),
+            database_path,
             _owner: PhantomData,
         };
-        if schema_version(&store.db)? != MIGRATIONS.len() {
+        if provenant_sqlite::stored_version(&store.db)? != SCHEMA.version {
             return Err(Error::Invalid("local delivery index unavailable"));
         }
         crate::local_delivery::before(deadline)?;
@@ -213,20 +204,43 @@ impl Store {
             Ok(_) => {}
         }
         companions(&fabric, &path, "fabric.sqlite3")?;
-        let db = provenant_sqlite::open_connection(&path.join("fabric.sqlite3"), true)?;
-        let version = schema_version(&db)?;
-        if version != MIGRATIONS.len() {
-            return Err(Error::SchemaVersion(version as i64));
+        let database_path = path.join("fabric.sqlite3");
+        let db = provenant_sqlite::open_connection(&database_path, true)?;
+        if provenant_sqlite::stored_version(&db)? == 0 {
+            return Err(Error::NotFound);
         }
+        check_version(&db)?;
         Ok(Self {
             db,
-            state_root: root.as_path().to_owned(),
+            state_root: root.clone(),
+            database_path,
             _owner: PhantomData,
         })
     }
 
     pub fn open(root: &StateRoot, request: &Request<'_>) -> Result<Self> {
         Self::open_database(root, request, "fabric.sqlite3", true)
+    }
+
+    /// Files that change when owner commits append a Fabric event. The post-commit
+    /// hint is lossy, so watchers also follow SQLite's event database companions.
+    pub fn event_observation_paths(&self) -> Vec<std::path::PathBuf> {
+        let mut paths = vec![self.database_path.clone()];
+        for suffix in ["-wal", "-journal"] {
+            let mut name = self
+                .database_path
+                .file_name()
+                .unwrap_or_default()
+                .to_os_string();
+            name.push(suffix);
+            paths.push(self.database_path.with_file_name(name));
+        }
+        paths.push(
+            self.state_root
+                .as_path()
+                .join(provenant_core::changes::FILE_NAME),
+        );
+        paths
     }
 
     /// Host-only records live outside the exact coordination DB grants lanes
@@ -333,49 +347,27 @@ impl Store {
         }
         companions(&fabric, &path, database)?;
         let db = provenant_sqlite::open_connection(&db_path, false)?;
-        // Refuse future versions before journal-mode changes or schema writes.
-        schema_version(&db)?;
+        // Refuse another version before journal-mode changes or schema writes.
+        check_version(&db)?;
         enable_wal(&db)?;
         if database == "fabric.sqlite3" {
             provenant_sqlite::retain_read_only_wal(&db)?;
         }
-        let store = Self {
+        provenant_sqlite::ensure_schema(&db, SCHEMA).map_err(|error| match error {
+            provenant_sqlite::VersionError::Refused { found, .. } => Error::SchemaVersion(found),
+            provenant_sqlite::VersionError::Sqlite(error) => error.into(),
+        })?;
+        Ok(Self {
             db,
-            state_root: root.as_path().to_owned(),
+            state_root: root.clone(),
+            database_path: db_path,
             _owner: PhantomData,
-        };
-        let initial_version = schema_version(&store.db)?;
-        while schema_version(&store.db)? < MIGRATIONS.len() {
-            let done = store.write(request, |tx| {
-                let version = schema_version(tx)?;
-                if version >= MIGRATIONS.len() {
-                    return Ok(true);
-                }
-                provenant_sqlite::migrate(
-                    tx,
-                    &MIGRATIONS[..=version],
-                    version,
-                    || {
-                        if version == initial_version {
-                            let stamp = request.clock.wall_now()?.as_micros();
-                            provenant_sqlite::snapshot_database(&fabric, &path, database, stamp)?;
-                        }
-                        Ok::<(), Error>(())
-                    },
-                    |_, _| Ok(()),
-                )?;
-                Ok(false)
-            })?;
-            if done {
-                break;
-            }
-        }
-        Ok(store)
+        })
     }
     /// Called after commit. The signal is a hint, so a failure never fails the write.
     pub(crate) fn signal_changes(&self) {
         use provenant_os::changes::{Scope, hint};
-        hint(&self.state_root, &[Scope::Inbox, Scope::Board]);
+        hint(self.state_root.as_path(), &[Scope::Inbox, Scope::Board]);
     }
     pub(crate) fn write<T>(
         &self,

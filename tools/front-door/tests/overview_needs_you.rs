@@ -198,7 +198,7 @@ fn overview_needs_you() -> Result {
     fabric_db.execute("UPDATE human_requests SET record=?1", [&original])?;
 
     // Submit a queued lane through its owner, without starting a provider.
-    use provenant_core::{ActorId, CancelToken, OperationId, ProjectId, TaskId};
+    use provenant_core::{ActorId, CancelToken, OperationId, ProjectId};
     use provenant_run::{
         DispatchRequest, DispatchTask, ExecutionContext, HarnessProfile, LaneAccess, Request,
         RequestedRoute, RunStore, Service,
@@ -223,11 +223,15 @@ fn overview_needs_you() -> Result {
         DispatchRequest {
             chair: None,
             operation_id: OperationId::parse("overview-lane")?,
-            tasks: vec![DispatchTask {
-                context: None,
+            task: DispatchTask {
+                context: Some(provenant_records::run::WorkContext {
+                    graph_id: Some("overview-graph".into()),
+                    node_id: Some("review".into()),
+                    attempt: Some(1),
+                    ..Default::default()
+                }),
                 build_heavy: false,
                 title: Some("Review changes".into()),
-                task_id: TaskId::from_bytes([3; 16]),
                 prompt: "PRIVATE PROMPT MARKER".into(),
                 base: None,
                 pinned_base: None,
@@ -245,8 +249,7 @@ fn overview_needs_you() -> Result {
                 deliver: None,
                 worktree: None,
                 access: LaneAccess::default(),
-            }],
-            concurrency: 1,
+            },
             lane_depth: 1,
             parent_attempt: None,
         },
@@ -260,6 +263,9 @@ fn overview_needs_you() -> Result {
     assert_eq!(lane["project_label"], "project");
     assert_eq!(lane["state"], "queued");
     assert!(lane["attempt_id"].is_string());
+    assert_eq!(lane["key"]["graph"], "overview-graph");
+    assert_eq!(lane["key"]["node"], "review");
+    assert_eq!(lane["key"]["attempt"], 1);
     assert_eq!(with_lane["data"]["counts"]["running"], 1);
     assert!(!with_lane.to_string().contains("PRIVATE PROMPT MARKER"));
 

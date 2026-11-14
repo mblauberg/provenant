@@ -78,8 +78,8 @@ impl RunStore {
         id: AttemptId,
         call: &Request<'_>,
     ) -> Result<LockGuard> {
-        let record = self.record(id, call)?;
-        let run = self.run_dir(record.run_id, false)?;
+        self.record(id, call)?;
+        let run = self.attempt_dir(id, false)?;
         let lease = run.lock(
             OsStr::new("publication.lock"),
             LockMode::Shared,
@@ -87,7 +87,7 @@ impl RunStore {
             call.cancel,
             call.clock,
         )?;
-        let attempt = self.attempt_dir(record.run_id, id, false)?;
+        let attempt = self.attempt_dir(id, false)?;
         match attempt.metadata_at(OsStr::new(EXPIRED), false) {
             Ok(_) => return Err(RunError::ProviderStateExpired),
             Err(error) if error.is_not_found() => {}
@@ -187,13 +187,11 @@ impl RunStore {
                 call,
             )?;
         }
-        let rows: Vec<(String, String, String, Vec<u8>)> = {
+        let rows: Vec<(String, String, Vec<u8>)> = {
             let mut query = self.db.prepare(
-                "SELECT id,run,project,record FROM attempts WHERE terminal=1 ORDER BY sequence",
+                "SELECT id,project,record FROM attempts WHERE terminal=1 AND refused=0 ORDER BY sequence",
             )?;
-            let rows = query.query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-            })?;
+            let rows = query.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
             rows.collect::<std::result::Result<_, _>>()?
         };
         let mut report = ProviderStateGc::default();
@@ -205,7 +203,7 @@ impl RunStore {
         );
         #[allow(clippy::disallowed_methods)] // Bound read-only maintenance in real time.
         let preview_started = std::time::Instant::now();
-        for (id, run, project, raw) in rows {
+        for (id, project, raw) in rows {
             if dry_run && preview_started.elapsed() >= std::time::Duration::from_secs(1) {
                 report.kept.push(ProviderStateIssue {
                     path: self.context.state_root.as_path().into(),
@@ -222,16 +220,13 @@ impl RunStore {
                 .context
                 .state_root
                 .as_path()
-                .join(format!("runs/{run}/attempts/{id}/provider-state"));
+                .join(format!("attempts/{id}/provider-state"));
             let first_removal = report.removed.len();
             let first_tightened = report.tightened.len();
             let result = (|| -> Result<()> {
                 let record: AttemptRecord = crate::db::decode_attempt(&raw)?;
                 crate::reader::validate_attempt(&record)?;
-                if record.attempt_id.to_string() != id
-                    || record.run_id.to_string() != run
-                    || record.project_id.to_string() != project
-                {
+                if record.attempt_id.to_string() != id || record.project_id.to_string() != project {
                     return Err(RunError::Validation("retention attempt index identity"));
                 }
                 let AttemptState::Terminal { finished_at, .. } = record.state else {
@@ -295,7 +290,7 @@ impl RunStore {
                             match raw {
                                 Some(raw) => {
                                     let receipts: provenant_records::run::SettlementReceipts =
-                                        crate::db::decode_unversioned(&raw)?;
+                                        crate::db::decode_column(&raw)?;
                                     !matches!(
                                         receipts.cleanup_custody_release,
                                         provenant_records::run::EffectDisposition::Done
@@ -309,8 +304,8 @@ impl RunStore {
                         if !dry_run && !pending_writer_cleanup {
                             self.write(call, |tx| {
                                 tx.execute(
-                                    "UPDATE attempts SET tmp_retained=0 WHERE id=?1 AND run=?2 AND project=?3 AND terminal=1",
-                                    rusqlite::params![id, record.run_id.to_string(), record.project_id.to_string()],
+                                    "UPDATE attempts SET tmp_retained=0 WHERE id=?1 AND project=?2 AND terminal=1",
+                                    rusqlite::params![id, record.project_id.to_string()],
                                 )?;
                                 Ok(())
                             })?;
@@ -330,16 +325,7 @@ impl RunStore {
                     ));
                 }
                 if age >= DAY_MICROS.saturating_mul(logs_days as i64) {
-                    // A terminal attempt in an open run still contributes to live
-                    // diagnostics. Expiry requires every sibling to be terminal.
-                    let open: bool = {
-                        self.db.query_row(
-                            "SELECT EXISTS(SELECT 1 FROM attempts WHERE run=?1 AND terminal=0)",
-                            [record.run_id.to_string()],
-                            |row| row.get(0),
-                        )?
-                    };
-                    if !open {
+                    {
                         collect_logs(
                             &attempt,
                             path.parent().ok_or_else(|| {
@@ -378,7 +364,7 @@ impl RunStore {
                     record_issue(&mut report, path.clone(), &error);
                 }
                 if age >= DAY_MICROS.saturating_mul(days as i64) {
-                    expire(&attempt, &record, dry_run, &mut report)?;
+                    expire(&attempt, dry_run, &mut report)?;
                 }
                 Ok(())
             })();
@@ -413,7 +399,7 @@ struct Held {
 
 impl RunStore {
     fn hold_attempt(&self, record: &AttemptRecord, id: &str) -> Result<Option<Held>> {
-        let run = match self.run_dir(record.run_id, false) {
+        let run = match self.attempt_dir(record.attempt_id, false) {
             Ok(run) => run,
             Err(error) if missing_directory(&error) => return Ok(None),
             Err(error) => return Err(error),
@@ -421,34 +407,31 @@ impl RunStore {
         let _publication =
             run.try_lock_existing(OsStr::new("publication.lock"), LockMode::Exclusive)?;
         let continuing: bool = self.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM continuations c JOIN attempts a ON a.run=c.run WHERE c.target=?1 AND a.terminal=0)",
-            [&id], |row| row.get(0))?;
+            "SELECT EXISTS(SELECT 1 FROM attempts WHERE continues=?1 AND terminal=0)",
+            [&id],
+            |row| row.get(0),
+        )?;
         // Host retention spans attribution projects. Verify the sealed
         // request against its own indexed run before following a writer's
         // persisted source-project custody namespace.
         let custody_project =
             match crate::artifacts::read_sealed(&run, "request.json", crate::RECORD_LIMIT)? {
                 Some(raw) => {
-                    let indexed: Vec<u8> = self.db.query_row(
-                        "SELECT record FROM runs WHERE id=?1 AND project=?2",
-                        rusqlite::params![record.run_id.to_string(), record.project_id.to_string()],
+                    let indexed: String = self.db.query_row(
+                        "SELECT digest FROM attempts WHERE id=?1 AND project=?2",
+                        rusqlite::params![id, record.project_id.to_string()],
                         |row| row.get(0),
                     )?;
-                    let indexed: RunRecord = crate::db::decode(&indexed)?;
                     let digest = provenant_records::stored_record_digest("run-request", 1, &raw)?;
-                    if indexed.run_id != record.run_id
-                        || indexed.project_id != record.project_id
-                        || indexed.request_digest != digest
-                    {
+                    if indexed != digest.to_string() {
                         return Err(RunError::Validation("retention request identity"));
                     }
                     let request: CanonicalRequest = crate::db::decode(&raw)?;
                     request
-                        .tasks
-                        .iter()
-                        .find(|task| task.task_id == record.task_id)
-                        .and_then(|task| task.writer.as_ref())
-                        .map(|writer| crate::writer::writer_project_id(writer, record.project_id))
+                        .task
+                        .writer
+                        .as_ref()
+                        .map(crate::writer::writer_project_id)
                         .transpose()?
                         .unwrap_or(record.project_id)
                 }
@@ -463,10 +446,10 @@ impl RunStore {
                 let listing = provenant_supervisor::custody::list_writer_reservations(&directory)
                     .map_err(|error| std::io::Error::other(error.to_string()))?;
                 if !listing.issues.is_empty()
-                    || listing.reservations.iter().any(|reservation| {
-                        reservation.scope.run == record.run_id
-                            && reservation.scope.attempt == record.attempt_id
-                    })
+                    || listing
+                        .reservations
+                        .iter()
+                        .any(|reservation| reservation.scope.attempt == record.attempt_id)
                 {
                     return Err(RunError::Validation(
                         "writer reservation retained or unreadable",
@@ -476,7 +459,7 @@ impl RunStore {
             Err(error) if error.is_not_found() => {}
             Err(error) => return Err(error.into()),
         }
-        let attempt = match self.attempt_dir(record.run_id, record.attempt_id, false) {
+        let attempt = match self.attempt_dir(record.attempt_id, false) {
             Ok(attempt) => attempt,
             Err(error) if missing_directory(&error) => return Ok(None),
             Err(error) => return Err(error),
@@ -499,6 +482,14 @@ impl RunStore {
             Ok(true) => return Err(RunError::Validation("attempt reservation retained")),
             Ok(false) => {}
             Err(error) => return Err(error.into()),
+        }
+        // Age cannot grant custody of private, unimported Git objects or an
+        // attempt whose loss has not been proven. Apply this to every payload
+        // collector, including temporary cleanup and log retention.
+        if pinned_payload(&attempt, record)? {
+            return Err(RunError::Validation(
+                "payload retained: custody proof unavailable",
+            ));
         }
         Ok(Some(Held {
             attempt,
@@ -535,7 +526,6 @@ struct Ledger {
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
 struct LedgerEntry {
-    run: String,
     project: String,
     finished_micros: i64,
     bytes: u64,
@@ -745,7 +735,7 @@ impl RunStore {
                     .context
                     .state_root
                     .as_path()
-                    .join(format!("runs/{}/attempts/{id}", entry.run));
+                    .join(format!("attempts/{id}"));
                 match self.evict_attempt(&id, &entry, now, dry_run, &path) {
                     Ok(true) => {
                         total = total.saturating_sub(entry.bytes);
@@ -794,17 +784,15 @@ impl RunStore {
         report: &mut PayloadReport,
         call: &Request<'_>,
     ) -> Result<()> {
-        let rows: Vec<(String, String, String, Vec<u8>)> = {
+        let rows: Vec<(String, String, Vec<u8>)> = {
             let mut query = self.db.prepare(
-                "SELECT id,run,project,record FROM attempts WHERE terminal=1 ORDER BY sequence",
+                "SELECT id,project,record FROM attempts WHERE terminal=1 AND refused=0 ORDER BY sequence",
             )?;
-            let rows = query.query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-            })?;
+            let rows = query.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
             rows.collect::<std::result::Result<_, _>>()?
         };
         let mut attempts = BTreeMap::new();
-        for (id, run, project, raw) in rows {
+        for (id, project, raw) in rows {
             if call.cancel.is_cancelled() {
                 return Err(RunError::Cancelled);
             }
@@ -812,20 +800,17 @@ impl RunStore {
                 .context
                 .state_root
                 .as_path()
-                .join(format!("runs/{run}/attempts/{id}"));
+                .join(format!("attempts/{id}"));
             let result = (|| -> Result<Option<LedgerEntry>> {
                 let record: AttemptRecord = crate::db::decode_attempt(&raw)?;
                 crate::reader::validate_attempt(&record)?;
-                if record.attempt_id.to_string() != id
-                    || record.run_id.to_string() != run
-                    || record.project_id.to_string() != project
-                {
+                if record.attempt_id.to_string() != id || record.project_id.to_string() != project {
                     return Err(RunError::Validation("retention attempt index identity"));
                 }
                 let AttemptState::Terminal { finished_at, .. } = record.state else {
                     return Ok(None);
                 };
-                let attempt = match self.attempt_dir(record.run_id, record.attempt_id, false) {
+                let attempt = match self.attempt_dir(record.attempt_id, false) {
                     Ok(attempt) => attempt,
                     Err(error) if missing_directory(&error) => return Ok(None),
                     Err(error) => return Err(error),
@@ -851,7 +836,6 @@ impl RunStore {
                 let bytes = payload_bytes(&attempt, &path);
                 drop(held);
                 Ok(Some(LedgerEntry {
-                    run: run.clone(),
                     project: project.clone(),
                     finished_micros: finished_at.as_micros(),
                     bytes,
@@ -882,8 +866,8 @@ impl RunStore {
         path: &std::path::Path,
     ) -> Result<bool> {
         let raw: Vec<u8> = self.db.query_row(
-            "SELECT record FROM attempts WHERE id=?1 AND run=?2 AND project=?3 AND terminal=1",
-            rusqlite::params![id, entry.run, entry.project],
+            "SELECT record FROM attempts WHERE id=?1 AND project=?2 AND terminal=1",
+            rusqlite::params![id, entry.project],
             |row| row.get(0),
         )?;
         let record: AttemptRecord = crate::db::decode_attempt(&raw)?;
@@ -1110,19 +1094,7 @@ pub(crate) fn prune_caches(
     let candidates = candidates(&state)?;
     for name in &candidates {
         let candidate = subdir(&state, name, false)?;
-        let provider = candidate_provider(&candidate, || {
-            if dry_run {
-                // Legacy multi-candidate session discovery is a recursive
-                // migration proof. Keep it for an applied collection.
-                record
-                    .applied_route
-                    .as_ref()
-                    .and_then(|route| route.provider.as_deref())
-                    .filter(|_| candidates.len() == 1)
-            } else {
-                candidate_provider_fallback(&candidate, record, candidates.len())
-            }
-        })?;
+        let provider = candidate_provider(&candidate)?;
         let first = report.removed.len();
         let removal = (|| -> Result<()> {
             if let Some((_, caches)) = PROVIDER_CACHES.iter().find(|(id, _)| *id == provider) {
@@ -1139,62 +1111,14 @@ pub(crate) fn prune_caches(
     Ok(())
 }
 
-fn contains_session(candidate: &Directory, session: &str) -> bool {
-    fn visit(directory: &Directory, session: &str, depth: u8, remaining: &mut u32) -> bool {
-        let Ok(entries) = directory.entries() else {
-            return false;
-        };
-        for entry in entries {
-            if *remaining == 0 {
-                return false;
-            }
-            *remaining -= 1;
-            let Ok(name) = entry else {
-                return false;
-            };
-            if name.to_string_lossy().contains(session) {
-                return true;
-            }
-            if depth > 0
-                && directory
-                    .open_verified_directory(&name)
-                    .is_ok_and(|child| visit(&child, session, depth - 1, remaining))
-            {
-                return true;
-            }
-        }
-        false
-    }
-    !session.is_empty() && visit(candidate, session, 32, &mut 100_000)
-}
-
 fn missing_directory(error: &RunError) -> bool {
     matches!(error, RunError::Filesystem(error) if error.is_not_found())
 }
 
-fn candidate_provider_fallback<'a>(
-    candidate: &Directory,
-    record: &'a AttemptRecord,
-    candidate_count: usize,
-) -> Option<&'a str> {
-    record.applied_route.as_ref().and_then(|route| {
-        route.provider.as_deref().filter(|_| {
-            candidate_count == 1
-                || record
-                    .session
-                    .as_deref()
-                    .is_some_and(|session| contains_session(candidate, session))
-        })
-    })
-}
-
-fn candidate_provider<'a>(
-    candidate: &Directory,
-    fallback: impl FnOnce() -> Option<&'a str>,
-) -> Result<String> {
+fn candidate_provider(candidate: &Directory) -> Result<String> {
     match candidate.read_bounded(OsStr::new("provider.txt"), 64) {
         Ok(raw) => String::from_utf8(raw).map_err(|_| RunError::Validation("provider marker")),
-        Err(error) if error.is_not_found() => Ok(fallback().unwrap_or_default().into()),
+        Err(error) if error.is_not_found() => Ok(String::new()),
         Err(error) => Err(error.into()),
     }
 }
@@ -1283,12 +1207,7 @@ fn transcript(name: &str) -> bool {
     })
 }
 
-fn expire(
-    attempt: &Directory,
-    record: &AttemptRecord,
-    dry_run: bool,
-    report: &mut ProviderStateGc,
-) -> Result<()> {
+fn expire(attempt: &Directory, dry_run: bool, report: &mut ProviderStateGc) -> Result<()> {
     retry_tombstones(attempt, &[STATE], dry_run, report)?;
     let Some(state) = existing(attempt, STATE)? else {
         return Ok(());
@@ -1298,25 +1217,9 @@ fn expire(
         let history = subdir(attempt, OsStr::new(HISTORY), true)?;
         let candidate_names = candidates(&state)?;
         // Whole candidates may already be archived by an interrupted sweep.
-        let mut all_candidates = candidates(&history)?;
-        all_candidates.extend(candidate_names.iter().cloned());
-        all_candidates.sort();
-        all_candidates.dedup();
         for name in &candidate_names {
             let candidate = subdir(&state, name, false)?;
-            let provider = candidate_provider(&candidate, || {
-                candidate_provider_fallback(&candidate, record, all_candidates.len()).or_else(
-                    || {
-                        // A previous sweep may already have moved the session.
-                        history
-                            .open_verified_directory(name)
-                            .ok()
-                            .and_then(|archive| {
-                                candidate_provider_fallback(&archive, record, all_candidates.len())
-                            })
-                    },
-                )
-            })?;
+            let provider = candidate_provider(&candidate)?;
             if !matches!(
                 provider.as_str(),
                 "codex" | "claude" | "cursor" | "opencode"
@@ -1550,7 +1453,7 @@ fn remove_contents(tree: &PayloadTree, depth: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::{call, clock, context, input, route};
+    use crate::tests::{call, clock, context, input};
     use provenant_core::{CancelToken, WallTime};
     use std::{
         fs,
@@ -1567,10 +1470,10 @@ mod tests {
         let store = RunStore::open(&context, &call)?;
         let input = input();
         store.create(&input, &call)?;
-        let attempt = context.state_root.as_path().join(format!(
-            "runs/{}/attempts/{}",
-            input.run_id, input.attempts[0].attempt_id
-        ));
+        let attempt = context
+            .state_root
+            .as_path()
+            .join(format!("attempts/{}", input.attempt_id));
         let candidate = attempt.join("provider-state/candidate-0");
         fs::create_dir_all(candidate.join("sessions"))?;
         fs::set_permissions(
@@ -1589,7 +1492,7 @@ mod tests {
         fs::write(candidate.join("thread_history_1.sqlite"), "history")?;
         fs::write(candidate.join("auth.json"), "credential")?;
         store.withdraw(
-            input.attempts[0].attempt_id,
+            input.attempt_id,
             AttemptState::Queued {
                 extra: Default::default(),
             },
@@ -1626,10 +1529,10 @@ mod tests {
         let store = RunStore::open(&context, &call)?;
         let input = input();
         store.create(&input, &call)?;
-        let attempt = context.state_root.as_path().join(format!(
-            "runs/{}/attempts/{}",
-            input.run_id, input.attempts[0].attempt_id
-        ));
+        let attempt = context
+            .state_root
+            .as_path()
+            .join(format!("attempts/{}", input.attempt_id));
         for path in [
             "provider-state/candidate-0/sessions",
             "provider-state/candidate-0/claude-config/projects",
@@ -1677,7 +1580,7 @@ mod tests {
     ) -> crate::Result<AttemptRecord> {
         store
             .withdraw(
-                input.attempts[0].attempt_id,
+                input.attempt_id,
                 AttemptState::Queued {
                     extra: Default::default(),
                 },
@@ -1859,7 +1762,7 @@ mod tests {
         crate::artifacts::seal(&directory, "stderr.log.tail", b"older tail", 65_536)?;
         let read = || {
             store.read_output(
-                input.attempts[0].attempt_id,
+                input.attempt_id,
                 crate::ArtifactPart::Stderr,
                 crate::ByteRange {
                     offset: 0,
@@ -1892,7 +1795,7 @@ mod tests {
         let (_temp, context, store, input, _attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         withdraw(&store, &input, &call)?;
 
         let events_before = store.events(0, 64, Some(id), &call)?;
@@ -1940,7 +1843,7 @@ mod tests {
         let (_temp, context, store, input, _attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         let selection = "retention-unseen";
         // Save a cursor before settlement, then leave the settlement unacknowledged.
         store.ack_seen(selection, store.last_event_sequence(id, &call)?, &call)?;
@@ -1959,14 +1862,7 @@ mod tests {
             unseen_after: Some(cursor),
         };
         // Exercise both the owned and explicit-target unseen filters.
-        for targets in [
-            vec![],
-            vec![LaneTarget {
-                run: input.run_id,
-                task: None,
-                attempt: Some(id),
-            }],
-        ] {
+        for targets in [vec![], vec![id]] {
             query.targets = targets;
             let page = store.lanes(&query, &call)?;
             assert_eq!(page.lanes.len(), 1, "expired settlement must remain unseen");
@@ -1977,48 +1873,6 @@ mod tests {
             assert!(store.lanes(&query, &call)?.lanes.is_empty());
             query.unseen_after = Some(cursor);
         }
-        Ok(())
-    }
-
-    #[test]
-    fn gc_retains_events_while_sibling_attempt_in_same_run_is_open() -> TestResult {
-        let temp = tempfile::tempdir()?;
-        let context = context(temp.path())?;
-        let (clock, cancel) = (clock(), CancelToken::new());
-        let call = call(&clock, &cancel);
-        let store = RunStore::open(&context, &call)?;
-        let mut input = input();
-        let task2 = provenant_core::TaskId::from_bytes([20; 16]);
-        let attempt2 = AttemptId::from_bytes([21; 16]);
-        let mut task_def = input.request.tasks[0].clone();
-        task_def.task_id = task2;
-        input.request.tasks.push(task_def);
-        input.attempts.push(NewAttempt {
-            task_id: task2,
-            attempt_id: attempt2,
-            prompt: "exact prompt".into(),
-        });
-        store.create(&input, &call)?;
-        let first = input.attempts[0].attempt_id;
-        store.withdraw(
-            first,
-            AttemptState::Queued {
-                extra: Default::default(),
-            },
-            Outcome::Cancelled,
-            "first finished",
-            WallTime::from_micros(200)?,
-            &call,
-        )?;
-        let events = store.events(0, 64, Some(first), &call)?;
-        assert!(!events.is_empty());
-        // Sibling attempt2 is still Queued (terminal == 0).
-        sweep(&store, &context, 7, 31 * DAY_MICROS, false, &call)?;
-        assert_eq!(
-            store.events(0, 64, Some(first), &call)?.len(),
-            events.len(),
-            "events must survive while run has an open attempt"
-        );
         Ok(())
     }
 
@@ -2066,48 +1920,29 @@ mod tests {
     }
 
     #[test]
-    fn gc_logs_use_configured_age_and_keep_an_open_runs_captures() -> TestResult {
+    fn gc_logs_use_configured_age() -> TestResult {
         let temp = tempfile::tempdir()?;
         let context = context(temp.path())?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context, &call)?;
-        let mut input = input();
-        let sibling_id = AttemptId::from_bytes([91; 16]);
-        let sibling_task = provenant_core::TaskId::from_bytes([92; 16]);
-        let mut task = input.request.tasks[0].clone();
-        task.task_id = sibling_task;
-        input.request.tasks.push(task);
-        input.attempts.push(NewAttempt {
-            attempt_id: sibling_id,
-            task_id: sibling_task,
-            prompt: input.attempts[0].prompt.clone(),
-        });
+        let input = input();
         store.create(&input, &call)?;
-        let attempt = context.state_root.as_path().join(format!(
-            "runs/{}/attempts/{}",
-            input.run_id, input.attempts[0].attempt_id
-        ));
+        let attempt = context
+            .state_root
+            .as_path()
+            .join(format!("attempts/{}", input.attempt_id));
         withdraw(&store, &input, &call)?;
         fs::write(attempt.join("stdout.log"), vec![1; 200_000])?;
         let root = Directory::open_anchor(context.state_root.as_path())?;
         let now = WallTime::from_micros(200 + 2 * DAY_MICROS)?;
         assert!(
             store
-                .gc_provider_state_with_logs(&root, 7, 1, now, false, &call)?
+                .gc_provider_state_with_logs(&root, 7, 3, now, false, &call)?
                 .attempt_logs
-                .is_empty()
+                .is_empty(),
+            "logs younger than the configured age stay"
         );
-        store.withdraw(
-            sibling_id,
-            AttemptState::Queued {
-                extra: Default::default(),
-            },
-            Outcome::Cancelled,
-            "fixture",
-            WallTime::from_micros(200)?,
-            &call,
-        )?;
         assert_eq!(
             store
                 .gc_provider_state_with_logs(&root, 7, 1, now, false, &call)?
@@ -2146,7 +1981,7 @@ mod tests {
         let (_temp, context, store, input, attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
-        let record = store.record(input.attempts[0].attempt_id, &call)?;
+        let record = store.record(input.attempt_id, &call)?;
         store.commit_lost(RunStore::scope(&record), "fixture", &call)?;
         let temporary = attempt.join("tmp");
         fs::DirBuilder::new().mode(0o700).create(&temporary)?;
@@ -2302,7 +2137,7 @@ mod tests {
         let (_temp, context, store, input, attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         withdraw(&store, &input, &call)?;
         fs::DirBuilder::new()
             .mode(0o700)
@@ -2333,7 +2168,7 @@ mod tests {
             let (clock, cancel) = (clock(), CancelToken::new());
             let call = call(&clock, &cancel);
             withdraw(&store, &input, &call)?;
-            let id = input.attempts[0].attempt_id;
+            let id = input.attempt_id;
             store.set_temporary_retained(id, true, &call)?;
             // Payload disposal refuses a root accessible to other users.
             let temporary = attempt.join("tmp");
@@ -2369,7 +2204,7 @@ mod tests {
         let (_temp, mut context, store, input, attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         let terminal = withdraw(&store, &input, &call)?;
         fs::DirBuilder::new()
             .mode(0o700)
@@ -2573,7 +2408,7 @@ mod tests {
             .mode(0o700)
             .create(attempt.join("tmp"))?;
         fs::write(attempt.join("tmp/keep"), "locked payload")?;
-        let run = store.run_dir(input.run_id, false)?;
+        let run = store.attempt_dir(input.attempt_id, false)?;
         let publication =
             run.try_lock_existing(OsStr::new("publication.lock"), LockMode::Shared)?;
         assert_eq!(
@@ -2593,7 +2428,7 @@ mod tests {
         );
         assert!(attempt.join("tmp/keep").exists());
         drop(writer);
-        let evidence = attempt.join(input.attempts[0].attempt_id.to_string());
+        let evidence = attempt.join(input.attempt_id.to_string());
         fs::create_dir_all(&evidence)?;
         fs::write(evidence.join("reservation.json"), "{}")?;
         assert_eq!(
@@ -2673,132 +2508,25 @@ mod tests {
     }
 
     #[test]
-    fn candidate_provider_only_uses_fallback_for_a_missing_marker() -> TestResult {
+    fn candidate_provider_uses_only_its_current_marker() -> TestResult {
         let temp = tempfile::tempdir()?;
         let candidate = Directory::open_anchor(temp.path())?;
-        let calls = std::cell::Cell::new(0);
-        let fallback = || {
-            calls.set(calls.get() + 1);
-            Some("claude")
-        };
         fs::write(temp.path().join("provider.txt"), "codex")?;
-        assert_eq!(candidate_provider(&candidate, fallback)?, "codex");
+        assert_eq!(candidate_provider(&candidate)?, "codex");
         fs::write(temp.path().join("provider.txt"), [0xff])?;
-        assert!(candidate_provider(&candidate, fallback).is_err());
-        assert_eq!(calls.get(), 0);
+        assert!(candidate_provider(&candidate).is_err());
         fs::remove_file(temp.path().join("provider.txt"))?;
-        assert_eq!(candidate_provider(&candidate, fallback)?, "claude");
-        assert_eq!(calls.get(), 1);
+        assert!(candidate_provider(&candidate)?.is_empty());
         Ok(())
     }
 
     #[test]
-    fn interrupted_expiry_keeps_legacy_candidate_classification() -> TestResult {
-        for whole_candidate in [false, true] {
-            let (_temp, _context, store, input, attempt) = seeded()?;
-            let (clock, cancel) = (clock(), CancelToken::new());
-            let call = call(&clock, &cancel);
-            let mut record = withdraw(&store, &input, &call)?;
-            let mut applied = route();
-            applied.provider = Some("codex".into());
-            record.applied_route = Some(applied);
-            record.session = Some("legacy-session".into());
-            fs::rename(
-                attempt.join("provider-state/candidate-0/sessions/session.jsonl"),
-                attempt.join("provider-state/candidate-0/sessions/legacy-session.jsonl"),
-            )?;
-            let state = attempt.join("provider-state");
-            for name in ["candidate-0", "candidate-1"] {
-                fs::remove_file(state.join(name).join("provider.txt"))?;
-            }
-            let history = attempt.join("provider-history");
-            fs::DirBuilder::new().mode(0o700).create(&history)?;
-            if whole_candidate {
-                fs::rename(state.join("candidate-0"), history.join("candidate-0"))?;
-            } else {
-                fs::DirBuilder::new()
-                    .mode(0o700)
-                    .create(history.join("candidate-0"))?;
-                fs::rename(
-                    state.join("candidate-0/sessions"),
-                    history.join("candidate-0/sessions"),
-                )?;
-            }
-            let directory = Directory::open_anchor(&attempt)?;
-            seal(&directory, EXPIRED, b"{}\n", 64)?;
-            expire(&directory, &record, false, &mut ProviderStateGc::default())?;
-            assert!(!state.exists());
-            assert!(
-                history
-                    .join("candidate-0/sessions/legacy-session.jsonl")
-                    .exists()
-            );
-            assert!(history.join("candidate-1/unknown-session").exists());
-            if !whole_candidate {
-                assert!(!history.join("candidate-0/other").exists());
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn legacy_candidates_use_provider_of_candidate_holding_session() -> TestResult {
-        let (_temp, _context, store, input, attempt) = seeded()?;
-        let (clock, cancel) = (clock(), CancelToken::new());
-        let call = call(&clock, &cancel);
-        let candidate0 = attempt.join("provider-state/candidate-0");
-        let candidate1 = attempt.join("provider-state/candidate-1");
-        fs::remove_file(candidate0.join("provider.txt"))?;
-        fs::remove_file(candidate1.join("provider.txt"))?;
-        fs::create_dir(candidate0.join("cache"))?;
-        fs::create_dir(candidate1.join("cache"))?;
-        fs::write(candidate0.join("cache/keep"), "first")?;
-        fs::write(candidate1.join("cache/remove"), "applied")?;
-        fs::create_dir(candidate1.join("sessions"))?;
-        fs::write(candidate1.join("sessions/legacy-session.jsonl"), "session")?;
-        fs::write(candidate1.join("config.toml"), "disposable")?;
-
-        let mut record = store.record(input.attempts[0].attempt_id, &call)?;
-        record.state = AttemptState::Terminal {
-            extra: Default::default(),
-            outcome: Outcome::Cancelled,
-            exit_code: None,
-            finished_at: WallTime::from_micros(200)?,
-            reason: None,
-        };
-        let mut applied = route();
-        applied.provider = Some("codex".into());
-        record.applied_route = Some(applied);
-        record.session = Some("legacy-session".into());
-
-        let attempt_dir = Directory::open_anchor(&attempt)?;
-        let mut report = ProviderStateGc::default();
-        prune_caches(&attempt_dir, &record, false, &mut report)?;
-        assert!(candidate0.join("cache/keep").exists());
-        assert!(!candidate1.join("cache").exists());
-
-        expire(&attempt_dir, &record, false, &mut report)?;
-        assert!(!attempt.join("provider-state").exists());
-        let history = attempt.join("provider-history");
-        assert!(history.join("candidate-0/cache/keep").exists());
-        assert_eq!(
-            fs::read_to_string(history.join("candidate-1/sessions/legacy-session.jsonl"))?,
-            "session"
-        );
-        assert!(!history.join("candidate-1/config.toml").exists());
-        Ok(())
-    }
-
-    #[test]
-    fn gc_ignores_indexed_attempt_with_missing_run_directory() -> TestResult {
+    fn gc_ignores_indexed_attempt_with_missing_attempt_directory() -> TestResult {
         let (_temp, context, store, input, attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
         let terminal = withdraw(&store, &input, &call)?;
-        let run = attempt
-            .parent()
-            .and_then(std::path::Path::parent)
-            .ok_or("run path")?;
+        let attempts = attempt.parent().ok_or("attempt collection path")?;
         fs::remove_dir_all(&attempt)?;
 
         let report = sweep(&store, &context, 7, 0, false, &call)?;
@@ -2806,7 +2534,7 @@ mod tests {
         assert!(report.kept.is_empty(), "{:?}", report.kept);
         assert!(store.record(terminal.attempt_id, &call).is_ok());
 
-        fs::remove_dir_all(run)?;
+        fs::remove_dir_all(attempts)?;
         let report = sweep(&store, &context, 7, 0, false, &call)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         Ok(())
@@ -2871,16 +2599,16 @@ mod tests {
 
     #[test]
     fn a_pending_continuation_keeps_its_source_and_expired_resume_spends_nothing() -> TestResult {
-        use provenant_core::{OperationId, RunId};
+        use provenant_core::{AttemptId, OperationId};
         let (_temp, context, store, input, attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
         withdraw(&store, &input, &call)?;
         let resume = Resume {
-            prior: input.attempts[0].attempt_id,
+            extend: Vec::new(),
+            prior: input.attempt_id,
             expected_generation: 0,
             operation_id: OperationId::parse("continue-fixture")?,
-            run_id: RunId::from_bytes([8; 16]),
             attempt_id: AttemptId::from_bytes([9; 16]),
             prompt: "continue".into(),
             created_at: WallTime::from_micros(300)?,
@@ -2912,8 +2640,9 @@ mod tests {
         let report = sweep(&store, &context, 1, DAY_MICROS, false, &call)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert!(!attempt.join("provider-state").exists());
-        assert_eq!(store.resume(&resume, &call)?.run_id, resume.run_id);
+        assert_eq!(store.resume(&resume, &call)?.attempt_id, resume.attempt_id);
         let fresh = Resume {
+            extend: Vec::new(),
             operation_id: OperationId::parse("expired-fixture")?,
             ..resume
         };
@@ -2999,16 +2728,17 @@ mod tests {
         let store = RunStore::open(&context, &call)?;
         let first = input();
         let mut second = input();
-        second.run_id = provenant_core::RunId::from_bytes([14; 16]);
+        second.attempt_id = provenant_core::AttemptId::from_bytes([14; 16]);
         second.operation_id = provenant_core::OperationId::parse("run-test-b")?;
-        second.attempts[0].attempt_id = AttemptId::from_bytes([16; 16]);
+        second.attempt_id = AttemptId::from_bytes([16; 16]);
+        crate::tests::rekey(&mut second);
         let mut paths = vec![];
         for (index, prepared) in [&first, &second].into_iter().enumerate() {
             store.create(prepared, &call)?;
-            let attempt = context.state_root.as_path().join(format!(
-                "runs/{}/attempts/{}",
-                prepared.run_id, prepared.attempts[0].attempt_id
-            ));
+            let attempt = context
+                .state_root
+                .as_path()
+                .join(format!("attempts/{}", prepared.attempt_id));
             let candidate = attempt.join("provider-state/candidate-0");
             fs::DirBuilder::new()
                 .recursive(true)
@@ -3017,7 +2747,7 @@ mod tests {
             fs::write(candidate.join("provider.txt"), "codex")?;
             fs::write(candidate.join("blob"), vec![7_u8; 262_144])?;
             store.withdraw(
-                prepared.attempts[0].attempt_id,
+                prepared.attempt_id,
                 AttemptState::Queued {
                     extra: Default::default(),
                 },
@@ -3094,6 +2824,29 @@ mod tests {
     }
 
     #[test]
+    fn age_collection_keeps_unimported_git_until_custody_is_proven() -> TestResult {
+        let pair = pair()?;
+        fs::create_dir(pair.older.join("tmp"))?;
+        fs::write(pair.older.join("tmp/objects"), "unlanded work")?;
+        fs::write(pair.older.join("writer-objects.json"), "{}")?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let report = sweep(&pair.store, &pair.context, 1, 8 * DAY_MICROS, false, &call)?;
+        assert!(
+            report
+                .kept
+                .iter()
+                .any(|issue| issue.path.starts_with(&pair.older))
+        );
+        assert_eq!(
+            fs::read_to_string(pair.older.join("tmp/objects"))?,
+            "unlanded work"
+        );
+        assert!(pair.older.join("provider-state/candidate-0/blob").exists());
+        Ok(())
+    }
+
+    #[test]
     fn payload_pressure_never_evicts_private_git_or_dry_runs() -> TestResult {
         let pair = pair()?;
         fs::create_dir(pair.older.join("tmp"))?;
@@ -3149,7 +2902,7 @@ mod tests {
         ));
         assert!(
             pair.store
-                .record(pair.newer_input.attempts[0].attempt_id, &call)
+                .record(pair.newer_input.attempt_id, &call)
                 .is_ok()
         );
         assert!(

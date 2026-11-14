@@ -3,9 +3,10 @@
 //! commit statuses for an exact commit through [`Observer::checks`].
 //!
 //! Reads are cached in host state by repository and commit, so waiters in any
-//! process share one answer per poll interval: a waiter accepts an answer
-//! younger than its own interval. An older answer is refreshed by a
-//! conditional request, so an unchanged commit costs a `304`. A one-shot
+//! process share one answer per configured observation interval. Settled CI
+//! uses the fast interval; pending CI slows until near the same check's recent
+//! median completion time. A zero caller max age always revalidates. An older
+//! answer is refreshed conditionally, so an unchanged commit costs a `304`. A one-shot
 //! decision accepts no age and always revalidates. A rate-limited
 //! response is recorded once for the repository with its reset time, and
 //! every waiter holds off until then instead of retrying on its own.
@@ -13,15 +14,13 @@
 //! A commit is any head: a pull request head, a `land/**` candidate or a
 //! landed commit.
 use super::gh::{Forge, Gh, Response, rate_limit_reset};
-use provenant_core::{CancelToken, Clock as _, DurationMicros, WaitBudget};
-use provenant_os::{
-    clock::SystemClock,
-    fs::{Directory, LockMode, PublishMode},
-};
+mod port;
+use provenant_os::fs::{Directory, LockMode, PublishMode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
+    io::Write,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -34,6 +33,9 @@ const RETRY_LAST: Duration = Duration::from_secs(15);
 const RATE_FILE: &str = "rate-limit.json";
 const RATE_LOCK: &str = "rate-limit.lock";
 const CACHE_LIMIT: u64 = 16 * 1024 * 1024;
+const REPOSITORY_CONTEXT_PATH: &str = "repos/{owner}/{repo}";
+const RECENT_CACHE_LIMIT: usize = 64;
+const RUN_HISTORY_LIMIT: usize = 512;
 
 /// One reported check run or the latest state of one status context.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,10 +100,49 @@ impl Forge for GhTransport {
     }
 }
 
+/// Resolve the selected repository through the selected observation transport context.
+#[allow(clippy::disallowed_methods, reason = "forge transport timing boundary")]
+pub(crate) fn repository_for_project(
+    state: &Path,
+    project: &Path,
+    budget: Duration,
+) -> Result<String, ObserveError> {
+    let mut forge = port::select_transport(state, project, budget)?;
+    let response = forge.get(REPOSITORY_CONTEXT_PATH, None).map_err(|error| {
+        ObserveError::Unavailable(format!("cannot identify repository: {error}"))
+    })?;
+    if let Some(reset) = rate_limit_reset(&response, jiff::Timestamp::now().as_second()) {
+        return Err(ObserveError::RateLimited {
+            reset: timestamp(reset),
+        });
+    }
+    if !(200..=299).contains(&response.status) {
+        return Err(ObserveError::Unavailable(format!(
+            "cannot identify repository: HTTP {}",
+            response.status
+        )));
+    }
+    let value: Value = serde_json::from_slice(&response.body).map_err(|error| {
+        ObserveError::Unavailable(format!("invalid repository response: {error}"))
+    })?;
+    value["full_name"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            ObserveError::Unavailable("repository response has no canonical name".into())
+        })
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct Page {
     etag: Option<String>,
     body: Value,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResourcePage {
+    page: Page,
+    fetched_at: i64,
 }
 #[derive(Default, Serialize, Deserialize)]
 struct Cached {
@@ -109,6 +150,193 @@ struct Cached {
     fetched_at: i64,
     runs: Vec<Page>,
     statuses: Vec<Page>,
+}
+
+#[derive(Clone)]
+struct RunDuration {
+    id: u64,
+    name: String,
+    duration_ms: i64,
+    completed_at_ms: i64,
+}
+
+#[derive(Clone, Copy)]
+struct Cadence {
+    fast: Duration,
+    slow: Duration,
+    near_end: Duration,
+    conditional_requests: bool,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct WaitDomain {
+    wait: provenant_cli::wait::Settings,
+}
+static WAIT_SECTIONS: [provenant_config::DomainSection; 1] = [provenant_cli::wait::SECTION];
+
+fn adaptive_freshness(
+    cached: &Cached,
+    history: &[RunDuration],
+    caller_max_age: Duration,
+    cadence: Cadence,
+    now_ms: i64,
+) -> Duration {
+    if caller_max_age.is_zero() {
+        return Duration::ZERO;
+    }
+    adaptive_interval(cached, history, cadence, now_ms)
+}
+
+fn adaptive_interval(
+    cached: &Cached,
+    history: &[RunDuration],
+    cadence: Cadence,
+    now_ms: i64,
+) -> Duration {
+    let fast = cadence.fast;
+    let pending = cached
+        .runs
+        .iter()
+        .filter_map(|page| page.body.get("check_runs")?.as_array())
+        .flat_map(|runs| runs.iter())
+        .filter(|run| {
+            matches!(
+                run.get("status").and_then(Value::as_str),
+                Some("queued" | "in_progress" | "pending" | "waiting" | "requested")
+            )
+        })
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        return fast;
+    }
+    let near_end = pending.iter().any(|run| {
+        let Some(name) = run.get("name").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(started) = time(run.get("started_at")).flatten() else {
+            return false;
+        };
+        let mut durations = history
+            .iter()
+            .filter(|sample| sample.name == name)
+            .map(|sample| sample.duration_ms)
+            .collect::<Vec<_>>();
+        if durations.is_empty() {
+            return false;
+        }
+        durations.sort_unstable();
+        let expected_ms = durations[durations.len() / 2];
+        let elapsed_ms = now_ms.saturating_sub(started.as_millisecond()).max(0);
+        elapsed_ms.saturating_add(i64::try_from(cadence.near_end.as_millis()).unwrap_or(i64::MAX))
+            >= expected_ms
+    });
+    if near_end {
+        fast
+    } else {
+        cadence.slow.max(fast)
+    }
+}
+
+fn durations_from_cache(cached: &Cached) -> Vec<RunDuration> {
+    cached
+        .runs
+        .iter()
+        .filter_map(|page| page.body.get("check_runs")?.as_array())
+        .flat_map(|runs| runs.iter())
+        .filter(|run| run.get("status").and_then(Value::as_str) == Some("completed"))
+        .filter_map(|run| {
+            let started = time(run.get("started_at"))?.flatten()?.as_millisecond();
+            let completed = time(run.get("completed_at"))?.flatten()?.as_millisecond();
+            let duration_ms = completed
+                .checked_sub(started)
+                .filter(|duration| *duration > 0)?;
+            Some(RunDuration {
+                id: run.get("id")?.as_u64()?,
+                name: run.get("name")?.as_str()?.to_owned(),
+                duration_ms,
+                completed_at_ms: completed,
+            })
+        })
+        .collect()
+}
+
+fn unique_run_history(samples: impl IntoIterator<Item = RunDuration>) -> Vec<RunDuration> {
+    let mut by_id = std::collections::BTreeMap::<u64, RunDuration>::new();
+    for sample in samples {
+        match by_id.entry(sample.id) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(sample);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let old = entry.get();
+                if sample.completed_at_ms > old.completed_at_ms
+                    || (sample.completed_at_ms == old.completed_at_ms
+                        && sample.duration_ms > old.duration_ms)
+                {
+                    entry.insert(sample);
+                }
+            }
+        }
+    }
+    let mut history = by_id.into_values().collect::<Vec<_>>();
+    history.sort_by_key(|sample| sample.completed_at_ms);
+    if history.len() > RUN_HISTORY_LIMIT {
+        history.drain(..history.len() - RUN_HISTORY_LIMIT);
+    }
+    history
+}
+
+fn cached_run_history(dir: &Directory) -> Option<Vec<RunDuration>> {
+    let entries = dir.entries().ok()?;
+    let mut names = Vec::<(i128, OsString)>::new();
+    for entry in entries {
+        let name = entry.ok()?;
+        let Some(text) = name.to_str() else {
+            continue;
+        };
+        let Some(commit) = text.strip_suffix(".json") else {
+            continue;
+        };
+        if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            continue;
+        }
+        let metadata = dir.metadata_at(&name, false).ok()?;
+        if metadata.kind == provenant_os::fs::FileKind::Regular {
+            names.push((metadata.modified_ns, name));
+        }
+    }
+    names.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    let mut history = Vec::new();
+    for (_, name) in names.into_iter().take(RECENT_CACHE_LIMIT) {
+        let bytes = dir.read_bounded(&name, CACHE_LIMIT).ok()?;
+        let cached: Cached = serde_json::from_slice(&bytes).ok()?;
+        history.extend(durations_from_cache(&cached));
+    }
+    Some(unique_run_history(history))
+}
+
+fn settings_roots(state: &Path, project: &Path) -> Result<provenant_core::Roots, ObserveError> {
+    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+        ObserveError::Unavailable("cannot resolve CI cadence configuration roots".into())
+    })?;
+    let mut inputs = provenant_core::RootInputs::new(home, project.to_owned());
+    inputs.state_dir = Some(state.to_owned());
+    inputs.workspaces.push(project.to_owned());
+    inputs
+        .resolve(&provenant_os::fs::SystemPathResolver)
+        .map_err(|_| {
+            ObserveError::Unavailable("cannot resolve CI cadence configuration roots".into())
+        })
+}
+
+fn request_etag<'a>(cadence: Cadence, previous: Option<&'a Page>) -> Option<&'a str> {
+    if cadence.conditional_requests {
+        previous.and_then(|page| page.etag.as_deref())
+    } else {
+        None
+    }
 }
 #[derive(Serialize, Deserialize)]
 struct RateLimit {
@@ -126,23 +354,30 @@ pub(crate) struct Observer<F, C> {
     repository: String,
     forge: F,
     clock: C,
+    cadence: Cadence,
+    history: Vec<RunDuration>,
+    next_poll_interval: Duration,
 }
 
-impl Observer<GhTransport, WallClock> {
-    /// The observer for `repository` (`owner/name`), reading through `gh` in
-    /// `project` within `budget`, with its cache under the state root.
-    #[allow(clippy::disallowed_methods, reason = "forge transport timing boundary")]
+impl Observer<port::SelectedTransport, WallClock> {
+    /// Select the configured CI transport once, then share the observer cache.
     pub(crate) fn open(
         state: &Path,
         project: &Path,
         repository: &str,
         budget: Duration,
     ) -> Result<Self, ObserveError> {
-        let transport = GhTransport {
-            project: project.to_owned(),
-            left: budget,
-        };
-        Self::with(state, repository, transport, WallClock)
+        let transport = port::select_transport(state, project, budget)?;
+        let roots = settings_roots(state, project).map_err(|error| {
+            ObserveError::Unavailable(format!("cannot read CI cadence configuration: {error}"))
+        })?;
+        let sections = provenant_config::DomainSections::<WaitDomain>::new(&WAIT_SECTIONS);
+        let settings = provenant_config::read_with_domains(&roots, &sections)
+            .map(|config| config.domains.wait)
+            .map_err(|error| {
+                ObserveError::Unavailable(format!("cannot read CI cadence configuration: {error}"))
+            })?;
+        Self::with_settings(state, repository, transport, WallClock, settings)
     }
 }
 
@@ -152,6 +387,26 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         repository: &str,
         forge: F,
         clock: C,
+    ) -> Result<Self, ObserveError> {
+        Self::with_settings(
+            state,
+            repository,
+            forge,
+            clock,
+            provenant_cli::wait::Settings::default(),
+        )
+    }
+
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "optional cadence-history warning"
+    )]
+    fn with_settings(
+        state: &Path,
+        repository: &str,
+        forge: F,
+        clock: C,
+        settings: provenant_cli::wait::Settings,
     ) -> Result<Self, ObserveError> {
         let repository = repository
             .strip_prefix("repos/")
@@ -174,17 +429,120 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         let dir = open_state(state, &key).map_err(|error| {
             ObserveError::Unavailable(format!("cannot open CI observer state: {error}"))
         })?;
+        let history = match cached_run_history(&dir) {
+            Some(history) => history,
+            None => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: recent CI duration cache unavailable; using slower observation cadence"
+                );
+                Vec::new()
+            }
+        };
+        let cadence = Cadence {
+            fast: Duration::from_millis(settings.pr_interval_ms),
+            slow: Duration::from_millis(settings.pr_slow_interval_ms),
+            near_end: Duration::from_millis(settings.pr_near_end_window_ms),
+            conditional_requests: settings.pr_conditional_requests,
+        };
+        let next_poll_interval = cadence.fast;
         Ok(Self {
             dir,
             repository,
             forge,
             clock,
+            cadence,
+            history,
+            next_poll_interval,
         })
     }
 
-    /// Every check reported for `commit`. An answer any waiter on the host
-    /// read less than `max_age` ago is served without a request. Transient
-    /// failures are retried, and a rate limit is waited out, within `budget`.
+    /// The configured fast interval for PR and CI observation.
+    pub(crate) fn fast_interval(&self) -> Duration {
+        self.cadence.fast
+    }
+
+    /// The interval selected from the last CI observation for the next read.
+    pub(crate) fn next_poll_interval(&self) -> Duration {
+        self.next_poll_interval
+    }
+
+    /// Read one repository-relative forge resource through the selected port.
+    /// Its cache is separate from the check-run cache shape.
+    pub(crate) fn resource(
+        &mut self,
+        relative_path: &str,
+        max_age: Duration,
+        budget: Duration,
+    ) -> Result<Value, ObserveError> {
+        if !valid_resource_path(relative_path) {
+            return Err(ObserveError::Unavailable(
+                "invalid repository resource path".into(),
+            ));
+        }
+        let path = format!("repos/{}/{relative_path}", self.repository);
+        let name = format!(
+            "resource-{}.json",
+            provenant_records::CanonicalV1::file_digest(path.as_bytes())
+        );
+        let now = self.clock.now();
+        let cached: Option<ResourcePage> = self
+            .dir
+            .read_bounded(OsStr::new(&name), CACHE_LIMIT)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        if let Some(entry) = cached.as_ref() {
+            let age = now.as_millisecond().saturating_sub(entry.fetched_at);
+            if (0..i64::try_from(max_age.as_millis()).unwrap_or(i64::MAX)).contains(&age) {
+                return Ok(entry.page.body.clone());
+            }
+        }
+        if let Some(reset) = self.rate_limited(now) {
+            return Err(ObserveError::RateLimited {
+                reset: timestamp(reset),
+            });
+        }
+        if budget.is_zero() {
+            return Err(ObserveError::Expired);
+        }
+        self.forge.bound(budget);
+        let previous = cached.map(|entry| entry.page);
+        let fetched =
+            self.page(&path, previous.as_ref(), identity)
+                .map_err(|fetch| match fetch {
+                    Fetch::Limited(reset) => {
+                        let reset = self.record_reset(reset.max(now.as_second().saturating_add(1)));
+                        ObserveError::RateLimited {
+                            reset: timestamp(reset),
+                        }
+                    }
+                    Fetch::Transient(message) | Fetch::Failed(message) => {
+                        ObserveError::Unavailable(message)
+                    }
+                })?;
+        let entry = ResourcePage {
+            page: fetched,
+            fetched_at: self.clock.now().as_millisecond(),
+        };
+        let bytes = serde_json::to_vec(&entry).map_err(|error| {
+            ObserveError::Unavailable(format!("cannot encode repository resource: {error}"))
+        })?;
+        self.dir
+            .atomic_write(
+                OsStr::new(&name),
+                ".resource-",
+                &bytes,
+                PublishMode::Replace,
+            )
+            .map_err(|error| {
+                ObserveError::Unavailable(format!("cannot record repository resource: {error}"))
+            })?;
+        Ok(entry.page.body)
+    }
+
+    /// Every check reported for `commit`. A zero `max_age` forces a fresh read;
+    /// any nonzero value enables the configured adaptive cadence. Transient
+    /// failures are retried within `budget`; a rate limit returns at once.
     pub(crate) fn checks(
         &mut self,
         commit: &str,
@@ -205,42 +563,24 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         let mut retries = 0_u32;
         loop {
             let now = self.clock.now();
+            // A recorded limit skips this read; the caller's next poll retries.
             if let Some(reset) = self.rate_limited(now) {
-                let at = timestamp(reset);
-                if at > deadline {
-                    return Err(ObserveError::RateLimited { reset: at });
-                }
-                self.clock
-                    .sleep(seconds(reset.saturating_sub(now.as_second()).max(1)));
-                continue;
+                return Err(ObserveError::RateLimited {
+                    reset: timestamp(reset),
+                });
             }
             let left = Duration::try_from(deadline.duration_since(now)).unwrap_or_default();
             if left.is_zero() {
                 return Err(ObserveError::Expired);
             }
             self.forge.bound(left);
+            // The per-commit lock only shares one read between waiters. A busy
+            // lock is skipped: this waiter reads unlocked rather than queue.
             let lock = format!("{commit}.lock");
             let guard = self
                 .dir
-                .lock(
-                    OsStr::new(&lock),
-                    LockMode::Exclusive,
-                    WaitBudget::up_to(
-                        SystemClock.mono_now(),
-                        DurationMicros::from_micros(
-                            u64::try_from(left.as_micros()).unwrap_or(u64::MAX),
-                        ),
-                    ),
-                    &CancelToken::new(),
-                    &SystemClock,
-                )
-                .map_err(|error| {
-                    if self.clock.now() >= deadline {
-                        ObserveError::Expired
-                    } else {
-                        ObserveError::Unavailable(format!("cannot lock CI observer state: {error}"))
-                    }
-                })?;
+                .try_lock(OsStr::new(&lock), LockMode::Exclusive)
+                .ok();
             let now = self.clock.now();
             // Another waiter may have met the limit while this one queued.
             if self.rate_limited(now).is_some() {
@@ -253,15 +593,38 @@ impl<F: Forge, C: Clock> Observer<F, C> {
                 .read_bounded(OsStr::new(&name), CACHE_LIMIT)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+            let freshness = cached.as_ref().map_or_else(
+                || {
+                    if max_age.is_zero() {
+                        Duration::ZERO
+                    } else {
+                        self.cadence.fast
+                    }
+                },
+                |cached| {
+                    adaptive_freshness(
+                        cached,
+                        &self.history,
+                        max_age,
+                        self.cadence,
+                        now.as_millisecond(),
+                    )
+                },
+            );
             let fresh = cached.as_ref().is_some_and(|cached| {
                 let age = now.as_millisecond().saturating_sub(cached.fetched_at);
-                (0..i64::try_from(max_age.as_millis()).unwrap_or(i64::MAX)).contains(&age)
+                (0..i64::try_from(freshness.as_millis()).unwrap_or(i64::MAX)).contains(&age)
             });
             let cached = if fresh {
                 cached.unwrap_or_default()
             } else {
                 match self.fetch(commit, cached.unwrap_or_default()) {
                     Ok(mut fetched) => {
+                        self.history = unique_run_history(
+                            std::mem::take(&mut self.history)
+                                .into_iter()
+                                .chain(durations_from_cache(&fetched)),
+                        );
                         fetched.fetched_at = now.as_millisecond();
                         let bytes = serde_json::to_vec(&fetched).map_err(|error| {
                             ObserveError::Unavailable(format!("cannot encode CI: {error}"))
@@ -280,12 +643,9 @@ impl<F: Forge, C: Clock> Observer<F, C> {
                         // recorded reset is never replaced by an earlier one.
                         let reset = self.record_reset(reset.max(now.as_second().saturating_add(1)));
                         drop(guard);
-                        if timestamp(reset) > deadline {
-                            return Err(ObserveError::RateLimited {
-                                reset: timestamp(reset),
-                            });
-                        }
-                        continue;
+                        return Err(ObserveError::RateLimited {
+                            reset: timestamp(reset),
+                        });
                     }
                     Err(Fetch::Transient(message)) => {
                         drop(guard);
@@ -304,6 +664,12 @@ impl<F: Forge, C: Clock> Observer<F, C> {
                     Err(Fetch::Failed(message)) => return Err(ObserveError::Unavailable(message)),
                 }
             };
+            self.next_poll_interval = adaptive_interval(
+                &cached,
+                &self.history,
+                self.cadence,
+                self.clock.now().as_millisecond(),
+            );
             drop(guard);
             return parse(&cached, commit).ok_or_else(|| {
                 ObserveError::Unavailable(
@@ -321,16 +687,7 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         // next limited read records the limit again.
         let _guard = self
             .dir
-            .lock(
-                OsStr::new(RATE_LOCK),
-                LockMode::Exclusive,
-                WaitBudget::up_to(
-                    SystemClock.mono_now(),
-                    DurationMicros::from_micros(5_000_000),
-                ),
-                &CancelToken::new(),
-                &SystemClock,
-            )
+            .try_lock(OsStr::new(RATE_LOCK), LockMode::Exclusive)
             .ok();
         let reset = reset.max(self.recorded_reset());
         if let Ok(bytes) = serde_json::to_vec(&RateLimit { reset }) {
@@ -406,11 +763,18 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         previous: Option<&Page>,
         prune: fn(Value) -> Value,
     ) -> Result<Page, Fetch> {
-        let etag = previous.and_then(|page| page.etag.as_deref());
-        let response = self
-            .forge
-            .get(path, etag)
-            .map_err(|error| Fetch::Transient(format!("cannot read CI: {error}")))?;
+        let etag = request_etag(self.cadence, previous);
+        let response = self.forge.get(path, etag).map_err(|error| {
+            let message = format!("cannot read CI: {error}");
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::InvalidData
+            ) {
+                Fetch::Failed(message)
+            } else {
+                Fetch::Transient(message)
+            }
+        })?;
         if let Some(reset) = rate_limit_reset(&response, self.clock.now().as_second()) {
             return Err(Fetch::Limited(reset));
         }
@@ -441,6 +805,23 @@ impl<F: Forge, C: Clock> Observer<F, C> {
     }
 }
 
+fn identity(body: Value) -> Value {
+    body
+}
+
+fn valid_resource_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && path.split('/').all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
+}
+
 /// `state/ci-observer/<repository>`, private to this user, so its locks hold.
 fn open_state(state: &Path, key: &str) -> Result<Directory, Box<dyn std::error::Error>> {
     std::fs::create_dir_all(state)?;
@@ -456,9 +837,6 @@ fn open_state(state: &Path, key: &str) -> Result<Directory, Box<dyn std::error::
     Ok(dir)
 }
 
-fn seconds(value: i64) -> Duration {
-    Duration::from_secs(u64::try_from(value).unwrap_or(0))
-}
 fn timestamp(second: i64) -> jiff::Timestamp {
     jiff::Timestamp::from_second(second).unwrap_or(jiff::Timestamp::MAX)
 }
@@ -794,8 +1172,111 @@ mod tests {
         tempfile::tempdir().expect("state")
     }
 
+    #[derive(Clone, Default)]
+    struct ResourceForge(Arc<Mutex<Vec<(String, Option<String>)>>>);
+    impl ResourceForge {
+        fn requests(&self) -> Vec<(String, Option<String>)> {
+            self.0.lock().expect("requests").clone()
+        }
+    }
+    impl Forge for ResourceForge {
+        fn get(&mut self, path: &str, etag: Option<&str>) -> io::Result<Response> {
+            self.0
+                .lock()
+                .expect("requests")
+                .push((path.into(), etag.map(str::to_owned)));
+            let headers = BTreeMap::from([("etag".into(), "stable".into())]);
+            if etag == Some("stable") {
+                Ok(Response {
+                    status: 304,
+                    headers,
+                    body: Vec::new(),
+                })
+            } else {
+                Ok(Response {
+                    status: 200,
+                    headers,
+                    body: br#"{"number":12,"state":"open"}"#.to_vec(),
+                })
+            }
+        }
+    }
+
     #[test]
-    fn two_concurrent_waiters_on_one_head_share_one_read_per_poll() {
+    fn repository_resource_revalidates_through_the_shared_forge_cache() {
+        let state = state();
+        let forge = ResourceForge::default();
+        let mut observer = Observer::with(state.path(), "Owner/Repo", forge.clone(), Shared::new())
+            .expect("observer");
+        let first = observer
+            .resource("pulls/12", Duration::ZERO, Duration::from_secs(30))
+            .expect("first resource");
+        let second = observer
+            .resource("pulls/12", Duration::ZERO, Duration::from_secs(30))
+            .expect("conditional resource");
+        assert_eq!(first, second);
+        let requests = forge.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].0, "repos/Owner/Repo/pulls/12");
+        assert_eq!(requests[0].1, None);
+        assert_eq!(requests[1].1.as_deref(), Some("stable"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_context_uses_the_selected_transport_and_none_does_not_fall_back() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let project = tempfile::tempdir().expect("project");
+        let state = tempfile::tempdir().expect("state");
+        let config = project.path().join(".provenant");
+        std::fs::create_dir(&config).expect("port config directory");
+        let command = project.path().join("ci-context-command");
+        std::fs::write(
+            &command,
+            r#"#!/bin/sh
+[ "$PROVENANT_PORT_REQUEST_PATH" = 'repos/{owner}/{repo}' ] || exit 71
+[ -z "$PROVENANT_PORT_IF_NONE_MATCH" ] || exit 72
+printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}"}'
+"#,
+        )
+        .expect("command fixture");
+        let mut permissions = std::fs::metadata(&command)
+            .expect("command metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&command, permissions).expect("executable command");
+
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.ci_observation.backend = provenant_config::PortBackend::Command {
+            command: provenant_config::PortCommand {
+                argv: vec![command.to_string_lossy().into_owned()],
+                exit_codes: provenant_config::CommandExitCodes {
+                    success: vec![0],
+                    unknown: Vec::new(),
+                    other: provenant_config::ExitDisposition::Refused,
+                },
+            },
+        };
+        let path = config.join("ports.json");
+        std::fs::write(&path, serde_json::to_vec(&ports).expect("encode ports"))
+            .expect("write command port");
+        assert_eq!(
+            repository_for_project(state.path(), project.path(), Duration::from_secs(30))
+                .expect("selected command repository"),
+            "owner/repo"
+        );
+
+        ports.ci_observation.backend = provenant_config::PortBackend::None;
+        std::fs::write(&path, serde_json::to_vec(&ports).expect("encode ports"))
+            .expect("write disabled port");
+        let error = repository_for_project(state.path(), project.path(), Duration::from_secs(30))
+            .expect_err("none must fail before any request");
+        assert!(error.to_string().contains("disabled"), "{error}");
+    }
+
+    #[test]
+    fn concurrent_waiters_never_queue_and_share_the_cached_read() {
         let shared = Shared::new();
         shared.with(|world| {
             world
@@ -803,8 +1284,8 @@ mod tests {
                 .insert(HEAD.into(), page(vec![run("build", "in_progress", None)]));
             world.delay = Duration::from_millis(100);
         });
-        // The first read stays open until both waiters are inside `checks`,
-        // so the second must queue behind it and be served from its cache.
+        // The first read stays open until both waiters are inside `checks`;
+        // the second never queues behind it, so it may read too.
         shared.hold_reads_until(2);
         let dir = state();
         let poll = |shared: &Shared| {
@@ -828,16 +1309,14 @@ mod tests {
         let first = poll(&shared);
         assert_eq!(first[0], first[1]);
         assert_eq!(first[0][0].bucket, "pending");
-        // One read of the head is one check-run request and one status request.
-        assert_eq!(shared.requests(), 2);
+        // One read of the head is one check-run request and one status
+        // request; a waiter that found the read busy made its own.
+        let read = shared.requests();
+        assert!(matches!(read, 2 | 4), "{read}");
         // Within the interval, neither waiter reaches the forge.
         shared.with(|world| world.now_ms += 1_000);
         poll(&shared);
-        assert_eq!(shared.requests(), 2);
-        // The next interval costs one more read for both.
-        shared.with(|world| world.now_ms += 5_000);
-        poll(&shared);
-        assert_eq!(shared.requests(), 4);
+        assert_eq!(shared.requests(), read);
     }
 
     #[test]
@@ -914,18 +1393,29 @@ mod tests {
             .expect_err("still limited");
         assert!(matches!(error, ObserveError::RateLimited { .. }), "{error}");
         assert_eq!(shared.requests(), 1);
-        // A waiter whose budget outlasts the reset sleeps until it, then reads.
+        // A budget that outlasts the reset still skips this poll at once.
+        let before = shared.with(|world| world.now_ms);
+        let error = shared
+            .observer(dir.path())
+            .checks(HEAD, POLL, Duration::from_secs(300))
+            .expect_err("skips the poll");
+        assert!(matches!(error, ObserveError::RateLimited { .. }), "{error}");
+        assert_eq!(shared.with(|world| world.now_ms), before);
+        assert_eq!(shared.requests(), 1);
+        // The first poll after the reset reads again.
+        shared.with(|world| {
+            world.now_ms = reset * 1000;
+            world.limited_until = None;
+        });
         let checks = shared
             .observer(dir.path())
             .checks(HEAD, POLL, Duration::from_secs(300))
             .expect("after reset");
         assert_eq!(checks[0].bucket, "pass");
-        assert!(shared.with(|world| world.now_ms) >= reset * 1000);
-        assert_eq!(shared.requests(), 3);
     }
 
     #[test]
-    fn a_rate_limit_whose_reset_is_past_still_pauses() {
+    fn a_rate_limit_whose_reset_is_past_still_skips_one_poll() {
         let shared = Shared::new();
         shared.with(|world| {
             world.runs.insert(
@@ -935,12 +1425,17 @@ mod tests {
             world.past_limit = true;
         });
         let dir = state();
+        let error = shared
+            .observer(dir.path())
+            .checks(HEAD, Duration::ZERO, Duration::from_secs(60))
+            .expect_err("skips the poll");
+        assert!(matches!(error, ObserveError::RateLimited { .. }), "{error}");
+        shared.with(|world| world.now_ms += 1000);
         let checks = shared
             .observer(dir.path())
             .checks(HEAD, Duration::ZERO, Duration::from_secs(60))
-            .expect("after pause");
+            .expect("next poll");
         assert_eq!(checks[0].bucket, "pass");
-        assert!(shared.with(|world| world.now_ms) >= START + 1000);
     }
 
     #[test]
@@ -971,22 +1466,21 @@ mod tests {
     }
 
     #[test]
-    fn pr_status_land_wait_and_the_landing_gate_agree_on_one_observation() {
+    fn pr_status_and_the_landing_gate_agree_on_one_observation() {
         let shared = Shared::new();
         let dir = state();
-        let now: jiff::Timestamp = "2026-01-01T00:00:00Z".parse().expect("now");
         for (runs, expected) in [
             (
                 vec![run("build", "in_progress", None)],
-                ("pending", "pending", "pending"),
+                ("pending", "pending"),
             ),
             (
                 vec![run("build", "completed", Some("failure"))],
-                ("failing", "failed", "failed"),
+                ("failing", "failed"),
             ),
             (
                 vec![run("build", "completed", Some("success"))],
-                ("ready", "passed", "passed"),
+                ("ready", "passed"),
             ),
             (
                 vec![
@@ -994,7 +1488,7 @@ mod tests {
                     run("test", "completed", Some("failure")),
                     run("build", "completed", Some("success")),
                 ],
-                ("failing", "failed", "failed"),
+                ("failing", "failed"),
             ),
         ] {
             shared.with(|world| {
@@ -1005,14 +1499,13 @@ mod tests {
                 .checks(HEAD, Duration::ZERO, Duration::from_secs(60))
                 .expect("checks");
             let status = crate::pr::status::class_of(HEAD, &checks);
-            let wait = crate::pr::wait::verdict(&checks, now);
             let gate = match crate::pr::landing::adapters::gate_checks(checks).1 {
                 crate::pr::landing::model::GateResult::Passed => "passed",
                 crate::pr::landing::model::GateResult::Pending => "pending",
                 crate::pr::landing::model::GateResult::Failed => "failed",
                 other => panic!("unexpected gate result {other:?}"),
             };
-            assert_eq!((status, wait, gate), expected);
+            assert_eq!((status, gate), expected);
         }
     }
 
@@ -1135,6 +1628,96 @@ mod tests {
                 .as_deref()
                 .is_some_and(|url| url.ends_with("/runs/1"))
         );
+    }
+
+    #[test]
+    fn pending_cache_cadence_speeds_up_near_the_recent_check_duration() {
+        let cached = Cached {
+            runs: vec![Page {
+                etag: None,
+                body: json!({"check_runs":[{
+                    "name":"build", "status":"in_progress", "started_at":"1970-01-01T00:00:00Z"
+                }]}),
+            }],
+            ..Cached::default()
+        };
+        let history = [RunDuration {
+            id: 1,
+            name: "build".into(),
+            duration_ms: 300_000,
+            completed_at_ms: 300_000,
+        }];
+        let cadence = Cadence {
+            fast: Duration::from_secs(5),
+            slow: Duration::from_secs(15),
+            near_end: Duration::from_secs(30),
+            conditional_requests: true,
+        };
+        assert_eq!(
+            adaptive_freshness(&cached, &history, Duration::from_secs(5), cadence, 100_000),
+            Duration::from_secs(15)
+        );
+        assert_eq!(
+            adaptive_freshness(&cached, &history, Duration::from_secs(5), cadence, 280_000),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            adaptive_freshness(&cached, &[], Duration::from_secs(5), cadence, 280_000),
+            Duration::from_secs(15)
+        );
+    }
+
+    #[test]
+    fn configured_fast_cadence_drives_cache_age_and_zero_forces_refresh() {
+        let cadence = Cadence {
+            fast: Duration::from_secs(2),
+            slow: Duration::from_secs(15),
+            near_end: Duration::from_secs(30),
+            conditional_requests: true,
+        };
+        assert_eq!(
+            adaptive_freshness(&Cached::default(), &[], Duration::from_secs(30), cadence, 0),
+            Duration::from_secs(2),
+        );
+        assert_eq!(
+            adaptive_freshness(&Cached::default(), &[], Duration::ZERO, cadence, 0),
+            Duration::ZERO,
+        );
+        assert_eq!(
+            adaptive_interval(&Cached::default(), &[], cadence, 0),
+            Duration::from_secs(2),
+            "forced reads still publish the configured next cadence",
+        );
+    }
+
+    #[test]
+    fn duration_history_deduplicates_run_identity_not_equal_measurements() {
+        let sample = |id| RunDuration {
+            id,
+            name: "build".into(),
+            duration_ms: 300_000,
+            completed_at_ms: 600_000,
+        };
+        let history = unique_run_history([sample(1), sample(2), sample(1)]);
+        assert_eq!(history.iter().filter(|run| run.id == 1).count(), 1);
+        assert_eq!(history.iter().filter(|run| run.id == 2).count(), 1);
+    }
+
+    #[test]
+    fn etag_requests_follow_the_sourced_conditional_setting() {
+        let previous = Page {
+            etag: Some("validator".into()),
+            body: Value::Null,
+        };
+        let mut cadence = Cadence {
+            fast: Duration::from_secs(5),
+            slow: Duration::from_secs(15),
+            near_end: Duration::from_secs(30),
+            conditional_requests: true,
+        };
+        assert_eq!(request_etag(cadence, Some(&previous)), Some("validator"));
+        cadence.conditional_requests = false;
+        assert_eq!(request_etag(cadence, Some(&previous)), None);
     }
 
     #[test]

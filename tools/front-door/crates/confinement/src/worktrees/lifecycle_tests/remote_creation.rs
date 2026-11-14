@@ -274,36 +274,42 @@ fn default_base_fetch_is_outside_registry_lock_and_failed_fetch_ignores_cached_t
 }
 
 #[test]
-fn gc_legacy_observer_gate_preview_is_read_only_and_apply_initialises_it()
--> Result<(), Box<dyn Error>> {
+fn gc_missing_observer_gate_remains_unknown_during_preview_and_apply() -> Result<(), Box<dyn Error>>
+{
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();
-    let lane = gc_merged_worktree(&fixture, &context, "gc-legacy-gate")?;
+    let lane = gc_merged_worktree(&fixture, &context, "gc-missing-gate")?;
+    let retirement = HostRetirementFixture::new(&test)?;
+    retirement.seed_lane(&context, &lane)?;
+    let upstream = fixture.head()?;
+    let evidence = gc_landing_evidence(&fixture, upstream)?;
     let slot = writer_directory(context.project_state, &lane.path)?;
     drop(slot.try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?);
     let gate = slot.current_path()?.join("writer-probe.lock");
     fs::remove_file(&gate)?;
     let policy = WorktreeGcPolicy {
-        upstream: Some(fixture.head()?),
+        upstream: Some(upstream),
         terminal: &|_| false,
         no_live_lanes: &|_| true,
         regenerable: &[],
         keep: &[],
         written_before_ns: i128::MAX,
         dry_run: true,
-        foreign_merged_clean: true,
+        include_foreign: true,
+        retirement_port: None,
+        retirement_feeds: None,
+        mode: CollectionMode::Worktrees,
+        proof: None,
+        upstream_reference: None,
+        integration_patterns: &[],
+        excluded_paths: &[],
     };
     let preview = collect(&context, std::slice::from_ref(&lane), &policy, &cancel())?;
     assert!(preview.worktrees.removed.is_empty());
-    assert_eq!(
-        preview.worktrees.retained,
-        vec![RetainedBranch {
-            branch: "gc-legacy-gate".into(),
-            reason: RetainReason::UnknownWriter,
-            detail: None,
-        }]
-    );
+    assert!(preview.worktrees.retained.iter().any(|retained| {
+        retained.branch == "gc-missing-gate" && retained.reason == RetainReason::UnknownWriter
+    }));
     assert!(
         matches!(
             cache_writer_probe(context.project_state, &lane.path),
@@ -319,13 +325,27 @@ fn gc_legacy_observer_gate_preview_is_read_only_and_apply_initialises_it()
         std::slice::from_ref(&lane),
         &WorktreeGcPolicy {
             dry_run: false,
+            retirement_port: Some(&retirement),
+            retirement_feeds: Some(&retirement),
+            proof: Some(&evidence),
             ..policy
         },
         &cancel(),
     )?;
-    assert_eq!(applied.worktrees.removed.len(), 1, "{applied:?}");
-    assert!(gate.is_file(), "mutation upgrades legacy observation gates");
-    assert!(!lane.path.exists());
+    assert!(applied.worktrees.retained.iter().any(|retained| {
+        retained.branch == "gc-missing-gate" && retained.reason == RetainReason::UnknownWriter
+    }));
+    assert!(applied.removals.iter().all(|removal| {
+        !matches!(
+            &removal.outcome,
+            provenant_records::custody::RemovalOutcome::Removed { .. }
+        )
+    }));
+    assert!(
+        !gate.exists(),
+        "mutation cannot repair a missing observer gate"
+    );
+    assert!(lane.path.exists());
     Ok(())
 }
 
@@ -468,7 +488,14 @@ fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error
             keep: &[],
             written_before_ns: i128::MAX,
             dry_run: true,
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement_port: None,
+            retirement_feeds: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
         },
         &cancel(),
     )?;
@@ -990,7 +1017,7 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
     context.executor = &git;
     let lanes = list_for_gc(&context, &cancel())?;
     assert_eq!(lanes.len(), 100);
-    let report = collect_lazy(
+    let report = collect(
         &context,
         &lanes,
         &WorktreeGcPolicy {
@@ -1001,7 +1028,14 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
             keep: &[],
             written_before_ns: i128::MAX,
             dry_run: true,
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement_port: None,
+            retirement_feeds: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
         },
         &cancel(),
     )?;
@@ -1010,7 +1044,7 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
     assert_eq!(git.calls.load(Ordering::SeqCst), 1);
     assert_eq!(git.listings.load(Ordering::SeqCst), 1);
     let lanes = list_for_gc(&context, &cancel())?;
-    collect_lazy(
+    collect(
         &context,
         &lanes,
         &WorktreeGcPolicy {
@@ -1021,7 +1055,14 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
             keep: &[],
             written_before_ns: i128::MAX,
             dry_run: false,
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement_port: None,
+            retirement_feeds: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
         },
         &cancel(),
     )?;

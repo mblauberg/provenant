@@ -1,66 +1,5 @@
 mod support;
-#[path = "support/terminal_run.rs"]
-mod terminal_run;
 use support::{Result, TestRig, code};
-
-#[test]
-fn usage_reads_terminal_lanes_across_projects_and_keeps_unknown_accounts() -> Result {
-    let mut rig = TestRig::new()?;
-    let original = rig.project.clone();
-    for (project, operation) in [
-        (original.clone(), "first"),
-        (rig.root.join("second"), "second"),
-    ] {
-        std::fs::create_dir_all(&project)?;
-        rig.project = project;
-        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-        assert_eq!(code(&rig.execute(&git, &["init", "-q"], None)?), 0);
-        terminal_run::seed(&rig, operation, &[serde_json::Value::Null])?;
-    }
-    rig.project = original;
-    let output = rig.command(&["quota", "usage", "--json"])?;
-    assert_eq!(
-        code(&output),
-        0,
-        "{}",
-        String::from_utf8_lossy(&output.stdout.bytes)
-    );
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
-    let rows = report["data"]["rows"].as_array().ok_or("rows")?;
-    assert_eq!(rows.len(), 2, "{report}");
-    assert_ne!(rows[0]["project"], rows[1]["project"]);
-    for row in rows {
-        assert_eq!(row["lane_attempts"], 1);
-        assert_eq!(row["chair_sessions"], 0);
-        assert_eq!(row["chair_sessions_unread"], 0);
-        assert!(row["account"].is_null());
-        assert_eq!(row["lane_usage"]["uncached_input"]["missing"], 1);
-    }
-    assert!(!String::from_utf8_lossy(&output.stdout.bytes).contains("private fixture prompt"));
-    let human = rig.command(&["quota", "usage", "--full"])?;
-    let human = String::from_utf8(human.stdout.bytes)?;
-    assert!(human.contains("Chair tokens are read from each recorded chair session"));
-    assert!(human.contains("unknown account"));
-    assert!(human.contains("records missing this category"));
-    assert!(human.contains("lanes cache-read share: not reported"));
-    assert!(!rig.state.join("quota").exists());
-    rig.assert_legacy_unchanged()
-}
-
-#[test]
-fn usage_with_missing_state_creates_nothing_and_rejects_invalid_windows() -> Result {
-    let rig = TestRig::new()?.without_state()?;
-    let output = rig.command(&["quota", "usage", "--json"])?;
-    assert_eq!(code(&output), 0);
-    assert!(!rig.state.exists());
-    for days in ["0", "366"] {
-        assert_eq!(
-            code(&rig.command(&["quota", "usage", "--days", days, "--json"])?),
-            2
-        );
-    }
-    rig.assert_legacy_unchanged()
-}
 
 #[test]
 fn tick_does_not_create_missing_state_ancestors() -> Result {
@@ -459,33 +398,6 @@ fn oversized_show_returns_a_bounded_envelope_and_filter_remains_usable() -> Resu
     )?;
     fs::set_permissions(account, fs::Permissions::from_mode(0o755))?;
     assert_eq!(code(&rig.command(&["quota", "show", "--json"])?), 3);
-    rig.assert_legacy_unchanged()
-}
-
-#[test]
-fn internal_lock_deadline_is_contention_and_keeps_the_report() -> Result {
-    use provenant_core::{CancelToken, Clock, WaitBudget};
-    use provenant_os::clock::SystemClock;
-    use provenant_os::fs::Directory;
-    use provenant_os::fs::LockMode;
-    let rig = quota_rig()?;
-    assert_eq!(code(&rig.command(&["quota", "tick", "--json"])?), 0);
-    let before = std::fs::read(rig.state.join("quota/report.json"))?;
-    let dir = Directory::open_anchor(&rig.state.join("quota"))?;
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let _held = dir.lock(
-        std::ffi::OsStr::new("quota.lock"),
-        LockMode::Exclusive,
-        WaitBudget::cli(clock.mono_now(), 1)?,
-        &cancel,
-        &clock,
-    )?;
-    let out = rig.command(&["quota", "tick", "--json"])?;
-    assert_eq!(code(&out), 3);
-    let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
-    assert_eq!(value["status"], "error");
-    assert_eq!(std::fs::read(rig.state.join("quota/report.json"))?, before);
     rig.assert_legacy_unchanged()
 }
 
@@ -1006,7 +918,12 @@ fn registered_accounts_have_distinct_quota_keys() -> Result {
         };
         for account in &known {
             let plan = provenant_providers::quota::plan(provider, account, &input)?;
-            let snapshot = provenant_providers::quota::decode(
+            let source = provenant_providers::REGISTRY
+                .iter()
+                .filter_map(|registration| registration.quota_source)
+                .find(|source| source.adapter_id() == provider)
+                .expect("provider quota source is registered");
+            let snapshot = source.decode(
                 &plan,
                 &ProbeCapture {
                     stdout: fixture.as_bytes().to_vec(),

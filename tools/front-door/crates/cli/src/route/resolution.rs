@@ -1,5 +1,169 @@
 use super::*;
 
+/// Best-effort bounded evidence. Store outages affect preference, never admission.
+pub(crate) fn selection_evidence(
+    roots: &Roots,
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+    role: Option<&str>,
+) -> provenant_routing::SelectionEvidence {
+    use provenant_core::CancelToken;
+    use provenant_run as run;
+    let mut evidence = provenant_routing::SelectionEvidence {
+        role: role.map(str::to_owned),
+        source: "run_store:unavailable".into(),
+        ..Default::default()
+    };
+    let read = |evidence: &mut provenant_routing::SelectionEvidence| -> Result<(), String> {
+        let identity = crate::fabric::Context::open_read_only(roots.clone(), home, cwd)
+            .map_err(|e| e.to_string())?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let mut projects =
+            provenant_config::registered_projects(roots).map_err(|e| e.to_string())?;
+        if projects.len() > 128 {
+            return Err("project evidence bound".into());
+        }
+        projects.sort_by_key(|p| p.project_id());
+        projects.dedup_by_key(|p| p.project_id());
+        let mut outcomes = Vec::new();
+        for project in projects {
+            let context = run::ExecutionContext {
+                state_root: identity.roots.state.clone(),
+                project_id: project.project_id(),
+                actor_id: identity.identity.inbox.actor,
+                read_prompts: false,
+            };
+            let Some(store) =
+                run::RunStore::open_read_only(&context, &call).map_err(|e| e.to_string())?
+            else {
+                continue;
+            };
+            // Account capacity is host-wide, so count active lanes across projects.
+            let mut after = 0;
+            for page_index in 0..100 {
+                let page = store
+                    .lanes(
+                        &run::LaneQuery {
+                            targets: Vec::new(),
+                            all: false,
+                            limit: 100,
+                            after,
+                            newest_first: false,
+                            owner: None,
+                            unseen_after: None,
+                        },
+                        &call,
+                    )
+                    .map_err(|e| e.to_string())?;
+                for lane in page.lanes {
+                    if matches!(lane.state, run::AttemptState::Terminal { .. }) {
+                        continue;
+                    }
+                    if let Some(route) =
+                        lane.applied_route.as_ref().or(lane.resolved_route.as_ref())
+                        && let (Some(adapter), Some(account)) =
+                            (&route.provider, &route.account_key)
+                    {
+                        *evidence
+                            .live_lanes
+                            .entry((adapter.clone(), account.clone()))
+                            .or_default() += 1;
+                    }
+                }
+                match page.next {
+                    None => break,
+                    Some(next) if page_index < 99 => after = next,
+                    Some(_) => return Err("live lane evidence bound".into()),
+                }
+            }
+            if project.project_id() != identity.identity.project {
+                continue;
+            }
+            // Priors stay within the caller's project, pool and role. Read only
+            // the newest 1,000 retained attempts, without prompts or requests.
+            let mut after = 0;
+            for _ in 0..10 {
+                let page = store
+                    .lanes(
+                        &run::LaneQuery {
+                            targets: Vec::new(),
+                            all: true,
+                            limit: 100,
+                            after,
+                            newest_first: true,
+                            owner: None,
+                            unseen_after: None,
+                        },
+                        &call,
+                    )
+                    .map_err(|e| e.to_string())?;
+                for lane in page.lanes {
+                    if !matches!(lane.state, run::AttemptState::Terminal { .. })
+                        || !matches!(
+                            lane.terminal_evidence,
+                            Some(run::TerminalEvidence::ProcessExit)
+                        )
+                    {
+                        continue;
+                    }
+                    let pool = lane
+                        .resolved_route
+                        .as_ref()
+                        .and_then(|route| route.pool_selection.as_ref())
+                        .filter(|receipt| {
+                            provenant_telemetry::route_outcomes::hash_assigned(receipt)
+                        })
+                        .map(|receipt| receipt.pool.clone());
+                    let partial = provenant_telemetry::route_outcomes::provider_work_incomplete(
+                        &lane.partial_signals,
+                    );
+                    let fact = run::fact(lane).map_err(|e| e.to_string())?;
+                    outcomes.push(provenant_telemetry::route_outcomes::Evidence {
+                        fact,
+                        pool,
+                        partial,
+                        access: Some("stored_launch".into()),
+                    });
+                }
+                match page.next {
+                    None => break,
+                    Some(next) => after = next,
+                }
+            }
+        }
+        evidence.priors = provenant_telemetry::route_outcomes::priors(outcomes)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter_map(|prior| {
+                Some(provenant_routing::RoutePrior {
+                    model: ModelId::parse(&prior.model).ok()?,
+                    pool: prior.pool,
+                    role: prior.role,
+                    successes: prior.successes,
+                    failures: prior.failures,
+                    source: format!(
+                        "{}:project/{}:recent/1000",
+                        prior.source, identity.identity.project
+                    ),
+                })
+            })
+            .collect();
+        evidence.live_lanes_known = true;
+        evidence.source = "run_store:host_active_lanes;project_recent_1000_outcomes".into();
+        Ok(())
+    };
+    if let Err(error) = read(&mut evidence) {
+        evidence.live_lanes_known = false;
+        evidence.source = format!("run_store:unknown ({error})");
+    }
+    evidence
+}
+
 pub(crate) fn recorded_model_readiness(
     settings: &provenant_providers::accounts::Settings,
     model: &ModelId,
@@ -10,7 +174,7 @@ pub(crate) fn recorded_model_readiness(
 ) -> Vec<RecordedReadiness> {
     let mut seen = BTreeSet::new();
     settings
-        .with_derived_accounts()
+        .unique_accounts()
         .entries
         .into_iter()
         .filter_map(|(id, entry)| {
@@ -23,8 +187,9 @@ pub(crate) fn recorded_model_readiness(
                         && hint != format!("{}/{}", entry.adapter, entry.key)
                 })
                 || !seen.insert((entry.adapter.clone(), entry.key.clone()))
-                || provenant_records::AdapterSpec::get(&entry.adapter)
-                    .is_some_and(|spec| !spec.account_serves_model(&entry.key, model.model()))
+                || provenant_records::AdapterSpec::get(&entry.adapter).is_some_and(|spec| {
+                    !spec.account_serves_model(entry.plan.as_deref(), model.model())
+                })
             {
                 return None;
             }
@@ -59,16 +224,9 @@ pub(crate) fn recorded_model_readiness(
 /// The OpenCode snapshot reports the Go plan's pools, which only govern models
 /// served by the `opencode-go` provider. Free (Zen) and other configured
 /// providers must not inherit its account-level exhaustion.
-pub(super) fn snapshot_governs(adapter: &str, account: &str, model: &ModelId) -> bool {
-    provenant_records::AdapterSpec::get(adapter).is_none_or(|spec| {
-        if let Some((free_account, prefix)) = spec.free_account
-            && account == free_account
-        {
-            return model.model().starts_with(prefix);
-        }
-        spec.quota_model_prefix
-            .is_none_or(|prefix| model.model().starts_with(prefix))
-    })
+pub(super) fn snapshot_governs(adapter: &str, plan: Option<&str>, model: &ModelId) -> bool {
+    provenant_records::AdapterSpec::get(adapter)
+        .is_none_or(|spec| spec.account_serves_model(plan, model.model()))
 }
 pub(super) fn quota_observations(
     catalogue: &Catalogue,
@@ -122,7 +280,13 @@ pub(super) fn quota_observations(
                 .filter(|model| model.adapter() == adapter)
                 .cloned(),
         );
-        models.retain(|model| snapshot_governs(adapter, &record.account.account_key, model));
+        models.retain(|model| {
+            snapshot_governs(
+                adapter,
+                snapshot.details.as_ref().and_then(|d| d.plan.as_deref()),
+                model,
+            )
+        });
         if observations.len().saturating_add(models.len()) > 256 {
             return Err(provenant_quota::QuotaError::Invalid("quota observation bound").into());
         }
@@ -141,8 +305,7 @@ pub(super) fn resolve_account_reference(
     field: &str,
     settings: &provenant_providers::accounts::Settings,
 ) -> Result<String, EdgeError> {
-    let derived = settings.with_derived_accounts();
-    let valid = derived
+    let valid = settings
         .entries
         .iter()
         .map(|(id, entry)| {
@@ -166,10 +329,7 @@ pub(super) fn resolve_account_reference(
             .map(|(id, entry)| (id.clone(), entry.clone()))
             .collect::<Vec<_>>()
     };
-    let mut matches = matches_for(settings);
-    if matches.is_empty() {
-        matches = matches_for(&derived);
-    }
+    let matches = matches_for(settings);
     match matches.as_slice() {
         [(_, entry)] => Ok(format!("{}/{}", entry.adapter, entry.key)),
         [] => Err(EdgeError::AccountProfile {
@@ -247,6 +407,7 @@ pub(super) fn with_context<T>(
     host: &str,
     requested_models: &[ModelId],
     revalidated_auth: bool,
+    launch_policy: Option<&provenant_records::policy::Policy>,
     action: impl FnOnce(
         &RoutingContext<'_>,
         &[provenant_quota::AccountRecord],
@@ -254,7 +415,7 @@ pub(super) fn with_context<T>(
         &provenant_providers::accounts::Settings,
     ) -> Result<T, EdgeError>,
 ) -> Result<T, EdgeError> {
-    let resolved_config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?;
+    let resolved_config = crate::config_reads::read_for(roots, "route")?;
     let partial_headroom_source = resolved_config
         .knobs
         .get("routing.allow_unknown_partial_headroom")
@@ -264,9 +425,34 @@ pub(super) fn with_context<T>(
         .value
         .as_bool()
         .ok_or(RoutingError::InvalidValue)?;
+    let preference_sources = resolved_config
+        .origins
+        .iter()
+        .filter(|(key, _)| key.starts_with("domains.routing."))
+        .map(|(key, origin)| {
+            (
+                key.clone(),
+                match origin {
+                    provenant_config::Origin::Compiled { .. } => "default".to_owned(),
+                    provenant_config::Origin::User { .. } => "config".to_owned(),
+                },
+            )
+        })
+        .collect();
     let domains = resolved_config.domains;
     let policies = provenant_providers::scheduling_policies(&domains.quota, registry);
     let mut config = domains.routing;
+    config.preference_sources = preference_sources;
+    let project = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| crate::run::preview_project_id(roots, &cwd))
+        .map(|project| project.to_string())
+        .unwrap_or_default();
+    config.launch_policy = launch_policy.cloned().unwrap_or_else(|| {
+        domains
+            .policy
+            .resolve_with_knobs(&project, &resolved_config.knobs, &Default::default())
+    });
     config.allow_unknown_partial_headroom = allow_unknown;
     config.partial_headroom_source = Some(partial_headroom_source);
     resolve_pacing_accounts(&mut config, &domains.accounts)?;
@@ -362,6 +548,7 @@ pub(super) fn with_context<T>(
         &RoutingContext {
             policy_account_hint: None,
             choice_context: None,
+            selection_evidence: None,
             catalogue: &catalogue,
             config: &config,
             registry,
@@ -466,6 +653,8 @@ pub(crate) fn resolve_dispatch_rejecting(
         rejected,
         choice_context,
         None,
+        None,
+        None,
     )
 }
 
@@ -484,6 +673,8 @@ pub(crate) fn resolve_dispatch_rejecting_family(
     rejected: &[ModelId],
     choice_context: Option<(&str, &str)>,
     required_family: Option<&str>,
+    selection_evidence: Option<&provenant_routing::SelectionEvidence>,
+    launch_policy: Option<&provenant_records::policy::Policy>,
 ) -> Result<provenant_records::ResolvedRoute, DispatchError> {
     let catalogue = Catalogue::bundled()?;
     let (excluded_families, required, preferred) = match excluded_families {
@@ -525,6 +716,8 @@ pub(crate) fn resolve_dispatch_rejecting_family(
         rules,
         choice_context,
         required_family,
+        selection_evidence,
+        launch_policy,
     );
     // Relax when the unused families have no eligible member, including fresh
     // snapshot exhaustion, or the selected account is blocked by persisted
@@ -555,6 +748,8 @@ pub(crate) fn resolve_dispatch_rejecting_family(
             rules,
             choice_context,
             required_family,
+            selection_evidence,
+            launch_policy,
         );
         match (relaxed, selected) {
             // Keep the preferred-stage route when relaxing would only trade one
@@ -594,6 +789,8 @@ pub(crate) fn resolve_dispatch_rejecting_family(
             rules,
             choice_context,
             required_family,
+            selection_evidence,
+            launch_policy,
         );
         match (relaxed, selected) {
             // Relaxing must not trade a spent route for another one.
@@ -640,37 +837,6 @@ pub(super) fn review_family_excluded(family: Option<&str>, families: &[String]) 
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg(test)]
-pub(super) fn resolve_dispatch_excluding(
-    request: &provenant_routing::RouteRequest,
-    roots: &Roots,
-    registry: &[provenant_providers::Registration],
-    account: Option<&str>,
-    seed: (&str, u64),
-    availability: &[AvailabilityRecord],
-    access: &[AccessContext<'_>],
-    host: &str,
-    initial_exclusions: &[ModelId],
-    rules: &[provenant_routing::ExclusionRule],
-    choice_context: Option<(&str, &str)>,
-) -> Result<provenant_records::ResolvedRoute, EdgeError> {
-    resolve_dispatch_excluding_family(
-        request,
-        roots,
-        registry,
-        account,
-        seed,
-        availability,
-        access,
-        host,
-        initial_exclusions,
-        rules,
-        choice_context,
-        None,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_dispatch_excluding_family(
     request: &provenant_routing::RouteRequest,
     roots: &Roots,
@@ -684,6 +850,8 @@ pub(super) fn resolve_dispatch_excluding_family(
     rules: &[provenant_routing::ExclusionRule],
     choice_context: Option<(&str, &str)>,
     required_family: Option<&str>,
+    selection_evidence: Option<&provenant_routing::SelectionEvidence>,
+    launch_policy: Option<&provenant_records::policy::Policy>,
 ) -> Result<provenant_records::ResolvedRoute, EdgeError> {
     let mut requested_models = Vec::new();
     if let RouteChoice::Model(model) = &request.choice {
@@ -700,9 +868,11 @@ pub(super) fn resolve_dispatch_excluding_family(
         host,
         &requested_models,
         true,
+        launch_policy,
         |context, records, policies, _| {
             let scoped = RoutingContext {
                 choice_context,
+                selection_evidence,
                 ..*context
             };
             let context = &scoped;
@@ -732,31 +902,16 @@ pub(super) fn resolve_dispatch_excluding_family(
                     records,
                     pools: &pools,
                 };
-                let gate = provenant_routing::check_go_allowance(
-                    &model,
-                    context.config,
-                    context.catalogue,
-                )
-                .map_err(EdgeError::GoAllowance)
-                .and_then(|()| {
-                    if matches!(&resolved.readiness, RouteReadiness::Ready { .. }) {
-                        admission
-                            .check_with_partial_headroom(
-                                &resolved,
-                                context.config.allow_unknown_partial_headroom,
-                            )
-                            .map_err(EdgeError::from)
-                    } else {
-                        Ok(())
-                    }
-                });
+                let gate = if matches!(&resolved.readiness, RouteReadiness::Ready { .. }) {
+                    admission.check(&resolved).map_err(EdgeError::from)
+                } else {
+                    Ok(())
+                };
                 if let Err(error) = gate {
-                    let is_go_refusal = matches!(&error, EdgeError::GoAllowance(_));
                     // A spent account leaves the model servable by another
                     // registered account. Unless the caller pinned one, try the
                     // same model there before giving it up.
-                    if !is_go_refusal
-                        && account.is_none()
+                    if account.is_none()
                         && let Some(key) = resolved.account_key.clone()
                     {
                         refused_accounts.push((resolved.adapter.clone(), key));
@@ -795,14 +950,10 @@ pub(super) fn resolve_dispatch_excluding_family(
                             continue;
                         }
                     }
-                    let has_fallback = matches!(&request.fallback, Fallback::Models(_));
                     if !matches!(&request.choice, RouteChoice::NamedRoute(_))
                         || resolved.pool_selection.is_none()
                         || excluded_members.contains(&model)
                     {
-                        if is_go_refusal && has_fallback {
-                            return Ok(resolved);
-                        }
                         return Err(error);
                     }
                     let reason = error.to_string();
@@ -822,13 +973,10 @@ pub(super) fn resolve_dispatch_excluding_family(
                     )? {
                         Some(route) => route,
                         None => {
-                            if is_go_refusal && has_fallback {
-                                return Ok(resolved);
-                            }
                             if refusals.len() == 1 {
                                 return Err(error);
                             }
-                            return Err(EdgeError::GoAllowance(refusals.join("; ")));
+                            return Err(EdgeError::Admission(refusals.join("; ")));
                         }
                     };
                     if replacement.adapter == resolved.adapter
@@ -843,9 +991,9 @@ pub(super) fn resolve_dispatch_excluding_family(
                         .and_then(|selection| selection.redraws.last_mut())
                     {
                         let cause = match &error {
-                            EdgeError::Quota(provenant_quota::QuotaError::Refused(
-                                "allowance exhausted",
-                            )) => provenant_records::RouteExclusionReason::Exhausted,
+                            EdgeError::Quota(provenant_quota::QuotaError::AllowanceExhausted) => {
+                                provenant_records::RouteExclusionReason::Exhausted
+                            }
                             EdgeError::Quota(provenant_quota::QuotaError::Refused(
                                 "uncalibrated partial coverage",
                             )) => provenant_records::RouteExclusionReason::UnknownPartialHeadroom,
@@ -962,22 +1110,14 @@ pub(crate) fn check_dispatch_candidate(
     roots: &Roots,
     route: &provenant_records::ResolvedRoute,
     registry: &[provenant_providers::Registration],
-) -> Result<(), String> {
-    let catalogue = Catalogue::bundled().map_err(|e| e.to_string())?;
-    let model =
-        ModelId::parse(&format!("{}/{}", route.adapter, route.model)).map_err(|e| e.to_string())?;
-    let resolved_config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-        .map_err(|e| e.to_string())?;
-    let allow_unknown = resolved_config
-        .knobs
-        .get("routing.allow_unknown_partial_headroom")
-        .and_then(|v| v.value.as_bool())
-        .unwrap_or(false);
+) -> Result<(), EdgeError> {
+    let catalogue = Catalogue::bundled()?;
+    let model = ModelId::parse(&format!("{}/{}", route.adapter, route.model))?;
+    let resolved_config = crate::config_reads::read_for(roots, "route")?;
     let domains = resolved_config.domains;
-    provenant_routing::check_go_allowance(&model, &domains.routing, &catalogue)?;
     let pools = catalogue.admission_pools(&model);
     let now = SystemClock::new().unix_seconds();
-    let records = crate::quota::read_cache(roots).map_err(|e| e.to_string())?;
+    let records = crate::quota::read_cache(roots)?;
     let (records, policies) = account_evidence(&domains.quota, records, now, registry);
     provenant_quota::Admission {
         policies: &policies,
@@ -985,8 +1125,8 @@ pub(crate) fn check_dispatch_candidate(
         records: &records,
         pools: &pools,
     }
-    .check_with_partial_headroom(route, allow_unknown)
-    .map_err(|e| e.to_string())
+    .check(route)?;
+    Ok(())
 }
 
 /// Check a review slot against the same pool and account policy used by dispatch.
@@ -1042,6 +1182,7 @@ pub fn resolve_review_family(
                 "local-preview",
                 &[],
                 false,
+                None,
                 |context, records, policies, settings| {
                     let rules = effective_exclusion_rules(exclude, roots)?;
                     // Preview has no availability probes. Account exclusions
@@ -1066,7 +1207,7 @@ pub fn resolve_review_family(
                                 if refusals.is_empty() {
                                     EdgeError::from(error)
                                 } else {
-                                    EdgeError::GoAllowance(format!(
+                                    EdgeError::Admission(format!(
                                         "{}; {error}",
                                         refusals.join("; ")
                                     ))
@@ -1075,7 +1216,7 @@ pub fn resolve_review_family(
                         let model =
                             ModelId::parse(&format!("{}/{}", selected.adapter, selected.model))?;
                         if excluded.contains(&model) {
-                            return Err(EdgeError::GoAllowance(refusals.join("; ")));
+                            return Err(EdgeError::Admission(refusals.join("; ")));
                         }
                         let pools = context.catalogue.admission_pools(&model);
                         let now = context.now.as_timestamp().as_second();
@@ -1120,7 +1261,7 @@ pub fn resolve_review_family(
                                 extra: Default::default(), availability_ref: "preview".into(), expires_unix_seconds: now + 60,
                             };
                             let spent = records.iter().any(|record| record.account.adapter == selected.adapter && record.account.account_key == key && super::output::spent(record, now));
-                            match admission.check_with_partial_headroom(&probe, context.config.allow_unknown_partial_headroom) {
+                            match admission.check(&probe) {
                                 Ok(()) if !spent => { accounts.clear(); break; }
                                 Ok(()) => accounts.push(format!("account {key}: allowance exhausted")),
                                 Err(error) => accounts.push(format!("account {key}: {error}")),
@@ -1144,4 +1285,147 @@ pub fn resolve_review_family(
         }
     }
     Err(refusals.join("; "))
+}
+
+/// What the depletion ladder reads for a stopped attempt. Readiness comes from
+/// the availability the stopped attempt's preparation probed; every adapter
+/// there is offered under the stopped task's authority digest, because the
+/// ladder only proposes a route and preparation establishes confinement again
+/// before any launch. `tried` are the node's other attempts.
+pub fn depletion_facts(
+    roots: &Roots,
+    stopped: &provenant_records::run::AttemptRecord,
+    tried: &[provenant_records::run::AttemptRecord],
+    availability: &[AvailabilityRecord],
+) -> Result<provenant_fabric_runtime::graph::DepletionFacts, String> {
+    use provenant_routing::{HostNativeRoute, Stopped, Target};
+    let text = |error: &dyn std::fmt::Display| error.to_string();
+    let resolved = crate::config_reads::read_for(roots, "route").map_err(|error| text(&error))?;
+    let catalogue = Catalogue::bundled().map_err(|error| text(&error))?;
+    let route = stopped
+        .applied_route
+        .as_ref()
+        .ok_or("the stopped attempt has no applied route")?;
+    let model = ModelId::parse(
+        route
+            .model
+            .as_deref()
+            .ok_or("the stopped route has no model")?,
+    )
+    .map_err(|error| text(&error))?;
+    let stopped_route = Stopped {
+        family: catalogue
+            .model(&model)
+            .and_then(|entry| entry.family.clone()),
+        model: model.clone(),
+        account: route.account_key.clone(),
+        effort: route.effort.clone(),
+        tier: route
+            .pool_selection
+            .as_ref()
+            .map(|selection| selection.pool.clone()),
+    };
+    let tried = std::iter::once(stopped)
+        .chain(tried)
+        .filter_map(|record| record.applied_route.as_ref())
+        .filter_map(|route| match route.extra.get("host_native") {
+            Some(name) => Some(Target::HostNative {
+                name: name.as_str()?.to_owned(),
+            }),
+            None => Some(Target::Route {
+                model: ModelId::parse(route.model.as_deref()?).ok()?,
+                account: route.account_key.clone(),
+            }),
+        })
+        .collect();
+    let host_native = resolved
+        .domains
+        .fabric
+        .host_native
+        .iter()
+        .map(|(name, native)| match native {
+            provenant_fabric_runtime::config::HostNativeConfig::ClaudeAgent { model, .. } => {
+                HostNativeRoute {
+                    name: name.clone(),
+                    model: ModelId::parse(model)
+                        .or_else(|_| ModelId::parse(&format!("claude/{model}")))
+                        .ok(),
+                }
+            }
+        })
+        .collect();
+    let profile = &stopped.profile;
+    let intent = provenant_routing::RouteIntent {
+        workload: if matches!(
+            stopped.requested_route,
+            provenant_records::run::RequestedRoute::Review { .. }
+        ) {
+            provenant_routing::Workload::Review
+        } else {
+            match profile
+                .knobs
+                .get("routing.workload")
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("read_heavy") => provenant_routing::Workload::ReadHeavy,
+                Some("edit_heavy") => provenant_routing::Workload::EditHeavy,
+                Some("review") => provenant_routing::Workload::Review,
+                _ => provenant_routing::Workload::General,
+            }
+        },
+        writes: !stopped.write_grants.is_empty(),
+        network: None,
+        image_input: false,
+        skill_location: profile.require_skill_location,
+    };
+    let exclusions = task_exclusion_rules(profile, roots).map_err(|error| text(&error))?;
+    let digest = stopped.authority_digest.to_string();
+    let adapters: BTreeSet<&str> = availability
+        .iter()
+        .map(|record| record.adapter.as_str())
+        .collect();
+    let access: Vec<_> = adapters
+        .into_iter()
+        .map(|adapter| AccessContext {
+            adapter,
+            disclosure_ref: &digest,
+            confinement_ref: &digest,
+        })
+        .collect();
+    let host = provenant_config::bind_host(roots)
+        .map_err(|error| text(&error))?
+        .to_string();
+    let (readiness, now) = with_context(
+        roots,
+        REGISTRY,
+        availability,
+        &access,
+        &host,
+        std::slice::from_ref(&model),
+        true,
+        None,
+        |context, _, _, _| {
+            Ok((
+                provenant_routing::depletion_facts(context, intent, std::slice::from_ref(&model))?,
+                context.now,
+            ))
+        },
+    )
+    .map_err(|error| text(&error))?;
+    Ok(provenant_fabric_runtime::graph::DepletionFacts {
+        config: resolved.domains.routing,
+        catalogue,
+        stopped: stopped_route,
+        readiness,
+        tried,
+        host_native,
+        exclusions,
+        intent,
+        confidential: profile
+            .extra
+            .get("confidential")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        now,
+    })
 }

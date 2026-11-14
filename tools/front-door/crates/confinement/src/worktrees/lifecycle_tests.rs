@@ -87,6 +87,7 @@ pub(super) struct TestContext<'a> {
     pub(super) fixture: &'a Fixture,
     pub(super) facts: RepoFacts,
     pub(super) binding: ProjectBinding,
+    pub(super) roots: provenant_core::Roots,
     pub(super) project_state: Directory,
     pub(super) workers: FreeWorkers,
     pub(super) clock: SystemClock,
@@ -114,12 +115,24 @@ impl<'a> TestContext<'a> {
         fs::create_dir(&state_path)?;
         fs::set_permissions(&state_path, fs::Permissions::from_mode(0o700))?;
         let project_state = Directory::open_anchor(&state_path)?;
+        // Baseline fixtures model a repository whose first foreign preview has
+        // already been observed. The first-pass invariant removes this receipt.
+        let identity = fixture.repo.common_identity();
+        fs::write(
+            state_path.join(format!(
+                "foreign-preview-{}-{}",
+                identity.device, identity.inode
+            )),
+            b"{}",
+        )?;
+
         let clock = SystemClock;
         let lock_budget = WaitBudget::cli(clock.mono_now(), 5)?;
         Ok(Self {
             fixture,
             facts: RepoFacts::default(),
             binding,
+            roots,
             project_state,
             workers: FreeWorkers,
             clock,
@@ -145,6 +158,341 @@ impl<'a> TestContext<'a> {
             lock_budget: self.lock_budget,
         }
     }
+}
+
+/// One real host custody store for GC lifecycle tests. Fixture ref generations
+/// and owner records come from the same worktree creation path under test.
+pub(super) struct HostRetirementFixture {
+    store: provenant_fabric_store::HostStore,
+    project: provenant_core::ProjectId,
+    actor: provenant_core::ActorId,
+    clock: SystemClock,
+    cancel: CancelToken,
+}
+
+impl HostRetirementFixture {
+    pub(super) fn new(test: &TestContext<'_>) -> Result<Self, Box<dyn Error>> {
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let request = provenant_fabric_store::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let store = provenant_fabric_store::HostStore::open(&test.roots.state, &request)?;
+        Ok(Self {
+            store,
+            project: test.binding.project_id(),
+            actor: provenant_core::ActorId::from_bytes([1; 16]),
+            clock,
+            cancel,
+        })
+    }
+
+    fn request(&self) -> provenant_fabric_store::Request<'_> {
+        provenant_fabric_store::Request {
+            clock: &self.clock,
+            cancel: &self.cancel,
+        }
+    }
+
+    fn ensure_custody(
+        &self,
+        project: provenant_core::ProjectId,
+        subject: &provenant_records::custody::Subject,
+        request: &provenant_fabric_store::Request<'_>,
+    ) -> Result<bool, WorktreeError> {
+        use provenant_records::custody::CustodyState;
+
+        if let Some(item) = self
+            .store
+            .custody_item(project, subject, request)
+            .map_err(Self::error)?
+        {
+            return Ok(matches!(
+                item.state,
+                CustodyState::Active | CustodyState::Landed { .. }
+            ));
+        }
+        let holder = provenant_records::custody::Holder::Chair {
+            chair: provenant_records::custody::Chair {
+                extra: Default::default(),
+                host: provenant_core::HostId::from_bytes([1; 16]),
+                actor: self.actor,
+                session: Some("confinement-test".into()),
+                process: None,
+            },
+        };
+        self.store
+            .acquire_custody(
+                project,
+                subject,
+                &holder,
+                provenant_records::custody::Origin::Provenant,
+                request,
+            )
+            .map_err(Self::error)?;
+        let provenance = provenant_records::CanonicalV1::record_digest(
+            "confinement-test-retirement",
+            2,
+            subject,
+        )
+        .map_err(Self::error)?;
+        self.store
+            .seal_custody_provenance(project, subject, provenance, request)
+            .map_err(Self::error)?;
+        Ok(true)
+    }
+
+    /// Seed the real branch and worktree owners backing a lane produced by
+    /// `create`; the HostStore then derives the generation-qualified ref
+    /// subject using the production retirement transition.
+    pub(super) fn seed_lane(
+        &self,
+        context: &WorktreeContext<'_>,
+        lane: &WorktreeInfo,
+    ) -> Result<(), Box<dyn Error>> {
+        let owner = lane
+            .owner
+            .as_ref()
+            .map_err(|error| io::Error::other(error.to_string()))?
+            .as_ref()
+            .ok_or("GC fixture lane has no real WorktreeOwner")?;
+        let reference = owner
+            .reference
+            .as_ref()
+            .ok_or("GC fixture lane has no RefLedger ownership")?;
+        let branch = reference
+            .logical_branch_subject()
+            .ok_or("GC fixture ref has no logical branch subject")?;
+        let reference_name = GitRefName::new(&reference.reference)?;
+        let ledger = RefLedger::for_context(context)?;
+        let generation = ledger
+            .load(&reference.endpoint, &reference_name)?
+            .ok_or("GC fixture lane has no RefLedger generation")?;
+        if generation.ownership() != *reference {
+            return Err("GC fixture lane has a different RefLedger generation".into());
+        }
+
+        let provenance = provenant_records::CanonicalV1::record_digest(
+            "confinement-test-worktree-owner",
+            2,
+            owner,
+        )?;
+        let request = self.request();
+        let holder = provenant_records::custody::Holder::Chair {
+            chair: provenant_records::custody::Chair {
+                extra: Default::default(),
+                host: owner.host,
+                actor: self.actor,
+                session: Some("confinement-test".into()),
+                process: None,
+            },
+        };
+        let path = fs::canonicalize(&lane.path)?;
+        let worktree = provenant_records::custody::Subject::new(
+            provenant_records::custody::SubjectKind::Worktree,
+            path.to_string_lossy().into_owned(),
+        );
+        for subject in [&branch, &worktree] {
+            self.store.acquire_custody(
+                self.project,
+                subject,
+                &holder,
+                provenant_records::custody::Origin::Provenant,
+                &request,
+            )?;
+            self.store
+                .seal_custody_provenance(self.project, subject, provenance, &request)?;
+        }
+        Ok(())
+    }
+
+    fn error(error: impl Error + 'static) -> WorktreeError {
+        WorktreeError::Retirement(Box::new(error))
+    }
+}
+
+impl RetirementPort for HostRetirementFixture {
+    fn begin_retirement(
+        &self,
+        intent: RetirementIntent,
+    ) -> Result<Option<provenant_records::custody::RetirementRecord>, WorktreeError> {
+        use provenant_records::custody::RetirementRecord;
+
+        if intent.project != self.project || intent.reference.repository != self.project {
+            return Err(WorktreeError::InvalidRequest);
+        }
+        if intent.decision.authority() != self.actor {
+            return Err(WorktreeError::InvalidRequest);
+        }
+        let request = self.request();
+        let planned = RetirementRecord::plan(
+            intent.project,
+            intent.related_subjects,
+            intent.reference,
+            intent.expected_tip,
+            intent.decision,
+        )
+        .map_err(Self::error)?;
+        for subject in planned.subjects() {
+            if !self.ensure_custody(intent.project, subject, &request)? {
+                return Ok(None);
+            }
+        }
+        self.store
+            .start_retirement(&planned, &request)
+            .map(Some)
+            .map_err(Self::error)
+    }
+
+    fn retirement_for_subject(
+        &self,
+        project: provenant_core::ProjectId,
+        subject: &provenant_records::custody::Subject,
+    ) -> Result<Option<provenant_records::custody::RetirementRecord>, WorktreeError> {
+        use provenant_records::custody::CustodyState;
+
+        if project != self.project {
+            return Err(WorktreeError::InvalidRequest);
+        }
+        let request = self.request();
+        let Some(item) = self
+            .store
+            .custody_item(project, subject, &request)
+            .map_err(Self::error)?
+        else {
+            return Ok(None);
+        };
+        let CustodyState::Retired { retirement_id } = item.state else {
+            return Ok(None);
+        };
+        let record = self
+            .store
+            .retirement(project, &retirement_id, &request)
+            .map_err(Self::error)?
+            .ok_or(WorktreeError::RegistrationUnconfirmed)?;
+        if !record.owns_subject(subject) {
+            return Err(WorktreeError::RegistrationUnconfirmed);
+        }
+        Ok(Some(record))
+    }
+
+    fn pending_retirements(
+        &self,
+        project: provenant_core::ProjectId,
+    ) -> Result<Vec<provenant_records::custody::RetirementRecord>, WorktreeError> {
+        use provenant_records::custody::{CustodyQuery, CustodyState, StateKind};
+
+        if project != self.project {
+            return Err(WorktreeError::InvalidRequest);
+        }
+        let request = self.request();
+        let mut query = CustodyQuery {
+            project: Some(project),
+            state: Some(StateKind::Retired),
+            ..Default::default()
+        };
+        let mut records = std::collections::BTreeMap::new();
+        loop {
+            let page = self.store.custody(&query, &request).map_err(Self::error)?;
+            for item in page.items {
+                let CustodyState::Retired { retirement_id } = item.state else {
+                    continue;
+                };
+                let record = self
+                    .store
+                    .retirement(project, &retirement_id, &request)
+                    .map_err(Self::error)?
+                    .ok_or(WorktreeError::RegistrationUnconfirmed)?;
+                if !record.valid_evidence() {
+                    return Err(WorktreeError::InvalidOutput);
+                }
+                if record.outcomes.iter().any(|outcome| {
+                    !matches!(
+                        &outcome.state,
+                        provenant_records::custody::RetirementStepState::Completed { .. }
+                    )
+                }) {
+                    records.insert(record.id.clone(), record);
+                }
+            }
+            match page.next {
+                Some(next) if next > query.after => query.after = next,
+                Some(_) => return Err(WorktreeError::RegistrationUnconfirmed),
+                None => break,
+            }
+        }
+        Ok(records.into_values().collect())
+    }
+
+    fn advance_retirement(
+        &self,
+        record: &provenant_records::custody::RetirementRecord,
+        step: provenant_records::custody::RetirementStep,
+        state: provenant_records::custody::RetirementStepState,
+    ) -> Result<provenant_records::custody::RetirementRecord, WorktreeError> {
+        self.store
+            .set_retirement_step(
+                record.project,
+                &record.id,
+                record.revision,
+                provenant_records::custody::RetirementStepOutcome { step, state },
+                &self.request(),
+            )
+            .map_err(Self::error)
+    }
+}
+
+impl RetirementFeeds for HostRetirementFixture {
+    fn authority(&self) -> Result<provenant_core::ActorId, String> {
+        Ok(self.actor)
+    }
+
+    fn custody(&self, _lane: &WorktreeInfo) -> Result<(), String> {
+        // These fixtures declare that no active run owns a candidate; the
+        // durable port establishes or verifies the relevant custody subjects.
+        Ok(())
+    }
+
+    fn forge(&self, _branch: &GitRefName) -> ForgeObservation {
+        ForgeObservation::Absent
+    }
+
+    fn integration_bases(&self) -> Vec<(String, GitOid)> {
+        Vec::new()
+    }
+
+    fn remote_guard(
+        &self,
+        _context: &WorktreeContext<'_>,
+        _branch: &str,
+        _tip: GitOid,
+        _min_days: u64,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+pub(super) fn gc_landing_evidence(
+    fixture: &Fixture,
+    expected_target: GitOid,
+) -> Result<provenant_records::custody::LandedEvidence, Box<dyn Error>> {
+    use provenant_records::custody::{LandedEvidence, LandingPredicate, LandingSource};
+
+    let target_ref = fixture.run(&["symbolic-ref", "HEAD"])?;
+    let reference = std::str::from_utf8(&target_ref.stdout.bytes)?.trim();
+    let target_commit = fixture.run(&["rev-parse", "--verify", reference])?;
+    let actual_target = GitOid::parse(std::str::from_utf8(&target_commit.stdout.bytes)?.trim())?;
+    if actual_target != expected_target {
+        return Err("GC fixture evidence differs from the pinned integration target".into());
+    }
+    Ok(LandedEvidence {
+        predicate: LandingPredicate::Landed,
+        source: LandingSource::IntegrationTarget {
+            reference: reference.to_owned(),
+            commit: actual_target,
+        },
+    })
 }
 
 pub(super) fn cancel() -> CancelToken {
@@ -318,7 +666,14 @@ pub(super) fn gc_foreign_retains_a_process_with_cwd_inside_the_worktree()
             keep: &[],
             written_before_ns: i128::MAX,
             dry_run: false,
-            foreign_merged_clean: true,
+            include_foreign: true,
+            retirement_port: None,
+            retirement_feeds: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
         },
         &cancel(),
     )?;
@@ -336,7 +691,7 @@ pub(super) fn gc_foreign_retains_a_process_with_cwd_inside_the_worktree()
 }
 
 #[test]
-pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck()
+pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck_and_retires_idle_lane()
 -> Result<(), Box<dyn Error>> {
     for scenario in [
         "remove",
@@ -363,6 +718,7 @@ pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck()
             path.to_str().ok_or("path")?,
         ])?;
         let lanes = list(&context, &cancel())?;
+        let retirement = HostRetirementFixture::new(&test_context)?;
         let state_name = state_dir_name(&path);
         assert!(
             context
@@ -422,33 +778,38 @@ pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck()
                 keep: &[],
                 written_before_ns: i128::MAX,
                 dry_run: false,
-                foreign_merged_clean: true,
+                include_foreign: true,
+                retirement_port: Some(&retirement),
+                retirement_feeds: Some(&retirement),
+                mode: CollectionMode::Worktrees,
+                proof: None,
+                upstream_reference: None,
+                integration_patterns: &[],
+                excluded_paths: &[],
             },
             &collection_cancel,
         )?;
         if refuse {
-            assert_eq!(
-                report.worktrees.retained,
-                vec![RetainedBranch {
-                    branch: "native-no-state".into(),
-                    reason: RetainReason::UnknownWriter,
-                    detail: None,
-                }]
-            );
+            assert!(report.worktrees.retained.iter().any(|retained| {
+                retained.branch == "native-no-state"
+                    && retained.reason == RetainReason::UnknownWriter
+            }));
             assert!(path.is_dir());
         } else {
-            assert_eq!(
-                report
-                    .worktrees
-                    .removed
-                    .iter()
-                    .map(|tree| &tree.path)
-                    .collect::<Vec<_>>(),
-                vec![&path],
-                "{report:?}"
+            let subject = provenant_records::custody::Subject::new(
+                provenant_records::custody::SubjectKind::Worktree,
+                path.to_string_lossy().into_owned(),
             );
-            assert!(!path.exists());
+            assert!(report.removals.iter().any(|removal| {
+                removal.subject == subject
+                    && matches!(
+                        &removal.outcome,
+                        provenant_records::custody::RemovalOutcome::Removed { .. }
+                    )
+            }));
         }
+        assert_eq!(path.is_dir(), refuse, "idle foreign worktree outcome");
+        assert!(branch_exists(&fixture, "native-no-state"));
         if let Some(holder) = holder.into_inner() {
             drop(holder);
         } else {
@@ -484,7 +845,7 @@ fn merge_proof_scenario() -> Result<(), Box<dyn Error>> {
         list(&context, &cancel())?
             .into_iter()
             .find(|lane| lane.path == created.path)
-            .ok_or_else(|| "missing lane".into())
+            .ok_or_else(|| "missing lane after commit".into())
     };
     let batch = new_lane("proof-batch")?;
     let via_batch = new_lane("proof-via-batch")?;
@@ -522,15 +883,24 @@ fn merge_proof_scenario() -> Result<(), Box<dyn Error>> {
         &advanced.path,
         &["commit", "--allow-empty", "-m", "after listing"],
     )?;
+    let retirement = HostRetirementFixture::new(&test_context)?;
+    retirement.seed_lane(&context, &via_batch)?;
     let policy = |upstream, dry_run| WorktreeGcPolicy {
-        foreign_merged_clean: false,
         upstream: Some(upstream),
+        upstream_reference: Some("refs/heads/main"),
         terminal: &|_| true,
         no_live_lanes: &|_| true,
         regenerable: &[],
         keep: &[],
         written_before_ns: 0,
         dry_run,
+        include_foreign: true,
+        retirement_port: Some(&retirement),
+        retirement_feeds: Some(&retirement),
+        mode: CollectionMode::Worktrees,
+        proof: None,
+        integration_patterns: &[],
+        excluded_paths: &[],
     };
     let local = collect(
         &context,
@@ -668,6 +1038,39 @@ impl Executor for FailsFirstGcSettlement<'_> {
         }
         Ok(outcome)
     }
+}
+
+#[test]
+fn creation_uses_a_nested_project_worktree_layout() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    fs::create_dir_all(fixture.root.join(".provenant"))?;
+    let mut ports = provenant_config::PortTable::builtin();
+    ports.worktree_layout.roots = vec![
+        PathBuf::from(".worktrees"),
+        PathBuf::from(".claude/worktrees"),
+    ];
+    ports.worktree_layout.default = PathBuf::from(".claude/worktrees/<branch>");
+    fs::write(
+        fixture.root.join(provenant_config::PORTS_CONFIG),
+        serde_json::to_vec(&ports)?,
+    )?;
+
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let created = create(
+        &context,
+        WorktreeCreate {
+            branch: "custom-layout".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    assert_eq!(
+        created.path,
+        fixture.root.join(".claude/worktrees/custom-layout"),
+    );
+    assert!(created.path.join(".git").exists());
+    Ok(())
 }
 
 /// Worktree creation and writer setup use one common-directory mutation owner.

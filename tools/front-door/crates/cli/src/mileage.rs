@@ -156,7 +156,7 @@ fn human_money(value: &Option<mileage::Money>) -> String {
 }
 
 fn inner(command: &Mileage, edge: &Edge<'_>) -> Result<(Value, String), Failure> {
-    let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
+    let config = crate::config_reads::read_for(edge.roots, "telemetry")
         .map_err(|error| (ErrorKind::Io, error.to_string()))?;
     let accounts = &config.domains.accounts.entries;
     let history = crate::quota_history::read(
@@ -199,11 +199,11 @@ fn inner(command: &Mileage, edge: &Edge<'_>) -> Result<(Value, String), Failure>
             .push(record);
     }
     // Each account's rows are timed once, not once per reading and window.
-    let mut timed_by_account: BTreeMap<&str, Vec<(i64, &ingest::Row)>> = BTreeMap::new();
+    let mut timed_by_account: BTreeMap<String, Vec<(i64, &ingest::Row)>> = BTreeMap::new();
     for row in &rows {
         if let Some(at) = row.unix_seconds() {
             timed_by_account
-                .entry(row.account.as_str())
+                .entry(row.identity.account_key())
                 .or_default()
                 .push((at, row));
         }
@@ -211,8 +211,9 @@ fn inner(command: &Mileage, edge: &Edge<'_>) -> Result<(Value, String), Failure>
     let mut reports = Vec::new();
     let mut human = String::new();
     for ((key, provider, label), records) in &grouped {
+        let identity = format!("{provider}/{key}");
         let account_rows: &Timed<'_> = timed_by_account
-            .get(label.as_str())
+            .get(&identity)
             .map_or(&[][..], Vec::as_slice);
         let latest = records
             .iter()
@@ -385,7 +386,11 @@ mod tests {
     fn row(at: i64) -> ingest::Row {
         ingest::Row {
             schema_version: ingest::ROW_SCHEMA_VERSION,
-            account: "work".into(),
+            identity: provenant_telemetry::usage::AccountIdentity::known(
+                "claude",
+                "work",
+                "fixture-epoch",
+            ),
             provider: "claude".into(),
             model: "m".into(),
             effort: None,

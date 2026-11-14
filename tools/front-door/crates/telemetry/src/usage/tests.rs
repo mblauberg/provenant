@@ -19,10 +19,7 @@ fn tempdir() -> Result<(tempfile::TempDir, PathBuf)> {
     Ok((temp, base))
 }
 fn inventory() -> Vec<(String, String)> {
-    vec![
-        (EVENT_KINDS[0].into(), "root".into()),
-        (EVENT_KINDS[1].into(), "fabric_context".into()),
-    ]
+    vec![(EVENT_KINDS[0].into(), "root".into())]
 }
 
 #[test]
@@ -49,11 +46,32 @@ impl Clock for Fixed {
 }
 
 #[test]
+fn every_account_identity_case_round_trips() -> Result {
+    let cases = [
+        AccountIdentity {
+            identity: Identity::Known {
+                provider: "claude".into(),
+                account_key: "account-key".into(),
+            },
+            epoch: IdentityEpoch::Known { id: "epoch".into() },
+            evidence_source: IdentityEvidenceSource::Provider,
+        },
+        AccountIdentity::unknown(),
+        AccountIdentity::no_provider_account(),
+    ];
+    for identity in cases {
+        let bytes = serde_json::to_vec(&identity)?;
+        let decoded: AccountIdentity = serde_json::from_slice(&bytes)?;
+        assert_eq!(decoded, identity);
+    }
+    Ok(())
+}
+
+#[test]
 fn recording_on_a_missing_root_creates_nothing() -> Result {
     let (_temp, base) = tempdir()?;
     let roots = roots(&base)?;
     record_cli(&roots, CLOCK, "root", 0, 4, None);
-    record_tool(&roots, CLOCK, "fabric_context", "ok", 1, None);
     assert!(!roots.state.as_path().exists());
     Ok(())
 }
@@ -67,7 +85,16 @@ fn chair_observations_survive_rotation_and_respect_window_bounds() -> Result {
     record_chair(
         &roots,
         CLOCK,
-        "work",
+        AccountIdentity {
+            identity: Identity::Known {
+                provider: "claude".into(),
+                account_key: "account-work".into(),
+            },
+            epoch: IdentityEpoch::Known {
+                id: "epoch-1".into(),
+            },
+            evidence_source: IdentityEvidenceSource::Provider,
+        },
         "session",
         Some(project),
         Some(".claude-work"),
@@ -79,7 +106,7 @@ fn chair_observations_survive_rotation_and_respect_window_bounds() -> Result {
     record_chair(
         &roots,
         CLOCK,
-        "spare",
+        AccountIdentity::unknown(),
         "another-session",
         Some(project),
         None,
@@ -88,9 +115,12 @@ fn chair_observations_survive_rotation_and_respect_window_bounds() -> Result {
     let until = "2026-10-27T00:00:00Z".parse()?;
     let chairs = chair_sessions(&roots, since, until)?;
     assert_eq!(chairs.len(), 2);
-    assert_eq!(chairs[0].account, "work");
+    assert_eq!(
+        chairs[0].account_identity.account_key(),
+        "claude/account-work"
+    );
     assert_eq!(chairs[0].config.as_deref(), Some(".claude-work"));
-    assert_eq!(chairs[1].account, "spare");
+    assert_eq!(chairs[1].account_identity, AccountIdentity::unknown());
     assert_eq!(chairs[1].config, None);
     assert!(
         chairs
@@ -110,14 +140,13 @@ fn unattributed_events_omit_trace_from_json() -> Result {
     let roots = roots(&base)?;
     provenant_os::fixture::private_state_dir(roots.state.as_path())?;
     record_cli(&roots, CLOCK, "root", 0, 4, None);
-    record_tool(&roots, CLOCK, "fabric_context", "ok", 1, None);
     assert!(roots.state.as_path().join(LOG).is_file());
     let log = std::fs::read_to_string(roots.state.as_path().join(LOG))?;
     let events = log
         .lines()
         .map(serde_json::from_str::<serde_json::Value>)
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 1);
     assert!(events.iter().all(|event| event.get("project_id").is_none()));
     assert!(events.iter().all(|event| event.get("trace").is_none()));
     assert!(
@@ -135,16 +164,14 @@ fn attributed_events_are_reported_under_their_project_id() -> Result {
     provenant_os::fixture::private_state_dir(roots.state.as_path())?;
     let expected_id = ProjectId::from_bytes([1; 16]);
     record_cli(&roots, CLOCK, "root", 0, 4, Some(expected_id));
-    record_tool(&roots, CLOCK, "fabric_context", "ok", 1, Some(expected_id));
 
     let log = std::fs::read_to_string(roots.state.as_path().join(LOG))?;
     let events = log
         .lines()
         .map(serde_json::from_str::<serde_json::Value>)
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 1);
     assert_eq!(events[0]["kind"], "cli.verb");
-    assert_eq!(events[1]["kind"], "mcp.tool");
     assert!(
         events
             .iter()
@@ -158,9 +185,6 @@ fn attributed_events_are_reported_under_their_project_id() -> Result {
             && unit.project_id == Some(expected_id)
             && unit.scope == Some("project")
     }));
-    assert!(report.units.iter().any(|unit| {
-        unit.unit == "fabric_context" && unit.calls == 1 && unit.project_id == Some(expected_id)
-    }));
     assert!(
         report
             .units
@@ -171,15 +195,12 @@ fn attributed_events_are_reported_under_their_project_id() -> Result {
 }
 
 #[test]
-fn rotation_preserves_appends_and_reports_while_the_rotation_lock_is_busy() -> Result {
+fn rotation_preserves_the_tail_and_reports_without_a_lock() -> Result {
     let (_temp, base) = tempdir()?;
     let roots = roots(&base)?;
     provenant_os::fixture::private_state_dir(roots.state.as_path())?;
     record_cli(&roots, CLOCK, "root", 0, 4, None);
     let log = roots.state.as_path().join(LOG);
-    assert!(!roots.state.as_path().join(LOCK).exists());
-    let directory = Directory::open_anchor(roots.state.as_path())?;
-    let lock = directory.try_lock(OsStr::new(LOCK), LockMode::Exclusive)?;
     let before = std::fs::read(&log)?;
     record_cli(&roots, CLOCK, "root", 0, 1, None);
     assert!(std::fs::read(&log)?.len() > before.len());
@@ -195,22 +216,13 @@ fn rotation_preserves_appends_and_reports_while_the_rotation_lock_is_busy() -> R
         .open(&log)?
         .set_len(CAP)?;
     record_cli(&roots, CLOCK, "root", 0, 1, None);
-    assert!(std::fs::metadata(&log)?.len() > CAP);
-    // The report reads the newest CAP bytes. The first event, which lies before
-    // that window, is not counted; the second one starts it and is counted. The
-    // newest event follows zero-filled space and is counted too.
-    assert_eq!(count(report(&roots, inventory(), None, None)?), Some(2));
-    drop(lock);
-    // MCP logging only appends; existing workers perform rotation.
-    record_tool(&roots, CLOCK, "fabric_context", "ok", 1, None);
-    assert!(!roots.state.as_path().join(BACKUP).exists());
-    maintain_tools(&roots);
-    // Rotation is permitted again; the old log is retained as the backup.
-    record_cli(&roots, CLOCK, "root", 0, 1, None);
-    assert!(std::fs::metadata(roots.state.as_path().join(BACKUP))?.len() >= CAP);
+    assert_eq!(
+        std::fs::metadata(roots.state.as_path().join(BACKUP))?.len(),
+        CAP
+    );
     assert!(std::fs::metadata(&log)?.len() < LINE_CAP as u64);
-    // Only the newest backup event is in the window, plus the one in the new log.
-    assert_eq!(count(report(&roots, inventory(), None, None)?), Some(2));
+    assert_eq!(count(report(&roots, inventory(), None, None)?), Some(3));
+    assert!(!roots.state.as_path().join("usage.lock").exists());
     // A torn line is ignored, including an event appended to that line.
     std::fs::write(&log, b"{partial")?;
     record_cli(&roots, CLOCK, "root", 0, 1, None);

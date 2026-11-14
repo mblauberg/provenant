@@ -3,40 +3,6 @@ use provenant_core::{HostId, HumanAnswerId, HumanRequestId, OperationId};
 use provenant_records::inbox::*;
 
 #[test]
-fn viewer_state_migration_drops_rows_and_keeps_mail() {
-    let f = Fixture::new();
-    let store = f.open();
-    store.send(&message(&f, 9), &f.request()).unwrap();
-    // Rewind to the last release that wrote viewer state, with rows in both tables.
-    store
-        .db
-        .execute_batch(&format!(
-            "{RESTORE_TASKS_TABLE} {} INSERT INTO viewer_requests(project,viewer,request,seen_revision,dismissed) VALUES('p','console','r',1,1); INSERT INTO viewer_summaries(project,viewer,session,revision) VALUES('p','console','chair',2); PRAGMA user_version=13;",
-            include_str!("../migrations/013-viewer-state.sql")
-        ))
-        .unwrap();
-    drop(store);
-    let store = f.open();
-    let tables: i64 = store
-        .db
-        .query_row(
-            "SELECT count(*) FROM sqlite_master WHERE name IN ('viewer_requests','viewer_summaries')",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(tables, 0);
-    assert_eq!(
-        store
-            .read_mail(project(), actor(3), Some(0), 100, &f.request())
-            .unwrap()
-            .items
-            .len(),
-        1
-    );
-}
-
-#[test]
 #[allow(clippy::disallowed_methods)] // Native deadlines are part of this store API.
 fn invalid_hook_candidates_do_not_block_valid_answers() {
     use std::time::{Duration, Instant};
@@ -707,30 +673,38 @@ fn human_answer_outbox_mail_and_history_roll_back_when_receipt_fails() {
 }
 
 #[test]
-fn human_inbox_migration_preserves_existing_mail_and_refuses_old_binary_version() {
+fn a_fresh_store_matches_its_schema_and_other_versions_are_refused_unchanged() {
     let f = Fixture::new();
-    let store = f.open();
-    store.send(&message(&f, 9), &f.request()).unwrap();
-    // Reopen is idempotent and all pre-inbox records remain readable.
-    drop(store);
-    let store = f.open();
-    assert_eq!(
-        store
-            .read_mail(project(), actor(3), Some(0), 100, &f.request())
-            .unwrap()
-            .items
-            .len(),
-        1
-    );
-    let version: i64 = store
-        .db
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .unwrap();
-    assert_eq!(version, crate::db::MIGRATIONS.len() as i64);
-    assert!(matches!(
-        provenant_sqlite::read_version(&store.db, 7),
-        Err(provenant_sqlite::VersionError::Unsupported(found)) if found == version
-    ));
+    drop(f.open());
+    drop(HostStore::open(&f.root, &f.request()).unwrap());
+    for name in ["fabric.sqlite3", "host.sqlite3"] {
+        let path = f.root.as_path().join("fabric").join(name);
+        let db = rusqlite::Connection::open(&path).unwrap();
+        assert!(
+            provenant_sqlite::schema_matches(&db, crate::db::SCHEMA).unwrap(),
+            "{name}"
+        );
+        drop(db);
+        for version in [crate::db::SCHEMA.version - 1, crate::db::SCHEMA.version + 1] {
+            let db = rusqlite::Connection::open(&path).unwrap();
+            db.execute_batch(&format!(
+                "PRAGMA journal_mode=DELETE; PRAGMA user_version={version}"
+            ))
+            .unwrap();
+            drop(db);
+            let before = std::fs::read(&path).unwrap();
+            let opened = if name == "fabric.sqlite3" {
+                Store::open(&f.root, &f.request()).map(drop)
+            } else {
+                HostStore::open(&f.root, &f.request()).map(drop)
+            };
+            assert!(matches!(opened, Err(Error::SchemaVersion(found)) if found == version));
+            assert_eq!(std::fs::read(&path).unwrap(), before, "{name} {version}");
+            let db = rusqlite::Connection::open(&path).unwrap();
+            db.pragma_update(None, "user_version", crate::db::SCHEMA.version)
+                .unwrap();
+        }
+    }
 }
 
 #[test]

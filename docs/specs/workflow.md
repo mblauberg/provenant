@@ -23,9 +23,8 @@ A review counts only for a retained verdict on the exact subject, at least the
 highest author tier, from an independent reviewer; authors, decision makers
 (the chair included) and repeats never count. `inconclusive` never counts and
 never blocks. Cross-family legs count only on observed family evidence, never
-attestation; a waived leg needs a blocker with source references. A diff that
-touches tests always gets the `tests` lens. The `code-review` skill
-owns the lens choice; the checker's counts may sit below it.
+attestation; a waived leg needs a blocker with source references. The
+`code-review` skill owns lens choice; the checker's counts may sit below it.
 - Why: self-review, a stale subject or an attested family proves nothing.
 - Test: `crates/workflow/src/coverage.rs::authors_decision_makers_repeats_and_low_tiers_do_not_count`;
   `::a_review_of_another_subject_never_counts`;
@@ -54,11 +53,12 @@ receipt at an expected revision: one winner, never a torn file.
 ## Sessions
 
 A checkpoint is keyed exactly by project and host session; a session
-registered to another project refuses without an explicit `--project`. Each save
+registered to another project requires an explicit project selection. Each save
 keeps the text it replaces as a bounded, hashed revision. Hooks are advisory:
-they exit 0, emit only their own key's checkpoint, and mark a missing or slow
+they emit only their own key's checkpoint, and mark a missing or slow
 source unavailable, never empty. Autosave never writes the chair's
 `checkpoint.md`.
+Hook state carries custody-ledger, lane and worktree rows; it has no checkpoint-derived PR rows or PR scan.
 - Why: restoring the wrong or a lost checkpoint misdirects an agent, and absent
   evidence must not read as an empty queue.
 - Test: `tests/workflow.rs::session_save_refuses_another_registered_project`;
@@ -104,18 +104,3 @@ never launches again.
 - Why: a handoff must not lose work, launch twice or use an unregistered account.
 - Test: `crates/fabric-runtime/src/handoff/session/tests.rs::receive_refuses_until_the_host_opts_in`;
   `::the_peer_takes_the_lease_only_for_a_launch_or_no_launch`
-
-## Writing checks
-
-`check writing` never reports inside code spans and refuses unsupported or
-oversized rule sets.
-- Test: `crates/workflow/src/writing/tests.rs::inline_code_cannot_hide_following_lines_or_open_a_fence`
-
-## Route and topology evidence boundary
-
-Receipts own route, provider, model and attempt facts. An issue or receipt
-records evidence, not approval: release, promotion, sharing, provider login,
-push and destructive action stay gated by current user authority. Route
-comparison is task-local, with no learned router.
-- Why: evidence must never be mistaken for permission.
-- Test: none (review gate)

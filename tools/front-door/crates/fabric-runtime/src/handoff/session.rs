@@ -22,11 +22,11 @@ use std::{
 /// The source waits `peer_seconds`; the peer works to less, so a slow
 /// recreation is reported by the peer rather than timing the source out.
 const PEER_MARGIN: u64 = 5;
-/// The peer's budget: the source's less a margin, never above the peer's own
-/// limit. A source that sent no budget gets the peer's limit less the margin.
-pub fn peer_seconds(source_seconds: Option<u64>, local_limit: u64) -> u64 {
+/// The peer's budget: the required source budget less a margin, never above
+/// the peer's own limit.
+pub fn peer_seconds(source_seconds: u64, local_limit: u64) -> u64 {
     source_seconds
-        .map_or(local_limit, |s| s.min(local_limit))
+        .min(local_limit)
         .saturating_sub(PEER_MARGIN)
         .max(1)
 }

@@ -1,3 +1,100 @@
+fn cargo_home_path(spec: &LaunchSpec) -> std::path::PathBuf {
+    let receipt = spec.cargo_home_receipt();
+    let path = std::path::PathBuf::from(receipt["path"].as_str().expect("Cargo home receipt path"));
+    let values: Vec<_> = spec
+        .env
+        .iter()
+        .filter(|(key, _)| key == "CARGO_HOME")
+        .collect();
+    assert_eq!(values.len(), 1, "one host Cargo home selector");
+    assert_eq!(std::path::Path::new(&values[0].1), path);
+    path
+}
+
+fn assert_cargo_credentials_ungranted(spec: &LaunchSpec) {
+    use provenant_confinement::permissions::{PathGrant, PathScope};
+    let home = cargo_home_path(spec);
+    let reads: Vec<_> = spec
+        .profile
+        .spec
+        .runtime_reads
+        .iter()
+        .chain(
+            spec.profile
+                .spec
+                .authentication
+                .iter()
+                .flat_map(|grant| &grant.roots),
+        )
+        .collect();
+    let writes: Vec<_> = spec
+        .profile
+        .spec
+        .tool_writes
+        .iter()
+        .chain(&spec.profile.spec.state_writes)
+        .chain(
+            spec.profile
+                .spec
+                .authentication
+                .iter()
+                .flat_map(|grant| &grant.in_place_writes),
+        )
+        .collect();
+    for name in provenant_confinement::cargo::CREDENTIAL_FILES {
+        let credential = PathGrant {
+            path: home.join(name),
+            scope: PathScope::Exact,
+        };
+        assert!(
+            reads.iter().all(|grant| !grant.overlaps(&credential)),
+            "Cargo credential read grant: {credential:?}"
+        );
+        assert!(
+            writes.iter().all(|grant| !grant.overlaps(&credential)),
+            "Cargo credential write grant: {credential:?}"
+        );
+    }
+}
+
+fn assert_read_only_cargo_access(spec: &LaunchSpec) {
+    use provenant_confinement::permissions::{PathGrant, PathScope};
+    let home = cargo_home_path(spec);
+    let receipt = spec.cargo_home_receipt();
+    assert_eq!(receipt["source_writes"], false);
+    let writes = &spec.profile.spec.tool_writes;
+    let tracking: Vec<_> = provenant_confinement::cargo::TRACKING_FILES
+        .iter()
+        .map(|name| PathGrant {
+            path: home.join(name),
+            scope: PathScope::Exact,
+        })
+        .collect();
+    for grant in &tracking {
+        assert!(
+            writes.contains(grant),
+            "Cargo tracking write grant missing: {grant:?}"
+        );
+    }
+    for grant in writes.iter().filter(|grant| grant.path.starts_with(&home)) {
+        assert!(
+            tracking.contains(grant),
+            "undeclared Cargo home write grant: {grant:?}"
+        );
+    }
+    for name in provenant_confinement::cargo::SOURCE_DIRECTORIES {
+        let source = PathGrant {
+            path: home.join(name),
+            scope: PathScope::Subtree,
+        };
+        assert!(
+            writes.iter().all(|grant| !grant.overlaps(&source)),
+            "default Cargo source write grant: {source:?}"
+        );
+    }
+    assert_cargo_credentials_ungranted(spec);
+}
+
 #[test]
 fn agy_individual_quota_is_quota_limited_until_its_stated_reset() -> Result<(), ProviderError> {
     let exit = ExitObservation {
@@ -573,8 +670,8 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
 }
 
 #[test]
-fn a_wide_integer_echoed_in_an_ignored_frame_does_not_fail_the_stream()
--> Result<(), ProviderError> {
+fn a_wide_integer_echoed_in_an_ignored_frame_does_not_fail_the_stream() -> Result<(), ProviderError>
+{
     // Shape of #3111: a tool result echoes a JSON Schema whose bound is u64::MAX
     // printed as a float, which is wider than any i64 or u64.
     let stream = concat!(
@@ -833,33 +930,42 @@ fn registry_has_unique_ids_and_matching_quota_sources() -> Result<(), Box<dyn st
 
 #[test]
 fn argv_prompt_limit_counts_utf8_bytes() {
-    assert!(Prompt::new("a".repeat(65_536)).check_argv().is_ok());
+    let default = crate::tests::fixture_policy();
+    assert_eq!(
+        default.rule("ARGV_PROMPT").rule.strength,
+        provenant_records::policy::Strength::Warn
+    );
+    assert!(Prompt::new("a".repeat(65_536)).check_argv(default).is_ok());
     assert!(
         Prompt::new("a".repeat(65_537))
             .with_argv_limit(
                 131_072,
                 provenant_records::diagnostic::SettingSource::Configuration
             )
-            .check_argv()
+            .check_argv(default)
             .is_ok()
     );
+    let mut strict = provenant_records::policy::Policy::default();
+    strict.overlay(
+        &std::collections::BTreeMap::from([(
+            "ARGV_PROMPT".into(),
+            provenant_records::policy::Strength::Refuse,
+        )]),
+        provenant_records::policy::Source::Project,
+    );
     assert!(matches!(
-        Prompt::new("é".repeat(32_769)).check_argv(),
+        Prompt::new("é".repeat(32_769)).check_argv(&strict),
         Err(ProviderError::PromptTooLarge { .. })
     ));
-    let error = Prompt::new("abcd".into())
-        .with_argv_limit(
-            3,
-            provenant_records::diagnostic::SettingSource::Configuration,
-        )
-        .check_argv()
-        .expect_err("configured limit must be enforced");
-    assert!(
-        error
-            .to_string()
-            .contains("domains.run.argv_prompt_limit_bytes")
-    );
-    assert!(error.to_string().contains("host configuration"));
+    assert!(matches!(
+        Prompt::new("abcd".into())
+            .with_argv_limit(
+                3,
+                provenant_records::diagnostic::SettingSource::Configuration,
+            )
+            .check_argv(&strict),
+        Err(ProviderError::PromptTooLarge { .. })
+    ));
 }
 
 pub(super) fn read_only_plan(
@@ -969,8 +1075,11 @@ fn claude_network_on_enables_web_tools_and_codex_toolchain_without_writer_grants
     let home = temp.path().canonicalize().unwrap();
     for path in [
         ".cargo/bin",
-        ".cargo/registry",
-        ".cargo/git",
+        ".cargo/registry/index",
+        ".cargo/registry/cache",
+        ".cargo/registry/src",
+        ".cargo/git/db",
+        ".cargo/git/checkouts",
         ".rustup/toolchains",
     ] {
         std::fs::create_dir_all(home.join(path)).unwrap();
@@ -1017,7 +1126,19 @@ fn claude_network_on_enables_web_tools_and_codex_toolchain_without_writer_grants
             }
             assert!(launch.profile.spec.authentication.is_empty());
             assert!(launch.profile.spec.deny_keychain_access);
-            assert!(launch.profile.spec.tool_writes.is_empty());
+            // Sources stay read-only by default; Cargo can update only the
+            // declared tracking files. The credentials boundary remains active.
+            assert_read_only_cargo_access(&launch);
+            let cargo_home = cargo_home_path(&launch);
+            for name in provenant_confinement::cargo::SOURCE_DIRECTORIES {
+                assert!(
+                    launch
+                        .profile
+                        .spec
+                        .runtime_reads
+                        .contains(&crate::launch::subtree(cargo_home.join(name)))
+                );
+            }
             let rendered = provenant_confinement::permissions::snapshot::render(
                 plan.permissions(),
                 &launch.profile,
@@ -1050,7 +1171,7 @@ fn claude_network_on_enables_web_tools_and_codex_toolchain_without_writer_grants
                 }
             }
             if access == Access::ReadOnly && network != NetworkAccess::Open {
-                assert!(launch.env.iter().all(|(key, _)| key != "CARGO_HOME"));
+                assert_eq!(cargo_home_path(&launch), home.join(".cargo"));
                 assert_eq!(
                     launch.env.iter().find(|(key, _)| key == "PATH").unwrap().1,
                     "/fixture/scratch/read-only-git:/fixture/scratch/bin:/usr/bin:/bin"
@@ -1143,7 +1264,8 @@ fn claude_network_on_without_complete_rust_keeps_public_system_tools()
                 Some(&token),
             )
         })?;
-        assert!(launch.env.iter().all(|(key, _)| key != "CARGO_HOME"));
+        assert_eq!(cargo_home_path(&launch), home.join(".cargo"));
+        assert_read_only_cargo_access(&launch);
         assert!(
             launch
                 .profile
@@ -1214,7 +1336,8 @@ fn rust_less_hosts_keep_repository_execution_in_the_rendered_profile()
             "claude" => claude::Claude.prepare(input)?,
             _ => crate::codex::Codex.prepare(input)?,
         };
-        assert!(launch.env.iter().all(|(key, _)| key != "CARGO_HOME"));
+        assert_eq!(cargo_home_path(&launch), home.join(".cargo"));
+        assert_read_only_cargo_access(&launch);
         let spec = &launch.profile.spec;
         assert!(
             spec.runtime_reads

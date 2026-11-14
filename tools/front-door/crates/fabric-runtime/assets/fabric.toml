@@ -9,7 +9,6 @@ memory_pressure_threshold = "critical"
 # A build throttle for cooperative fair sharing of CPU and memory among lanes, not a hard cap:
 # lanes' `cargo` commands that compile wait for a slot; direct `~/.cargo/bin/cargo`, rustc and non-cargo builds are not gated.
 max_concurrent_builds = -1 # host-wide builds at once, 1-64; automatic: max(1, min(cores / cargo_build_jobs, GiB of RAM / 6))
-build_wait_minutes = -1 # minutes a build waits for a slot or Cargo lock before giving up, 1-1440; automatic: 30
 max_writer_lanes = -1 # writer lanes live at once across the host, 1-64; automatic: unlimited
 lane_port_base = -1 # first port of the range split into per-writer-lane blocks, 1024-65535; automatic: 30000
 lane_port_block = -1 # ports in each writer lane's block, 1-1024; automatic: 16
@@ -17,7 +16,7 @@ lane_port_blocks = -1 # blocks in the range, 0-1024, the base plus blocks times 
 max_project_writer_lanes = -1 # writer lanes live at once per project, 1-32 and at most max_writer_lanes; automatic: unlimited
 cargo_build_jobs = -1 # automatic: half the available cores, at least 1
 [lanes.cargo_seed]
-enabled = true # macOS only; clones host Cargo registry, Git and target seeds, and falls back where the volume cannot clone
+enabled = true # macOS only; clones host-built target seeds, and falls back where the volume cannot clone
 max_generations = 3
 max_bytes = 21474836480
 [lanes.settlement]
@@ -36,7 +35,6 @@ page_rows = 100
 output_lines = 500
 output_bytes = 65536
 result_bytes = 1048576
-lease_seconds = 3600
 peer_seconds = 30
 graph_timeout_seconds = 14400
 store_busy_timeout_ms = 30000 # wait for a contended store before reporting contention, 0-600000; 0 fails fast
@@ -55,7 +53,8 @@ write_crates = 2 # a write scope spanning more crates than this turns it on
 batch_issues = 2 # this many distinct issues in one brief turns it on
 
 [graph]
-writer_launch_seconds = 55 # minimum allowance per writer binding, separate from settlement wait
+launch_wait_seconds = 55 # general launch and read/wait allowance
+writer_provision_seconds = 55 # independent allowance for each writer provisioning
 ci_poll_overrides = {}
 
 [graph.ci_poll_backoff]

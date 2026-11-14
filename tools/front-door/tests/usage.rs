@@ -1,7 +1,7 @@
 mod support;
-use serde_json::{Value, json};
-use std::{fs, os::unix::fs::PermissionsExt, path::Path};
-use support::{Result, TestRig, code, mcp::McpClient};
+use serde_json::Value;
+use std::{fs, os::unix::fs::PermissionsExt};
+use support::{Result, TestRig, code};
 
 #[test]
 fn chair_summary_reads_do_not_record_usage() -> Result {
@@ -19,25 +19,13 @@ fn chair_summary_reads_do_not_record_usage() -> Result {
 }
 
 #[test]
-fn cli_and_mcp_usage_records_exclude_arguments_prompts_and_results() -> Result {
+fn cli_usage_records_exclude_arguments_prompts_and_results() -> Result {
     let rig = TestRig::new()?;
     fs::create_dir_all(&rig.state)?;
     fs::set_permissions(&rig.state, fs::Permissions::from_mode(0o700))?;
     let out = rig.command(&["output", "--id", "sensitive-argument", "--json"])?;
     assert_ne!(code(&out), 0);
     assert_eq!(code(&rig.command(&["root", "--json"])?), 0);
-    let mut client = McpClient::default();
-    client.initialise("2025-11-25")?;
-    client.initialised()?;
-    client.call("fabric_context", json!({"op":"inspect"}))?;
-    client.call("fabric_mail", json!({"op":"send","body":"secret-body"}))?;
-    client.call("secret-unknown-tool", json!({"secret":"secret-value"}))?;
-    client.call("fabric_run", json!({"op":"list","limit":1,"cursor":null}))?;
-    client.eof(
-        &rig,
-        Path::new(env!("CARGO_BIN_EXE_provenant")),
-        &["fabric", "mcp", "--client", "codex"],
-    )?;
     let log = fs::read_to_string(rig.state.join("usage.jsonl"))?;
     assert!(!log.contains("sensitive-argument"));
     assert!(!log.contains("secret"));
@@ -45,7 +33,7 @@ fn cli_and_mcp_usage_records_exclude_arguments_prompts_and_results() -> Result {
         .lines()
         .map(serde_json::from_str::<Value>)
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    assert_eq!(events.len(), 7);
+    assert_eq!(events.len(), 2);
     assert_eq!(events[0]["unit"], "parse");
     assert_eq!(events[0]["exit_code"], code(&out));
     for event in &events {
@@ -65,16 +53,6 @@ fn cli_and_mcp_usage_records_exclude_arguments_prompts_and_results() -> Result {
             ]
             .contains(&key.as_str())
         }));
-    }
-    for (tool, outcome) in [
-        ("fabric_context", "ok"),
-        ("fabric_mail", "error"),
-        ("unknown", "error"),
-        ("fabric_run", "error"),
-    ] {
-        assert!(events.iter().any(|row| row["kind"] == "mcp.tool"
-            && row["unit"] == tool
-            && row["outcome"] == outcome));
     }
     rig.assert_legacy_unchanged()
 }
@@ -122,7 +100,7 @@ fn project_usage_is_captured_before_commands_and_labels_subset_rows() -> Result 
 }
 
 #[test]
-fn usage_report_includes_zero_count_cli_verbs_and_mcp_tools() -> Result {
+fn usage_report_includes_zero_count_cli_verbs() -> Result {
     let rig = TestRig::new()?;
     let report = rig.command(&[
         "telemetry",
@@ -145,11 +123,6 @@ fn usage_report_includes_zero_count_cli_verbs_and_mcp_tools() -> Result {
         units
             .iter()
             .any(|v| v["kind"] == "cli.verb" && v["unit"] == "quota tick")
-    );
-    assert!(
-        units
-            .iter()
-            .any(|v| v["kind"] == "mcp.tool" && v["unit"] == "fabric_context")
     );
     rig.assert_legacy_unchanged()
 }

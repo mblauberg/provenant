@@ -16,6 +16,9 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
     }
     impl AttemptOwner for RoundOwner<'_, '_> {
         type Error = FacadeError;
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
         fn actor(&self) -> String {
             self.bound.actor()
         }
@@ -37,7 +40,8 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
                 .observe_or_start(key, node, route, access, worktree, replay)
         }
     }
-    let fixture = SettlementFixture::settled_fixture("graph-round-one", Some("loop-settlement"))?;
+    // Each round attempt is admitted under its round node's work key.
+    let fixture = SettlementFixture::for_node("loop-settlement", "revise--r1--repair")?;
     let factory = Factory {
         context: Context::open(
             fixture.roots.clone(),
@@ -52,7 +56,6 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
         cwd: fixture.rig.project.clone(),
         assets: fixture.rig.project.clone(),
         host_launch: None,
-        mcp_project: None,
         workers: &FreeWorkers,
     };
     let cancel = CancelToken::new();
@@ -70,24 +73,25 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
         provenant_run::DispatchRequest {
             chair: None,
             operation_id: "graph-round-two".parse()?,
-            concurrency: 1,
             lane_depth: 1,
             parent_attempt: None,
-            tasks: vec![provenant_run::DispatchTask {
-                    source_head: None,
+            task: provenant_run::DispatchTask {
+                source_head: None,
                 context: Some(provenant_records::run::WorkContext {
                     graph_id: Some("loop-settlement".into()),
+                    node_id: Some("revise--r2--repair".into()),
+                    attempt: Some(1),
                     ..Default::default()
                 }),
                 build_heavy: false,
                 title: None,
-                task_id: TaskId::from_bytes([71; 16]),
                 prompt: "reply OK".into(),
                 base: Some(head.to_string()),
                 pinned_base: None,
                 head: None,
                 profile: Default::default(),
-                route: provenant_run::RequestedRoute::Model {extra: Default::default(),
+                route: provenant_run::RequestedRoute::Model {
+                    extra: Default::default(),
                     provider: "fixture".into(),
                     model: "fixture/model".into(),
                     effort: None,
@@ -98,17 +102,16 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
                 deliver: None,
                 worktree: Some(fixture.worktree.clone()),
                 access: Default::default(),
-            }],
+            },
         },
         &fixture.rig.project,
         &call,
     )?;
-    let second_id = fixture.store.pending_attempts(second.run_id, &call)?[0].attempt_id;
+    let second_id = second.attempt_id;
     let second_record = fixture.store.record(second_id, &call)?;
     assert!(second_record.retry_of.is_none());
     publish_success(&fixture.rig, &fixture.store, &second_record, head, &call)?;
     let mut second_holder = fixture.settled.clone();
-    second_holder.run_id = second.run_id;
     second_holder.attempt_id = second_id;
     let document: graph::GraphDocument = serde_json::from_value(
         serde_json::json!({"schema_version":1,"graph_id":"loop-settlement","nodes":[{"id":"revise","kind":"loop","access":"read_only","loop":{"max_rounds":2,"until":"approved","body":[{"id":"repair","prompt":"reply OK","access":"worktree_write","worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}},{"id":"approved","kind":"gate","access":"read_only","depends_on":["repair"],"inputs":[{"node":"repair","outputs":["verdict"]}],"condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}]}}]}),
@@ -121,16 +124,22 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
         &cancel,
         &factory.clock,
     )?;
-    journal.bind(graph::GraphExecution {review_base: None, extra: Default::default(),
-        integration_base: None,
+    journal.bind(graph::GraphExecution {
+        extra: Default::default(),
+        bases: None,
         directory: fixture.rig.project.clone(),
         document: document.clone(),
     })?;
-    let mut bound = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
+    let mut bound = BoundGraphOwner {
+        writer_launch_budget: None,
+        admission_timeout: None,
+        launch_warnings: Vec::new(),
+        repo_facts: Default::default(),
         integration_branch: None,
         factory: &factory,
         integration_base: None,
-        network: None, capability_overrides: Default::default(),
+        network: None,
+        capability_overrides: Default::default(),
         exclude: Vec::new(),
         budget,
         cancel: &cancel,
@@ -223,7 +232,7 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
         return Ok(());
     }
     use provenant_fabric_runtime::{
-        graph::{AskScope, AttemptOwner, loop_ask},
+        graph::{AskFiling, AskLink, AskScope, AttemptOwner, loop_ask},
         inbox::{InboxFilter, InboxInput, InboxResult, InboxService},
     };
     use provenant_records::inbox::{AnswerAction, InteractionChannel, RequestState};
@@ -248,39 +257,55 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
         cwd: fixture.rig.project.clone(),
         assets: fixture.rig.project.clone(),
         host_launch: None,
-        mcp_project: None,
         workers: &FreeWorkers,
     };
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
     let actor = original.inbox.actor.to_string();
     let ask = loop_ask("actor-loop", "revise", 2, "original-session");
-    let scope = AskScope {
+    let filing = AskFiling {
         graph_id: "actor-loop",
         instance_id: "instance-one",
         actor: &actor,
         ask: &ask,
     };
-    let mut owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
+    let mut owner = BoundGraphOwner {
+        writer_launch_budget: None,
+        admission_timeout: None,
+        launch_warnings: Vec::new(),
+        repo_facts: Default::default(),
         integration_branch: None,
         factory: &factory,
         integration_base: None,
-        network: None, capability_overrides: Default::default(),
+        network: None,
+        capability_overrides: Default::default(),
         exclude: Vec::new(),
         budget,
         cancel: &cancel,
         prices: None,
         tick: false,
     };
+    let filed = owner.file_ask(filing)?;
+    let link = AskLink {
+        extra: Default::default(),
+        ask_id: ask.ask_id.clone(),
+        kind: ask.kind,
+        node: ask.node.clone(),
+        rounds: ask.rounds,
+        session: ask.session.clone(),
+        wake_at: ask.wake_at,
+        timeout: ask.timeout,
+        request: filed.request,
+    };
+    let scope = AskScope {
+        actor: &actor,
+        ask: &link,
+    };
     assert_eq!(owner.node_ask(scope)?, None);
-    let service = InboxService::open(
-        &fixture.roots.state,
-        &original,
-        &factory.clock,
-        &cancel,
-    )?;
+    let service = InboxService::open(&fixture.roots.state, &original, &factory.clock, &cancel)?;
     let InboxResult::Listed { items, .. } = service.execute(
-        InboxInput::List {extra: Default::default(),
+        InboxInput::List {
+            extra: Default::default(),
             id: None,
             session: Some(ask.session.clone()),
             state: InboxFilter::All,
@@ -296,7 +321,8 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
     let ask = &items[0];
     assert_eq!(ask.chair_actor, original.inbox.actor);
     service.execute(
-        InboxInput::Answer {extra: Default::default(),
+        InboxInput::Answer {
+            extra: Default::default(),
             id: ask.id,
             action: AnswerAction::Choose,
             option_id: Some("accept".into()),
@@ -312,7 +338,8 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
     assert_eq!(reply.actor, actor);
     owner.close_node_ask(scope)?;
     let InboxResult::Item { item, .. } = service.execute(
-        InboxInput::List {extra: Default::default(),
+        InboxInput::List {
+            extra: Default::default(),
             id: Some(ask.id),
             session: None,
             state: InboxFilter::All,
@@ -324,7 +351,8 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
     else {
         return Err("request".into());
     };
-    assert_eq!(item.request.state, RequestState::Superseded);
+    // Closing leaves an answered request answered.
+    assert_eq!(item.request.state, RequestState::Answered);
     Ok(())
 }
 
@@ -345,7 +373,14 @@ fn loop_corrupt_unrelated_checkpoint_does_not_fail_ordinary_settlement()
         cancel: &cancel,
     };
     let record = fixture.store.record(fixture.settled.attempt_id, &call)?;
-    assert!(!record.operation_id.as_str().starts_with("graph-"));
+    assert!(
+        !fixture
+            .store
+            .attempt_operation(record.attempt_id, &call)?
+            .operation_id
+            .as_str()
+            .starts_with("graph-")
+    );
     {
         let _journal = provenant_fabric_runtime::graph::FileJournal::open(
             &fixture.roots.state,

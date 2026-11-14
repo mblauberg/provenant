@@ -53,7 +53,7 @@ impl Driver<'_> {
                     warnings,
                     omitted,
                     &format!(
-                        "cleanup deadline: pid {} command {:?} remains in attempt process custody; resource {} cannot be released; close the service or wait for it to exit, then run `provenant reconcile --id {}`; writer custody remains fenced",
+                        "cleanup deadline: pid {} command {:?} remains in attempt process custody; resource {} cannot be released; close the service or wait for it to exit, then run `provenant reconcile` for attempt {}; writer custody remains fenced",
                         fact.identity.pid,
                         fact.command.as_deref().unwrap_or("unknown"),
                         resource.display(),
@@ -84,7 +84,7 @@ impl Driver<'_> {
                         warnings,
                         omitted,
                         &format!(
-                            "cleanup deadline: pid {} command {:?} has resource {} open; lock ownership is unproven; close the service or wait for it to exit, then run `provenant reconcile --id {}`",
+                            "cleanup deadline: pid {} command {:?} has resource {} open; lock ownership is unproven; close the service or wait for it to exit, then run `provenant reconcile` for attempt {}",
                             fact.identity.pid,
                             fact.command.as_deref().unwrap_or("unknown"),
                             resource.display(),
@@ -99,7 +99,7 @@ impl Driver<'_> {
                 warnings,
                 omitted,
                 &format!(
-                    "cleanup deadline: resource {} or process census remains unresolved; holder pid and command unavailable; inspect open descriptors and run `provenant reconcile --id {}` after the holder exits; writer custody remains fenced",
+                    "cleanup deadline: resource {} or process census remains unresolved; holder pid and command unavailable; inspect open descriptors and run `provenant reconcile` for attempt {} after the holder exits; writer custody remains fenced",
                     resource.display(),
                     self.reservation.scope.attempt,
                 ),
@@ -107,6 +107,7 @@ impl Driver<'_> {
         }
     }
 
+    #[cfg(target_os = "macos")]
     pub(super) fn holder_reports_no_live_children(&self) -> bool {
         host_allows_escapee_stop(self.holder, &self.holder_context)
     }
@@ -766,6 +767,7 @@ impl Driver<'_> {
 
 /// Unknown host graph state refuses escapee signals. This is intentionally
 /// separate from census: an ordinary history walk must not reopen graph state.
+#[cfg(any(target_os = "macos", test))]
 pub(super) fn host_allows_escapee_stop(holder: Option<&dyn Holder>, context: &[u8]) -> bool {
     holder.is_none_or(|holder| matches!(holder.has_live_children(context), Ok(false)))
 }

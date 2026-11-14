@@ -25,6 +25,7 @@ pub(super) fn list_data_and_accounts(
         "local-preview",
         &[],
         false,
+        None,
         |context, _, _, accounts| {
             Ok((
                 Box::new(provenant_routing::list(
@@ -198,7 +199,7 @@ pub(super) fn edit_config(
 ) -> Result<(), EdgeError> {
     let _ = provenant_config::edit_config::<crate::domains::Domains>(
         roots,
-        &crate::domains::SECTIONS,
+        &crate::config_reads::sections_for("route")?,
         &provenant_config::EditOptions::new("cli"),
         |document, _| {
             edit(document).map_err(|reason| provenant_config::ConfigError::Edit { reason })
@@ -540,7 +541,7 @@ pub(super) fn set_override(
             "invalid schedule: --starts must precede --until, --tz must be an IANA time zone, windows need distinct start and end hours from 0 to 24, and at most 16 windows",
         ));
     }
-    let settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
+    let settings = crate::config_reads::read_for(roots, "route")?
         .domains
         .accounts;
     let account = request
@@ -645,7 +646,7 @@ pub(super) fn clear_override(
     if let (Some(risk), Some(task)) = (&request.risk_tier, &request.task_kind) {
         return clear_model_choice(roots, risk, task, now);
     }
-    let settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
+    let settings = crate::config_reads::read_for(roots, "route")?
         .domains
         .accounts;
     let account = request
@@ -681,18 +682,16 @@ pub(super) fn clear_override(
 
 /// What was repaired or ignored in the persisted model exclusions.
 pub(super) fn exclusion_notes(roots: &Roots) -> Result<Vec<String>, EdgeError> {
-    Ok(
-        provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
-            .domains
-            .routing
-            .model_exclusions
-            .notes()
-            .to_vec(),
-    )
+    Ok(crate::config_reads::read_for(roots, "route")?
+        .domains
+        .routing
+        .model_exclusions
+        .notes()
+        .to_vec())
 }
 /// Every recorded pacing override, then every scheduled model policy rule.
 pub(super) fn list_overrides(roots: &Roots, now: WallTime) -> Result<Vec<OverrideRow>, EdgeError> {
-    let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
+    let config = crate::config_reads::read_for(roots, "route")?
         .domains
         .routing;
     let mut overrides: Vec<OverrideRow> = config
@@ -811,6 +810,7 @@ pub(super) fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<D
             "local-preview",
             &[],
             false,
+            None,
             |context, records, policies, accounts| {
                 let context = &RoutingContext {
                     policy_account_hint: query.account.as_deref(),
@@ -839,8 +839,6 @@ pub(super) fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<D
                     .compaction
                     .window
                     .and_then(|window| model_policy.policy.break_even_turns(window, 15_000, 0));
-                provenant_routing::check_go_allowance(&model, context.config, context.catalogue)
-                    .map_err(EdgeError::GoAllowance)?;
                 let quota = records
                     .iter()
                     .find(|r| {
@@ -852,7 +850,10 @@ pub(super) fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<D
                                         .is_some_and(|spec| spec.allowance_prefix.is_some())
                                     && snapshot_governs(
                                         &route.adapter,
-                                        &r.account.account_key,
+                                        r.snapshot
+                                            .as_ref()
+                                            .and_then(|s| s.details.as_ref())
+                                            .and_then(|d| d.plan.as_deref()),
                                         &model,
                                     )))
                     })
@@ -915,10 +916,7 @@ pub(super) fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<D
                         availability_ref: "preview".into(),
                         expires_unix_seconds: now.unix_seconds().saturating_add(60),
                     };
-                    let result = admission.check_with_partial_headroom(
-                        &candidate,
-                        context.config.allow_unknown_partial_headroom,
-                    );
+                    let result = admission.check(&candidate);
                     match &result {
                         Ok(()) => possible = true,
                         Err(error) => refusals.push(format!("{}: {error}", row.account_key)),

@@ -17,7 +17,7 @@ pub(crate) struct BinaryRunOwner<'a> {
     /// Replay submissions under this actor instead of the process's own.
     pub(crate) actor: Option<provenant_core::ActorId>,
     /// Only the direct chair entry point supplies a verified origin.
-    pub(crate) chair: Option<provenant_run::ChairBinding>,
+    pub(crate) chair: Option<provenant_records::custody::Chair>,
 }
 /// Retain admitted preparation records when the CLI projects a launch refusal.
 /// Callers still classify the durable records with `BinaryRunOwner::receipt`.
@@ -26,10 +26,10 @@ pub(crate) fn recover_accepted_launch(
     operation_id: &provenant_core::OperationId,
     call: &provenant_run::Request<'_>,
     submitted: Result<
-        (provenant_run::RunRecord, Vec<provenant_run::Started>),
+        (provenant_run::AttemptRecord, Vec<provenant_run::Started>),
         provenant_cli::run::Fail,
     >,
-) -> Result<(provenant_run::RunRecord, Vec<provenant_run::Started>), provenant_cli::run::Fail> {
+) -> Result<(provenant_run::AttemptRecord, Vec<provenant_run::Started>), provenant_cli::run::Fail> {
     match submitted {
         // The CLI reports an all-refused launch batch as an error even
         // after admitting its terminal preparation records. The graph
@@ -44,7 +44,8 @@ pub(crate) fn recover_accepted_launch(
                             | provenant_run::OperationState::Terminal
                     ) =>
                 {
-                    Ok((session.store.run(operation.run_id, call)?, Vec::new()))
+                    let admitted = session.store.operation_attempt(operation_id, call)?;
+                    Ok((session.store.record(admitted, call)?, Vec::new()))
                 }
                 _ => Err(fail),
             }
@@ -86,6 +87,23 @@ pub(crate) fn events_within<T: serde::Serialize>(
     Ok(events.len())
 }
 pub(crate) fn run_error(error: provenant_run::RunError) -> FacadeError {
+    // Preserve resource contention through the public error boundary; an
+    // immediate repository probe must schedule a retry, not fail the writer.
+    if matches!(
+        &error,
+        provenant_run::RunError::Filesystem(provenant_os::fs::FsError::LockTimeout { .. })
+    ) {
+        return FacadeError::Busy;
+    }
+    if matches!(
+        &error,
+        provenant_run::RunError::Writer(
+            provenant_confinement::worktrees::WorktreeError::LockBusy
+                | provenant_confinement::worktrees::WorktreeError::RegistryLockTimeout
+        )
+    ) {
+        return FacadeError::WriterLockBusy;
+    }
     if let provenant_run::RunError::Writer(writer) = &error
         && let Some((operation, lock_failure)) = writer.mutation_failure()
     {
@@ -192,11 +210,8 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
                     reason: "disk observation failed".into(),
                 };
             }
-            Some(DiagnosticFact::PromptLimit { task_index, limit }) => {
-                let field = task_index.map_or_else(
-                    || "tasks".to_owned(),
-                    |index| format!("tasks[{index}].prompt"),
-                );
+            Some(DiagnosticFact::PromptLimit { limit }) => {
+                let field = "prompt".to_owned();
                 return usize::try_from(*limit).map_or(FacadeError::InvalidInput { detail: None }, |limit| {
                     FacadeError::invalid(provenant_fabric_runtime::coordination::facade::InvalidInputDetail::FieldTooLarge { field, limit })
                 });
@@ -291,7 +306,7 @@ pub(crate) fn dispatch_refused(fail: provenant_cli::run::Fail) -> FacadeError {
         },
     }
 }
-/// Translate a typed run category at the MCP edge. `ErrorKind` is the one
+/// Translate a typed run category at the command edge. `ErrorKind` is the one
 /// categorisation of run errors; this only renders it.
 pub(crate) fn facade_error_for_kind(kind: provenant_run::ErrorKind) -> FacadeError {
     use provenant_run::ErrorKind as E;
@@ -514,7 +529,7 @@ impl BinaryRunOwner<'_> {
     /// [`admitter_floors`].
     fn admitter_floors_launch(
         &self,
-        tasks: &[provenant_fabric_runtime::coordination::facade::SubmittedTask],
+        task: &provenant_fabric_runtime::coordination::facade::SubmittedTask,
         attempt: Option<&provenant_fabric_runtime::graph::AttemptSpec>,
         cancel: &CancelToken,
     ) -> bool {
@@ -522,9 +537,10 @@ impl BinaryRunOwner<'_> {
             return false;
         };
         let ctx = &self.factory.context;
-        let graph = tasks
-            .iter()
-            .find_map(|task| task.context.as_ref()?.graph_id.as_deref());
+        let graph = task
+            .context
+            .as_ref()
+            .and_then(|context| context.graph_id.as_deref());
         let mut store = None;
         admitter_floors(
             admitter,
@@ -542,7 +558,7 @@ impl BinaryRunOwner<'_> {
                 store
                     .get_or_insert_with(|| self.read_session(cancel).ok())
                     .as_ref()
-                    .is_none_or(|session| {
+                    .is_some_and(|session| {
                         session
                             .store
                             .attempt_floors_children(id, &self.call(cancel))
@@ -599,12 +615,12 @@ impl BinaryRunOwner<'_> {
         })
         .map_err(fail_error)
     }
-    /// The attempts of a run this owner just accepted or continued.
+    /// The attempt this owner just accepted or continued.
     pub(crate) fn receipt(
         &self,
         session: &provenant_cli::run::Session,
         operation_id: provenant_core::OperationId,
-        run: &provenant_run::RunRecord,
+        attempt: &provenant_run::AttemptRecord,
         started: &[provenant_run::Started],
         call: &provenant_run::Request<'_>,
     ) -> Result<SubmissionReceipt, FacadeError> {
@@ -622,11 +638,7 @@ impl BinaryRunOwner<'_> {
                 .service()
                 .lanes(
                     &provenant_run::LaneQuery {
-                        targets: vec![provenant_run::LaneTarget {
-                            run: run.run_id,
-                            task: None,
-                            attempt: None,
-                        }],
+                        targets: vec![attempt.attempt_id],
                         all: true,
                         limit: 100,
                         after,
@@ -863,22 +875,6 @@ impl BinaryRunOwner<'_> {
         )
         .map_err(|error| scope_io(error, "submit"))
     }
-    fn retained_operation(
-        &self,
-        operation_id: &provenant_core::OperationId,
-        cancel: &CancelToken,
-    ) -> Result<bool, FacadeError> {
-        let session = match self.read_session(cancel) {
-            Ok(session) => session,
-            Err(FacadeError::NotFound) => return Ok(false),
-            Err(error) => return Err(error),
-        };
-        Ok(session
-            .store
-            .operation(operation_id, &self.call(cancel))
-            .map_err(run_error)?
-            .is_some_and(|operation| operation.state != provenant_run::OperationState::Prepared))
-    }
 
     /// Read an accepted graph operation in the authenticated owner's namespace.
     pub(crate) fn retained_graph_receipt(
@@ -906,30 +902,23 @@ impl BinaryRunOwner<'_> {
         else {
             return Ok(None);
         };
-        let request = session
+        let admitted = session
             .store
-            .request(operation.run_id, &call)
+            .operation_attempt(&operation.operation_id, &call)
             .map_err(run_error)?;
-        if request.tasks.is_empty()
-            || request.tasks.iter().any(|task| {
-                task.context.as_ref().is_none_or(|context| {
-                    !context.graph_template_launch
-                        || context.graph_id.as_ref().is_none_or(|id| id.is_empty())
-                        || context.node_id.as_ref().is_none_or(|id| id.is_empty())
-                })
-            })
-        {
+        let request = session.store.request(admitted, &call).map_err(run_error)?;
+        if request.task.context.as_ref().is_none_or(|context| {
+            !context.graph_template_launch
+                || context.graph_id.as_ref().is_none_or(|id| id.is_empty())
+                || context.node_id.as_ref().is_none_or(|id| id.is_empty())
+        }) {
             return Ok(None);
         }
         let page = session
             .service()
             .lanes(
                 &provenant_run::LaneQuery {
-                    targets: vec![provenant_run::LaneTarget {
-                        run: operation.run_id,
-                        task: None,
-                        attempt: None,
-                    }],
+                    targets: vec![admitted],
                     all: true,
                     limit: 100,
                     after: 0,
@@ -959,36 +948,6 @@ impl BinaryRunOwner<'_> {
         }))
     }
 
-    fn guard_graph_admission(
-        &self,
-        operation_id: &provenant_core::OperationId,
-        host: Option<provenant_core::HostId>,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<(), FacadeError> {
-        let refusal =
-            match crate::install::cutover_admission_guard(&self.factory.context.roots.state) {
-                Ok(()) => return Ok(()),
-                Err(error) => error,
-            };
-        let retained = if let Some(host) =
-            host.filter(|host| *host != self.factory.context.identity.host)
-        {
-            let actor = self
-                .actor
-                .unwrap_or(self.factory.context.identity.inbox.actor);
-            matches!(self.peer(host, PeerAction::Receipt {
-                extra: [("graph_launch_actor".into(), serde_json::json!(actor))].into(),
-                operation_id: operation_id.clone(),
-            }, budget, cancel), Ok(PeerResult::Submitted { data, .. })
-                if data.operation_id == *operation_id && !data.targets.is_empty()
-                    && data.worktree.is_none() && data.targets.iter().all(|target| target.host == Some(host)))
-        } else {
-            self.retained_operation(operation_id, cancel)?
-        };
-        if retained { Ok(()) } else { Err(refusal) }
-    }
-
     #[allow(clippy::disallowed_methods)] // Translate the caller's remaining wait to the launcher's deadline.
     fn launch_graph_attempt(
         &mut self,
@@ -997,27 +956,27 @@ impl BinaryRunOwner<'_> {
         cancel: &CancelToken,
         policy: SubmissionPolicy<'_>,
     ) -> Result<SubmissionReceipt, FacadeError> {
-        use provenant_cli::run::{Submission, Submitted, derived_task, worktree_access};
+        use provenant_cli::run::{Submission, Submitted, worktree_access};
         let SubmissionPolicy {
             facts,
             access,
             settlement_retry_limit,
-            attempt,
+            mut attempt,
             refusal,
         } = policy;
         let SubmitInput::Submit {
             operation_id,
-            tasks,
-            concurrency,
+            origin_work_key,
+            task,
             knobs,
             host,
             ..
         } = input;
-        if tasks.iter().any(|task| {
-            task.context
-                .as_ref()
-                .is_none_or(|context| context.graph_id.is_none() || context.node_id.is_none())
-        }) {
+        if task
+            .context
+            .as_ref()
+            .is_none_or(|context| context.graph_id.is_none() || context.node_id.is_none())
+        {
             let invalid =
                 || FacadeError::invalid(InvalidInputDetail::Field("graph context".into()));
             let session = match self.read_session(cancel) {
@@ -1038,14 +997,32 @@ impl BinaryRunOwner<'_> {
             // An accepted pre-cutover operation may have no context. The sealed
             // request digest below still rejects any change to its launch inputs.
         }
-        let floored = self.admitter_floors_launch(&tasks, attempt.as_ref(), cancel);
+        // Replays use sealed admission facts, never a fresh checkpoint lookup.
+        let floored = !attempt.as_ref().is_some_and(|spec| spec.policy_sealed)
+            && self.admitter_floors_launch(&task, attempt.as_ref(), cancel);
+        let spec = attempt.get_or_insert_with(Default::default);
+        spec.parent_sandboxed |= floored;
+        let directory = task
+            .worktree
+            .as_deref()
+            .map(Path::new)
+            .or_else(|| spec.directory.as_deref().map(Path::new))
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.factory.cwd.clone());
+        provenant_cli::run::seal_launch_policy(
+            spec,
+            &directory,
+            &task.prompt,
+            &access,
+            task.base.as_deref(),
+            task.head.as_deref(),
+        )
+        .map_err(fail_error)?;
         if let Some(host) = host.filter(|host| *host != self.factory.context.identity.host) {
             if !self.allow_remote
-                || tasks.iter().any(|task| {
-                    task.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
-                        || task.worktree.is_some()
-                        || task.new_worktree.is_some()
-                })
+                || task.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
+                || task.worktree.is_some()
+                || task.new_worktree.is_some()
             {
                 return Err(FacadeError::ConfinementRefused { resource: None });
             }
@@ -1060,7 +1037,6 @@ impl BinaryRunOwner<'_> {
             {
                 return Err(FacadeError::ConfinementRefused { resource: None });
             }
-            self.guard_graph_admission(&operation_id, Some(host), budget, cancel)?;
             let mut attempt = attempt.unwrap_or_default();
             attempt.host = None;
             attempt.parent_sandboxed |= floored;
@@ -1084,14 +1060,14 @@ impl BinaryRunOwner<'_> {
                 "graph_network".into(),
                 serde_json::to_value(access.network).map_err(|_| FacadeError::StateCorrupt)?,
             );
-            let input = SubmitInput::Submit {
+            let input = Box::new(SubmitInput::Submit {
                 extra: Default::default(),
+                origin_work_key: Some(origin_work_key.ok_or(FacadeError::StateCorrupt)?),
                 operation_id: operation_id.clone(),
-                tasks,
-                concurrency,
+                task,
                 knobs,
                 host: None,
-            };
+            });
             return match self.peer(host, PeerAction::Submit { extra, input }, budget, cancel)? {
                 PeerResult::Submitted { data, .. }
                     if data.operation_id == operation_id
@@ -1106,22 +1082,18 @@ impl BinaryRunOwner<'_> {
         }
         // Graph worktree and placement are resolved before the sealed attempt reaches this owner.
         if host.is_some_and(|host| host != self.factory.context.identity.host)
-            || tasks.iter().any(|task| task.new_worktree.is_some())
+            || task.new_worktree.is_some()
         {
             return Err(FacadeError::invalid(InvalidInputDetail::Field(
                 "attempt placement".into(),
             )));
         }
-        self.guard_graph_admission(&operation_id, host, budget, cancel)?;
-        let launch_directory = tasks
-            .iter()
-            .find_map(|task| {
-                task.worktree
-                    .as_deref()
-                    .map(Path::new)
-                    .filter(|path| path.is_absolute())
-                    .map(Path::to_path_buf)
-            })
+        let launch_directory = task
+            .worktree
+            .as_deref()
+            .map(Path::new)
+            .filter(|path| path.is_absolute())
+            .map(Path::to_path_buf)
             .or_else(|| {
                 attempt
                     .as_ref()
@@ -1129,15 +1101,14 @@ impl BinaryRunOwner<'_> {
                     .map(PathBuf::from)
             })
             .unwrap_or_else(|| self.factory.cwd.clone());
-        let mut submitted = Vec::new();
-        for (index, task) in tasks.into_iter().enumerate() {
+        let submitted = {
             worktree_access(
                 task.access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite,
                 false,
                 task.worktree.as_deref().map(Path::new),
             )
             .map_err(fail_error)?;
-            submitted.push(Submitted {
+            Submitted {
                 attempt: {
                     let mut spec = attempt.clone().unwrap_or_else(|| {
                         provenant_fabric_runtime::graph::AttemptSpec {
@@ -1156,7 +1127,6 @@ impl BinaryRunOwner<'_> {
                 pinned_base: None,
                 head: task.head,
                 source_head: task.source_head,
-                task_id: derived_task(&operation_id, index).map_err(fail_error)?,
                 prompt: task.prompt,
                 title: task.title,
                 route: task.route,
@@ -1165,8 +1135,8 @@ impl BinaryRunOwner<'_> {
                 deliver: task.deliver,
                 worktree: task.worktree.map(PathBuf::from),
                 access: access.clone(),
-            });
-        }
+            }
+        };
         let session = self.session_with_facts(cancel, facts)?;
         let call = self.call(cancel);
         let mut host_launch = match &self.factory.host_launch {
@@ -1192,8 +1162,7 @@ impl BinaryRunOwner<'_> {
                 Submission {
                     chair: self.chair.clone(),
                     operation_id: operation_id.clone(),
-                    tasks: submitted,
-                    concurrency: concurrency.map(u64::from),
+                    task: submitted,
                     knobs,
                 },
                 &call,
@@ -1223,8 +1192,8 @@ impl BinaryRunOwner<'_> {
                 "refusal notice could not be delivered; inspect the chair binding and notice configuration, then run `provenant reconcile`"
             );
         }
-        let (run, started) = submission?;
-        self.receipt(&session, operation_id, &run, &started, &call)
+        let (admitted, started) = submission?;
+        self.receipt(&session, operation_id, &admitted, &started, &call)
     }
     pub(crate) fn output(
         &mut self,
@@ -1497,119 +1466,210 @@ impl BinaryRunOwner<'_> {
                 if !self.allow_remote && !remote_batches.is_empty() {
                     return Err(FacadeError::ConfinementRefused { resource: None });
                 }
+                let wait_config =
+                    provenant_cli::config_reads::read_for(&self.factory.context.roots, "wait")?;
+                let interval =
+                    std::time::Duration::from_millis(wait_config.domains.wait.local_interval_ms);
                 let local_session = if local_indices.is_empty() {
                     None
                 } else {
                     Some(self.read_session(cancel)?)
                 };
                 let local_call = self.call(cancel);
+                // Subscribe once before the first target read. A settlement
+                // during registration or the first read remains observable.
+                let event_paths = local_session
+                    .as_ref()
+                    .map(|session| session.store.observation_paths())
+                    .unwrap_or_default();
+                let mut observation =
+                    crate::status_wait::LocalObservation::subscribe(&event_paths, interval);
+                let remote_pending = !remote_batches.is_empty();
+                let observation_extra = |observation: &crate::status_wait::LocalObservation| {
+                    let mut extra = provenant_records::ExtraFields::default();
+                    extra.insert(
+                        "observation".into(),
+                        serde_json::Value::String(observation.report(remote_pending)),
+                    );
+                    extra
+                };
+                // SQLite events can precede commit visibility and the shared
+                // hint is lossy under contention; deadline results get one final
+                // committed read from the owning store.
+                let refresh_local = |attempts: &mut [provenant_records::run::AttemptRecord]| {
+                    if let Some(session) = &local_session {
+                        for index in &local_indices {
+                            attempts[*index] = session
+                                .store
+                                .record(targets[*index].attempt, &local_call)
+                                .map_err(run_error)?;
+                        }
+                    }
+                    Ok::<(), FacadeError>(())
+                };
                 let mut last_attempts = None;
-                let mut backoff_micros = 50_000_u64;
+                let mut observed_attempts: Vec<Option<provenant_records::run::AttemptRecord>> =
+                    std::iter::repeat_with(|| None)
+                        .take(targets.len())
+                        .collect();
+                let mut read_local = !local_indices.is_empty();
+                let mut read_remote = !remote_batches.is_empty();
+                let interval_micros = interval.as_micros() as u64;
+                let mut next_remote_poll = self
+                    .factory
+                    .clock
+                    .mono_now()
+                    .checked_add(provenant_core::DurationMicros::from_micros(interval_micros))
+                    .map_err(FacadeError::Time)?;
                 loop {
                     if cancel.is_cancelled() {
                         return Err(FacadeError::Cancelled);
                     }
-                    if budget.remaining(self.factory.clock.mono_now()).as_micros() == 0 {
+                    if budget.remaining(self.factory.clock.mono_now()).as_micros() == 0
+                        && !(budget.is_nonblocking() && last_attempts.is_none())
+                    {
                         if let Some(attempts) = last_attempts {
-                            return Ok(RunResult::Wait {
-                                extra: Default::default(),
+                            return provenant_fabric_runtime::runs::finish_wait_snapshot(
                                 condition,
                                 attempts,
-                                satisfied: false,
-                                timed_out: true,
-                            });
+                                true,
+                                observation_extra(&observation),
+                                &refresh_local,
+                            );
                         }
                         return Err(FacadeError::Timeout);
                     }
-                    let mut attempts: Vec<Option<provenant_records::run::AttemptRecord>> =
-                        std::iter::repeat_with(|| None)
-                            .take(targets.len())
-                            .collect();
-                    if let Some(session) = &local_session {
+                    if read_local {
+                        let Some(session) = &local_session else {
+                            return Err(FacadeError::StateCorrupt);
+                        };
                         for index in &local_indices {
-                            attempts[*index] = Some(
+                            observed_attempts[*index] = Some(
                                 session
                                     .store
                                     .record(targets[*index].attempt, &local_call)
                                     .map_err(run_error)?,
                             );
                         }
+                        read_local = false;
                     }
-                    for (host, batch) in &remote_batches {
-                        let requested = batch
-                            .iter()
-                            .map(|(_, target)| target.clone())
-                            .collect::<Vec<_>>();
-                        let result = match self.peer(
-                            *host,
-                            PeerAction::RunStatuses {
-                                extra: Default::default(),
-                                targets: requested,
-                            },
-                            budget,
-                            cancel,
-                        ) {
-                            Ok(result) => result,
-                            // A poll cut short by the wait's own deadline is a
-                            // timed-out wait, not an unavailable peer.
-                            Err(error) => {
-                                let expired =
-                                    budget.remaining(self.factory.clock.mono_now()).as_micros()
-                                        == 0;
-                                return match last_attempts {
-                                    Some(attempts) if expired => Ok(RunResult::Wait {
-                                        extra: Default::default(),
-                                        condition,
-                                        attempts,
-                                        satisfied: false,
-                                        timed_out: true,
-                                    }),
-                                    _ => Err(error),
-                                };
-                            }
-                        };
-                        let PeerResult::RunStatuses { data: records, .. } = result else {
-                            return Err(FacadeError::StateCorrupt);
-                        };
-                        if records.len() != batch.len() {
-                            return Err(FacadeError::StateCorrupt);
-                        }
-                        for ((index, target), record) in batch.iter().zip(records) {
-                            if record.attempt_id != target.attempt {
+                    if read_remote {
+                        for (host, batch) in &remote_batches {
+                            let requested = batch
+                                .iter()
+                                .map(|(_, target)| target.clone())
+                                .collect::<Vec<_>>();
+                            let result = match self.peer(
+                                *host,
+                                PeerAction::RunStatuses {
+                                    extra: Default::default(),
+                                    targets: requested,
+                                },
+                                budget,
+                                cancel,
+                            ) {
+                                Ok(result) => result,
+                                // A poll cut short by the wait's own deadline is a
+                                // timed-out wait, not an unavailable peer.
+                                Err(error) => {
+                                    let expired =
+                                        budget.remaining(self.factory.clock.mono_now()).as_micros()
+                                            == 0;
+                                    return match last_attempts {
+                                        Some(attempts) if expired => {
+                                            provenant_fabric_runtime::runs::finish_wait_snapshot(
+                                                condition,
+                                                attempts,
+                                                true,
+                                                observation_extra(&observation),
+                                                &refresh_local,
+                                            )
+                                        }
+                                        None if expired => Err(FacadeError::Timeout),
+                                        _ => Err(error),
+                                    };
+                                }
+                            };
+                            let PeerResult::RunStatuses { data: records, .. } = result else {
+                                return Err(FacadeError::StateCorrupt);
+                            };
+                            if records.len() != batch.len() {
                                 return Err(FacadeError::StateCorrupt);
                             }
-                            attempts[*index] = Some(record);
+                            for ((index, target), record) in batch.iter().zip(records) {
+                                if record.attempt_id != target.attempt {
+                                    return Err(FacadeError::StateCorrupt);
+                                }
+                                observed_attempts[*index] = Some(record);
+                            }
                         }
+                        read_remote = false;
+                        next_remote_poll = self
+                            .factory
+                            .clock
+                            .mono_now()
+                            .checked_add(provenant_core::DurationMicros::from_micros(
+                                interval_micros,
+                            ))
+                            .map_err(FacadeError::Time)?;
                     }
-                    let attempts = attempts
-                        .into_iter()
+                    let attempts = observed_attempts
+                        .iter()
+                        .cloned()
                         .collect::<Option<Vec<_>>>()
                         .ok_or(FacadeError::StateCorrupt)?;
                     let satisfied = provenant_fabric_runtime::runs::wait_satisfied(
                         condition,
-                        attempts.iter().map(|r| &r.state),
+                        attempts.iter().map(|record| &record.state),
                     );
                     let timed_out =
                         budget.remaining(self.factory.clock.mono_now()).as_micros() == 0;
                     if satisfied || timed_out {
-                        return Ok(RunResult::Wait {
-                            extra: Default::default(),
+                        return provenant_fabric_runtime::runs::finish_wait_snapshot(
                             condition,
                             attempts,
-                            satisfied,
-                            timed_out: !satisfied && timed_out,
-                        });
+                            timed_out,
+                            observation_extra(&observation),
+                            &refresh_local,
+                        );
                     }
                     last_attempts = Some(attempts);
-                    provenant_core::Pause::wait(
-                        &self.factory.backoff,
-                        provenant_core::DurationMicros::from_micros(
-                            backoff_micros
-                                .min(budget.remaining(self.factory.clock.mono_now()).as_micros()),
-                        ),
-                        cancel,
+
+                    let remaining = std::time::Duration::from_micros(
+                        budget.remaining(self.factory.clock.mono_now()).as_micros(),
                     );
-                    backoff_micros = backoff_micros.saturating_mul(2).min(500_000);
+                    let until_remote = if remote_batches.is_empty() {
+                        remaining
+                    } else {
+                        std::time::Duration::from_micros(
+                            next_remote_poll
+                                .as_micros()
+                                .saturating_sub(self.factory.clock.mono_now().as_micros()),
+                        )
+                    };
+                    let maximum = remaining.min(until_remote);
+                    let wake = observation
+                        .wait(maximum, cancel, &self.factory.clock)
+                        .map_err(FacadeError::Time)?;
+                    match wake {
+                        crate::status_wait::ObservationWake::Changed
+                        | crate::status_wait::ObservationWake::Woken => {
+                            read_local = !local_indices.is_empty();
+                        }
+                        crate::status_wait::ObservationWake::PacedFallback => {
+                            read_local = !local_indices.is_empty();
+                            read_remote = !remote_batches.is_empty();
+                        }
+                        crate::status_wait::ObservationWake::NativeTimeout => {}
+                        crate::status_wait::ObservationWake::Cancelled => {
+                            return Err(FacadeError::Cancelled);
+                        }
+                    }
+                    if !remote_batches.is_empty()
+                        && self.factory.clock.mono_now() >= next_remote_poll
+                    {
+                        read_remote = true;
+                    }
                 }
             }
             RunInput::Cancel {
@@ -1648,9 +1708,6 @@ impl BinaryRunOwner<'_> {
                 let call = self.call(cancel);
                 let reason = format!("cancelled by Fabric operation {operation_id}");
                 let service = provenant_run::Service::new(&store);
-                service
-                    .bind_cancel(operation_id, &target.attempt.to_string(), &call)
-                    .map_err(run_error)?;
                 let receipt = service
                     .cancel(target.attempt, &reason, &call)
                     .map_err(run_error)?;
@@ -1729,11 +1786,16 @@ impl BinaryRunOwner<'_> {
                 } else {
                     None
                 };
+                let items = page
+                    .lanes
+                    .into_iter()
+                    .map(provenant_fabric_runtime::runs::AttemptSummary::from)
+                    .collect();
                 Ok(RunResult::List {
                     extra: Default::default(),
                     page: AttemptPage {
                         extra: Default::default(),
-                        items: page.lanes.into_iter().map(Into::into).collect(),
+                        items,
                         next_after,
                         truncated,
                     },
@@ -1807,9 +1869,9 @@ fn require_graph_context(
 }
 
 /// Whether the lane of `admitter`, the node whose lane or plan admitted the
-/// node being launched, was sandboxed by distrust, so the node is sandboxed
-/// too. An unreadable graph, an admitter without recorded attempts, an attempt
-/// on another host and a record that cannot be read all floor.
+/// node being launched, has sealed user-enabled sandbox evidence. Missing
+/// evidence does not invent an enabled sandbox; peers carry the host-sealed
+/// parent flag alongside the launch.
 pub(crate) fn admitter_floors(
     admitter: &str,
     checkpoint: impl FnOnce() -> Option<provenant_fabric_runtime::graph::GraphCheckpoint>,
@@ -1817,7 +1879,7 @@ pub(crate) fn admitter_floors(
     floors: &mut dyn FnMut(provenant_core::AttemptId) -> bool,
 ) -> bool {
     let Some(checkpoint) = checkpoint() else {
-        return true;
+        return false;
     };
     let mut references = checkpoint
         .nodes
@@ -1827,7 +1889,7 @@ pub(crate) fn admitter_floors(
         .filter_map(|row| row.attempt_ref.as_deref())
         .peekable();
     if references.peek().is_none() {
-        return true;
+        return false;
     }
     references.any(|reference| {
         match reference
@@ -1836,7 +1898,7 @@ pub(crate) fn admitter_floors(
             .and_then(|(_, id)| id.parse::<provenant_core::AttemptId>().ok())
         {
             Some(id) => floors(id),
-            None => true,
+            None => false,
         }
     })
 }
@@ -1849,7 +1911,7 @@ pub(crate) fn admitter_floors(
 mod graph_control_tests {
     use super::*;
     #[test]
-    fn nodes_admitted_by_a_distrusted_lane_are_sandboxed() {
+    fn admission_requires_user_enabled_sandbox_evidence() {
         let open = provenant_core::AttemptId::from_bytes([1; 16]);
         let closed = provenant_core::AttemptId::from_bytes([2; 16]);
         let checkpoint = |reference: String| {
@@ -1859,7 +1921,7 @@ mod graph_control_tests {
                     "nodes":[
                         {"id":"composite","state":"running","attempts":[]},
                         {"id":"lane","state":"running","attempts":[{
-                            "key":{"graph_id":"g","node_id":"lane","route_index":0},
+                            "key":{"graph_id":"g","node_id":"lane","route_index":0, "attempt": 1},
                             "launched":true,"route":{"alias":"junior"},"state":"running",
                             "attempt_ref":reference,"launch_actor":"fixture"}]},
                     ]
@@ -1881,16 +1943,16 @@ mod graph_control_tests {
             "host",
             &mut lookup
         ));
-        // Another host's attempt, an unreadable graph and an admitter without
-        // attempts all fail closed.
-        assert!(admitter_floors(
+        // Missing evidence cannot turn optional sandboxing on. A peer's
+        // host-sealed floor travels on AttemptSpec instead.
+        assert!(!admitter_floors(
             "lane",
             checkpoint(format!("peer/{open}")),
             "host",
             &mut lookup
         ));
-        assert!(admitter_floors("lane", || None, "host", &mut lookup));
-        assert!(admitter_floors(
+        assert!(!admitter_floors("lane", || None, "host", &mut lookup));
+        assert!(!admitter_floors(
             "composite",
             checkpoint(local(open)),
             "host",

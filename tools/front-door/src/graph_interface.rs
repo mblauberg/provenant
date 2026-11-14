@@ -1,5 +1,6 @@
 //! CLI documents for the shared graph service.
 use crate::fabric;
+use provenant_cli::brief::{BriefSource, read_brief, select_brief_source};
 use provenant_cli::{Edit, Globals, GraphRunArgs, Templates};
 use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::{CancelToken, Clock, WaitBudget};
@@ -22,7 +23,7 @@ fn response_outcome(command: &str, data: &Value) -> Outcome {
     if data["timed_out"] == true {
         return Outcome::Waiting;
     }
-    if command == "run" {
+    if command == "run" && data["named"]["replayed"] != true {
         match data["status"].as_str() {
             Some("complete") if data["outcome"] == "failed" => return Outcome::Failed,
             Some("cancelled") => return Outcome::Cancelled,
@@ -56,22 +57,52 @@ fn cli_input_error(detail: &str) -> Box<provenant_records::diagnostic::Diagnosti
     )
 }
 
-fn file_input_error(path: &Path) -> Box<provenant_records::diagnostic::Diagnostic> {
-    file_error(path, "input could not be read")
+fn config_cause<'a>(
+    mut error: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a provenant_config::ConfigError> {
+    loop {
+        if let Some(config) = error.downcast_ref::<provenant_config::ConfigError>() {
+            return Some(config);
+        }
+        if let Some(provenant_cli::fabric::EdgeError::Config(config)) =
+            error.downcast_ref::<provenant_cli::fabric::EdgeError>()
+        {
+            return Some(config);
+        }
+        error = error.source()?;
+    }
 }
 
-fn file_error(path: &Path, reason: &str) -> Box<provenant_records::diagnostic::Diagnostic> {
+fn config_repair(globals: &Globals) -> String {
+    let mut command = String::from("provenant");
+    if let Some(state) = &globals.state_dir {
+        let path = state.to_string_lossy().replace('\'', "'\\''");
+        command.push_str(&format!(" --state-dir '{path}'"));
+    }
+    command.push_str(" check config --json");
+    command
+}
+
+fn file_input_error(path: &Path) -> Box<provenant_records::diagnostic::Diagnostic> {
+    file_error("--file", path, "input could not be read")
+}
+
+fn file_error(
+    flag: &str,
+    path: &Path,
+    reason: &str,
+) -> Box<provenant_records::diagnostic::Diagnostic> {
     let path = provenant_records::diagnostic::safe_path(
         path,
         provenant_records::diagnostic::Destination::Local,
     );
     cli_input_error(&format!(
-        "--file {}: {reason}",
+        "{flag} {}: {reason}",
         path.as_deref().unwrap_or("input"),
     ))
 }
 
-/// `GRAPH STATE model=MODEL worktree=WORKTREE`, naming the handle that
+/// `NAME STATE MODEL WORKTREE`, naming the handle that
 /// `status` and `output` accept.
 fn run_headline(
     checkpoint: &Value,
@@ -131,45 +162,13 @@ fn run_headline(
         .or_else(|| input["worktree"].as_str().map(str::to_owned))
         .or_else(|| new_worktree(&input["branch"]))
         .unwrap_or_else(|| "-".into());
-    format!("{graph} {state} model={model} worktree={worktree}")
+    format!("{graph} {state} {model} {worktree}")
 }
 
-/// The full `GRAPH/NODE/ATTEMPT` ID of each node's newest launched attempt.
-fn lane_ids(checkpoint: &Value) -> Vec<String> {
-    let graph = checkpoint["graph_id"].as_str().unwrap_or_default();
-    checkpoint["nodes"]
-        .as_array()
-        .map_or(&[][..], Vec::as_slice)
-        .iter()
-        .filter_map(|node| {
-            let attempt = node["attempts"]
-                .as_array()?
-                .iter()
-                .rev()
-                .find_map(|attempt| attempt["attempt_ref"].as_str())?;
-            Some(format!(
-                "{graph}/{}/{}",
-                node["id"].as_str()?,
-                attempt.rsplit('/').next()?
-            ))
-        })
-        .collect()
-}
-
-/// One line per launched lane, within the receipt's row budget.
-fn lane_lines(checkpoint: &Value) -> String {
-    let ids = lane_ids(checkpoint);
-    let mut text: String = ids
-        .iter()
-        .take(provenant_cli::limits::SUMMARY_ROWS)
-        .map(|id| format!("lane: {id}\n"))
-        .collect();
-    if ids.len() > provenant_cli::limits::SUMMARY_ROWS {
-        text += &format!(
-            "{} more lanes in --json\n",
-            ids.len() - provenant_cli::limits::SUMMARY_ROWS
-        );
-    }
+/// One line per node the owner refused before admission, within the receipt's
+/// row budget. A run that launched cleanly prints none.
+fn refusal_lines(checkpoint: &Value) -> String {
+    let mut text = String::new();
     let refused: Vec<String> = checkpoint["nodes"]
         .as_array()
         .map_or(&[][..], Vec::as_slice)
@@ -193,7 +192,7 @@ fn lane_lines(checkpoint: &Value) -> String {
     }
     if refused.len() > provenant_cli::limits::SUMMARY_ROWS {
         text += &format!(
-            "{} more refused lanes in --json\n",
+            "{} more refused nodes in --json\n",
             refused.len() - provenant_cli::limits::SUMMARY_ROWS
         );
     }
@@ -201,17 +200,24 @@ fn lane_lines(checkpoint: &Value) -> String {
 }
 
 /// The compact `run` result: the headline, unless it was already announced,
-/// then the one next command.
+/// then the one next command. A refusal before admission adds its own line.
 fn run_human(data: &Value, input: &Value, announced: bool) -> String {
     let graph = data["checkpoint"]["graph_id"].as_str().unwrap_or_default();
     let next = match data["status"].as_str() {
         Some("complete" | "cancelled") => format!("provenant output {graph}"),
         Some("paused") => format!("provenant status {graph}"),
-        _ => format!("provenant status {graph} --wait"),
+        _ => format!("provenant wait {graph}"),
     };
     let status = data["status"].as_str().unwrap_or("pending");
     let document = input.get("document");
-    let lanes = lane_lines(&data["checkpoint"]);
+    let mut lanes = String::new();
+    if let (Some(taken), true) = (
+        data["named"]["taken"].as_str(),
+        data["named"]["graph"].is_string(),
+    ) {
+        lanes += &format!("{taken} exists with different input; started {graph}\n");
+    }
+    lanes += &refusal_lines(&data["checkpoint"]);
     if announced {
         format!("{lanes}next: {next}\n")
     } else {
@@ -247,17 +253,22 @@ fn invoke(
     let result = (|| -> Result<Value, Box<dyn std::error::Error>> {
         if command == "run" && std::env::var_os(provenant_run::PARENT_ATTEMPT_ENV).is_some() {
             let factory = fabric::read_factory(globals, workers)?;
-            let wait_seconds = input["wait_seconds"].as_u64().unwrap_or(55).max(55);
+            let wait_seconds = input["wait_seconds"]
+                .as_u64()
+                .unwrap_or(factory.context.config.graph.launch_wait_seconds);
             let budget = WaitBudget::cli(factory.clock.mono_now(), wait_seconds)?;
             return Ok(factory.relay_document(&input, budget, &CancelToken::new())?);
         }
-        let factory =
-            if input["explain"] == true || matches!(command, "templates" | "status" | "stats") {
-                fabric::read_factory(globals, workers)?
-            } else {
-                fabric::factory(globals, workers)?
-            };
-        let wait_seconds = input["wait_seconds"].as_u64().unwrap_or(55);
+        let factory = if input["explain"] == true || command == "templates" {
+            fabric::read_factory(globals, workers)?
+        } else {
+            fabric::factory(globals, workers)?
+        };
+        // `run` takes no wait: its launch, including binding a writer, has the
+        // configured launch allowance.
+        let wait_seconds = input["wait_seconds"]
+            .as_u64()
+            .unwrap_or(factory.context.config.graph.launch_wait_seconds);
         let budget = WaitBudget::cli(factory.clock.mono_now(), wait_seconds)?;
         let local_branch = (command == "run" && input["host"].is_null())
             .then(|| input["branch"].as_str().map(str::to_owned))
@@ -301,9 +312,6 @@ fn invoke(
             result["local_worktree_remedy"] = json!(action);
         }
         factory.name_refusal_causes(&mut result);
-        if command == "run" && result["checkpoint"]["graph_id"].is_string() {
-            result["lane_ids"] = json!(lane_ids(&result["checkpoint"]));
-        }
         Ok(result)
     })();
     match result {
@@ -316,8 +324,12 @@ fn invoke(
             } else {
                 serde_json::to_string_pretty(&data).unwrap_or_default() + "\n"
             };
+            // A replay reports the graph its input already started; its failure
+            // was reported when it happened.
+            let replayed = data["named"]["replayed"] == true;
             let mut result = CommandResult::new(command, response_outcome(command, &data), data);
             if command == "run"
+                && !replayed
                 && let Some(node) = launch_error_node(&result.data, result.status)
             {
                 result.error = Some(provenant_records::CommandError {
@@ -335,26 +347,38 @@ fn invoke(
                     repair: None,
                 });
             }
-            crate::emit(
-                &result,
-                globals,
-                &human,
-                matches!(command, "templates" | "status" | "stats"),
-            )
+            crate::emit(&result, globals, &human, command == "templates")
         }
         Err(error) => {
+            let config = config_cause(error.as_ref());
             let facade =
                 error.downcast_ref::<provenant_fabric_runtime::coordination::facade::FacadeError>();
             let projection = facade
                 .map(|error| error.diagnostic())
                 .or_else(|| {
+                    config.map(|cause| {
+                        provenant_records::diagnostic::Diagnostic::new("CONFIG")
+                            .category("configuration")
+                            .detail(cause.to_string())
+                            .next(config_repair(globals))
+                    })
+                })
+                .or_else(|| {
                     error
                         .downcast_ref::<provenant_cli::fabric::EdgeError>()
                         .and_then(provenant_cli::fabric::edge_diagnostic)
                 })
-                .unwrap_or_else(|| *cli_input_error("graph input could not be processed"));
+                .unwrap_or_else(|| {
+                    provenant_records::diagnostic::Diagnostic::new("graph_error")
+                        .detail(error.to_string())
+                        .next(format!("provenant help {command} --json"))
+                });
             let outcome = facade.map_or(
-                Outcome::Invalid,
+                if config.is_some() {
+                    Outcome::Invalid
+                } else {
+                    Outcome::Error
+                },
                 provenant_cli::fabric::coordination_outcome,
             );
             let mut result = CommandResult::new(command, outcome, Value::Null);
@@ -365,7 +389,11 @@ fn invoke(
                     .detail
                     .clone()
                     .unwrap_or_else(|| "graph input could not be processed".into()),
-                cause: facade.and_then(|error| error.cause()).map(str::to_owned),
+                cause: Some(
+                    facade
+                        .and_then(|error| error.cause())
+                        .map_or_else(|| error.to_string(), str::to_owned),
+                ),
                 repair: projection.next,
             });
             crate::emit(&result, globals, "", false)
@@ -413,18 +441,10 @@ pub(crate) fn local_branch_action(factory: &fabric::Factory, branch: &str) -> Op
 }
 #[allow(clippy::print_stderr)]
 pub(crate) fn run(
-    mut request: GraphRunArgs,
+    request: GraphRunArgs,
     globals: &Globals,
     workers: &'static dyn WorkerObserver,
 ) -> u8 {
-    if let Some(value) = request.ambiguous_wait_brief().map(str::to_owned) {
-        let message = format!("`--wait` has no value; use `--wait={value}`");
-        let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
-        request.brief = None;
-        if request.file.is_none() {
-            return invoke("run", Err(cli_input_error(&message)), globals, workers);
-        }
-    }
     if request.over.len() > 5 {
         let _ = writeln!(
             std::io::stderr().lock(),
@@ -478,6 +498,12 @@ fn run_input(
 ) -> Result<Value, Box<provenant_records::diagnostic::Diagnostic>> {
     (|| {
         let sandbox = request.sandbox_override();
+        let brief_source = select_brief_source([
+            request.brief.map(BriefSource::Text),
+            request.brief_text.map(BriefSource::Text),
+            request.brief_file.map(BriefSource::file),
+        ])
+        .map_err(|error| cli_input_error(&error.to_string()))?;
         let model = request.model.map(model_selector).transpose()?;
         let mut input = json!({"op":"run","explain":request.explain,"detached":request.detached});
         for (field, value) in [
@@ -485,10 +511,9 @@ fn run_input(
             ("model", model),
             ("effort", request.effort),
             ("account", request.account),
-            (
-                "operation_id",
-                request.operation_id.map(|id| id.to_string()),
-            ),
+            ("name", request.name),
+            ("template", request.template),
+            ("route", request.route),
         ] {
             if let Some(value) = value {
                 input[field] = json!(value);
@@ -509,16 +534,6 @@ fn run_input(
         if !request.write_scope.is_empty() {
             input["write_scope"] = json!(request.write_scope);
         }
-        if let Some(wait) = request.wait {
-            input["wait_seconds"] = json!(wait);
-        }
-        if let Some(name) = request.template {
-            input["use"] = json!(name);
-        }
-        let brief_selected = request.tier.is_some();
-        if let Some(tier) = request.tier {
-            input["tier"] = json!(tier);
-        }
         if !request.over.is_empty() {
             input["over"] = if request.over.len() == 1 && request.over[0].starts_with('@') {
                 json!(request.over[0])
@@ -526,61 +541,64 @@ fn run_input(
                 json!(request.over)
             };
         }
+        // Values travel as the text the caller wrote. The launch owner holds the
+        // template library, so it types each one by the declaration it meets.
         let mut parameters = json!({});
         for item in request.set {
             let (key, value) = item
                 .split_once('=')
-                .ok_or_else(|| cli_input_error("--set expects NAME=TOML_VALUE"))?;
-            let parsed: Value =
-                toml_edit::de::from_str(&format!("value = {value}")).map_err(|_| {
-                    let safe = matches!(
-                        key,
-                        "attempt"
-                            | "attempt.host"
-                            | "attempt.account"
-                            | "attempt.confidential"
-                            | "attempt.provider_timeout"
-                            | "attempt.capabilities"
-                            | "attempt.build_heavy"
-                            | "attempt.write_roots"
-                    );
-                    if safe {
-                        cli_input_error(&format!("--set `{key}`: value is not valid TOML"))
-                    } else {
-                        cli_input_error("--set value is not valid TOML")
-                    }
-                })?;
+                .ok_or_else(|| cli_input_error("--set expects NAME=VALUE"))?;
             if key.is_empty() {
                 return Err(cli_input_error("--set parameter name is empty"));
             }
-            validate_set_value_path(key, &parsed["value"])?;
-            parameters[key] = parsed["value"].clone();
+            validate_set_path(key)?;
+            if key == "attempt" {
+                let parsed: Value = toml_edit::de::from_str(&format!("value = {value}"))
+                    .map_err(|_| cli_input_error("--set `attempt`: value is not valid TOML"))?;
+                validate_set_value_path(key, &parsed["value"])?;
+                parameters[key] = parsed["value"].clone();
+            } else {
+                parameters[key] = json!(value);
+            }
         }
         if let Some(sandbox) = sandbox {
             parameters["attempt.sandbox"] = json!(sandbox);
         }
+        let mut policy_inputs = Vec::new();
+        if let Some(BriefSource::File(path)) = &brief_source {
+            policy_inputs.push(std::path::absolute(path).map_err(|_| file_input_error(path))?);
+        }
+        if let Some(path) = &request.file {
+            policy_inputs.push(std::path::absolute(path).map_err(|_| file_input_error(path))?);
+        }
+        if !policy_inputs.is_empty() {
+            parameters["attempt.policy_inputs"] = json!(policy_inputs);
+        }
         input["set"] = parameters;
-        if let Some(brief) = request.brief {
+        if let Some(source) = brief_source {
+            let brief = read_brief(source, provenant_cli::brief::MAX_BRIEF_BYTES)
+                .map_err(|error| cli_input_error(&error.to_string()))?;
+            if brief.trim().is_empty() {
+                return Err(cli_input_error("brief is empty"));
+            }
             input["brief"] = json!(brief);
         }
         if let Some(path) = request.file {
             let text = std::fs::read_to_string(&path).map_err(|_| file_input_error(&path))?;
             if text.trim().is_empty() {
-                return Err(file_error(&path, "brief is empty"));
+                return Err(file_error("--file", &path, "document is empty"));
             }
             match decode(&text) {
-                Ok(value)
-                    if value.as_object().is_some_and(|object| {
-                        // A route override must not turn an explicit graph
-                        // into the prompt of a newly generated task.
-                        object.contains_key("nodes")
-                            || object.contains_key("graph_id")
-                            || (!brief_selected && !object.is_empty())
-                    }) =>
-                {
+                Ok(value) if value.as_object().is_some_and(|object| !object.is_empty()) => {
                     input["document"] = value;
                 }
-                _ => input["brief"] = json!(text),
+                _ => {
+                    return Err(file_error(
+                        "--file",
+                        &path,
+                        "not a graph document; use --brief-file for a brief",
+                    ));
+                }
             }
         }
         Ok(input)
@@ -602,7 +620,8 @@ fn validate_set_path(key: &str) -> Result<(), Box<provenant_records::diagnostic:
         )),
         "host" | "account" | "confidential" | "provider_timeout" | "capabilities"
         | "capability" | "build_heavy" | "build_weight" | "write_roots" | "write_root"
-        | "local_cargo" | "preset" | "isolation" | "supervision" | "receipts" | "sandbox" => Ok(()),
+        | "local_cargo" | "ci_scope" | "preset" | "isolation" | "supervision" | "receipts"
+        | "sandbox" | "policy_inputs" | "token_budget" | "on_budget" | "budget_grace" => Ok(()),
         _ if path.starts_with("mode.") => {
             Err(cli_input_error("use --mode for attempt access mode"))
         }
@@ -632,7 +651,7 @@ fn validate_set_value_path(
 pub(crate) fn edit(request: Edit, globals: &Globals, workers: &'static dyn WorkerObserver) -> u8 {
     invoke(
         "edit",
-        document(&request.file).map(|patch| json!({"op":"edit","id":request.id,"patch":patch})),
+        document(&request.file).map(|patch| json!({"op":"edit","id":request.name,"patch":patch})),
         globals,
         workers,
     )
@@ -655,21 +674,6 @@ pub(crate) fn templates(
     })();
     invoke("templates", input, globals, workers)
 }
-pub(crate) fn stats(
-    command: &str,
-    id: Option<String>,
-    by: String,
-    globals: &Globals,
-    workers: &'static dyn WorkerObserver,
-) -> u8 {
-    invoke(
-        command,
-        Ok(json!({"op":"status","id":id,"stats":true,"by":by})),
-        globals,
-        workers,
-    )
-}
-
 #[cfg(test)]
 #[allow(
     unused_imports,
@@ -677,6 +681,22 @@ pub(crate) fn stats(
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configuration_cause_and_selected_state_survive_projection() {
+        let error = provenant_cli::fabric::EdgeError::Config(
+            provenant_config::ConfigError::Refused("typed cause".into()),
+        );
+        assert!(config_cause(&error).is_some());
+        let globals = Globals {
+            state_dir: Some("/tmp/state with 'quote".into()),
+            ..Globals::default()
+        };
+        let repair = config_repair(&globals);
+        assert!(repair.contains("--state-dir"));
+        assert!(repair.ends_with(" check config --json"));
+        assert!(repair.contains("'\\''"));
+    }
 
     #[allow(
         dead_code,
@@ -688,10 +708,12 @@ mod tests {
             model: None,
             effort: None,
             account: None,
-            operation_id: None,
+            name: None,
             brief: None,
+            brief_text: None,
+            brief_file: None,
             template: None,
-            tier: None,
+            route: None,
             mode: None,
             worktree: None,
             branch: None,
@@ -704,8 +726,6 @@ mod tests {
             sandbox: false,
             no_sandbox: false,
             explain: false,
-            wait: None,
-            bare_wait_value: None,
         }
     }
 
@@ -713,9 +733,9 @@ mod tests {
     fn malformed_set_and_missing_file_preserve_input_detail()
     -> Result<(), Box<dyn std::error::Error>> {
         for (setting, detail) in [
-            ("broken", "--set expects NAME=TOML_VALUE"),
+            ("broken", "--set expects NAME=VALUE"),
             ("=1", "--set parameter name is empty"),
-            ("count=", "TOML"),
+            ("attempt=", "TOML"),
         ] {
             let mut request = run_request();
             request.set.push(setting.into());
@@ -730,7 +750,7 @@ mod tests {
             );
         }
         let mut request = run_request();
-        request.set.push("x='PROMPT_SENTINEL".into());
+        request.set.push("attempt='PROMPT_SENTINEL".into());
         let diagnostic = run_input(request).unwrap_err();
         assert!(!serde_json::to_string(&diagnostic)?.contains("PROMPT_SENTINEL"));
         let directory = tempfile::tempdir()?;
@@ -764,8 +784,6 @@ mod tests {
                 "high",
                 "--account",
                 "work",
-                "--operation-id",
-                "host-run",
                 "--set",
                 "attempt.build_heavy=true",
                 "--set",
@@ -787,11 +805,16 @@ mod tests {
         assert_eq!(input["model"], "codex/gpt-6-luna");
         assert_eq!(input["effort"], "high");
         assert_eq!(input["account"], "work");
-        assert_eq!(input["operation_id"], "host-run");
-        assert_eq!(input["set"]["attempt.build_heavy"], true);
-        assert_eq!(input["set"]["attempt.confidential"], true);
-        assert_eq!(input["set"]["attempt.provider_timeout"], 42);
-        assert_eq!(input["set"]["attempt.host"], "other");
+        // Values travel as written; the launch owner types them by declaration.
+        assert!(input.get("operation_id").is_none());
+        for (key, text) in [
+            ("attempt.build_heavy", "true"),
+            ("attempt.confidential", "true"),
+            ("attempt.provider_timeout", "42"),
+            ("attempt.host", "'other'"),
+        ] {
+            assert_eq!(input["set"][key], text);
+        }
     }
 
     #[test]
@@ -818,9 +841,6 @@ mod tests {
             parse(&["--sandbox", "--no-sandbox"]),
             provenant_cli::ParseOutcome::Invocation(_)
         ));
-        let mut request = run_request();
-        request.set.push("attempt.sandbox='on'".into());
-        assert_eq!(run_input(request).unwrap()["set"]["attempt.sandbox"], "on");
     }
 
     #[test]
@@ -951,57 +971,55 @@ mod tests {
     }
 
     #[test]
-    fn run_result_is_a_headline_and_one_next_command() {
-        let data = json!({"status":"pending", "timed_out":false, "checkpoint":{"graph_id":"g-1", "nodes":[
-            {"id":"task", "state":"running", "attempts":[
-                {"route":{"adapter":"claude", "model":"claude-opus-5-5"}, "attempt_ref":"a/b"}
-            ]}
-        ]}});
-        let input = json!({"op":"run", "worktree":"/repo/.worktrees/lane"});
-        let human = run_human(&data, &input, false);
-        assert_eq!(
-            human,
-            "g-1 running model=claude/claude-opus-5-5 worktree=/repo/.worktrees/lane\n\
-             lane: g-1/task/b\n\
-             next: provenant status g-1 --wait\n"
-        );
-        assert!(human.lines().count() <= 3);
-        assert_eq!(
-            run_human(&data, &input, true),
-            "lane: g-1/task/b\nnext: provenant status g-1 --wait\n"
-        );
-        assert_eq!(lane_ids(&data["checkpoint"]), ["g-1/task/b"]);
-        let mut complete = data.clone();
-        complete["status"] = json!("complete");
-        assert!(run_human(&complete, &input, true).ends_with("next: provenant output g-1\n"));
+    fn run_receipt_is_bounded_and_ends_in_one_next_command() {
+        let nodes: Vec<_> = (0..40)
+            .map(|n| json!({"id":format!("n{n}"), "state":"failed", "advance_error_code":"preparation_refused",
+                "advance_error":"x".repeat(1000), "attempts":[]}))
+            .collect();
+        for (status, command) in [
+            ("pending", "provenant wait review-1"),
+            ("complete", "provenant output review-1"),
+            ("paused", "provenant status review-1"),
+        ] {
+            let data =
+                json!({"status":status, "checkpoint":{"graph_id":"review-1", "nodes":nodes}});
+            for announced in [false, true] {
+                let human = run_human(&data, &json!({"op":"run"}), announced);
+                assert!(
+                    human.starts_with(if announced { "refused" } else { "review-1" }),
+                    "{human}"
+                );
+                assert!(human.ends_with(&format!("next: {command}\n")), "{human}");
+                assert!(
+                    human
+                        .lines()
+                        .filter(|line| line.starts_with("next:"))
+                        .count()
+                        == 1
+                );
+                assert!(
+                    human
+                        .lines()
+                        .all(|line| line.len() <= provenant_cli::limits::SUMMARY_ROW_BYTES)
+                );
+                assert!(human.lines().count() <= provenant_cli::limits::SUMMARY_ROWS + 4);
+            }
+        }
     }
 
     #[test]
-    fn receipt_lists_refused_cause_and_bounds_lane_lines() {
-        let nodes: Vec<_> = (0..15)
-            .map(|n| json!({"id":format!("n{n}"), "state":"running", "attempts":[{"attempt_ref":format!("h/a{n}")}]}))
-            .collect();
-        let text = lane_lines(&json!({"graph_id":"g", "nodes":nodes}));
-        assert_eq!(text.lines().count(), 13, "{text}");
-        assert!(text.contains("lane: g/n0/a0\n"));
-        let refused = json!({"graph_id":"g", "nodes":[
-            {"id":"r", "state":"failed", "advance_error_code":"preparation_refused",
-             "advance_error":"refused. Refused: codex/gpt: allowance spent", "attempts":[]}
-        ]});
-        assert!(lane_lines(&refused).contains("allowance spent"));
-        let many: Vec<_> = (0..15)
-            .map(|n| {
-                json!({"id":format!("r{n}"), "advance_error_code":"preparation_refused",
-                "advance_error":"x".repeat(1000), "attempts":[]})
-            })
-            .collect();
-        let text = lane_lines(&json!({"graph_id":"g", "nodes":many}));
-        assert_eq!(text.lines().count(), 13, "{text}");
-        assert!(text.ends_with("3 more refused lanes in --json\n"));
+    fn a_suffixed_name_is_announced_and_a_replay_is_not_a_failure() {
+        let data = json!({"status":"pending", "named":{"requested":"fix", "graph":"fix-2", "taken":"fix"},
+            "checkpoint":{"graph_id":"fix-2", "nodes":[]}});
+        let human = run_human(&data, &json!({}), false);
         assert!(
-            text.lines()
-                .all(|line| line.len() <= provenant_cli::limits::SUMMARY_ROW_BYTES)
+            human.contains("fix exists with different input; started fix-2"),
+            "{human}"
         );
+        let replay = json!({"status":"complete", "outcome":"failed", "named":{"graph":"fix", "replayed":true}});
+        assert_eq!(response_outcome("run", &replay), Outcome::Ok);
+        let fresh = json!({"status":"complete", "outcome":"failed"});
+        assert_eq!(response_outcome("run", &fresh), Outcome::Failed);
     }
 
     #[test]
@@ -1017,11 +1035,11 @@ mod tests {
         ]});
         assert_eq!(
             run_headline(&checkpoint, "pending", Some(&document), &json!({})),
-            "g-2 pending model=senior worktree=new:batch/work"
+            "g-2 pending senior new:batch/work"
         );
         assert_eq!(
             run_headline(&checkpoint, "pending", None, &json!({})),
-            "g-2 pending model=- worktree=-"
+            "g-2 pending - -"
         );
     }
 

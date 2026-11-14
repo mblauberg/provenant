@@ -162,7 +162,11 @@ pub(crate) fn validate_edit<T: DeserializeOwned + Serialize>(
         .cloned()
         .unwrap_or_default();
     normalise_tables(&mut domains);
-    for entry in sections.entries {
+    for entry in sections
+        .entries
+        .iter()
+        .filter(|entry| sections.reads(entry.name))
+    {
         let Some(user) = domains.get(entry.name).and_then(Item::as_table) else {
             continue;
         };
@@ -199,6 +203,18 @@ fn validate_entry(entry: &crate::DomainSection, table: &Table) -> Vec<SectionErr
             detail: None,
             field: "limits.bundle_bytes".into(),
             code: "retired.bundle_bytes",
+        }];
+    }
+    if entry.name == "fabric"
+        && table
+            .get("graph")
+            .and_then(Item::as_table_like)
+            .is_some_and(|graph| graph.contains_key("writer_launch_seconds"))
+    {
+        return vec![SectionError {
+            detail: None,
+            field: "graph.writer_launch_seconds".into(),
+            code: "retired.writer_launch_seconds",
         }];
     }
     (entry.validate)(table)
@@ -325,6 +341,59 @@ fn inspect<T: DeserializeOwned + Serialize>(
     let user_sites = sites(&user, text.unwrap_or(""), &user_origin, "");
     normalise_tables(&mut user);
     let mut issues = Vec::new();
+    let profile = user
+        .get("profile")
+        .and_then(Item::as_str)
+        .and_then(Profile::from_name)
+        .unwrap_or_default();
+    // A consumer cannot be refused by a domain it does not read. Discard its
+    // overrides before merge, validation and origin attribution, rather than
+    // loading every domain and recovering from somebody else's boundary error.
+    if let Some(domains) = user.get_mut("domains").and_then(Item::as_table_mut) {
+        for entry in sections
+            .entries
+            .iter()
+            .filter(|entry| !sections.reads(entry.name))
+        {
+            if let Some(item) = domains.remove(entry.name) {
+                // Inspect an unused override only for an advisory. It never
+                // enters the resolved configuration or boundary validation.
+                let invalid = if let Some(table) = item.as_table() {
+                    let compiled = Origin::Compiled { profile };
+                    let mut candidate = parse((entry.defaults)(profile), &compiled, "")?;
+                    normalise_tables(&mut candidate);
+                    let replace_tables = entry
+                        .replace_tables
+                        .iter()
+                        .map(|path| format!("domains.{}.{path}", entry.name))
+                        .collect();
+                    merge_table(
+                        &mut candidate,
+                        table,
+                        &mut vec!["domains".into(), entry.name.into()],
+                        &replace_tables,
+                    );
+                    !validate_entry(entry, &candidate).is_empty()
+                } else {
+                    true
+                };
+                if !invalid {
+                    continue;
+                }
+                issues.push(Issue {
+                    location: site(
+                        &user_sites,
+                        &format!("domains.{}", entry.name),
+                        &user_origin,
+                        false,
+                    ),
+                    rule: "unused_domain",
+                    source: None,
+                    rejected: String::new(),
+                });
+            }
+        }
+    }
     let mut install_item = user.remove("install");
     let install = recover_settings::<crate::InstallSettings>(
         &mut install_item,
@@ -417,12 +486,6 @@ fn inspect<T: DeserializeOwned + Serialize>(
             _ => {}
         }
     }
-    // Inspect this single scalar without decoding the header or any domain.
-    let profile = user
-        .get("profile")
-        .and_then(Item::as_str)
-        .and_then(Profile::from_name)
-        .unwrap_or_default();
     let mut knob_boundary = user
         .get("profile")
         .and_then(Item::as_str)
@@ -540,7 +603,9 @@ fn inspect<T: DeserializeOwned + Serialize>(
         "gc.schedule",
         "gc.idle_days",
         "gc.graph_checkpoint_days",
+        "gc.discard_archive_days",
         "gc.free_floor",
+        "gc.critical_free",
         "gc.lane_cargo_cache_max",
         "gc.alert_below",
         "gc.projects",
@@ -553,15 +618,19 @@ fn inspect<T: DeserializeOwned + Serialize>(
         });
     }
     for project in gc.projects.keys() {
-        origins
-            .entry(format!("gc.projects.{project}.foreign_worktrees"))
-            .or_insert_with(|| compiled.clone());
+        for key in [
+            "foreign_worktrees",
+            "integration_branches",
+            "keep_paths",
+            "remote_branches",
+            "remote_min_tip_age_days",
+        ] {
+            origins
+                .entry(format!("gc.projects.{project}.{key}"))
+                .or_insert_with(|| compiled.clone());
+        }
     }
-    for key in [
-        "worktrees.setup",
-        "worktrees.timeout_seconds",
-        "worktrees.projects",
-    ] {
+    for key in ["worktrees.timeout_seconds", "worktrees.projects"] {
         origins.insert(key.into(), compiled.clone());
     }
     if let Some(item) = &worktrees_item {
@@ -797,7 +866,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
     })
 }
 fn boundary_issue<T>(issue: &Issue, sections: &DomainSections<T>) -> bool {
-    if issue.rule == "unknown_key" && issue.source.is_none() {
+    if matches!(issue.rule, "unknown_key" | "unused_domain") && issue.source.is_none() {
         return false;
     }
     sections.entries.iter().any(|entry| {
@@ -1271,14 +1340,41 @@ fn repair_semantic(
 
 fn issue_finding(issue: &Issue) -> Result<Finding, ConfigError> {
     let key: String = issue.location.key_path.chars().take(256).collect();
+    if issue.rule == "unused_domain" {
+        return Ok(Finding {
+            rule: issue.rule.into(),
+            path: user_path()?,
+            line: issue.location.line,
+            message: format!(
+                "{key}: invalid configuration in an unused domain; run `provenant check config --json` to inspect it"
+            ),
+        });
+    }
+    if issue.rule == "unknown_key"
+        && let Some(replacement) = crate::removed::config_key_replacement(&key)
+    {
+        return Ok(Finding {
+            rule: issue.rule.into(),
+            path: user_path()?,
+            line: issue.location.line,
+            message: format!("{key}: removed setting; {replacement}"),
+        });
+    }
+    if let Some(source) = &issue.source
+        && let Some(replacement) = crate::removed::diagnostic_code_replacement(source.code)
+    {
+        return Ok(Finding {
+            rule: issue.rule.into(),
+            path: user_path()?,
+            line: issue.location.line,
+            message: format!("{key}: {replacement}"),
+        });
+    }
     Ok(Finding {
         rule: issue.rule.into(),
         path: user_path()?,
         line: issue.location.line,
         message: match &issue.source {
-            _ if issue.rule == "unknown_key" && key == "domains.fabric.pipelines" => {
-                "domains.fabric.pipelines: pipeline settings, including domains.fabric.pipelines.experiment, have been removed; delete the stale configuration table".into()
-            }
             Some(source)
                 if source.code == "unknown_fallback"
                     || source.code == "unsupported_fallback_effort" =>
@@ -1286,24 +1382,6 @@ fn issue_finding(issue: &Issue) -> Result<Finding, ConfigError> {
                 format!(
                     "{key}: invalid model fallback ({}); effective fallback checked after overlays",
                     source.code
-                )
-            }
-            Some(source) if crate::is_retired_key_code(source.code) => {
-                if source.code.starts_with("retired.") {
-                    return Ok(Finding {
-                        rule: issue.rule.into(),
-                        path: user_path()?,
-                        line: issue.location.line,
-                        message: format!(
-                            "{key}: ignored invalid configuration ({}); run `provenant config migrate`",
-                            source.code
-                        ),
-                    });
-                }
-                let replacement = source.code.trim_start_matches("moved_to_schedule.");
-                format!(
-                    "{key}: ignored invalid configuration ({}: {}); replace the retired key with schedule.{replacement}; run `provenant config migrate`",
-                    issue.rule, source.code
                 )
             }
             Some(source) => format!(
@@ -1324,11 +1402,6 @@ fn knob_message(key: &str, rule: &str) -> String {
             None => "using the default".to_owned(),
         };
         return format!("{key}: invalid value ({rule}); {fallback}");
-    }
-    if crate::migrate::RETIRED_DOMAIN_KNOBS.contains(&name) {
-        return format!(
-            "{key}: ignored; this setting is not a knob and belongs outside [knobs]; run `provenant config migrate` or delete the line"
-        );
     }
     match crate::knobs::nearest_knobs(name).as_slice() {
         [] => format!(
@@ -1594,7 +1667,7 @@ impl Overrides<'_> {
     fn issue(&mut self, path: &[String], rule: &'static str) {
         let graph_policy =
             path.len() >= 4 && path[0] == "domains" && path[1] == "fabric" && path[2] == "graph";
-        let retired_key = rule == "retired.bundle_bytes";
+        let retired_key = rule.starts_with("retired.");
         let rejected = if graph_policy {
             numeric_rejected(at(self.user, path))
         } else {
@@ -1653,6 +1726,8 @@ impl Overrides<'_> {
             key.extend(relative);
             let rule = if key == ["domains", "fabric", "limits", "bundle_bytes"] {
                 "retired.bundle_bytes"
+            } else if key == ["domains", "fabric", "graph", "writer_launch_seconds"] {
+                "retired.writer_launch_seconds"
             } else {
                 "unknown_key"
             };
@@ -2494,40 +2569,27 @@ mod warning_tests {
         inputs.state_dir = Some(temp.path().join("state"));
         std::fs::create_dir(inputs.state_dir.as_ref().ok_or("state")?)?;
         let roots = inputs.resolve(&Resolver)?;
-        let issue = Issue {
-            location: location(
-                "",
-                0,
-                &Origin::Compiled {
-                    profile: Profile::Balanced,
-                },
-                "domains.routing.pacing_overrides.0",
-            ),
-            rule: "invalid",
-            source: Some(SectionError {
-                detail: None,
-                field: String::new(),
-                code: "moved_to_schedule.expires",
-            }),
-            rejected: String::new(),
-        };
-        let warning = issue_finding(&issue)?;
-        assert!(warning.message.contains("schedule.expires"));
-        assert!(warning.message.contains("provenant config migrate"));
+        let text = b"schema_version=1\n[knobs]\nunregistered.setting=1";
+        let config = load(&roots, Some(&text[..]))?;
+        let warning = config
+            .warnings
+            .iter()
+            .find(|warning| warning.message.contains("unknown knob"))
+            .ok_or("missing current unknown-key warning")?;
         assert!(first_warning(
             roots.state.as_path(),
             Some("revision one"),
-            &warning
+            warning
         ));
         assert!(!first_warning(
             roots.state.as_path(),
             Some("revision one"),
-            &warning
+            warning
         ));
         assert!(first_warning(
             roots.state.as_path(),
             Some("revision two"),
-            &warning
+            warning
         ));
         Ok(())
     }

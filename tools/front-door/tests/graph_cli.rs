@@ -22,7 +22,7 @@ fn file_briefs_reach_the_compiled_prompt_or_refuse_before_launch() -> Result {
         std::fs::write(&path, brief)?;
         let output = rig
             .command()
-            .args(["run", "--route", "junior", "--file"])
+            .args(["run", "task", "--route", "junior", "--brief-file"])
             .arg(&path)
             .arg("--explain")
             .output()?;
@@ -32,7 +32,7 @@ fn file_briefs_reach_the_compiled_prompt_or_refuse_before_launch() -> Result {
     }
     let output = rig
         .command()
-        .args(["run", "--file"])
+        .args(["run", "task", "--brief-file"])
         .arg(rig.project.join("brief.md"))
         .arg("--explain")
         .output()?;
@@ -56,7 +56,7 @@ fn file_briefs_reach_the_compiled_prompt_or_refuse_before_launch() -> Result {
     std::fs::write(&path, "task = 'do this'\n")?;
     let output = rig
         .command()
-        .args(["run", "--route", "junior", "--file"])
+        .args(["run", "task", "--route", "junior", "--brief-file"])
         .arg(&path)
         .arg("--explain")
         .output()?;
@@ -75,15 +75,12 @@ fn file_briefs_reach_the_compiled_prompt_or_refuse_before_launch() -> Result {
         std::fs::write(&path, contents)?;
         let output = rig
             .command()
-            .args(["run", "--route", "junior", "--file"])
+            .args(["run", "task", "--route", "junior", "--brief-file"])
             .arg(&path)
             .output()?;
         let value: Value = serde_json::from_slice(&output.stdout)?;
         assert!(!output.status.success(), "{value}");
-        assert!(
-            value["error"]["message"].as_str().unwrap().contains(name),
-            "{value}"
-        );
+        assert_eq!(value["error"]["code"], "invalid_input", "{value}");
         assert!(graph_records(&rig.state())?.is_empty());
     }
     for path in [
@@ -92,28 +89,23 @@ fn file_briefs_reach_the_compiled_prompt_or_refuse_before_launch() -> Result {
     ] {
         let output = rig
             .command()
-            .args(["run", "--route", "junior", "--file"])
+            .args(["run", "task", "--route", "junior", "--brief-file"])
             .arg(&path)
             .output()?;
         let value: Value = serde_json::from_slice(&output.stdout)?;
         assert!(!output.status.success(), "{value}");
-        assert!(
-            value["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains(path.to_str().unwrap()),
-            "{value}"
-        );
+        assert_eq!(value["error"]["code"], "invalid_input", "{value}");
         assert!(graph_records(&rig.state())?.is_empty());
     }
     let mut child = rig
         .command()
         .args([
             "run",
+            "task",
             "--route",
             "junior",
-            "--file",
-            "/dev/stdin",
+            "--brief-file",
+            "-",
             "--explain",
         ])
         .stdin(std::process::Stdio::piped())
@@ -124,6 +116,23 @@ fn file_briefs_reach_the_compiled_prompt_or_refuse_before_launch() -> Result {
     let value: Value = serde_json::from_slice(&output.stdout)?;
     assert!(output.status.success(), "{value}");
     assert_eq!(value["data"]["document"]["nodes"][0]["prompt"], brief);
+    // `--file` takes a graph document only; a brief in it is refused with the
+    // flag that does take one.
+    let output = rig
+        .command()
+        .args(["run", "--file"])
+        .arg(rig.project.join("brief.md"))
+        .arg("--explain")
+        .output()?;
+    let value: Value = serde_json::from_slice(&output.stdout)?;
+    assert!(!output.status.success(), "{value}");
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--brief-file"),
+        "{value}"
+    );
     Ok(())
 }
 
@@ -216,16 +225,16 @@ fn existing_git_worktree_with_spaces_has_a_followable_branch_remedy() -> Result 
     assert!(git.status.success(), "{git:?}");
     let (output, refusal) = rig.run(&[
         "run",
+        "task",
         "inspect",
         "--branch",
         "topic/remedy",
         "--base",
         "HEAD",
-        "--operation-id",
+        "--name",
         "worktree-remedy",
         "--write-scope",
         ".",
-        "--wait=10s",
     ])?;
     if refusal.to_string().contains("ProbeFailed") {
         provenant_test_support::skip_sandbox_dependent_test("native confinement probe failed")?;
@@ -259,16 +268,16 @@ fn existing_git_worktree_with_spaces_has_a_followable_branch_remedy() -> Result 
         .ok_or("missing graph id")?;
     let (_, replay) = rig.run(&[
         "run",
+        "task",
         "inspect",
         "--branch",
         "topic/remedy",
         "--base",
         "HEAD",
-        "--operation-id",
+        "--name",
         "worktree-remedy",
         "--write-scope",
         ".",
-        "--wait=10s",
     ])?;
     assert_eq!(replay["data"]["checkpoint"]["graph_id"], graph, "{replay}");
     assert_eq!(replay["data"]["local_worktree_remedy"], action, "{replay}");
@@ -298,9 +307,9 @@ fn existing_git_worktree_with_spaces_has_a_followable_branch_remedy() -> Result 
     );
     let output = rig
         .command()
-        .args(["run", "inspect", "--worktree"])
+        .args(["run", "task", "inspect", "--worktree"])
         .arg(&selected)
-        .args(["--write-scope", ".", "--wait=10s"])
+        .args(["--write-scope", "."])
         .output()?;
     let followed: Value = serde_json::from_slice(&output.stdout)?;
     let binding = followed["data"]["checkpoint"]["nodes"]
@@ -447,12 +456,7 @@ fn corrupt_graph_listing_gives_a_working_retirement_command() -> Result {
     let rig = GraphProject::new()?;
     for id in ["broken", "healthy"] {
         let path = rig.document(&json!({"schema_version":1,"graph_id":id,"nodes":[{"id":"gate","kind":"gate","access":"read_only","condition":{"type":"budget"}}]}))?;
-        let output = rig
-            .command()
-            .args(["run", "--file"])
-            .arg(path)
-            .arg("--wait=10s")
-            .output()?;
+        let output = rig.command().args(["run", "--file"]).arg(path).output()?;
         assert!(output.status.success(), "{output:?}");
     }
     let broken = graph_records(&rig.state())?
@@ -465,16 +469,16 @@ fn corrupt_graph_listing_gives_a_working_retirement_command() -> Result {
     std::fs::write(&broken, b"PRIVATE_CONTENT_SENTINEL")?;
     let (output, listing) = rig.run(&["status"])?;
     assert!(output.status.success(), "{listing}");
-    let rows = listing["data"]["rows"].as_array().ok_or("rows")?;
+    let rows = listing["data"]["graphs"].as_array().ok_or("graphs")?;
     let bad = rows
         .iter()
-        .find(|row| row["id"] == "broken")
+        .find(|row| row["name"] == "broken")
         .ok_or("broken row")?;
     assert_eq!(bad["state"], "unreadable");
     let reason = bad["reason"].as_str().ok_or("reason")?;
     assert!(reason.contains("provenant stop -- broken"), "{reason}");
     assert!(reason.contains("Other graphs"), "{reason}");
-    assert!(rows.iter().any(|row| row["id"] == "healthy"));
+    assert!(rows.iter().any(|row| row["name"] == "healthy"));
     assert!(!listing.to_string().contains("PRIVATE_CONTENT_SENTINEL"));
     assert!(
         !listing
@@ -501,22 +505,30 @@ fn corrupt_graph_listing_gives_a_working_retirement_command() -> Result {
         status.to_string().contains("provenant stop -- broken"),
         "{status}"
     );
-    assert_eq!(
-        status["data"]["rows"][0]["next"],
-        "provenant stop -- broken"
-    );
     assert!(!status.to_string().contains("PRIVATE_CONTENT_SENTINEL"));
     assert!(
         !status
             .to_string()
             .contains(&rig.state().display().to_string())
     );
-    let (output, stopped) = rig.run(&["stop", "--", "broken"])?;
+    // The row's own next action is the command that retires the record.
+    let next = status["data"]["rows"][0]["next"]
+        .as_str()
+        .ok_or("next action")?;
+    let words: Vec<&str> = next.split_whitespace().collect();
+    assert_eq!(words.first(), Some(&"provenant"), "{next}");
+    assert!(
+        words.contains(&"stop") && words.last() == Some(&"broken"),
+        "{next}"
+    );
+    let (output, stopped) = rig.run(&words[1..])?;
     assert!(output.status.success(), "{stopped}");
     let (_, after) = rig.run(&["status"])?;
-    let rows = after["data"]["rows"].as_array().ok_or("rows after stop")?;
-    assert!(!rows.iter().any(|row| row["id"] == "broken"));
-    assert!(rows.iter().any(|row| row["id"] == "healthy"));
+    let rows = after["data"]["graphs"]
+        .as_array()
+        .ok_or("graphs after stop")?;
+    assert!(!rows.iter().any(|row| row["name"] == "broken"), "{after}");
+    assert!(rows.iter().any(|row| row["name"] == "healthy"), "{after}");
     Ok(())
 }
 
@@ -530,10 +542,10 @@ fn graph_secrets_are_refused_before_publication() -> Result {
             command.arg("run");
             match source {
                 "brief" => {
-                    command.arg(&secret);
+                    command.arg("task").arg(&secret);
                 }
                 "review" => {
-                    command.arg(&secret).args(["--use", "review"]);
+                    command.arg("review").arg(&secret);
                 }
                 "parameter" => {
                     let templates = rig.project.join(".provenant/templates");
@@ -543,13 +555,13 @@ fn graph_secrets_are_refused_before_publication() -> Result {
                         "brief='${text}'\ntier='senior'\n[parameters.text]\ntype='string'\n",
                     )?;
                     command
-                        .args(["--use", "parameterised", "--set"])
-                        .arg(format!("text='{secret}'"));
+                        .args(["parameterised", "--set"])
+                        .arg(format!("text={secret}"));
                 }
                 "file" => {
                     let path = rig.project.join("brief.txt");
                     std::fs::write(&path, &secret)?;
-                    command.arg("--file").arg(path);
+                    command.args(["task", "--brief-file"]).arg(path);
                 }
                 "inline" => {
                     let path = rig.document(&json!({"nodes":[{"id":"x","use":"inline"}],"templates":{"inline":{"brief":secret,"tier":"senior"}}}))?;
@@ -582,14 +594,13 @@ fn explain_compiles_template_parameters_and_over_without_graph_state() -> Result
     )?;
     let (output, value) = rig.run(&[
         "run",
-        "--use",
         "map",
-        "--tier",
+        "--route",
         "senior",
         "--over",
         "core,cli",
         "--set",
-        "topic='Review'",
+        "topic=Review",
         "--explain",
     ])?;
     assert!(output.status.success(), "{value}");
@@ -748,17 +759,16 @@ fn every_bundled_template_is_listed_shown_and_explained() -> Result {
         let explained: Value = serde_json::from_slice(&output.stdout)?;
         assert!(output.status.success(), "{name}: {explained}");
     }
-    let worktree = format!("worktree='{}'", rig.project.display());
+    let worktree = format!("worktree={}", rig.project.display());
     let (output, explained) = rig.run(&[
         "run",
-        "--use",
         "batch",
         "--set",
         &worktree,
         "--set",
         "write_scope=['.']",
         "--set",
-        "integration_branch='batch/example'",
+        "integration_branch=batch/example",
         "--explain",
     ])?;
     assert!(output.status.success(), "{explained}");
@@ -816,7 +826,16 @@ fn review_shape_selects_the_expected_template_nodes() -> Result {
     fn ids(value: &Value, out: &mut Vec<String>) {
         match value {
             Value::Object(map) => {
-                if let Some(id) = map.get("id").and_then(Value::as_str) {
+                // A stage whose condition does not hold is a skipped row.
+                let skipped = map
+                    .get("when")
+                    .and_then(Value::as_array)
+                    .is_some_and(|terms| {
+                        terms.iter().any(|term| term["expected"] != term["actual"])
+                    });
+                if let Some(id) = map.get("id").and_then(Value::as_str)
+                    && !skipped
+                {
                     out.push(id.to_owned());
                     if matches!(id, "lenses" | "verify") && map.contains_key("composite") {
                         assert_eq!(map["composite"]["min_successful"], 1);
@@ -859,6 +878,15 @@ fn review_shape_selects_the_expected_template_nodes() -> Result {
                 expected,
                 "{risk}: {stage}"
             );
+            // Each stage that is off is listed as skipped, with its condition.
+            let listed = result["data"]["skipped"].as_array().is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    row["node"]
+                        .as_str()
+                        .is_some_and(|id| id.ends_with(&format!("--{stage}")))
+                })
+            });
+            assert_eq!(listed, !expected, "{risk}: {stage} skipped listing");
         }
     }
     Ok(())
@@ -941,7 +969,7 @@ fn invalid_template_documents_are_refused_by_list_and_show() -> Result {
         let (output, _) = rig.run(&args)?;
         assert!(!output.status.success());
     }
-    let (output, refusal) = rig.run(&["run", "--use", "broken", "inspect"])?;
+    let (output, refusal) = rig.run(&["run", "broken", "inspect"])?;
     assert!(!output.status.success(), "{refusal}");
     assert_eq!(refusal["error"]["code"], "invalid_input", "{refusal}");
     assert!(refusal["error"]["repair"].is_string(), "{refusal}");
@@ -961,12 +989,7 @@ fn deterministic_graph_wait_status_trace_and_replay_share_one_journal() -> Resul
     let rig = GraphProject::new()?;
     let path = rig.document(&json!({"schema_version":1,"graph_id":"gate-replay","nodes":[{"id":"accept","kind":"gate","access":"read_only","condition":{"type":"budget"}}]}))?;
     let run = || -> Result<Value> {
-        let output = rig
-            .command()
-            .args(["run", "--file"])
-            .arg(&path)
-            .arg("--wait=10s")
-            .output()?;
+        let output = rig.command().args(["run", "--file"]).arg(&path).output()?;
         let value: Value = serde_json::from_slice(&output.stdout)?;
         assert!(output.status.success(), "{value}");
         Ok(value["data"].clone())
@@ -988,7 +1011,7 @@ fn deterministic_graph_wait_status_trace_and_replay_share_one_journal() -> Resul
     assert_eq!(node["state"], first["checkpoint"]["nodes"][0]["state"]);
     let second = run()?;
     assert_eq!(second["checkpoint"]["nodes"], first["checkpoint"]["nodes"]);
-    let (output, trace) = rig.run(&["output", "gate-replay", "--trace"])?;
+    let (output, trace) = rig.run(&["trace", "gate-replay"])?;
     assert!(output.status.success(), "{trace}");
     assert!(
         !trace["data"]["events"]
@@ -1004,12 +1027,7 @@ fn trace_reports_recorded_patch_and_attempt_in_text_and_json() -> Result {
     use std::io::Write;
     let rig = GraphProject::new()?;
     let path = rig.document(&json!({"schema_version":1,"graph_id":"trace-test","nodes":[{"id":"gate","kind":"gate","access":"read_only","condition":{"type":"budget"}}]}))?;
-    let output = rig
-        .command()
-        .args(["run", "--file"])
-        .arg(path)
-        .arg("--wait=10s")
-        .output()?;
+    let output = rig.command().args(["run", "--file"]).arg(path).output()?;
     assert!(output.status.success(), "{output:?}");
     let journal = graph_records(&rig.state())?
         .into_iter()
@@ -1073,42 +1091,139 @@ fn trace_reports_recorded_patch_and_attempt_in_text_and_json() -> Result {
 }
 
 #[test]
-fn content_rerun_reattaches_and_fresh_run_after_cancel_has_a_new_identity() -> Result {
+fn a_named_run_replays_its_input_and_a_changed_input_takes_the_next_name() -> Result {
     let rig = GraphProject::new()?;
     let templates = rig.project.join(".provenant/templates");
     std::fs::create_dir_all(&templates)?;
-    for identity in ["content", "fresh"] {
-        std::fs::write(
-            templates.join(format!("{identity}.toml")),
-            format!("identity='{identity}'\nkind='gate'\n[node.condition]\ntype='budget'\n"),
-        )?;
-    }
-    let run = |template: &str| -> Result<Value> {
-        let (output, result) = rig.run(&["run", "--use", template, "--wait=10s"])?;
-        assert!(output.status.success(), "{result}");
+    std::fs::write(
+        templates.join("stamp.toml"),
+        "kind='gate'\n[node.condition]\ntype='budget'\n[parameters.tag]\ntype='string'\ndefault='none'\n",
+    )?;
+    let run = |args: &[&str]| -> Result<Value> {
+        let mut command = vec!["run", "stamp"];
+        command.extend_from_slice(args);
+        let (output, result) = rig.run(&command)?;
+        assert!(output.status.success(), "{args:?}: {result}");
         Ok(result["data"].clone())
     };
-    let first = run("content")?;
-    let id = first["checkpoint"]["graph_id"].as_str().ok_or("graph ID")?;
-    assert_eq!(first["status"], "complete");
-    assert_eq!(run("content")?["checkpoint"], first["checkpoint"]);
-    let (output, stopped) = rig.run(&["stop", id])?;
+    let graph_count = || -> Result<usize> {
+        Ok(graph_records(&rig.state())?
+            .iter()
+            .filter(|path| {
+                path.file_name().is_some_and(|name| {
+                    let name = name.to_string_lossy();
+                    name.starts_with("graph-") && name.ends_with(".json")
+                })
+            })
+            .count())
+    };
+    let records = || -> Result<Vec<Vec<u8>>> {
+        let mut paths = graph_records(&rig.state())?;
+        paths.sort();
+        Ok(paths
+            .iter()
+            .map(std::fs::read)
+            .collect::<std::io::Result<_>>()?)
+    };
+    let first = run(&["--name", "once", "--set", "tag=a"])?;
+    assert_eq!(first["checkpoint"]["graph_id"], "once");
+    // The same input returns the same graph and writes nothing: no node is
+    // launched or advanced by a replay.
+    let before = records()?;
+    let again = run(&["--name", "once", "--set", "tag=a"])?;
+    assert_eq!(again["checkpoint"]["graph_id"], "once");
+    assert_eq!(again["named"]["replayed"], true, "{again}");
+    assert_eq!(
+        records()?,
+        before,
+        "a replay leaves every graph record as it was"
+    );
+    assert_eq!(graph_count()?, 1);
+    // Changed input takes the next free name and leaves the first graph alone.
+    let changed = run(&["--name", "once", "--set", "tag=b"])?;
+    assert_eq!(changed["checkpoint"]["graph_id"], "once-2");
+    assert_eq!(changed["named"]["taken"], "once");
+    assert_eq!(graph_count()?, 2);
+    // Each input finds its own graph.
+    for (tag, id) in [("a", "once"), ("b", "once-2")] {
+        let replay = run(&["--name", "once", "--set", &format!("tag={tag}")])?;
+        assert_eq!(replay["checkpoint"]["graph_id"], id);
+    }
+    assert_eq!(graph_count()?, 2);
+    // A stopped graph is still the answer to its input: the replay reports it.
+    let (output, stopped) = rig.run(&["stop", "once"])?;
     assert!(output.status.success(), "{stopped}");
-    let (output, replay) = rig.run(&["run", "--use", "content", "--wait=10s"])?;
-    assert!(!output.status.success(), "{replay}");
-    let replay = &replay["data"];
-    assert_eq!(replay["checkpoint"]["graph_id"], id);
-    assert_eq!(replay["checkpoint"]["cancelled"], true);
+    let replay = run(&["--name", "once", "--set", "tag=a"])?;
+    assert_eq!(replay["checkpoint"]["graph_id"], "once");
+    assert_eq!(graph_count()?, 2);
+    // An edited template is a different launch under the same input.
+    std::fs::write(
+        templates.join("stamp.toml"),
+        "kind='gate'\n[node.condition]\ntype='budget'\n[parameters.tag]\ntype='string'\ndefault='edited'\n",
+    )?;
+    let edited = run(&["--name", "once", "--set", "tag=a"])?;
+    assert_eq!(edited["checkpoint"]["graph_id"], "once-3", "{edited}");
+    assert_eq!(graph_count()?, 3);
+    // Without a name the host assigns a valid, unique handle and never replays.
+    let mut handles = std::collections::BTreeSet::new();
+    for _ in 0..3 {
+        let unnamed = run(&["--set", "tag=a"])?;
+        let id = unnamed["checkpoint"]["graph_id"]
+            .as_str()
+            .ok_or("graph id")?
+            .to_owned();
+        assert!(
+            provenant_fabric_runtime::graph::template::graph_name_fault(&id).is_none(),
+            "{id}"
+        );
+        assert!(id.starts_with("stamp-"), "{id}");
+        assert!(handles.insert(id), "handles are unique");
+    }
+    assert_eq!(graph_count()?, 6);
+    Ok(())
+}
 
-    let fresh = run("fresh")?;
-    let fresh_id = fresh["checkpoint"]["graph_id"].as_str().ok_or("fresh ID")?;
-    assert_ne!(fresh_id, id);
-    let (output, stopped) = rig.run(&["stop", fresh_id])?;
-    assert!(output.status.success(), "{stopped}");
-    let rerun = run("fresh")?;
-    assert_ne!(rerun["checkpoint"]["graph_id"], fresh_id);
-    assert_eq!(rerun["checkpoint"]["cancelled"], false);
-    assert_eq!(rerun["status"], "complete");
+#[test]
+fn concurrent_named_runs_with_different_input_each_launch_under_their_own_name() -> Result {
+    let rig = GraphProject::new()?;
+    let templates = rig.project.join(".provenant/templates");
+    std::fs::create_dir_all(&templates)?;
+    std::fs::write(
+        templates.join("stamp.toml"),
+        "kind='gate'\n[node.condition]\ntype='budget'\n[parameters.tag]\ntype='string'\ndefault='none'\n",
+    )?;
+    let launches = 4;
+    let barrier = std::sync::Barrier::new(launches);
+    let ids = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..launches)
+            .map(|index| {
+                let (rig, barrier) = (&rig, &barrier);
+                scope.spawn(move || -> std::result::Result<String, String> {
+                    let tag = format!("tag={index}");
+                    barrier.wait();
+                    let (output, result) = rig
+                        .run(&["run", "stamp", "--name", "race", "--set", &tag])
+                        .map_err(|error| error.to_string())?;
+                    if !output.status.success() {
+                        return Err(result.to_string());
+                    }
+                    result["data"]["checkpoint"]["graph_id"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| result.to_string())
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().map_err(|_| "launch panicked".to_owned())?)
+            .collect::<std::result::Result<std::collections::BTreeSet<_>, _>>()
+    })?;
+    assert_eq!(ids.len(), launches, "each input owns one graph: {ids:?}");
+    assert!(
+        ids.iter().all(|id| id == "race" || id.starts_with("race-")),
+        "{ids:?}"
+    );
     Ok(())
 }
 
@@ -1130,57 +1245,6 @@ fn explain_refuses_document_read_roots_outside_the_project() -> Result {
     Ok(())
 }
 
-/// Drive one `fabric_run` MCP tool call through a real server process.
-fn mcp_run(rig: &GraphProject, arguments: Value) -> Result<Value> {
-    use std::io::Write;
-    let frames = [
-        json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}}),
-        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
-        json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_run","arguments":arguments}}),
-    ];
-    let input = frames
-        .iter()
-        .map(serde_json::to_string)
-        .collect::<std::result::Result<Vec<_>, _>>()?
-        .join("\n")
-        + "\n";
-    let mut command = fixture_cli();
-    command
-        .current_dir(&rig.project)
-        .env("PROVENANT_ROOT", &rig.root)
-        .env("XDG_CONFIG_HOME", rig.temp.path().join("config"))
-        .arg("--state-dir")
-        .arg(rig.state())
-        .args(["fabric", "mcp", "--client", "codex"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let mut child = command.spawn()?;
-    child
-        .stdin
-        .as_mut()
-        .ok_or("MCP stdin")?
-        .write_all(input.as_bytes())?;
-    drop(child.stdin.take());
-    let output = child.wait_with_output()?;
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    for line in output
-        .stdout
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-    {
-        let value: Value = serde_json::from_slice(line)?;
-        if value["id"] == 1 {
-            return Ok(value["result"].clone());
-        }
-    }
-    Err("missing MCP reply".into())
-}
-
 /// One state directory that a compile failure can be observed against.
 fn prepare_state(rig: &GraphProject) -> Result {
     std::fs::create_dir_all(rig.state())?;
@@ -1192,7 +1256,7 @@ fn prepare_state(rig: &GraphProject) -> Result {
     Ok(())
 }
 
-/// Assert that the template CLI, a raw document on the CLI and the MCP tool
+/// Assert that the template CLI, and a raw document on the CLI
 /// all refuse the same compile failure with `expected` and journal nothing.
 fn assert_compile_refusal_matches(
     rig: &GraphProject,
@@ -1210,10 +1274,7 @@ fn assert_compile_refusal_matches(
     std::fs::write(rig.state().join("config.toml"), config)?;
     let path = rig.document(document)?;
     let mut messages = Vec::new();
-    for args in [
-        vec!["run", "--use", name, "--explain"],
-        vec!["run", "--use", name],
-    ] {
+    for args in [vec!["run", name, "--explain"], vec!["run", name]] {
         let (output, value) = rig.run(&args)?;
         assert!(!output.status.success(), "{name} {args:?}: {value}");
         messages.push(
@@ -1239,20 +1300,6 @@ fn assert_compile_refusal_matches(
             value["error"]["message"]
                 .as_str()
                 .ok_or("message")?
-                .to_owned(),
-        );
-    }
-    for arguments in [
-        json!({"op":"run","use":name}),
-        json!({"op":"run","use":name,"explain":true}),
-        json!({"op":"run","document":document}),
-    ] {
-        let value = mcp_run(rig, arguments.clone())?;
-        assert_eq!(value["isError"], true, "{name} {arguments}: {value}");
-        messages.push(
-            value["structuredContent"]["message"]
-                .as_str()
-                .ok_or("MCP message")?
                 .to_owned(),
         );
     }
@@ -1285,7 +1332,7 @@ fn oversized_graph_expansion_is_refused_before_journalling() -> Result {
     )?;
 
     // A graph that compiles to more nodes than the state admits: the template
-    // CLI, the raw document CLI and the MCP tool must read the same refusal.
+    // CLI and the raw document CLI must read the same refusal.
     // The template compiles to one composite boundary over two leaves, so the
     // document carries that shape and both expand to the same node count.
     let node_cap = provenant_fabric_runtime::config::GraphLimits {
@@ -1401,15 +1448,10 @@ fn oversized_graph_expansion_is_refused_before_journalling() -> Result {
 }
 
 #[test]
-fn steer_graph_and_node_refuse_ambiguous_live_attempts_before_reading_stdin() -> Result {
+fn steer_graph_and_node_refuse_an_unlaunched_attempt_before_reading_stdin() -> Result {
     let rig = GraphProject::new()?;
     let path = rig.document(&json!({"schema_version":1,"graph_id":"steer-ambiguous","nodes":[{"id":"accept","kind":"gate","access":"read_only","condition":{"type":"budget"}}]}))?;
-    let output = rig
-        .command()
-        .args(["run", "--file"])
-        .arg(path)
-        .arg("--wait=10s")
-        .output()?;
+    let output = rig.command().args(["run", "--file"]).arg(path).output()?;
     assert!(output.status.success(), "{output:?}");
     let checkpoint_path = graph_records(&rig.state())?
         .into_iter()
@@ -1433,13 +1475,11 @@ fn steer_graph_and_node_refuse_ambiguous_live_attempts_before_reading_stdin() ->
         FileJournal::execution(&state, project, "steer-ambiguous")?.ok_or("execution")?;
     let mut checkpoint =
         FileJournal::read_checkpoint(&state, project, "steer-ambiguous")?.ok_or("checkpoint")?;
-    let attempt = json!({"key":{"graph_id":"steer-ambiguous","node_id":"accept","route_index":0},
+    let attempt = json!({"key":{"graph_id":"steer-ambiguous","node_id":"accept","route_index":0, "attempt": 1},
         "launched":false,"route":{"alias":"senior"},"state":"starting","attempt_ref":null,
         "outcome":null,"launch_actor":"fixture"});
-    let mut other = attempt.clone();
-    other["key"]["route_index"] = json!(1);
     checkpoint.nodes[0].state = NodeState::Running;
-    checkpoint.nodes[0].attempts = serde_json::from_value(json!([attempt, other]))?;
+    checkpoint.nodes[0].attempts = serde_json::from_value(json!([attempt]))?;
     let clock = provenant_os::clock::SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5)?;
@@ -1448,17 +1488,13 @@ fn steer_graph_and_node_refuse_ambiguous_live_attempts_before_reading_stdin() ->
     journal.bind(execution)?;
     journal.save(&checkpoint)?;
     drop(journal);
+    // A node target names its newest attempt; one with no provider session
+    // yet is refused as a target before any steer text is read.
     for target in ["steer-ambiguous", "steer-ambiguous/accept"] {
-        let (output, value) = rig.run(&["steer", target, "--text-stdin"])?;
+        let (output, value) = rig.run(&["steer", target, "--brief-file", "-"])?;
         assert!(!output.status.success(), "{value}");
         assert_eq!(value["status"], "refused", "{value}");
         assert_eq!(value["error"]["code"], "steer_target_refused", "{value}");
-        assert!(
-            value["error"]["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("several live attempts")),
-            "{value}"
-        );
     }
     Ok(())
 }
@@ -1515,6 +1551,9 @@ fn fake_launch_owner_refusal_reaches_real_graph_status() -> Result {
     struct RefusingOwner(Option<InvalidInputDetail>);
     impl AttemptOwner for RefusingOwner {
         type Error = FacadeError;
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
         fn launch_refused_before_acceptance(
             &mut self,
             _: &graph::GraphAttempt,
@@ -1540,12 +1579,7 @@ fn fake_launch_owner_refusal_reaches_real_graph_status() -> Result {
     }
     let rig = GraphProject::new()?;
     let seed = rig.document(&json!({"schema_version":1,"graph_id":"seed","nodes":[{"id":"accept","kind":"gate","access":"read_only","condition":{"type":"budget"}}]}))?;
-    let output = rig
-        .command()
-        .args(["run", "--file"])
-        .arg(seed)
-        .arg("--wait=10s")
-        .output()?;
+    let output = rig.command().args(["run", "--file"]).arg(seed).output()?;
     assert!(output.status.success(), "{output:?}");
     let checkpoint = graph_records(&rig.state())?
         .into_iter()
@@ -1593,9 +1627,8 @@ fn fake_launch_owner_refusal_reaches_real_graph_status() -> Result {
             &clock,
         )?;
         journal.bind(GraphExecution {
-            review_base: None,
             extra: Default::default(),
-            integration_base: None,
+            bases: None,
             directory: rig.project.clone(),
             document: document.clone(),
         })?;
@@ -1655,15 +1688,17 @@ fn fake_launch_owner_refusal_reaches_real_graph_status() -> Result {
         let text = String::from_utf8(human.stdout)?;
         assert!(text.contains(expected) && text.contains("check"), "{text}");
         if id == "schema-refusal" {
-            let (_, invalid) = rig.run(&["retry", id, "--node", "missing"])?;
+            let (refused, invalid) = rig.run(&["retry", &format!("{id}/missing")])?;
+            assert_eq!(refused.status.code(), Some(2), "{invalid}");
+            assert_eq!(invalid["error"]["code"], "NOT_FOUND", "{invalid}");
             assert!(
                 invalid["error"]["message"]
                     .as_str()
                     .unwrap()
-                    .contains("node does not exist"),
+                    .contains(&format!("{id}/missing")),
                 "{invalid}"
             );
-            let (output, retried) = rig.run(&["retry", id, "--node", "one"])?;
+            let (output, retried) = rig.run(&["retry", &format!("{id}/one")])?;
             assert!(
                 output.status.success(),
                 "retry: {retried}, stderr: {}",
@@ -1720,21 +1755,25 @@ fn stored_prompt(rig: &GraphProject, graph: &str, node: &str) -> Result<(String,
 }
 
 fn settled_task_graph(rig: &GraphProject) -> Result<String> {
-    let (_, started) = rig.run(&[
-        "run",
-        "old brief",
-        "--use",
-        "task",
-        "--model",
-        "fixture/model",
-        "--wait=10s",
-    ])?;
+    let (_, started) = rig.run(&["run", "task", "old brief", "--model", "fixture/model"])?;
     let id = started["data"]["checkpoint"]["graph_id"]
         .as_str()
         .ok_or_else(|| format!("graph id: {started}"))?;
-    assert_eq!(
-        started["data"]["checkpoint"]["nodes"][0]["state"], "failed",
-        "{started}"
+    // The fixture provider cannot run, so the graph settles unsuccessfully
+    // (or asks for input); either ends the wait.
+    // In JSON mode wait emits progress event rows before its final command
+    // record. This helper only needs the graph to settle; status below checks
+    // the public failed-node state.
+    let _wait = rig
+        .command()
+        .args(["wait", id, "--timeout", "10s"])
+        .output()?;
+    let (_, settled) = rig.run(&["status", id])?;
+    assert!(
+        settled["data"]["rows"].as_array().is_some_and(|rows| rows
+            .iter()
+            .any(|row| row["kind"] == "node" && row["state"] == "failed")),
+        "{settled}"
     );
     Ok(id.to_owned())
 }
@@ -1766,21 +1805,14 @@ fn retry_brief_on_a_graph_of_several_nodes_asks_for_the_node() -> Result {
         {"id":"first","kind":"gate","access":"read_only","condition":{"type":"budget"}},
         {"id":"second","kind":"gate","access":"read_only","condition":{"type":"budget"}}
     ]}))?;
-    let output = rig
-        .command()
-        .args(["run", "--file"])
-        .arg(path)
-        .arg("--wait=10s")
-        .output()?;
+    let output = rig.command().args(["run", "--file"]).arg(path).output()?;
     assert!(output.status.success(), "{output:?}");
+    let (_, before) = rig.run(&["status", "two-nodes"])?;
     let (output, refusal) = rig.run(&["retry", "two-nodes", "--brief", "corrected"])?;
     assert!(!output.status.success(), "{refusal}");
+    // The typed code is the contract; the refusal changes nothing.
     assert_eq!(refusal["error"]["code"], "graph_target", "{refusal}");
-    assert!(
-        refusal["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("--node")),
-        "{refusal}"
-    );
+    let (_, after) = rig.run(&["status", "two-nodes"])?;
+    assert_eq!(after["data"]["rows"], before["data"]["rows"], "{after}");
     Ok(())
 }

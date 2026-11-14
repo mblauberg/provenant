@@ -143,9 +143,8 @@ pub enum RouteReadiness {
     },
 }
 impl RouteReadiness {
-    /// Readiness that was never observed. The receipt has no unknown status
-    /// and an older reader rejects an unrecognised one, so unknown projects
-    /// onto the existing unavailable status with its established reason.
+    /// Readiness that was never observed projects onto the unavailable status
+    /// with an explicit unknown-availability reason.
     pub fn unknown() -> Self {
         Self::Unavailable {
             extra: Default::default(),

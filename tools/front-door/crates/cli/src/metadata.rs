@@ -14,17 +14,33 @@ impl ArgExt for PublishedBounds {}
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Requirements(pub Vec<String>);
 impl ArgExt for Requirements {}
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RequiredUnless(pub Vec<String>);
+impl ArgExt for RequiredUnless {}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TargetSyntax {
+    Graph,
+    GraphName,
+    Branch,
+}
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TargetGrammar(pub TargetSyntax);
+impl ArgExt for TargetGrammar {}
 
 pub(crate) trait CatalogueArg {
     fn catalog_bounds(self, bounds: (u64, u64)) -> Self;
     fn catalog_u8_range(self, range: impl RangeBounds<i64>) -> Self;
     fn catalog_duration(self) -> Self;
-    fn catalog_status_wait(self) -> Self;
+    fn catalog_observation_wait(self) -> Self;
     fn catalog_u64_range(self, range: impl RangeBounds<u64>) -> Self;
     fn catalog_u32_range(self, range: impl RangeBounds<i64>) -> Self;
     fn catalog_i64_range(self, range: impl RangeBounds<i64>) -> Self;
     fn catalog_requires(self, id: &'static str) -> Self;
     fn catalog_requires_all(self, ids: impl IntoIterator<Item = &'static str>) -> Self;
+    fn catalog_required_unless(self, id: &'static str) -> Self;
+    fn catalog_graph_target(self) -> Self;
+    fn catalog_graph_name(self) -> Self;
+    fn catalog_branch_target(self) -> Self;
 }
 fn unsigned_bounds(range: &impl RangeBounds<u64>) -> (u64, u64) {
     let min = match range.start_bound() {
@@ -64,11 +80,11 @@ impl CatalogueArg for Arg {
     }
     fn catalog_duration(self) -> Self {
         self.value_parser(crate::grammar::duration_seconds)
-            .add(NumericBounds((1, provenant_core::MAX_LANE_RUNTIME_SECONDS)))
+            .catalog_bounds((1, provenant_core::MAX_LANE_RUNTIME_SECONDS))
     }
-    fn catalog_status_wait(self) -> Self {
-        self.catalog_duration()
-            .value_parser(crate::grammar::status_wait_seconds)
+    fn catalog_observation_wait(self) -> Self {
+        self.value_parser(crate::grammar::observation_wait_seconds)
+            .add(NumericBounds((0, provenant_core::MAX_LANE_RUNTIME_SECONDS)))
     }
     fn catalog_u64_range(self, range: impl RangeBounds<u64>) -> Self {
         let bounds = unsigned_bounds(&range);
@@ -93,6 +109,21 @@ impl CatalogueArg for Arg {
         let ids: Vec<_> = ids.into_iter().collect();
         requirements.0.extend(ids.iter().map(|id| (*id).to_owned()));
         self.requires_all(ids).add(requirements)
+    }
+    fn catalog_required_unless(self, id: &'static str) -> Self {
+        let mut conditions = self.get::<RequiredUnless>().cloned().unwrap_or_default();
+        conditions.0.push(id.to_owned());
+        self.required_unless_present(id).add(conditions)
+    }
+    fn catalog_graph_target(self) -> Self {
+        self.add(TargetGrammar(TargetSyntax::Graph))
+    }
+    fn catalog_graph_name(self) -> Self {
+        self.add(TargetGrammar(TargetSyntax::GraphName))
+    }
+    fn catalog_branch_target(self) -> Self {
+        self.value_parser(crate::grammar::branch_name)
+            .add(TargetGrammar(TargetSyntax::Branch))
     }
 }
 

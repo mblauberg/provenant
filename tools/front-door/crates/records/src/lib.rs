@@ -3,15 +3,16 @@
 
 mod adapters;
 pub use adapters::{
-    ADAPTER_SPECS, AdapterSpec, COMMAND_OUTPUT_TAIL_BYTES, GithubAuth, LaunchCapabilities,
-    LaunchField, LaunchRequest, LoginObservation, LoginReprobe, ModelObservation, NamedEntry,
-    QuotaProbeKind, SetupRoot, SkillLocation, UnsupportedLaunch,
+    ADAPTER_SPECS, AccountModelPlan, AccountQuota, AdapterSpec, COMMAND_OUTPUT_TAIL_BYTES,
+    GithubAuth, LaunchCapabilities, LaunchField, LaunchRequest, LoginObservation, LoginReprobe,
+    ModelObservation, NamedEntry, QuotaProbeKind, SetupRoot, SkillLocation, UnsupportedLaunch,
 };
 mod artifact_ref;
 mod attempt_fact;
 mod attempt_file;
 mod canonical;
 pub mod control;
+pub mod custody;
 pub mod diagnostic;
 mod finding;
 pub mod handoff;
@@ -20,9 +21,11 @@ mod install;
 mod json;
 mod jsonc;
 mod path_wire;
+pub mod policy;
 mod source;
 pub mod telemetry_context;
 mod trace;
+pub mod usage_identity;
 
 pub use artifact_ref::ArtifactRef;
 pub use attempt_fact::{
@@ -40,8 +43,12 @@ pub use jsonc::{JsoncDocument, JsoncToken, JsoncTokenKind, decode_jsonc};
 pub use path_wire::{PathWire, PathWireError, StructuredPathWire};
 pub use source::{SourceDigest, SourceDigestError, SourceInput, source_digest};
 pub use trace::Trace;
+pub use usage_identity::{
+    AccountIdentity, Identity, IdentityEpoch, IdentityEvidenceSource, UnknownIdentityReason,
+};
 
 pub mod inbox;
+pub mod landing;
 pub mod workflow;
 
 pub use install::{
@@ -66,6 +73,23 @@ pub use resolved_route::{
 
 pub mod result_capture;
 pub mod run;
+
+// Format-2 records (#3078). Callers adopt them in later slices.
+pub mod finding_decision;
+pub mod limit;
+pub mod pause;
+pub mod stop;
+pub mod work_key;
+pub use finding_decision::{FindingDecision, FindingDisposition};
+pub use limit::{
+    BudgetAction, BudgetGrace, BudgetPolicy, CeilingError, LaneLimits, Limit, LimitSource,
+    LimitStrength,
+};
+pub use pause::{Pause, PauseCause};
+pub use stop::{Continuation, NextStep, OnStop, STOP_TABLE, Stop, StopCause, StopFacts, StopRule};
+pub use work_key::WorkKey;
+#[cfg(test)]
+mod format2_tests;
 pub use run::UserSkillsMode;
 
 /// Fields from newer writers, retained in canonical record bytes.

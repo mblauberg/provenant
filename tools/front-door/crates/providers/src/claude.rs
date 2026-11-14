@@ -98,7 +98,12 @@ pub const REGISTRATION: crate::Registration = crate::Registration {
     },
 };
 
-crate::adapter!(Claude, "claude", prepare);
+crate::adapter!(
+    Claude,
+    "claude",
+    prepare;
+    crate::quota_live::claude::session_identity
+);
 const MODEL_ON_WIRE: bool = true;
 
 /// The default config directory's keychain service. A non-default
@@ -364,8 +369,9 @@ fn parse_stored_token(bytes: &[u8], now_ms: u64) -> Result<OauthToken, ProviderE
 /// servers, no slash commands, no session file) in the executor's private
 /// working directory. Host callers share an exclusive config-directory lock
 /// across a second read, refresh and reread, so only one CLI can rotate its token.
-/// Every subprocess is capped by the caller's `deadline_ms` on the
-/// `now_ms` clock. The token is never logged, printed or persisted.
+/// Reads and admission use the caller's deadline. Once admitted, the CLI owns
+/// rotation and runs to completion; interrupting it can lose a single-use token.
+/// The token is never logged, printed or persisted.
 pub fn refresh_if_expiring(
     executor: &dyn Executor,
     login: &Login<'_>,
@@ -373,13 +379,36 @@ pub fn refresh_if_expiring(
     deadline_ms: u64,
     authority: Option<&CredentialAuthority>,
 ) -> Result<OauthToken, ProviderError> {
+    refresh_with_policy(
+        executor,
+        login,
+        now_ms,
+        deadline_ms,
+        authority,
+        60_000,
+        false,
+    )
+}
+
+/// `minimum_budget_ms` gates admission, not an in-flight rotation. `force`
+/// asks the CLI to revalidate after an API refusal even if local expiry is fresh.
+pub(super) fn refresh_with_policy(
+    executor: &dyn Executor,
+    login: &Login<'_>,
+    now_ms: &dyn Fn() -> u64,
+    deadline_ms: u64,
+    authority: Option<&CredentialAuthority>,
+    minimum_budget_ms: u64,
+    force: bool,
+) -> Result<OauthToken, ProviderError> {
     let source = credential_source(login)?;
+    let io_deadline = std::cell::Cell::new(deadline_ms);
     if let Some(authority) = authority {
         authority.check(&source, now_ms())?;
     }
     let budget = |cap: Duration| -> Result<Duration, ProviderError> {
-        match deadline_ms.saturating_sub(now_ms()) {
-            0 => Err(ProviderError::CredentialUnavailable),
+        match io_deadline.get().saturating_sub(now_ms()) {
+            0 => Err(ProviderError::RefreshDeferred),
             left => Ok(cap.min(Duration::from_millis(left))),
         }
     };
@@ -467,11 +496,14 @@ pub fn refresh_if_expiring(
         }
     };
     match read() {
-        Ok(token) if !token.needs_refresh(now_ms()) => return Ok(token),
+        Ok(token) if !force && !token.needs_refresh(now_ms()) => return Ok(token),
         // An expired token was read successfully, so refreshing is safe: no
         // running lane can still be using it. Read failures never refresh.
         Ok(_) | Err(ProviderError::CredentialExpired) => {}
         Err(error) => return Err(error),
+    }
+    if deadline_ms.saturating_sub(now_ms()) < minimum_budget_ms {
+        return Err(ProviderError::RefreshDeferred);
     }
     // Stable inode, never removed: reread storage under this cross-process
     // lock in case another caller already refreshed the token.
@@ -486,7 +518,7 @@ pub fn refresh_if_expiring(
     let wait = WaitBudget::nonblocking(deadline);
     let directory = Directory::open_anchor(login.config_dir)
         .map_err(|_| ProviderError::CredentialUnavailable)?;
-    let _refresh_lock = directory
+    let refresh_lock = directory
         .lock(
             OsStr::new("provenant-oauth-refresh.lock"),
             LockMode::Exclusive,
@@ -496,9 +528,12 @@ pub fn refresh_if_expiring(
         )
         .map_err(|_| ProviderError::CredentialUnavailable)?;
     match read() {
-        Ok(token) if !token.needs_refresh(now_ms()) => return Ok(token),
+        Ok(token) if !force && !token.needs_refresh(now_ms()) => return Ok(token),
         Ok(_) | Err(ProviderError::CredentialExpired) => {}
         Err(error) => return Err(error),
+    }
+    if deadline_ms.saturating_sub(now_ms()) < minimum_budget_ms {
+        return Err(ProviderError::RefreshDeferred);
     }
     if authority.is_some() && credential_source(login)? != source {
         return Err(ProviderError::CredentialUnavailable);
@@ -528,17 +563,31 @@ pub fn refresh_if_expiring(
     let mut options = ExecOptions::new(
         &argv,
         Path::new(PROBE_CWD),
-        budget(Duration::from_secs(60))?,
+        Duration::from_millis(minimum_budget_ms.max(60_000)),
     );
+    options.wait_for_completion = true;
+    // Terminal interruption of the host must not interrupt token persistence.
+    options.process_group = true;
+    // Rotation may outlive a crashing host. The CLI and its descendants keep
+    // the same exclusive lock until persistence has finished.
+    options.inherited_lease = Some(&refresh_lock);
     options.env = Some(&env);
     options.stdout = StreamPolicy::Discard;
     options.stderr = StreamPolicy::Discard;
     executor
         .execute(options)
         .map_err(|_| ProviderError::CredentialUnavailable)?;
-    let token = read()?;
+    // Persistence is complete before the CLI exits. Give the final read its own
+    // budget even when the caller's tick deadline passed during the rotation.
+    io_deadline.set(now_ms().saturating_add(10_000));
+    let token = read().map_err(|error| match error {
+        ProviderError::CredentialExpired | ProviderError::CredentialNotFound => {
+            ProviderError::RefreshDeferred
+        }
+        other => other,
+    })?;
     if token.expires_at_ms.saturating_sub(now_ms()) < MIN_LIFETIME_MS {
-        return Err(ProviderError::CredentialUnavailable);
+        return Err(ProviderError::RefreshDeferred);
     }
     Ok(token)
 }
@@ -563,7 +612,12 @@ pub fn refresh_for_account_authorised(
     deadline_ms: u64,
     authority: &CredentialAuthority,
 ) -> Result<OauthToken, ProviderError> {
-    authority.check(&credential_source(login)?, now_ms())?;
+    authority
+        .check(&credential_source(login)?, now_ms())
+        .map_err(|error| match error {
+            ProviderError::CredentialUnavailable => ProviderError::RefreshDeferred,
+            other => other,
+        })?;
     refresh_account(
         executor,
         login,
@@ -587,7 +641,7 @@ fn refresh_account(
     let check = || -> Result<(), ProviderError> {
         let remaining = deadline_ms.saturating_sub(now_ms());
         if remaining == 0 {
-            return Err(ProviderError::CredentialUnavailable);
+            return Err(ProviderError::RefreshDeferred);
         }
         let argv = [
             login.executable.into(),
@@ -612,37 +666,48 @@ fn refresh_account(
         options.stop_on_output_limit = true;
         let out = executor
             .execute(options)
-            .map_err(|_| ProviderError::CredentialUnavailable)?;
-        if out.termination != Termination::Exit(0)
+            .map_err(|_| ProviderError::RefreshDeferred)?;
+        if !matches!(out.termination, Termination::Exit(_))
             || out.timed_out
             || out.stdout.truncated
             || out.stdout.read_failed
             || out.drain_truncated
             || out.cancelled
         {
-            return Err(ProviderError::CredentialUnavailable);
+            return Err(ProviderError::RefreshDeferred);
         }
         #[derive(Deserialize)]
         struct Status {
             #[serde(rename = "loggedIn")]
             logged_in: bool,
+            #[serde(default)]
             email: String,
         }
         let status: Status = serde_json::from_slice(&out.stdout.bytes)
             .map_err(|_| ProviderError::UnknownIdentity)?;
-        if !status.logged_in
-            || crate::identity::fingerprint(&status.email).as_deref() != Some(account.key())
-        {
+        if !status.logged_in {
+            return Err(ProviderError::LoginRequired);
+        }
+        if out.termination != Termination::Exit(0) {
+            return Err(ProviderError::RefreshDeferred);
+        }
+        if crate::identity::fingerprint(&status.email).as_deref() != Some(account.key()) {
             return Err(ProviderError::IdentityMismatch);
         }
         Ok(())
     };
     check()?;
-    let mut token = match lane_token(login)? {
-        Some(token) => token,
-        None => refresh_if_expiring(executor, login, now_ms, deadline_ms, authority)?,
+    let token = match lane_token(login)? {
+        Some(token) => Ok(token),
+        None => refresh_if_expiring(executor, login, now_ms, deadline_ms, authority),
     };
     check()?;
+    let mut token = token.map_err(|error| match error {
+        ProviderError::CredentialExpired | ProviderError::CredentialUnavailable => {
+            ProviderError::RefreshDeferred
+        }
+        other => other,
+    })?;
     token.account = Some((account.key().into(), account.directory().to_owned()));
     Ok(token)
 }
@@ -651,7 +716,7 @@ fn refresh_account(
 /// and passes it through an inherited pipe. Sandboxed lanes deny keychain
 /// services and use attempt-private configuration; native lanes keep the
 /// ordinary configuration unless an account selects another directory.
-/// Provenant and its hook helpers are added explicitly for lane MCP use.
+/// Provenant and its hook helpers are added explicitly for lane use.
 fn prepare(
     input: &PrepareInput<'_>,
     access: Access,
@@ -662,11 +727,25 @@ fn prepare(
     let mut tool_requirements = crate::launch::ToolRequirements::default();
     // No credential path is granted: the token arrives through a pipe.
     if plan.selected_authentication.is_some() {
-        return Err(ProviderError::UnsupportedPolicy);
+        return Err(input.boundary_error(
+            "CLAUDE_PREPARE_CREDENTIALS",
+            "Claude receives its selected account token through the host pipe",
+            ProviderError::UnsupportedPolicy,
+        ));
     }
-    let token = input.token.ok_or(ProviderError::UnsupportedPolicy)?;
+    let token = input.token.ok_or_else(|| {
+        input.boundary_error(
+            "CLAUDE_PREPARE_CREDENTIALS",
+            "Claude launch requires its selected host-read token",
+            ProviderError::UnsupportedPolicy,
+        )
+    })?;
     if token.account.is_some() && input.account.is_none() {
-        return Err(ProviderError::IdentityMismatch);
+        return Err(input.boundary_error(
+            "CLAUDE_PREPARE_AUTHORITY",
+            "Claude token identity must match the selected account",
+            ProviderError::IdentityMismatch,
+        ));
     }
     if let Some(account) = input.account
         && token
@@ -674,11 +753,21 @@ fn prepare(
             .as_ref()
             .is_none_or(|(key, dir)| key != account.key() || dir != account.directory())
     {
-        return Err(ProviderError::IdentityMismatch);
+        return Err(input.boundary_error(
+            "CLAUDE_PREPARE_AUTHORITY",
+            "Claude token identity must match the selected account",
+            ProviderError::IdentityMismatch,
+        ));
     }
     let session_id = match (session, input.continuation) {
         (Session::Resume, Some(continuation)) => continuation.session().to_owned(),
-        (Session::Resume, None) => return Err(ProviderError::UnknownIdentity),
+        (Session::Resume, None) => {
+            return Err(input.boundary_error(
+                "CLAUDE_PREPARE_AUTHORITY",
+                "resumed Claude invocation has no validated continuation identity",
+                ProviderError::UnknownIdentity,
+            ));
+        }
         (Session::Fresh, _) => uuid_v4(input.nonce),
     };
     let mut argv: Vec<OsString> = [
@@ -724,7 +813,7 @@ fn prepare(
         argv.extend(["--effort".into(), effort.into()]);
     }
     if !shell && let Some(read_only) = &plan.read_only {
-        // The following MCP flags terminate --add-dir's variadic paths.
+        // The flags that follow terminate --add-dir's variadic paths.
         add_git_dirs(&mut argv, read_only.git_read_paths(), input.cwd);
     }
     if access == Access::ReadOnly {
@@ -744,14 +833,14 @@ fn prepare(
     }
 
     let mut package_omissions = Vec::new();
-    let package = package_grant(input.executable, &mut package_omissions);
+    let package = package_grant(input.executable, &mut package_omissions, input.policy)?;
     let scratch = &plan.scratch.path;
     // Filesystem confinement owns writer path access; native permission prompts
     // would refuse tools that cannot ask for approval in a headless lane.
     let allowed_tools = if web {
-        "Bash,Skill,mcp__fabric__*,WebFetch,WebSearch"
+        "Bash,Skill,WebFetch,WebSearch"
     } else {
-        "Bash,Skill,mcp__fabric__*"
+        "Bash,Skill"
     };
     let image_rules = if shell {
         Vec::new()
@@ -782,12 +871,13 @@ fn prepare(
     let mut setup = input.provenant.claude(
         scratch,
         &mut argv,
+        input.policy,
         (!shell).then_some(allowed_tools),
         &image_rules,
     )?;
 
     let toolchain = shell || web;
-    let path = crate::launch::tool_search_path(input.home, toolchain);
+    let path = crate::launch::tool_search_path(input.home, toolchain, input.policy)?;
     let mut env = base_env(input, scratch, path);
     if input.account.is_some() {
         // The selected login takes precedence over ambient provider selectors.
@@ -803,9 +893,13 @@ fn prepare(
             .any(|name| key == *name)
         });
     }
-    input
-        .provenant
-        .environment(scratch, &mut env, &mut setup, input.sandboxed())?;
+    input.provenant.environment(
+        scratch,
+        &mut env,
+        &mut setup,
+        input.sandboxed(),
+        input.policy,
+    )?;
     env.extend(
         [
             ("CLAUDE_CODE_TMPDIR", scratch.as_os_str()),
@@ -819,11 +913,14 @@ fn prepare(
     let skill_reads = user_skills.iter().map(subtree).collect::<Vec<_>>();
     let omitted_discovery = package_omissions;
     let discover_skills = user_skills.is_some();
-    let private = &plan
-        .private_state
-        .as_ref()
-        .ok_or(ProviderError::UnsupportedPolicy)?
-        .path;
+    let private = crate::launch::private_state_or_scratch(
+        plan.private_state
+            .as_ref()
+            .map(|state| state.path.as_path()),
+        &plan.scratch.path,
+        input.policy,
+        "CLAUDE_PREPARE_NONE",
+    )?;
     let config = if input.sandboxed() {
         private.join("claude-config")
     } else {
@@ -896,6 +993,7 @@ fn prepare(
         user_skills: staged_skills,
         tool_requirements,
         git_wrapper: Default::default(),
+        policy: input.policy.clone(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 process_executables: vec![exact(input.executable)],
@@ -915,7 +1013,7 @@ fn prepare(
         },
         stream,
     };
-    crate::launch::prepare_tool_requirements(input, &mut spec);
+    crate::launch::prepare_tool_requirements(input, &mut spec)?;
     input
         .provenant
         .grant(&mut spec.profile.spec, &mut spec.setup, true);
@@ -934,7 +1032,12 @@ pub(super) fn add_git_dirs<'a>(
     }
 }
 
-crate::quota_source!(Claude, "claude");
+crate::quota_source!(
+    Claude,
+    "claude",
+    crate::quota_live::claude::capture_source,
+    crate::quota::claude::decode_source
+);
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 enum Event {

@@ -5,7 +5,7 @@ notes; a project may override the starter with its own component harvest process
 Reference: [shadcn Vite installation](https://ui.shadcn.com/docs/installation/vite).
 
 The adjacent starter is a small Vite, React and Tailwind application with Base
-UI; exact versions are in its `package.json`. Copy it into a new project, install,
+UI; exact versions are in its package manifest. Copy it into a new project, install,
 typecheck and build. Do not overwrite an existing component system: the project
 owns the resulting component source and its updates.
 

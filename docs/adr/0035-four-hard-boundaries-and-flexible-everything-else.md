@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 
-Changed: 2026-10-30, #2284; 2026-11-04 (shims and provider guards); 2026-11-12 (unsandboxed trusted routes, #3246).
+Changed: 2026-10-30, #2284; 2026-11-04 (shims and provider guards); 2026-11-12 (unsandboxed trusted routes, #3246); 2026-11-14 (2.0.0 runs from a fresh state root, #3078).
 
 ## Context
 
@@ -32,23 +32,16 @@ other edge cases get a note, or a typed refusal of that one operation
 ([ADR 0034](0034-refusals-carry-stable-typed-codes.md)). Persisted formats are
 versioned and tolerate extra fields.
 
-Interfaces change without compatibility shims, before and after 1.0: no legacy
-readers, aliases, fallback paths or dual formats. A breaking change ships with
-a release note, and with `provenant config migrate` or a drain before
-upgrade ([install](../runbooks/install.md#bootstrap-and-upgrade)) when
-persisted state changes.
+Interfaces change without compatibility shims, legacy readers, aliases or dual formats. Breaking changes include a clear operator step when one is needed.
 
-Provider and launch guards outside the four boundaries warn and continue, or
-are configurable defaults with a visible source. They do not refuse a lane.
-Dropping an optional grant, skill or tool with a named warning is preferred
-over refusing the launch.
+Provider and launch guards outside the four boundaries warn and continue, or are configurable defaults with a visible source. The policy is declared once and overrides remain visible.
 
 ## Consequences
 
-New guards need an observed failure in one of the four classes. Reviews treat
+Hard holds require a real boundary in one of the four classes. Reviews treat
 a lane or launch refusal outside them, or any guard that blocks ordinary work,
 as a defect to loosen, not a safety gain. See
-[Simple first](../specs/rust-workspace.md#simple-first) and the
+[Build for change](../specs/rust-workspace.md#build-for-change-refuse-what-can-lose-data) and the
 [supervisor spec](../specs/supervisor.md).
 
 Overturn when: data loss, credential exposure or unauthorised change is traced

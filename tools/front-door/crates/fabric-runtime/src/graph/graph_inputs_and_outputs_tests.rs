@@ -126,12 +126,9 @@ fn optional_findings_distinguish_missing_invalid_and_valid_empty() {
             .as_ref()
             .unwrap();
         assert_eq!(output.findings_available, Some(available));
-        let mut stored = serde_json::to_value(output).unwrap();
+        let stored = serde_json::to_value(output).unwrap();
         let decoded: NodeOutputs = serde_json::from_value(stored.clone()).unwrap();
         assert_eq!(decoded.findings_available, Some(available));
-        stored.as_object_mut().unwrap().remove("findings_available");
-        let older: NodeOutputs = serde_json::from_value(stored).unwrap();
-        assert_eq!(older.findings_available, None);
         let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
         let replayed = replay
             .checkpoint
@@ -432,20 +429,26 @@ fn findings_and_verdict_at_the_end_of_a_large_result_are_parsed() {
         "id": "F1", "severity": "high", "file": "a.rs", "line": 1,
         "summary": "issue", "status": "open"
     });
-    for invalid in [
-        vec![finding.clone(); MAX_FINDINGS + 1],
-        vec![serde_json::json!({
+    let many = vec![finding.clone(); MAX_FINDINGS + 1];
+    let block = serde_json::json!({"schema_version": 1, "findings": many});
+    let captured = capture(&format!("```findings\n{block}\n```"));
+    let mut outputs = make_outputs(Some(&captured), None, None, None, None);
+    assert_eq!(outputs.findings_available, Some(true));
+    compact_findings(&mut outputs, Some(&captured), &[]);
+    assert!(!outputs.findings.is_empty());
+    assert!(canonical_len(&outputs.findings) <= FINDINGS_BYTES);
+
+    let oversized = serde_json::json!({
+        "schema_version": 1,
+        "findings": [{
             "id": "F1", "severity": "high", "file": "a.rs", "line": 1,
             "summary": "x".repeat(OUTPUT_FIELD_BYTES + 1), "status": "open"
-        })],
-    ] {
-        let block = serde_json::json!({"schema_version": 1, "findings": invalid});
-        let text = format!("```findings\n{block}\n```");
-        let outputs = make_outputs(Some(&capture(&text)), None, None, None, None);
-        assert!(outputs.findings.is_empty());
-        assert_eq!(outputs.warnings.len(), 1);
-        assert!(outputs.warnings[0].starts_with(FINDINGS_INVALID));
-    }
+        }]
+    });
+    let captured = capture(&format!("```findings\n{oversized}\n```"));
+    let outputs = make_outputs(Some(&captured), None, None, None, None);
+    assert_eq!(outputs.findings_available, Some(false));
+    assert!(outputs.warnings.iter().any(|warning| warning.starts_with(FINDINGS_INVALID)));
 }
 
 #[test]
@@ -1105,6 +1108,8 @@ fn required_verdict_checks_exact_lines_and_missing_results() {
                 result_path: None,
                 branch: None,
                 commit: None,
+                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                stop: None,
             }]),
             ..Default::default()
         };

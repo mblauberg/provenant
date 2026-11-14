@@ -79,6 +79,8 @@ pub enum Error {
     #[error(transparent)]
     Filesystem(#[from] FsError),
     #[error(transparent)]
+    Version(#[from] provenant_sqlite::VersionError),
+    #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
@@ -98,6 +100,11 @@ pub enum Error {
     #[error("chair log operation issued_at is too far in the future")]
     Future,
 }
+
+const SCHEMA: provenant_sqlite::Schema = provenant_sqlite::Schema {
+    sql: include_str!("log_schema.sql"),
+    version: 1,
+};
 
 pub struct LogStore {
     root: StateRoot,
@@ -199,26 +206,17 @@ impl LogStore {
         }
         Self::check_files(dir)?;
         let db = provenant_sqlite::open_connection(&self.path(), !write)?;
-        let version = match provenant_sqlite::read_version(&db, 1) {
-            Ok(version) => version,
-            Err(provenant_sqlite::VersionError::Sqlite(error)) => return Err(error.into()),
-            Err(_) => {
-                return Err(Error::Invalid(
-                    "invalid or unsupported chair log database version",
-                ));
-            }
-        };
-        if write && version == 0 {
-            db.execute_batch("PRAGMA auto_vacuum=FULL; PRAGMA synchronous=FULL; BEGIN IMMEDIATE;
-                CREATE TABLE IF NOT EXISTS meta (id INTEGER PRIMARY KEY CHECK(id=1), total_appended INTEGER NOT NULL, total_pruned INTEGER NOT NULL, expiry_cutoff INTEGER NOT NULL);
-                INSERT OR IGNORE INTO meta VALUES (1, 0, 0, -9223372036854775808);
-                CREATE TABLE IF NOT EXISTS entries (sequence INTEGER PRIMARY KEY, created_at INTEGER NOT NULL, bytes INTEGER NOT NULL, payload BLOB NOT NULL);
-                CREATE INDEX IF NOT EXISTS entries_age ON entries(created_at);
-                CREATE TABLE IF NOT EXISTS receipts (operation_id TEXT PRIMARY KEY, issued_at INTEGER NOT NULL, digest TEXT NOT NULL, sequence INTEGER NOT NULL, created_at INTEGER NOT NULL, host TEXT NOT NULL);
-                CREATE INDEX IF NOT EXISTS receipts_age ON receipts(issued_at);
-                PRAGMA user_version=1; COMMIT;")?;
-        } else if !write && version == 0 {
+        provenant_sqlite::check_version(&db, SCHEMA)?;
+        let fresh = provenant_sqlite::stored_version(&db)? == 0;
+        if fresh && !write {
             return Ok(None);
+        }
+        if fresh {
+            // Both apply to a store only before its tables exist.
+            db.execute_batch("PRAGMA auto_vacuum=FULL; PRAGMA synchronous=FULL;")?;
+        }
+        if write {
+            provenant_sqlite::ensure_schema(&db, SCHEMA)?;
         }
         if write {
             db.execute_batch("PRAGMA synchronous=FULL;")?;

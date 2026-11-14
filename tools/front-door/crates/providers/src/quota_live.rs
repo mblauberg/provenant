@@ -1,11 +1,14 @@
 //! Live quota effects: the one provider module that runs probes and reads
 //! credentials. Credentials and unredacted captures never leave it.
-mod claude;
-mod opencode;
+pub(crate) mod agy;
+pub(crate) mod claude;
+pub(crate) mod codex;
+pub(crate) mod cursor;
+pub(crate) mod opencode;
 
 use crate::accounts::Settings;
 use crate::host::PROBE_DIR_OPERATION;
-use crate::identity::{agy_fingerprint, base64url, codex_account, cursor_account};
+
 use provenant_core::Clock;
 use provenant_os::clock::SystemClock;
 use provenant_os::exec::{
@@ -29,7 +32,7 @@ const LIMIT: usize = 1_048_576;
 /// A day's backoff is for a probe binary that is absent or cannot execute.
 /// Any other failure is the host (busy executor, process budget, a probe
 /// directory that vanished before spawn) and retries on the short `Network`
-/// schedule. No new persisted variant: older readers reject unknown values.
+/// schedule; unavailable probe infrastructure does not imply an account failure.
 fn command_error(program: &str, error: ExecError) -> ProbeFailure {
     match error {
         ExecError::Io {
@@ -70,7 +73,7 @@ fn runnable(program: &str) -> bool {
         .is_some_and(|path| std::env::split_paths(&path).any(|dir| executable(&dir.join(program))))
 }
 #[derive(Clone)]
-struct Account {
+pub(crate) struct Account {
     scope: AccountScope,
     identity_dir: PathBuf,
     options: Value,
@@ -81,6 +84,11 @@ pub struct LiveQuota {
     roots: Option<provenant_core::Roots>,
     accounts: RefCell<Vec<Account>>,
     refresh_expired: bool,
+    refresh_pending: RefCell<bool>,
+    refresh_min_budget_seconds: u64,
+    refresh_budget_seconds: u64,
+    access_expiry: RefCell<Option<i64>>,
+    signed_in: RefCell<Option<bool>>,
     login_expiry: RefCell<Option<i64>>,
     readiness_failure: RefCell<Option<provenant_quota::ReadinessReason>>,
     last_reconcile_error: RefCell<Option<String>>,
@@ -110,23 +118,6 @@ fn fingerprint(identity: &str, length: usize) -> String {
         .and_then(|s| s.get(..length).map(str::to_owned))
         .unwrap_or_default()
 }
-fn cursor_token(dir: &Path) -> Option<String> {
-    use rusqlite::{Connection, OpenFlags};
-    let db = Connection::open_with_flags(dir.join("state.vscdb"), OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .ok()?;
-    db.busy_timeout(Duration::from_millis(250)).ok()?;
-    let token: String = db.query_row("SELECT substr(value,1,1048577) FROM ItemTable WHERE key='cursorAuth/accessToken' LIMIT 1", [], |r| r.get(0)).ok()?;
-    (token.len() <= LIMIT).then_some(token)
-}
-fn signin_key(adapter: &str, dir: &Path) -> Option<String> {
-    match adapter {
-        "codex" => read(&dir.join("auth.json"))
-            .ok()
-            .and_then(|b| codex_account(&b)),
-        "cursor" => cursor_token(dir).and_then(|s| cursor_account(&s)),
-        _ => None,
-    }
-}
 
 impl LiveQuota {
     /// Probes for the registered accounts, with private probe directories
@@ -137,7 +128,7 @@ impl LiveQuota {
         settings: &Settings,
     ) -> Result<Self, QuotaError> {
         let mut accounts = Vec::new();
-        for registration in settings.with_derived_accounts().entries.values() {
+        for registration in settings.unique_accounts().entries.values() {
             let dir = &registration.directory;
             if !dir.is_absolute()
                 || dir
@@ -174,6 +165,11 @@ impl LiveQuota {
             roots: Some(roots.clone()),
             accounts: RefCell::new(accounts),
             refresh_expired: true,
+            refresh_pending: RefCell::new(false),
+            refresh_min_budget_seconds: 60,
+            refresh_budget_seconds: 120,
+            access_expiry: RefCell::new(None),
+            signed_in: RefCell::new(None),
             login_expiry: RefCell::new(None),
             readiness_failure: RefCell::new(None),
             last_reconcile_error: RefCell::new(None),
@@ -181,6 +177,14 @@ impl LiveQuota {
             #[cfg(test)]
             executor: None,
         })
+    }
+    pub fn with_refresh_budget(mut self, seconds: u64) -> Self {
+        self.refresh_budget_seconds = seconds;
+        self
+    }
+    pub fn with_refresh_minimum(mut self, seconds: u64) -> Self {
+        self.refresh_min_budget_seconds = seconds;
+        self
     }
     pub fn last_reconcile_error(&self) -> Option<String> {
         self.last_reconcile_error.borrow().clone()
@@ -370,37 +374,38 @@ fn clean(out: &ExecOutcome) -> bool {
         && !out.stdout.read_failed
         && !out.overflow_stopped
 }
-impl QuotaEffects for LiveQuota {
-    fn accounts(&self) -> Result<Vec<AccountScope>, QuotaError> {
-        Ok(self
-            .accounts
-            .borrow()
-            .iter()
-            .map(|a| a.scope.clone())
-            .collect())
-    }
-    fn capture(
+impl LiveQuota {
+    pub(crate) fn capture_source(
         &self,
         plan: &QuotaProbePlan,
         _previous: Option<&AccountRecord>,
+        identity: Option<fn(&Path) -> Option<String>>,
+        operation: impl FnOnce(
+            &LiveQuota,
+            &Account,
+            i64,
+            &mut QuotaDetails,
+        ) -> Result<Value, ProbeFailure>,
     ) -> Result<ProbeCapture, ProbeFailure> {
         *self.readiness_failure.borrow_mut() = None;
         *self.login_expiry.borrow_mut() = None;
+        *self.access_expiry.borrow_mut() = None;
+        *self.signed_in.borrow_mut() = None;
+        *self.refresh_pending.borrow_mut() = false;
         let account = self
             .accounts
             .borrow()
             .iter()
-            .find(|a| a.scope == plan.account)
+            .find(|account| account.scope == plan.account)
             .cloned()
             .ok_or(ProbeFailure::Auth)?;
-        let deadline = plan.input.deadline_unix_seconds;
         let check_identity = || {
             if provenant_records::AdapterSpec::get(&account.scope.adapter)
                 .is_some_and(|spec| spec.quota_identity_check)
-                && signin_key(&account.scope.adapter, &account.identity_dir)
+                && identity
+                    .and_then(|read_identity| read_identity(&account.identity_dir))
                     .as_deref()
-                    .unwrap_or("unknown")
-                    != account.scope.account_key
+                    != Some(account.scope.account_key.as_str())
             {
                 return Err(ProbeFailure::Auth);
             }
@@ -421,29 +426,12 @@ impl QuotaEffects for LiveQuota {
                 .map(str::to_owned),
             ..QuotaDetails::default()
         };
-        let payload = match account.scope.adapter.as_str() {
-            "claude" => self.claude(&account, deadline, &mut details)?,
-            "codex" => self.codex(&account, deadline)?,
-            "cursor" => self.cursor(&account, deadline)?,
-            "agy" => self.agy(&account, deadline, &mut details)?,
-            "opencode" if account.scope.account_key == "zen" => {
-                details.note = Some(
-                    "Observed free-limit refusals only; allowance and daily reset unknown".into(),
-                );
-                json!({})
-            }
-            "opencode" => {
-                details.note = Some("Local estimate, this machine only; calibrated Go caps, other hosts not counted".into());
-                opencode::capture(
-                    &account.identity_dir,
-                    &account.options,
-                    self.now(),
-                    deadline,
-                )?
-            }
-            "command" => return Err(ProbeFailure::Disabled),
-            _ => return Err(ProbeFailure::Disabled),
-        };
+        let payload = operation(
+            self,
+            &account,
+            plan.input.deadline_unix_seconds,
+            &mut details,
+        )?;
         check_identity()?;
         Ok(ProbeCapture {
             stdout: serde_json::to_vec(&json!({"payload":payload,"details":details}))
@@ -452,6 +440,29 @@ impl QuotaEffects for LiveQuota {
             exit_code: Some(0),
             overflowed: false,
         })
+    }
+}
+
+impl QuotaEffects for LiveQuota {
+    fn accounts(&self) -> Result<Vec<AccountScope>, QuotaError> {
+        Ok(self
+            .accounts
+            .borrow()
+            .iter()
+            .map(|a| a.scope.clone())
+            .collect())
+    }
+    fn capture(
+        &self,
+        plan: &QuotaProbePlan,
+        previous: Option<&AccountRecord>,
+    ) -> Result<ProbeCapture, ProbeFailure> {
+        let source = crate::REGISTRY
+            .iter()
+            .filter_map(|registration| registration.quota_source)
+            .find(|source| source.adapter_id() == plan.account.adapter)
+            .ok_or(ProbeFailure::Disabled)?;
+        source.capture(self, plan, previous)
     }
 
     fn readiness_reason(&self, failure: ProbeFailure) -> provenant_quota::ReadinessReason {
@@ -463,183 +474,23 @@ impl QuotaEffects for LiveQuota {
         }
     }
 
+    fn access_token_expiry_unix_seconds(&self) -> Option<i64> {
+        *self.access_expiry.borrow()
+    }
+    fn refresh_pending(&self) -> bool {
+        *self.refresh_pending.borrow()
+    }
+    fn signed_in(&self) -> Option<bool> {
+        *self.signed_in.borrow()
+    }
     fn login_expiry_unix_seconds(&self) -> Option<i64> {
         *self.login_expiry.borrow()
     }
 }
-impl LiveQuota {
-    fn codex(&self, account: &Account, deadline: i64) -> Result<Value, ProbeFailure> {
-        // The service handles its own credentials. EOF closes this non-inference exchange.
-        let input = concat!(
-            "{\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"provenant\",\"version\":\"1\"}}}\n",
-            "{\"method\":\"initialized\"}\n",
-            "{\"id\":2,\"method\":\"account/rateLimits/read\"}\n"
-        );
-        let out = self.command(
-            "codex",
-            &["-s", "read-only", "-a", "never", "app-server"],
-            Some(("CODEX_HOME", &account.identity_dir)),
-            Some(input.as_bytes()),
-            deadline,
-            crate::codex::REGISTRATION.quota.probe_seconds,
-        )?;
-        if out.stdout.truncated || out.stdout.read_failed {
-            return Err(ProbeFailure::Malformed);
-        }
-        for line in out.stdout.bytes.split(|b| *b == b'\n') {
-            if let Ok(v) = serde_json::from_slice::<Value>(line)
-                && v.get("id").and_then(Value::as_u64) == Some(2)
-                && let Some(result) = v.get("result").filter(|r| r.is_object())
-            {
-                return Ok(result.clone());
-            }
-        }
-        // App-server can be unavailable when its runtime database is read-only.
-        // The usage endpoint accepts the same account-scoped OAuth token.
-        let auth = value(&account.identity_dir.join("auth.json"))?;
-        let token = auth
-            .pointer("/tokens/access_token")
-            .and_then(Value::as_str)
-            .ok_or(ProbeFailure::Auth)?;
-        let mut headers = vec![("Authorization", format!("Bearer {token}"))];
-        if let Some(id) = auth.pointer("/tokens/account_id").and_then(Value::as_str) {
-            headers.push(("ChatGPT-Account-Id", id.to_owned()));
-        }
-        self.http(
-            "https://chatgpt.com/backend-api/wham/usage",
-            &headers,
-            deadline,
-        )
-    }
-    fn cursor(&self, account: &Account, deadline: i64) -> Result<Value, ProbeFailure> {
-        let token = cursor_token(&account.identity_dir).ok_or(ProbeFailure::Auth)?;
-        let claims = token
-            .split('.')
-            .nth(1)
-            .and_then(base64url)
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-            .ok_or(ProbeFailure::Auth)?;
-        let user = claims
-            .get("sub")
-            .and_then(Value::as_str)
-            .and_then(|s| s.rsplit('|').next())
-            .filter(|s| {
-                !s.is_empty()
-                    && s.bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-            })
-            .ok_or(ProbeFailure::Auth)?;
-        if claims
-            .get("exp")
-            .and_then(Value::as_i64)
-            .is_none_or(|e| e <= self.now() + 60)
-        {
-            return Err(ProbeFailure::Auth);
-        }
-        self.http(
-            "https://cursor.com/api/usage-summary",
-            &[(
-                "Cookie",
-                format!("WorkosCursorSessionToken={user}%3A%3A{token}"),
-            )],
-            deadline,
-        )
-    }
-    #[allow(clippy::print_stderr)]
-    fn agy(
-        &self,
-        account: &Account,
-        deadline: i64,
-        details: &mut QuotaDetails,
-    ) -> Result<Value, ProbeFailure> {
-        // An isolated agy account is signed in under its own directory as
-        // `HOME`. A missing keychain has its own failure, never auth, and the
-        // probe re-checks it around the spawn.
-        // Never let a failed quota probe leave an earlier dispatch identity cached.
-        crate::agy::forget_identity(&self.state, &account.identity_dir);
-        let stamp_before = crate::agy::keychain_stamp(&account.identity_dir);
-        let probe_home =
-            crate::agy::ProbeHome::select(&account.identity_dir, &self.home).map_err(|error| {
-                match error {
-                    crate::ProviderError::IsolatedKeychainUnavailable(_) => {
-                        ProbeFailure::IsolatedKeychainUnavailable
-                    }
-                    _ => ProbeFailure::Auth,
-                }
-            })?;
-        let scratch = crate::host::HostProbeDir::create(&self.state)
-            .map_err(|_| ProbeFailure::ProbeDirectory)?;
-        let log = scratch.path().join("cli.log");
-        let log_arg = log.to_str().ok_or(ProbeFailure::Malformed)?;
-        let payload = self.json_command(
-            &probe_home,
-            "agy",
-            &[
-                "-p",
-                "/usage",
-                "--output-format",
-                "json",
-                "--log-file",
-                log_arg,
-            ],
-            None,
-            deadline,
-            crate::agy::REGISTRATION.quota.probe_seconds,
-        )?;
-        let signed_in = payload.get("status").and_then(Value::as_str) == Some("SUCCESS");
-        let actual = agy_signed_in_account(signed_in, read(&log).ok())?;
-        let key = format!("agy-{actual}");
-        let models = crate::quota::extract_agy_models(Some(&payload), None);
-        crate::agy::remember_identity(
-            &self.state,
-            &account.identity_dir,
-            &key,
-            self.now(),
-            stamp_before,
-            &models,
-        );
-        if key != account.scope.account_key {
-            if let Some(roots) = &self.roots {
-                // Failure to save never makes the stale identity routable. A
-                // later quota probe retries under the normal mismatch backoff.
-                match crate::accounts::reconcile_agy(
-                    roots,
-                    &account.identity_dir,
-                    &account.scope.account_key,
-                    &key,
-                ) {
-                    Ok(true) => {
-                        for registered in self.accounts.borrow_mut().iter_mut() {
-                            if registered.scope == account.scope {
-                                registered.scope.account_key.clone_from(&key);
-                            }
-                        }
-                    }
-                    Ok(false) => {}
-                    Err(error) => {
-                        *self.last_reconcile_error.borrow_mut() = Some(error.to_string());
-                        eprintln!("provenant: failed to reconcile agy account switch: {error}");
-                    }
-                }
-            }
-            return Err(ProbeFailure::AccountMismatch);
-        }
-        details.fingerprint = Some(actual);
-        Ok(payload)
-    }
-}
+
 /// The signed-in agy fingerprint, or why the probe cannot trust it. Sign-out
 /// and unreadable identity need a login. The caller reconciles a changed key;
 /// the identity itself is never part of the failure.
-fn agy_signed_in_account(signed_in: bool, log: Option<Vec<u8>>) -> Result<String, ProbeFailure> {
-    if !signed_in {
-        return Err(ProbeFailure::Auth);
-    }
-    let actual = log
-        .and_then(|bytes| agy_fingerprint(&bytes))
-        .ok_or(ProbeFailure::Auth)?;
-    Ok(actual)
-}
 /// Explicit Claude registrations only. No auth stores, identity probes or
 /// implicit default directory discovery are involved in chair switching.
 pub fn registered_claude(
@@ -675,7 +526,11 @@ pub fn registered_claude(
 mod tests {
     // The worktree driver includes this module without libtest.
     #[allow(unused_imports)]
+    use super::agy::agy_signed_in_account;
+    #[allow(unused_imports)]
     use super::*;
+    #[allow(unused_imports)]
+    use crate::identity::agy_fingerprint;
     #[allow(unused_imports)]
     use provenant_os::exec::ExecError;
 
@@ -687,12 +542,82 @@ mod tests {
             roots: None,
             accounts: RefCell::new(Vec::new()),
             refresh_expired: false,
+            refresh_pending: RefCell::new(false),
+            refresh_min_budget_seconds: 60,
+            refresh_budget_seconds: 120,
+            access_expiry: RefCell::new(None),
+            signed_in: RefCell::new(None),
             login_expiry: RefCell::new(None),
             readiness_failure: RefCell::new(None),
             last_reconcile_error: RefCell::new(None),
             clock: SystemClock::new(),
             executor: None,
         }
+    }
+
+    #[test]
+    fn provider_adapter_resolves_rotation_for_an_unregistered_session_directory() {
+        struct SessionIdentityProbe(std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>);
+        impl Executor for SessionIdentityProbe {
+            fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                let bytes = self.0.lock().unwrap().pop_front().ok_or(ExecError::Busy)?;
+                Ok(ExecOutcome {
+                    termination: Termination::Exit(0),
+                    stdout: provenant_os::exec::CapturedStream {
+                        bytes,
+                        ..Default::default()
+                    },
+                    stderr: Default::default(),
+                    timed_out: false,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                })
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let state = temp.path().join("state");
+        let directory = home.join("unregistered-config");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        let status = |email: &str| {
+            format!(r#"{{"loggedIn":true,"email":"{email}","loginExpiresAt":1800000000}}"#)
+                .into_bytes()
+        };
+        let mut live = quota(&home, state);
+        live.executor = Some(Box::new(SessionIdentityProbe(std::sync::Mutex::new(
+            std::collections::VecDeque::from([
+                status("first@example.test"),
+                status("first@example.test"),
+                status("second@example.test"),
+                status("second@example.test"),
+            ]),
+        ))));
+        let adapter = crate::REGISTRY
+            .iter()
+            .find(|registration| registration.adapter.id() == "claude")
+            .unwrap();
+
+        let first = adapter.adapter.session_identity(&live, &directory).unwrap();
+        let second = adapter.adapter.session_identity(&live, &directory).unwrap();
+
+        assert_eq!(
+            first,
+            provenant_records::AccountIdentity::provider_observation(
+                "claude",
+                &crate::identity::fingerprint("first@example.test").unwrap(),
+            )
+        );
+        assert_eq!(
+            second,
+            provenant_records::AccountIdentity::provider_observation(
+                "claude",
+                &crate::identity::fingerprint("second@example.test").unwrap(),
+            )
+        );
     }
 
     #[test]
@@ -729,16 +654,22 @@ mod tests {
         struct ChangingKeychain {
             inner: AgyUsage,
             keychain: PathBuf,
+            atomic: bool,
         }
         impl Executor for ChangingKeychain {
             fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
                 let outcome = self.inner.execute(options)?;
-                // Modify in place: the inode guard still passes, but the stamp must not.
-                fs::write(&self.keychain, "signed in as a different account").unwrap();
+                if self.atomic {
+                    let replacement = self.keychain.with_extension("replacement");
+                    fs::write(&replacement, "atomic save").unwrap();
+                    fs::rename(replacement, &self.keychain).unwrap();
+                } else {
+                    fs::write(&self.keychain, "signed in as a different account").unwrap();
+                }
                 Ok(outcome)
             }
         }
-        for quota_probe in [false, true] {
+        for (quota_probe, atomic) in [(false, false), (true, false), (true, true)] {
             let root = tempfile::tempdir().unwrap();
             let home = root.path().join("home");
             let state = root.path().join("state");
@@ -754,6 +685,7 @@ mod tests {
                     homes: homes.clone(),
                 },
                 keychain,
+                atomic,
             };
             let key = format!(
                 "agy-{}",
@@ -772,8 +704,10 @@ mod tests {
                     identity_dir: home.clone(),
                     options: Value::Null,
                 };
-                live.agy(&account, live.now() + 60, &mut QuotaDetails::default())
-                    .unwrap();
+                assert_eq!(
+                    live.agy(&account, live.now() + 60, &mut QuotaDetails::default()),
+                    Err(ProbeFailure::Network)
+                );
             } else {
                 assert_eq!(
                     crate::accounts::detect(
@@ -1300,6 +1234,9 @@ mod tests {
         struct Selected {
             dir: PathBuf,
             expires_ms: i64,
+            refreshes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+            requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+            refusal: bool,
             credential_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         }
         impl Executor for Selected {
@@ -1314,23 +1251,34 @@ mod tests {
                         options.argv[3],
                         OsString::from(format!("Claude Code-credentials-{suffix}"))
                     );
-                    format!(
-                        r#"{{"claudeAiOauth":{{"accessToken":"fake-selected","expiresAt":{}}}}}"#,
-                        self.expires_ms
-                    )
-                    .into_bytes()
+                    fs::read(self.dir.join(".credentials.json")).unwrap()
                 } else if program == "claude" {
                     assert_eq!(options.argv[1], OsStr::new("auth"));
                     assert_eq!(options.argv[2], OsStr::new("status"));
                     let env = options.env.unwrap();
-                    if let Some((_, value)) = env.iter().find(|(key, _)| key == "CLAUDE_CONFIG_DIR")
-                    {
-                        assert_eq!(value, self.dir.as_os_str());
-                    }
-                    br#"{"loggedIn":true,"email":"selected@example.test"}"#.to_vec()
+                    let (_, value) = env
+                        .iter()
+                        .find(|(key, _)| key == "CLAUDE_CONFIG_DIR")
+                        .expect("probe only the selected login, never the default");
+                    assert_eq!(value, self.dir.as_os_str());
+                    br#"{"loggedIn":true,"email":"selected@example.test","loginExpiresAt":"2100-01-01T00:00:00Z"}"#.to_vec()
+                } else if program == "/fixture/claude" {
+                    assert!(options.wait_for_completion);
+                    assert!(options.inherited_lease.is_some());
+                    self.refreshes
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    fs::write(self.dir.join(".credentials.json"), format!(r#"{{"claudeAiOauth":{{"accessToken":"fake-renewed","expiresAt":{}}}}}"#, self.expires_ms + 7_200_000)).unwrap();
+                    Vec::new()
                 } else {
                     assert_eq!(program, "/usr/bin/curl");
-                    b"{}\n200".to_vec()
+                    let request = self
+                        .requests
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if self.refusal && request == 0 {
+                        b"{}\n401".to_vec()
+                    } else {
+                        b"{}\n200".to_vec()
+                    }
                 };
                 Ok(ExecOutcome {
                     termination: Termination::Exit(0),
@@ -1355,6 +1303,8 @@ mod tests {
         fs::create_dir_all(&state).unwrap();
         let mut live = quota(&home, state);
         let credential_reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let refreshes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let expires_ms = (live.now() + 3600) * 1000;
         fs::write(
             selected.join(".credentials.json"),
@@ -1366,6 +1316,9 @@ mod tests {
         live.executor = Some(Box::new(Selected {
             dir: selected.clone(),
             expires_ms,
+            refreshes: refreshes.clone(),
+            requests: requests.clone(),
+            refusal: scenario == 3,
             credential_reads: credential_reads.clone(),
         }));
         let account = Account {
@@ -1377,12 +1330,22 @@ mod tests {
             identity_dir: selected,
             options: Value::Null,
         };
-        if scenario == 0 {
+        if scenario == 0 || scenario == 3 {
+            live.refresh_expired = scenario == 3;
             assert!(
-                live.claude(&account, live.now() + 60, &mut QuotaDetails::default())
+                live.claude(&account, live.now() + 120, &mut QuotaDetails::default())
                     .is_ok()
             );
-            assert_eq!(live.login_expiry_unix_seconds(), Some(expires_ms / 1000));
+            assert_eq!(live.login_expiry_unix_seconds(), Some(4102444800));
+            assert_eq!(live.signed_in(), Some(true));
+            assert_eq!(
+                refreshes.load(std::sync::atomic::Ordering::Relaxed),
+                usize::from(scenario == 3)
+            );
+            assert_eq!(
+                requests.load(std::sync::atomic::Ordering::Relaxed),
+                if scenario == 3 { 2 } else { 1 }
+            );
             return;
         }
         if scenario == 1 {
@@ -1401,7 +1364,7 @@ mod tests {
             assert_eq!(
                 live.claude(
                     &wrong_account,
-                    live.now() + 60,
+                    live.now() + 120,
                     &mut QuotaDetails::default()
                 ),
                 Err(ProbeFailure::AccountMismatch)
@@ -1425,13 +1388,36 @@ mod tests {
         live.executor = Some(Box::new(Selected {
             dir: account.identity_dir.clone(),
             expires_ms,
+            refreshes: refreshes.clone(),
+            requests,
+            refusal: false,
             credential_reads,
         }));
-        assert_eq!(
-            live.claude(&account, live.now() + 60, &mut QuotaDetails::default(),),
-            Err(ProbeFailure::LoginExpired)
+        if scenario == 4 {
+            live.refresh_budget_seconds = 30;
+            assert_eq!(
+                live.claude(&account, live.now() + 120, &mut QuotaDetails::default()),
+                Err(ProbeFailure::RefreshDeferred)
+            );
+            assert_eq!(live.signed_in(), Some(true));
+            assert!(live.refresh_pending());
+            assert_eq!(
+                live.access_token_expiry_unix_seconds(),
+                Some(expires_ms / 1000)
+            );
+            assert_eq!(refreshes.load(std::sync::atomic::Ordering::Relaxed), 0);
+            return;
+        }
+        assert!(
+            live.claude(&account, live.now() + 120, &mut QuotaDetails::default())
+                .is_ok()
         );
-        assert_eq!(live.login_expiry_unix_seconds(), Some(expires_ms / 1000));
+        assert_eq!(refreshes.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(live.login_expiry_unix_seconds(), Some(4102444800));
+        assert_eq!(
+            live.access_token_expiry_unix_seconds(),
+            Some(expires_ms / 1000 + 7200)
+        );
         assert!(!live.state.join("quota-claude-refresh.json").exists());
     }
 
@@ -1444,8 +1430,18 @@ mod tests {
         claude_selected_identity(1);
     }
     #[test]
-    fn claude_quota_does_not_refresh_shared_account() {
+    fn claude_quota_refreshes_selected_login_for_same_account() {
         claude_selected_identity(2);
+    }
+
+    #[test]
+    fn claude_usage_refusal_refreshes_once_then_retries() {
+        claude_selected_identity(3);
+    }
+
+    #[test]
+    fn claude_expired_access_token_with_signed_in_status_defers_without_refresh() {
+        claude_selected_identity(4);
     }
 
     #[test]
@@ -1533,11 +1529,13 @@ mod tests {
             options: Value::Null,
         };
         assert_eq!(
-            live.claude(&account, live.now() + 60, &mut QuotaDetails::default()),
+            live.claude(&account, live.now() + 120, &mut QuotaDetails::default()),
             Err(ProbeFailure::Network)
         );
+        assert_eq!(live.signed_in(), Some(true));
+        assert!(live.refresh_pending());
         assert!(
-            live.claude(&account, live.now() + 60, &mut QuotaDetails::default())
+            live.claude(&account, live.now() + 120, &mut QuotaDetails::default())
                 .is_ok()
         );
         assert_eq!(count.load(Ordering::Relaxed), 2);
@@ -1564,19 +1562,19 @@ mod tests {
 }
 
 #[cfg(test)]
-mod zen_tests {
+mod account_plan_tests {
     use super::*;
-    use provenant_quota::{QuotaProbeInput, QuotaStatus, Refusal};
+    use provenant_quota::{QuotaProbeInput, QuotaStatus};
 
     #[test]
-    fn zen_is_derived_and_uses_refusals_without_reading_go_ledger() {
-        let settings: Settings = serde_json::from_value(json!({
-            "entries": {"paid": {
-                "adapter": "opencode", "label": "go", "key": "go",
-                "directory": "/fixture/opencode", "plan": "go"
-            }}
-        }))
-        .unwrap();
+    fn non_ledger_plans_keep_quota_unknown_without_reading_ledger() {
+        let spec = provenant_records::AdapterSpec::get("opencode").unwrap();
+        let entries = spec.account_model_plans.iter().map(|plan| Some(plan.plan))
+            .chain([None, Some("unrecognised")]).enumerate().map(|(index, plan)| {
+                (format!("entry-{index}"), json!({"adapter":spec.name, "label":"fixture", "key":format!("identity-{index}"),
+                    "directory":format!("/fixture/nonexistent-{index}"), "plan":plan}))
+            }).collect::<serde_json::Map<_, _>>();
+        let settings: Settings = serde_json::from_value(json!({"entries": entries})).unwrap();
         let mut inputs =
             provenant_core::RootInputs::new("/fixture/home".into(), "/fixture/repo".into());
         inputs.state_dir = Some("/fixture/state".into());
@@ -1585,44 +1583,52 @@ mod zen_tests {
             .unwrap();
         let live = LiveQuota::new(&roots, Path::new("/fixture/home"), &settings).unwrap();
         let accounts = live.accounts().unwrap();
-        assert_eq!(accounts.len(), 2);
-        assert!(accounts.iter().any(|scope| scope.account_key == "go"));
-        let zen = accounts
+        let identities: std::collections::BTreeSet<_> = accounts
             .iter()
-            .find(|scope| scope.account_key == "zen")
-            .unwrap();
-        assert_eq!(zen.label, "zen");
-        let derived = settings.with_derived_accounts();
-        assert_eq!(derived.with_derived_accounts().entries.len(), 2);
-        let mut previous = AccountRecord::empty(zen.clone());
-        previous.refusals.push(Refusal {
-            extra: Default::default(),
-            account: zen.clone(),
-            model: "opencode/beam-free".into(),
-            pool: Some("opencode-free".into()),
-            observed_unix_seconds: 100,
-            resets_unix_seconds: None,
-        });
-        for at in [101, 3700] {
-            let plan = crate::quota::plan(
-                "opencode",
-                zen,
-                &QuotaProbeInput {
-                    now_unix_seconds: at,
-                    deadline_unix_seconds: at + 30,
-                    authority_ref: None,
-                },
-            )
-            .unwrap();
-            let capture = live.capture(&plan, Some(&previous)).unwrap();
-            let snapshot = crate::quota::decode(&plan, &capture).unwrap();
-            assert_eq!(snapshot.status, QuotaStatus::Unknown);
-            assert!(
-                snapshot
-                    .windows
+            .map(|scope| scope.account_key.as_str())
+            .collect();
+        assert_eq!(
+            identities,
+            settings
+                .entries
+                .values()
+                .map(|entry| entry.key.as_str())
+                .collect()
+        );
+        for entry in settings.entries.values().filter(|entry| {
+            spec.account_plan(entry.plan.as_deref())
+                .is_none_or(|plan| plan.quota != provenant_records::AccountQuota::LocalLedger)
+        }) {
+            let account = accounts
+                .iter()
+                .find(|scope| scope.account_key == entry.key)
+                .unwrap();
+            for at in [101, 3700] {
+                let plan = crate::quota::plan(
+                    spec.name,
+                    account,
+                    &QuotaProbeInput {
+                        now_unix_seconds: at,
+                        deadline_unix_seconds: at + 30,
+                        authority_ref: None,
+                    },
+                )
+                .unwrap();
+                let capture = live.capture(&plan, None).unwrap();
+                let snapshot = crate::REGISTRY
                     .iter()
-                    .all(|window| window.resets_unix_seconds.is_none())
-            );
+                    .filter_map(|registration| registration.quota_source)
+                    .find(|source| source.adapter_id() == spec.name)
+                    .unwrap()
+                    .decode(&plan, &capture)
+                    .unwrap();
+                assert_eq!(snapshot.status, QuotaStatus::Unknown);
+                assert!(snapshot.windows.is_empty());
+                let details = snapshot.details.unwrap();
+                assert_eq!(details.plan, entry.plan);
+                assert!(details.source.is_none());
+                assert!(details.note.is_some_and(|note| !note.is_empty()));
+            }
         }
     }
 }

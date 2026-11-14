@@ -1,4 +1,5 @@
 use super::*;
+use provenant_records::CanonicalV1;
 
 #[test]
 fn capacity_guardian_context_records_and_reports_config_failure()
@@ -16,7 +17,6 @@ fn capacity_guardian_context_records_and_reports_config_failure()
         },
         project_id: provenant_core::ProjectId::from_bytes([1; 16]),
         actor_id: ActorId::from_bytes([2; 16]),
-        run_id: RunId::from_bytes([3; 16]),
         attempt_id: AttemptId::from_bytes([4; 16]),
         host_delivery: None,
         launch: None,
@@ -284,12 +284,12 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
     let now = WallTime::from_micros(100)?;
     let mut record: run::AttemptRecord = serde_json::from_value(json!({
         "schema_version": 1, "attempt_id": AttemptId::from_bytes([1; 16]),
-        "run_id": RunId::from_bytes([2; 16]), "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
-        "task_id": TaskId::from_bytes([4; 16]), "operation_id": "receipt-test",
+        "key": {"project": provenant_core::ProjectId::from_bytes([3; 16]), "graph": "receipt", "node": "test", "attempt": 1},
+        "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
         "attempt_number": 1, "revision": 1, "generation": 0,
         "requested_route": {"kind":"model","provider":"codex","model":"codex/gpt-6.1-sol"},
         "applied_route": {"provider":"codex","model":"codex/gpt-6.1-sol","effort":"high","account_label":null},
-        "authority_digest": provenant_core::Digest::from_bytes([5; 32]), "queued_at": now,
+        "authority_digest": provenant_core::Digest::from_bytes([5; 32]), "read_only_writable": [], "protected_paths": [], "trace": {}, "queued_at": now,
         "state": {"state":"terminal","outcome":"lost","exit_code":null,"finished_at":now,"reason":null},
         "usage": {}, "prompt": {"path":{"encoding":"utf8","path":"prompt.txt"}, "digest":CanonicalV1::file_digest(b""),"bytes":0,"complete":true,"redacted":false}
     }))?;
@@ -297,13 +297,21 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
     assert_eq!(data["resolved_from"], "explicit");
     assert_eq!(data["reviewer"]["provenance"], "unknown");
     assert_eq!(data["reviewer"]["actor_id"], "unknown");
-    assert_eq!(
-        data["receipt"],
-        format!(
-            "Reviewer: codex/gpt-6.1-sol@high (openai; resolved from explicit), run {}/{}/{}",
-            record.run_id, record.task_id, record.attempt_id
-        )
-    );
+    // One grep-able line naming role, applied model and effort, family,
+    // resolution source and the attempt; the text form leads with it.
+    let receipt = data["receipt"].as_str().ok_or("receipt line")?;
+    assert!(!receipt.contains('\n'), "{receipt}");
+    assert!(receipt.starts_with("Reviewer: "), "{receipt}");
+    for part in [
+        "codex/gpt-6.1-sol@high".to_owned(),
+        "openai".to_owned(),
+        "explicit".to_owned(),
+        record.key.to_string(),
+        record.attempt_id.to_string(),
+    ] {
+        assert!(receipt.contains(&part), "{part}: {receipt}");
+    }
+    assert!(line.starts_with(&format!("{receipt}\n")), "{line}");
     assert!(
         line.ends_with(
             "Reviewer provenance: unknown, actor unknown, model unknown, family unknown\n"
@@ -416,6 +424,7 @@ fn claude_session_reaches_the_decoded_attempt() {
     let route = run::RouteRecord {
         provider: Some("claude".into()),
         model: Some("claude/claude-sonnet-5".into()),
+        account_key: Some("verified-key".into()),
         ..Default::default()
     };
     let stream = include_str!("../../../../tests/fixtures/providers/claude/fresh.jsonl");
@@ -430,6 +439,13 @@ fn claude_session_reaches_the_decoded_attempt() {
     assert_eq!(
         decoded.session.as_deref(),
         Some("FIXTURE_SESSION_IDENTIFIER_003")
+    );
+    assert_eq!(
+        decoded
+            .observed_route
+            .as_ref()
+            .and_then(|route| route.account_key.as_deref()),
+        Some("verified-key")
     );
 }
 #[test]
@@ -465,7 +481,7 @@ fn agy_repeated_answer_is_captured_once() {
         capture.push(decoded.result.as_bytes());
         let captured = capture.finish();
         assert!(
-            provenant_records::handoff::Handoff::from_result(&decoded.result)
+            provenant_records::handoff::Handoff::from_turns(&decoded.result, &[])
                 .unwrap()
                 .is_some()
         );
@@ -482,7 +498,7 @@ fn agy_repeated_answer_is_captured_once() {
     ] {
         let decoded = decode("", &response);
         assert_eq!(decoded.result, response);
-        assert!(provenant_records::handoff::Handoff::from_result(&decoded.result).is_err());
+        assert!(provenant_records::handoff::Handoff::from_turns(&decoded.result, &[]).is_err());
     }
 }
 #[test]
@@ -542,7 +558,7 @@ fn a_claude_reply_to_a_late_notification_keeps_the_final_handoff() {
         decoded.result,
         format!("{handoff}\nThe wait was redundant.")
     );
-    assert!(provenant_records::handoff::Handoff::from_result(&decoded.result).is_err());
+    assert!(provenant_records::handoff::Handoff::from_turns(&decoded.result, &[]).is_err());
     assert_eq!(decoded.handoff().unwrap().unwrap().note, "finished");
     // A tool run after the declaration leaves the lane without one.
     let decoded = decode(&[&notification, &tool_use]);
@@ -706,7 +722,7 @@ fn a_handoff_in_its_own_codex_message_is_read_after_prose() {
     let mut capture = provenant_records::result_capture::ResultCapture::new(Some("VERDICT: PASS"));
     capture.push(decoded.result.as_bytes());
     let captured = capture.finish();
-    let declared = provenant_records::handoff::Handoff::from_result(&decoded.result)
+    let declared = provenant_records::handoff::Handoff::from_turns(&decoded.result, &[])
         .expect("handoff parses")
         .expect("handoff found");
     assert_eq!(declared.note, "n");
@@ -830,46 +846,6 @@ fn claude_absent_usage_names_its_reason() {
     assert_eq!(decoded_unknown.usage.source, None);
 }
 #[test]
-fn wait_any_follows_a_superseded_failure() -> Result<(), Box<dyn std::error::Error>> {
-    let now = WallTime::from_micros(100)?;
-    let mut failed = lane_fixture(
-        1,
-        1,
-        run::AttemptState::Terminal {
-            extra: Default::default(),
-            outcome: run::Outcome::Failed,
-            exit_code: Some(1),
-            finished_at: now,
-            reason: None,
-        },
-    )?;
-    let mut retry = lane_fixture(
-        2,
-        1,
-        run::AttemptState::Queued {
-            extra: Default::default(),
-        },
-    )?;
-    failed.superseded_by = Some(retry.attempt_id);
-    assert!(!condition_met(
-        &[failed.clone(), retry.clone()],
-        Condition::Any
-    ));
-    assert!(!condition_met(
-        std::slice::from_ref(&failed),
-        Condition::Any
-    ));
-    retry.state = run::AttemptState::Terminal {
-        extra: Default::default(),
-        outcome: run::Outcome::Succeeded,
-        exit_code: Some(0),
-        finished_at: now,
-        reason: None,
-    };
-    assert!(condition_met(&[failed, retry], Condition::Any));
-    Ok(())
-}
-#[test]
 fn every_adapter_sign_in_failure_settles_auth_required() -> Result<(), Box<dyn std::error::Error>> {
     use run::Providers;
     let fixtures: &[(&str, &[u8])] = &[
@@ -991,6 +967,13 @@ fn claude_lane_auth_failure_reports_a_lost_lane_token_for_its_account()
     )?;
     assert_eq!(decoded.outcome, run::Outcome::AuthRequired);
     assert_eq!(
+        decoded
+            .observed_route
+            .as_ref()
+            .and_then(|route| route.account_key.as_deref()),
+        None
+    );
+    assert_eq!(
         decoded.terminal_cause,
         Some(run::TerminalCause::LaneTokenLost)
     );
@@ -1087,4 +1070,41 @@ fn successful_output_with_incidental_auth_stderr_stays_successful() {
         )
         .unwrap();
     assert_eq!(decoded.outcome, run::Outcome::Succeeded);
+}
+
+/// Small: an unsupported OpenCode reference names the requested route in both
+/// status's reason and output, without copying the provider's arbitrary body.
+#[test]
+fn unsupported_opencode_reference_is_actionable_and_redacted_in_status_and_output() {
+    let route = run::RouteRecord {
+        provider: Some("opencode".into()),
+        model: Some("opencode/example/model".into()),
+        effort: Some("ultra".into()),
+        ..Default::default()
+    };
+    for message in [
+        "Invalid model reference",
+        "Unsupported variant",
+        "effort is not supported",
+    ] {
+        let error = serde_json::json!({"type":"error", "error":{"type":"unknown", "message":format!("{message}; password=fixture-secret"), "response":{"body":{"error":{"code":"invalid_reference", "message":"https://user:secret@example.invalid"}}}}});
+        let mut exit = clean_exit();
+        exit.termination = Some(provenant_os::exec::Termination::Exit(1));
+        let decoded = Registry::default()
+            .decode_captures(
+                &route,
+                error.to_string().as_bytes(),
+                b"",
+                &exit,
+                Path::new("/nonexistent"),
+                None,
+            )
+            .unwrap();
+        for text in [decoded.reason.as_deref().unwrap(), decoded.result.as_str()] {
+            assert!(text.contains(route.model.as_deref().unwrap()));
+            assert!(text.contains("variant=ultra"));
+            assert!(text.contains("choose a supported model and variant"));
+            assert!(!text.contains("fixture-secret") && !text.contains("user:secret"));
+        }
+    }
 }

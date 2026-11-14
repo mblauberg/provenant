@@ -21,6 +21,10 @@ class ReferenceTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix='provenant-reference-test-')
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+        declarations = {'external_contract': {'schema_version': 1, 'interfaces': []}, 'policy': []}
+        self.declarations = patch.dict(GLOBALS, reference_data=lambda _: declarations)
+        self.declarations.start()
+        self.addCleanup(self.declarations.stop)
 
     def test_compact_configuration_keeps_advanced_fields_discoverable(self):
         data = {"documented_fields": ["lanes.max_depth"], "knobs": {
@@ -38,13 +42,35 @@ class ReferenceTests(unittest.TestCase):
         source.parent.mkdir(parents=True)
         source.write_text('{"knobs": {"example": {"default": false}}, "schema_version": 1}')
         files, gaps = GEN['generate'](self.root)
-        self.assertEqual(len(gaps), 3)
+        self.assertEqual(len(gaps), 2)
         self.assertIn('## `example`', files['config-keys.md'])
         for name in ('cli.md', 'cli-all.md'):
             self.assertIn('Cargo.toml is missing', files[name])
-        self.assertIn('tool-schemas.json is missing', files['mcp-tools.md'])
         for text in files.values():
             self.assertIn('scripts/generate-reference', text.splitlines()[0])
+
+    def test_policy_effects_follow_declared_thresholds(self):
+        for strength in ('off', 'warn', 'refuse'):
+            with self.subTest(strength=strength):
+                effect = f'declared {strength} behaviour'
+                data = {'knobs': {}, 'host_lane_build_settings': {
+                    'path': 'domains.fabric.lanes', 'settings': {'arbitrary_cap': {
+                        'type': 'int', 'default': 1, 'effect': 'Observed threshold.',
+                    }}}}
+                data = GEN['with_policy_effects'](data, [{
+                    'threshold': 'domains.fabric.lanes.arbitrary_cap', 'effect': effect}])
+                text = GEN['config_reference'](data, all_fields=True)
+                self.assertIn(effect, text)
+
+    def test_external_contract_document_preserves_every_declared_interface(self):
+        interfaces = [{'kind': 'lane_environment', 'name': 'FIXTURE'},
+                      {'kind': 'stable_commands', 'state': {'state': 'none_declared'}}]
+        text = GEN['external_contract_reference']({'schema_version': 1, 'interfaces': interfaces})
+        for interface in interfaces:
+            for value in interface.values():
+                if isinstance(value, str):
+                    self.assertIn(value, text)
+        self.assertIn('unsupported', text)
 
     def test_host_build_reference_uses_registry_values(self):
         text = GEN['config_reference']({'knobs': {}, 'host_lane_build_settings': {
@@ -92,15 +118,6 @@ class ReferenceTests(unittest.TestCase):
                     'conditional_defaults', 'groups', 'constraints'):
             self.assertIn('"' + key + '"', text)
 
-    def test_non_machine_readable_source_is_a_named_gap(self):
-        source = self.root / GEN['ALL_SCHEMAS']
-        source.parent.mkdir(parents=True)
-        for content in ('not JSON', '{"wrong": "shape"}'):
-            source.write_text(content)
-            files, gaps = GEN['generate'](self.root)
-            self.assertIn('no supported machine-readable schema', files['mcp-tools.md'])
-            self.assertTrue(any(str(GEN['ALL_SCHEMAS']) in gap for gap in gaps))
-
     def test_unsupported_help_is_a_gap_but_build_failure_is_an_error(self):
         workspace = self.root / GEN['WORKSPACE']
         workspace.mkdir(parents=True)
@@ -115,14 +132,7 @@ class ReferenceTests(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError):
                 GEN['generate'](self.root)
 
-    def test_mcp_and_configuration_preserve_all_schema_fields(self):
-        tool = {'name': 'fixture_tool', 'inputSchema': {'type': 'object'},
-                'outputSchema': {'const': None}, '_meta': {'schemaVersion': 2}}
-        text = GEN['mcp_reference']([tool], [tool, {'name': 'hidden'}])
-        for key in tool:
-            self.assertIn('"' + key + '"', text)
-        self.assertIn('## Discoverable tools', text)
-        self.assertIn('### `hidden`', text)
+    def test_configuration_preserves_all_schema_fields(self):
         data = {'knobs': {'fixture': {'type': 'enum', 'default': 'a', 'values': ['a', 'b'],
                                     'effect': 'One | two `three`.'}},
                 'schema_version': 1, 'profiles': {'balanced': {'fixture': 'b'}}}
@@ -149,11 +159,11 @@ class ReferenceTests(unittest.TestCase):
     def test_published_schemas_are_generated_files(self):
         schema = {'$schema': 'https://json-schema.org/draft/2020-12/schema', 'title': 'fixture',
                   'type': 'object'}
-        data = {'lanes.schema.json': schema, 'mcp/fabric_run.schema.json': schema,
+        data = {'lanes.schema.json': schema, 'error.schema.json': schema,
                 'error-codes': [{'code': 'PR', 'kind': 'umbrella', 'summary': 'A | b.'}]}
         files = GEN['schema_files'](data)
-        self.assertEqual(sorted(files), ['schemas.md', 'schemas/lanes.schema.json',
-                                         'schemas/mcp/fabric_run.schema.json'])
+        self.assertEqual(sorted(files), ['schemas.md', 'schemas/error.schema.json',
+                                         'schemas/lanes.schema.json'])
         self.assertIn('scripts/generate-reference', files['schemas.md'].splitlines()[0])
         self.assertIn('| `PR` | umbrella | A &#124; b. |', files['schemas.md'])
         self.assertEqual(json.loads(files['schemas/lanes.schema.json']), schema)

@@ -134,6 +134,32 @@ pub struct CredentialStat {
     pub size: u64,
     pub modified_ns: i128,
 }
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuthState {
+    /// Provider CLI access-token expiry, informational only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_token_expiry_unix_seconds: Option<i64>,
+    /// Provider CLI `loggedIn`; only false establishes signed-out state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signed_in: Option<bool>,
+    /// Observed need for renewal or revalidation, including an API 401.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub refresh_pending: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_unix_seconds: Option<i64>,
+}
+impl AuthState {
+    fn valid(&self) -> bool {
+        self.access_token_expiry_unix_seconds
+            .is_none_or(|expiry| jiff::Timestamp::from_second(expiry).is_ok())
+            && self
+                .observed_unix_seconds
+                .is_none_or(|at| jiff::Timestamp::from_second(at).is_ok())
+            && (!self.refresh_pending || self.signed_in == Some(true))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountRecord {
     pub schema_version: u64,
@@ -148,6 +174,9 @@ pub struct AccountRecord {
     /// A successful lane is newer account-scoped evidence than ambient detection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_verified_unix_seconds: Option<i64>,
+    /// Safe provider auth facts; no credential material is retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_state: Option<AuthState>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credential_metadata: Vec<CredentialMetadata>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -169,6 +198,7 @@ impl AccountRecord {
             failures: 0,
             last_error: None,
             auth_verified_unix_seconds: None,
+            auth_state: None,
             credential_metadata: Vec::new(),
             auth_retry_pending: false,
             refusals: Vec::new(),
@@ -179,6 +209,9 @@ impl AccountRecord {
         self.account.validate()?;
         if self.schema_version != 1 || self.claim.as_ref().is_some_and(|c| !component(&c.token)) {
             return Err(QuotaError::Invalid("record header or claim"));
+        }
+        if self.auth_state.as_ref().is_some_and(|state| !state.valid()) {
+            return Err(QuotaError::Invalid("authentication metadata"));
         }
         if let Some(claim) = &self.claim {
             let started = self
@@ -253,6 +286,8 @@ impl AccountRecord {
 pub enum ProbeFailure {
     Network,
     RateLimited,
+    /// The selected account is signed in but access-token renewal is pending.
+    RefreshDeferred,
     Auth,
     /// The selected login's recorded credential has expired.
     LoginExpired,
@@ -343,6 +378,9 @@ pub struct AccountRow {
     /// Account-scoped login expiry evidence, independent of quota status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login_expiry: Option<LoginExpiryView>,
+    /// Safe authentication facts from the provider CLI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_state: Option<AuthState>,
     pub snapshot: Option<QuotaSnapshot>,
     pub status: QuotaStatus,
     /// RFC 3339 expiry for an active free-pool refusal, when the provider recorded one.

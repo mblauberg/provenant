@@ -47,6 +47,8 @@ struct Owner {
     policy: Option<LandChoice>,
     reply: Option<String>,
     asked: usize,
+    /// Every request filed, in order.
+    filed: Vec<AskRequest>,
     writer_branch: Option<String>,
     /// The newest commit a writer delivered, which CI reports as the head.
     head: Option<String>,
@@ -87,6 +89,9 @@ impl CiStatus for Owner {
 }
 impl AttemptOwner for Owner {
     type Error = Infallible;
+    fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+        provenant_config::PortTable::builtin().worktree_layout
+    }
     fn attempt_families(&mut self, attempts: &[String]) -> Result<Vec<String>, Self::Error> {
         let mut families = Vec::new();
         for family in attempts
@@ -149,6 +154,16 @@ impl AttemptOwner for Owner {
     fn ci_status(&mut self) -> Option<&mut dyn CiStatus> {
         Some(self)
     }
+    fn file_ask(&mut self, filing: AskFiling<'_>) -> Result<AskFiled, Self::Error> {
+        if !self.filed.iter().any(|ask| ask.ask_id == filing.ask.ask_id) {
+            self.filed.push(filing.ask.clone());
+        }
+        Ok(AskFiled {
+            request: filing.ask.ask_id.clone(),
+            deadline: filing.ask.wake_at,
+            closed: false,
+        })
+    }
     fn node_ask(&mut self, _: AskScope<'_>) -> Result<Option<AskReply>, Self::Error> {
         self.asked += 1;
         Ok(self.reply.clone().map(|option| AskReply {
@@ -210,7 +225,7 @@ impl AttemptOwner for Owner {
         key: &AttemptKey,
         input: NodeInput<'_>,
         _: &GraphRoute,
-        _: AccessMode,
+        access: AccessMode,
         worktree: Option<&str>,
         replay: Replay<'_>,
     ) -> Result<AttemptObservation, Self::Error> {
@@ -229,7 +244,13 @@ impl AttemptOwner for Owner {
             branch: replay.branch.map(str::to_owned),
         });
         let (result, branch, commit) = match key.node_id.as_str() {
-            "write" | "delivery--implement" => (None, self.writer_branch.clone(), Some(WRITE_HEAD)),
+            "write" => (None, self.writer_branch.clone(), Some(WRITE_HEAD)),
+            _ if self.repair_fixture
+                && access == AccessMode::WorktreeWrite
+                && replay.branch.is_none() =>
+            {
+                (None, self.writer_branch.clone(), Some(WRITE_HEAD))
+            }
             "repair" => (None, replay.branch.map(str::to_owned), Some(REPAIR_HEAD)),
             id if self.repair_fixture && id.ends_with("--fix") => {
                 let mut capture = crate::result_capture::ResultCapture::new(None);
@@ -291,6 +312,8 @@ impl AttemptOwner for Owner {
             result_path: None,
             branch,
             commit: commit.map(str::to_owned),
+            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+            stop: None,
         })
     }
 }
@@ -419,7 +442,10 @@ fn findings_panels_feed_repair_and_land_the_reviewed_head() {
 fn bundled_deliver_repairs_findings_before_landing() {
     let library = template::TemplateLibrary::bundled();
     let resolvers = std::collections::BTreeMap::from([
-        ("review-topology".to_owned(), vec!["f0-v0-s0".to_owned()]),
+        ("review-frame".to_owned(), vec!["false".to_owned()]),
+        ("review-verify".to_owned(), vec!["false".to_owned()]),
+        ("review-synthesis".to_owned(), vec!["false".to_owned()]),
+        ("review-verifiers".to_owned(), vec!["1".to_owned()]),
         ("review-panel".to_owned(), vec!["correctness".to_owned()]),
         ("review-advice-correctness".to_owned(), vec![String::new()]),
     ]);
@@ -750,11 +776,13 @@ fn a_crucial_tier_asks_and_succeeds_only_once_the_chair_merges_by_hand() {
         (ask.ask_id.as_str(), ask.kind, ask.session.as_str()),
         ("land.ask-1", AskKind::Land, "chair")
     );
-    let options: Vec<_> = ask.options.iter().map(|o| o.id.as_str()).collect();
+    let filed = &owner.filed[0];
+    let options: Vec<_> = filed.options.iter().map(|o| o.id.as_str()).collect();
     assert_eq!(options, ["hold"]);
-    assert!(ask.body.contains(REPAIR_HEAD) && ask.body.contains("crucial tier asks first"));
+    assert!(filed.body.contains(REPAIR_HEAD) && filed.body.contains("crucial tier asks first"));
     assert!(
-        ask.body
+        filed
+            .body
             .contains(&format!("provenant land N --head {REPAIR_HEAD}"))
     );
 
@@ -777,7 +805,7 @@ fn a_crucial_tier_asks_and_succeeds_only_once_the_chair_merges_by_hand() {
             .excerpt
             .contains("the chair landed it by hand after land.ask-1")
     );
-    assert!(checkpoint.asks[0].resolved);
+    assert!(checkpoint.asks.is_empty());
 }
 
 #[test]
@@ -856,7 +884,7 @@ fn a_configured_policy_overrides_the_default_and_records_its_source() {
         ),
         (LandPolicy::Ask, LandSource::Project, None)
     );
-    assert!(checkpoint.asks[0].body.contains("project config"));
+    assert!(owner.filed[0].body.contains("project config"));
     assert!(owner.lands.is_empty());
 }
 
@@ -1380,6 +1408,8 @@ fn a_replaced_gate_accepting_rejection_never_lands() {
             scan: &|_| Ok(()),
             journal: None,
             limits: &limits,
+
+            worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
         },
     )
     .unwrap();
@@ -1393,4 +1423,16 @@ fn a_replaced_gate_accepting_rejection_never_lands() {
         Some("land_review_required")
     );
     assert!(owner.lands.is_empty());
+}
+
+#[test]
+fn a_land_ask_id_carries_the_sequence_and_the_retry_generation() {
+    for (sequence, generation) in [(1, 0), (2, 0), (1, 3), (7, 12)] {
+        let id = land::ask_id("land", sequence, generation);
+        assert_eq!(land::parse(&id, "land"), Some((sequence, generation)));
+    }
+    assert_ne!(land::ask_id("land", 1, 0), land::ask_id("land", 1, 1));
+    assert_eq!(land::parse("land.ask-1.retry-0", "land"), None);
+    assert_eq!(land::parse("land.ask-0", "land"), None);
+    assert_eq!(land::parse("other.ask-1", "land"), None);
 }

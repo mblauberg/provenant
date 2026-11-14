@@ -35,29 +35,58 @@ pub struct Approval {
     pub reference: String,
     pub reviewer: String,
 }
-/// A Provenant review record for a pull request: the head `H` it reviewed and
-/// the base `B` it read `H` against.
+/// Typed settlement of an independent Provenant review execution.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReviewRecord {
     pub reference: String,
     pub reviewer: String,
     pub head: String,
-    pub base: String,
+    pub verdict: provenant_records::workflow::ReviewVerdict,
+    pub independent: bool,
 }
-/// A pull request's accepted review records, and the receipts for it that
-/// cannot be read as one, each with the reason and its remedy.
+/// A pull request's typed review records and any unusable source diagnostics.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Reviews {
     pub records: Vec<ReviewRecord>,
     pub unusable: Vec<String>,
 }
-/// Accepted Provenant review records, read when `land.approval = "receipt"`.
+/// Provenant review settlements, read when configured as an approval source.
 /// This is the approval port beside [`Forge::approvals`].
 pub trait ReviewRecords {
-    fn reviews(&self, number: u64) -> Result<Reviews, LandingError>;
+    fn reviews(&self, number: u64, head: &str) -> Result<Reviews, LandingError>;
 }
+/// Read review evidence in the operation's saved project scope, independent of
+/// the invoking process's current configuration or project binding.
+pub trait ReviewRecordSource {
+    fn reviews(
+        &self,
+        scope: &provenant_records::landing::ReviewScope,
+        number: u64,
+        head: &str,
+    ) -> Result<Reviews, LandingError>;
+}
+
+pub struct ScopedReviews<'a> {
+    pub source: &'a dyn ReviewRecordSource,
+    pub scope: &'a provenant_records::landing::ReviewScope,
+}
+impl ReviewRecords for ScopedReviews<'_> {
+    fn reviews(&self, number: u64, head: &str) -> Result<Reviews, LandingError> {
+        self.source.reviews(self.scope, number, head)
+    }
+}
+
 pub trait Forge {
+    /// Optional features are observed per repository; unknown never implies support.
+    fn capabilities(
+        &mut self,
+        _target: &str,
+    ) -> Result<provenant_records::landing::Capabilities, LandingError> {
+        Ok(provenant_records::landing::Capabilities::default())
+    }
     fn set_project_path(&mut self, _path: &std::path::Path) {}
+    /// `Some` fixes polling for this landing; `None` leaves adapter cadence in control.
+    fn set_poll_interval_override(&mut self, _interval: Option<std::time::Duration>) {}
     fn pull_request(&mut self, number: u64) -> Result<PullRequestInfo, LandingError>;
     /// The stack's pull requests in bottom-to-top order.
     fn stack_members(&mut self, number: u64) -> Result<Vec<StackMember>, LandingError>;
@@ -68,6 +97,11 @@ pub trait Forge {
     fn head(&mut self, number: u64) -> Result<String, LandingError>;
     fn approvals(&mut self, number: u64, head: &str) -> Result<Vec<Approval>, LandingError>;
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError>;
+    /// Adapter-selected cadence for the next observation, if it owns one.
+    /// Callers use their declared policy cadence when the adapter has none.
+    fn observation_interval(&self) -> Option<std::time::Duration> {
+        None
+    }
     fn checks_with_timeout(
         &mut self,
         commit: &str,
@@ -120,6 +154,14 @@ pub enum MergeTree {
     Conflict,
 }
 pub trait Repo {
+    /// Execute the repository publisher with the durable pending intent on stdin.
+    fn publish_command(
+        &mut self,
+        _command: &provenant_records::landing::RepositoryCommand,
+        _attempt: &PendingAttempt,
+    ) -> Result<PublishResult, LandingError> {
+        Err(LandingError::Unimplemented("repository command publisher"))
+    }
     fn project_path(&self) -> Option<&std::path::Path> {
         None
     }
@@ -163,6 +205,8 @@ pub trait Repo {
 }
 pub trait GateRunner {
     fn set_project_path(&mut self, _path: &std::path::Path) {}
+    /// Forward the landing's explicit fixed cadence to an adapter-owned observer.
+    fn set_poll_interval_override(&mut self, _interval: Option<std::time::Duration>) {}
     fn gate(
         &mut self,
         candidate: &Candidate,

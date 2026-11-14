@@ -4,8 +4,9 @@ use crate::{PathCheck, Result, RunError, WriterRequest};
 use provenant_confinement::{
     ConfinedPlan, UtilityBudget, UtilityRuntime, VerifiedWorktree,
     permissions::{
-        AccessMode, AnchoredDirectory, Anchors, BackendContext, ProfileLimits, ProviderProfile,
-        prepare_writer_directories, required_anchors, system_backend_with_limits,
+        AccessMode, AnchoredDirectory, Anchors, Availability, AvailabilityReason, BackendContext,
+        ConfinementBackend, PermissionError, ProfileLimits, ProviderProfile,
+        prepare_writer_directories, required_anchors, system_backend_with_limits_and_policy,
     },
     repo::GitRefName,
     worktrees,
@@ -99,7 +100,7 @@ fn runtime(state: &Path) -> Result<UtilityRuntime> {
         Err(e) => return Err(anchored_error(e, state)),
     }
     let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
-    UtilityRuntime::new(&git, home.clone())
+    UtilityRuntime::new(&git, home.clone(), state)
         .map(|runtime| {
             runtime.with_lane_roots(provenant_confinement::utility::lane_state_roots(state))
         })
@@ -189,31 +190,35 @@ fn resolve_writer_with(
             error.into()
         }
     })?;
+    let location = provenant_config::ProjectLocation::new(repo.common_git_dir()).map_err(error(
+        "resolve writer project binding",
+        Some(repo.common_git_dir()),
+    ))?;
+    let binding = provenant_config::lookup_project_at_state(state, &location)
+        .map_err(error(
+            "read writer project binding",
+            Some(repo.common_git_dir()),
+        ))?
+        .ok_or(RunError::Validation(
+            "writer custody project is not registered",
+        ))?;
+    let mut extra = provenant_records::ExtraFields::default();
+    extra.insert(
+        "custody_project".into(),
+        serde_json::json!(binding.project_id()),
+    );
     if !verify {
         if !path.starts_with(project) {
             return Err(RunError::unsafe_path(path, PathCheck::Containment));
         }
         return Ok(WriterRequest {
-            extra: Default::default(),
+            extra,
             project: project.to_path_buf(),
             worktree: path,
         });
     }
     let worktree = provenant_confinement::verify_worktree(&repo, &path)
         .map_err(worktrees::WorktreeError::from)?;
-    let location = provenant_config::ProjectLocation::new(repo.common_git_dir()).map_err(error(
-        "resolve writer project binding",
-        Some(repo.common_git_dir()),
-    ))?;
-    let mut extra = provenant_records::ExtraFields::default();
-    if let Some(binding) = provenant_config::lookup_project_at_state(state, &location).map_err(
-        error("read writer project binding", Some(repo.common_git_dir())),
-    )? {
-        extra.insert(
-            "custody_project".into(),
-            serde_json::json!(binding.project_id()),
-        );
-    }
     Ok(WriterRequest {
         extra,
         project: project.to_path_buf(),
@@ -228,9 +233,6 @@ pub struct WriterLaunch {
     pub(crate) custody: Option<(Directory, WriterBinding)>,
     /// Repository observations and caps shared by this writer operation.
     pub(crate) facts: worktrees::RepoFacts,
-    /// Paths the project lets this writer change without review, read from the
-    /// host config when the launch was prepared.
-    pub(crate) review_exempt: provenant_confinement::review_exempt::ReviewExempt,
 }
 impl WriterLaunch {
     /// The verified branch head captured while preparing this writer.
@@ -258,11 +260,32 @@ impl WriterLaunch {
         source: GitOid,
         predecessor: GitOid,
     ) -> Result<()> {
+        self.require_continuation_source_with_policy(
+            git,
+            source,
+            predecessor,
+            &provenant_records::policy::Policy::default(),
+        )
+    }
+
+    pub fn require_continuation_source_with_policy(
+        &self,
+        git: &Path,
+        source: GitOid,
+        predecessor: GitOid,
+        policy: &provenant_records::policy::Policy,
+    ) -> Result<()> {
         if self.base != predecessor {
-            return Err(RunError::WriterSourceMismatch {
-                expected: predecessor,
-                actual: self.base,
-            });
+            return Err(policy.boundary_error(
+                "WRITER_WRITERLAUNCH_REQUIRE_CONTINUATION_SOURCE_GIT_ISOLATION",
+                provenant_records::policy::Facts::violation(
+                    "prepared writer base does not match the pinned predecessor head",
+                ),
+                RunError::WriterSourceMismatch {
+                    expected: predecessor,
+                    actual: self.base,
+                },
+            ));
         }
         let repo = self.worktree.repo();
         let descends = crate::objects::command(
@@ -279,10 +302,16 @@ impl WriterLaunch {
         )
         .is_ok();
         if !descends {
-            return Err(RunError::WriterSourceMismatch {
-                expected: source,
-                actual: self.base,
-            });
+            return Err(policy.boundary_error(
+                "WRITER_WRITERLAUNCH_REQUIRE_CONTINUATION_SOURCE_GIT_ISOLATION",
+                provenant_records::policy::Facts::violation(
+                    "pinned predecessor head does not descend from the writer source",
+                ),
+                RunError::WriterSourceMismatch {
+                    expected: source,
+                    actual: self.base,
+                },
+            ));
         }
         Ok(())
     }
@@ -304,6 +333,118 @@ impl WriterLaunch {
             None,
         )?;
         status_paths(&output)
+    }
+
+    /// A budget clean point needs both no edits and a locally recorded push of
+    /// the effective lane head. An unreadable Git fact is not proof of either.
+    pub(crate) fn budget_clean_point(&self, attempt: &Directory) -> Result<bool> {
+        let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
+        let (head, native) = self.effective_head(attempt, self.base)?;
+        let repo = self.worktree.repo();
+        let source = crate::objects::bound_source(attempt)?
+            .ok_or(RunError::Validation("clean point needs private Git state"))?;
+        let index_dir = if native {
+            repo.private_dir()
+        } else {
+            &source.refs
+        };
+        for directory in [repo.private_dir(), &source.refs] {
+            for name in [
+                "MERGE_HEAD",
+                "CHERRY_PICK_HEAD",
+                "REVERT_HEAD",
+                "rebase-merge",
+                "rebase-apply",
+            ] {
+                match directory.metadata_at(OsStr::new(name), false) {
+                    Ok(_) => return Ok(false),
+                    Err(error) if error.is_not_found() => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+        index_dir.read_stable(OsStr::new("index"), 64 * 1024 * 1024)?;
+        let index = index_dir.current_path()?.join("index");
+        let mut indexes = vec![index];
+        if head == self.base {
+            // Before the first native commit the heads cannot identify which
+            // index owns staged edits. Neither index may carry pending work.
+            repo.private_dir()
+                .read_stable(OsStr::new("index"), 64 * 1024 * 1024)?;
+            let native_index = repo.private_dir().current_path()?.join("index");
+            if !indexes.contains(&native_index) {
+                indexes.push(native_index);
+            }
+        }
+        let objects = source.objects.current_path()?;
+        let alternate = repo.common_git_dir().join("objects");
+        let clean = crate::objects::with_clean_view(&git, repo, head, None, |_, path| {
+            let run = |args: &[&str], index: &Path| {
+                crate::objects::execute_bounded(
+                    &git,
+                    path,
+                    repo.root_path(),
+                    &args.iter().map(OsString::from).collect::<Vec<_>>(),
+                    None,
+                    crate::objects::Execution {
+                        object_directory: Some(&objects),
+                        index_file: Some(index),
+                        alternate_directory: Some(&alternate),
+                        ..Default::default()
+                    },
+                )
+            };
+            run(&["update-ref", "HEAD", &head.to_string()], &indexes[0])?;
+            for index in &indexes {
+                if !run(
+                    &[
+                        "--no-optional-locks",
+                        "--work-tree",
+                        repo.root_path()
+                            .to_str()
+                            .ok_or(RunError::Validation("worktree path"))?,
+                        "status",
+                        "--porcelain",
+                        "-z",
+                        "-uall",
+                    ],
+                    index,
+                )?
+                .is_empty()
+                {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })?;
+        if !clean {
+            return Ok(false);
+        }
+        let upstream_dir = if native {
+            // Branch tracking config can be worktree-local when Git enables
+            // extensions.worktreeConfig; resolve the upstream from this
+            // worktree's private Git directory while refs stay shared.
+            repo.private_git_dir().to_path_buf()
+        } else {
+            source.refs.current_path()?
+        };
+        let branch = self
+            .branch
+            .as_str()
+            .strip_prefix("refs/heads/")
+            .ok_or(RunError::Validation("writer needs a local branch"))?;
+        let upstream = crate::objects::command(
+            &git,
+            &upstream_dir,
+            repo.root_path(),
+            &[
+                "rev-parse".into(),
+                "--verify".into(),
+                format!("{branch}@{{upstream}}").into(),
+            ],
+            None,
+        )?;
+        Ok(std::str::from_utf8(&upstream).is_ok_and(|tip| tip.trim() == head.to_string()))
     }
 
     /// Select the lane head while settlement holds writer exclusion. Native Git
@@ -426,6 +567,12 @@ impl WriterLaunch {
 
 /// The paths in `git status --porcelain -z` output.
 fn status_paths(output: &[u8]) -> Result<Vec<String>> {
+    Ok(status_paths_raw(output, false)?
+        .into_iter()
+        .map(|path| String::from_utf8_lossy(&path).into_owned())
+        .collect())
+}
+fn status_paths_raw(output: &[u8], include_sources: bool) -> Result<Vec<Vec<u8>>> {
     let mut records = output.split(|byte| *byte == 0);
     let mut paths = Vec::new();
     while let Some(record) = records.next() {
@@ -435,14 +582,18 @@ fn status_paths(output: &[u8]) -> Result<Vec<String>> {
         if record.len() < 4 || record[2] != b' ' {
             return Err(RunError::Validation("invalid Git status record"));
         }
-        paths.push(String::from_utf8_lossy(&record[3..]).into_owned());
-        // Porcelain -z puts the destination first and follows it with the source.
+        paths.push(record[3..].to_vec());
         if record[..2]
             .iter()
             .any(|status| matches!(status, b'R' | b'C'))
-            && records.next().is_none_or(|source| source.is_empty())
         {
-            return Err(RunError::Validation("invalid Git status rename"));
+            let source = records
+                .next()
+                .filter(|source| !source.is_empty())
+                .ok_or(RunError::Validation("invalid Git status rename"))?;
+            if include_sources {
+                paths.push(source.to_vec());
+            }
         }
     }
     Ok(paths)
@@ -513,11 +664,7 @@ fn in_progress_note(operation: &str) -> &'static str {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct ImportFence {
-    schema_version: u64,
-    scope: provenant_supervisor::custody::Scope,
-}
+use provenant_supervisor::custody::ImportFence;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -607,38 +754,18 @@ fn writer_branch(worktree: &VerifiedWorktree) -> Result<GitRefName> {
     .map_err(error("parse writer branch", Some(&head_path)))
 }
 
-/// Persisted source-project custody binding. Older requests keep their original
-/// attribution namespace during recovery.
-pub(crate) fn writer_project_id(
-    request: &WriterRequest,
-    attribution: ProjectId,
-) -> Result<ProjectId> {
-    request
+/// Read the required source-project custody binding from a current writer request.
+pub(crate) fn writer_project_id(request: &WriterRequest) -> Result<ProjectId> {
+    let value = request
         .extra
         .get("custody_project")
-        .map(|value| {
-            serde_json::from_value(value.clone())
-                .map_err(|_| RunError::Validation("invalid writer custody project"))
-        })
-        .transpose()
-        .map(|project| project.unwrap_or(attribution))
+        .ok_or(RunError::Validation("writer custody project missing"))?;
+    serde_json::from_value(value.clone())
+        .map_err(|_| RunError::Validation("invalid writer custody project"))
 }
 
-/// Compare persisted writer identity, interpreting legacy custody as attribution.
-/// Callers retain the original request bytes when replaying an equivalent writer.
-pub fn equivalent_writer(
-    saved: &WriterRequest,
-    resolved: &WriterRequest,
-    attribution: ProjectId,
-) -> bool {
-    let mut saved = saved.clone();
-    let mut resolved = resolved.clone();
-    for writer in [&mut saved, &mut resolved] {
-        writer
-            .extra
-            .entry("custody_project".into())
-            .or_insert_with(|| serde_json::json!(attribution));
-    }
+/// Compare the complete persisted writer identity.
+pub fn equivalent_writer(saved: &WriterRequest, resolved: &WriterRequest) -> bool {
     saved == resolved
 }
 
@@ -648,31 +775,22 @@ impl crate::RunStore {
     /// not inventory the host's slots.
     pub(crate) fn attempt_writer_slot(
         &self,
-        run: provenant_core::RunId,
-        task: provenant_core::TaskId,
-        project: ProjectId,
+        attempt: provenant_core::AttemptId,
         call: &crate::Request<'_>,
     ) -> Result<Option<PathBuf>> {
-        let request = self.request(run, call)?;
+        let request = self.request(attempt, call)?;
         request
-            .tasks
-            .iter()
-            .find(|candidate| candidate.task_id == task)
-            .ok_or(RunError::Validation("attempt task association"))?
+            .task
             .writer
             .as_ref()
-            .map(|writer| self.writer_slot(writer, project))
+            .map(|writer| self.writer_slot(writer))
             .transpose()
     }
-    pub(crate) fn writer_slot(
-        &self,
-        writer: &WriterRequest,
-        attribution: ProjectId,
-    ) -> Result<PathBuf> {
+    pub(crate) fn writer_slot(&self, writer: &WriterRequest) -> Result<PathBuf> {
         Ok(self
             .writer_registry
             .join("worktrees")
-            .join(writer_project_id(writer, attribution)?.to_string())
+            .join(writer_project_id(writer)?.to_string())
             .join(worktrees::state_dir_name(&writer.worktree)))
     }
 }
@@ -742,21 +860,19 @@ pub fn prepare_writer_with_facts(
         "resolve writer project binding",
         Some(repo.common_git_dir()),
     ))?;
-    let custody_project = writer_project_id(request, project)?;
-    if request.extra.contains_key("custody_project") {
-        let binding = provenant_config::lookup_project_at_state(state, &location)
-            .map_err(error(
-                "read writer project binding",
-                Some(repo.common_git_dir()),
-            ))?
-            .ok_or(RunError::Validation(
-                "writer custody project is not registered",
-            ))?;
-        if binding.project_id() != custody_project {
-            return Err(RunError::Validation(
-                "writer custody project does not match its repository",
-            ));
-        }
+    let custody_project = writer_project_id(request)?;
+    let binding = provenant_config::lookup_project_at_state(state, &location)
+        .map_err(error(
+            "read writer project binding",
+            Some(repo.common_git_dir()),
+        ))?
+        .ok_or(RunError::Validation(
+            "writer custody project is not registered",
+        ))?;
+    if binding.project_id() != custody_project {
+        return Err(RunError::Validation(
+            "writer custody project does not match its repository",
+        ));
     }
     let state_dir = Directory::open_anchor(state)?;
     if custody_project != project {
@@ -797,10 +913,6 @@ pub fn prepare_writer_with_facts(
         base,
         custody: Some((directory, binding)),
         facts: facts.clone(),
-        review_exempt: provenant_confinement::run_config::RunConfig::review_exempt_at(
-            state,
-            &project.to_string(),
-        ),
     })
 }
 
@@ -811,15 +923,26 @@ pub struct LaunchConfinement {
     pub writer: Option<WriterLaunch>,
     /// Canonical host home; the writer's lane cargo cache derives from it.
     pub home: PathBuf,
-    /// Opt in to cloning the host Cargo registry into a fresh writer cache.
-    pub cargo_registry_seed: bool,
+    /// Opt in to private host target seeding.
+    pub cargo_target_seed: bool,
+    /// Resolved once by the host, reused after all late environment additions.
+    pub cargo_home: provenant_confinement::cargo::CargoHome,
     /// Host state root containing target seed generations.
     pub state_root: PathBuf,
     /// Whether the lane runs under the compiled sandbox profile. Without it
     /// the plan still prepares writer directories and records access, but the
     /// provider starts directly, like the same CLI started by hand.
-    pub sandboxed: bool,
+    pub sandbox: provenant_confinement::run_config::SandboxMode,
+    /// Bound once before sealing launch evidence; compilation uses this exact
+    /// probed backend under writer custody, without a second selection.
+    pub backend: Option<BoundSandboxBackend>,
 }
+/// A probed backend and the limits whose sources were sealed with it.
+pub struct BoundSandboxBackend {
+    backend: Box<dyn ConfinementBackend>,
+    limits: ResolvedLaunchLimits,
+}
+
 struct ResolvedLaunchLimits {
     limits: ProfileLimits,
     grant_origin: provenant_records::diagnostic::SettingSource,
@@ -844,7 +967,10 @@ impl ResolvedLaunchLimits {
     }
 }
 
-fn launch_resource_limits(state: &Path) -> ResolvedLaunchLimits {
+fn launch_resource_limits(
+    state: &Path,
+    policy: &provenant_records::policy::Policy,
+) -> ResolvedLaunchLimits {
     match provenant_confinement::run_config::RunConfig::read_with_keys(state) {
         Ok((config, keys)) => {
             let origin = |key: &str| {
@@ -867,12 +993,15 @@ fn launch_resource_limits(state: &Path) -> ResolvedLaunchLimits {
         }
         Err(error) => {
             let defaults = ProfileLimits::default();
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: launch resource limits unavailable ({error}); using compiled defaults domains.run.grant_limit={} and domains.run.profile_limit_bytes={}",
-                defaults.grant_limit,
-                defaults.profile_limit_bytes
-            );
+            if let provenant_records::policy::Effect::Warn(message) = policy.check(
+                "WRITER_LAUNCH_RESOURCE_LIMITS_NONE",
+                provenant_records::policy::Facts::violation(format!(
+                    "launch resource limits unavailable ({error}); using compiled defaults domains.run.grant_limit={} and domains.run.profile_limit_bytes={}",
+                    defaults.grant_limit, defaults.profile_limit_bytes
+                )),
+            ) {
+                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+            }
             ResolvedLaunchLimits {
                 limits: defaults,
                 grant_origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
@@ -883,6 +1012,44 @@ fn launch_resource_limits(state: &Path) -> ResolvedLaunchLimits {
 }
 
 impl LaunchConfinement {
+    /// Backend absence is advisory. Plan validation and profile compilation
+    /// still fail at their typed credential, Git and integrity boundaries.
+    pub(crate) fn bind_backend(
+        &mut self,
+        cancel: &CancelToken,
+        policy: &provenant_records::policy::Policy,
+    ) -> Result<Availability> {
+        let executor =
+            SystemExecutor::new(1).map_err(error("initialise sandbox probe executor", None))?;
+        let limits = launch_resource_limits(&self.state_root, policy);
+        let selected = system_backend_with_limits_and_policy(
+            &BackendContext {
+                executor: &executor,
+                cancel,
+                #[cfg(target_os = "macos")]
+                env: &[],
+            },
+            limits.limits,
+            policy,
+        );
+        let reason = match selected {
+            Ok(backend) => {
+                let kind = backend.kind();
+                self.backend = Some(BoundSandboxBackend { backend, limits });
+                return Ok(Availability::Available { backend: kind });
+            }
+            Err(PermissionError::BackendNotAvailable(reason)) => reason,
+            Err(
+                PermissionError::BackendUnavailable
+                | PermissionError::Execution(_)
+                | PermissionError::Filesystem(_),
+            ) => AvailabilityReason::ProbeFailed,
+            Err(error) => return Err(RunError::Confinement(error)),
+        };
+        self.backend = None;
+        Ok(Availability::Unavailable { reason })
+    }
+
     /// Prepare Git while custody is held, then replace every handle that was
     /// bound to the common config before Git changed it.
     pub(crate) fn prepare_git(&mut self, cancel: &CancelToken) -> Result<()> {
@@ -909,92 +1076,32 @@ impl LaunchConfinement {
             cancel,
         )
     }
-    /// Prepare the private Cargo caches while writer custody is held.
+    /// Prepare a private target from host-built output while writer custody is held.
     pub(crate) fn seed_cargo(
         &self,
-        environment: &[(OsString, OsString)],
+        environment: &mut Vec<(OsString, OsString)>,
         attempt_dir: &Directory,
         cancel: &CancelToken,
     ) {
         if cancel.is_cancelled() {
             return;
         }
+        let cache = match &self.plan.permissions().mode {
+            AccessMode::WorktreeWrite(authority) => &authority.cargo_cache().path,
+            AccessMode::ReadOnly => &self.plan.permissions().scratch.path,
+        };
+        self.cargo_home
+            .lane_cargo_environment(&self.home, cache, environment);
+        self.cargo_home
+            .source_environment(self.plan.permissions().network, environment);
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
-        let outcome = match &self.plan.permissions().mode {
-            AccessMode::WorktreeWrite(authority) => crate::cargo_seed::seed_registry(
-                self.cargo_registry_seed,
-                &self.home,
-                &authority.cargo_cache().path,
-                cancel,
-            ),
-            AccessMode::ReadOnly => crate::cargo_seed::Outcome::skipped("read_only_lane"),
-        };
-        // Diagnostic publication must never prevent lane launch.
-        if let Err(error) = record_cargo_setup(attempt_dir, &outcome) {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: could not record Cargo setup: {error}"
-            );
-        }
-        if cancel.is_cancelled() {
-            return;
-        }
-        let git_outcome = match &self.plan.permissions().mode {
-            AccessMode::WorktreeWrite(authority) => crate::cargo_seed::seed_git(
-                self.cargo_registry_seed,
-                &self.home,
-                &authority.cargo_cache().path,
-                cancel,
-            ),
-            AccessMode::ReadOnly => crate::cargo_seed::Outcome::skipped("read_only_lane"),
-        };
-        if let Err(error) =
-            record_cargo_setup_file(attempt_dir, "cargo-git-setup.json", &git_outcome)
-        {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: could not record Cargo Git setup: {error}"
-            );
-        }
-        if cancel.is_cancelled() {
-            return;
-        }
         let target_outcome = match (&self.plan.permissions().mode, writer) {
-            (AccessMode::WorktreeWrite(authority), Some((worktree, _)))
-                if cfg!(unix)
-                    && self.cargo_registry_seed
-                    && let Err(detail) = verified_cargo_config(
-                        worktree.path(),
-                        &authority.cargo_cache().path,
-                        environment,
-                    )
-                    .and_then(|()| {
-                        trusted_lane_toolchain(
-                            &self.home,
-                            worktree.path(),
-                            environment,
-                            &provenant_confinement::write_grants(
-                                self.plan.permissions(),
-                                &self.profile,
-                            ),
-                        )
-                    }) =>
-            {
-                crate::cargo_seed::Outcome::fallback_detail("toolchain_unverified", detail)
-            }
-            (AccessMode::WorktreeWrite(authority), Some((worktree, _))) => {
-                crate::cargo_seed::seed_target(
-                    self.cargo_registry_seed,
-                    &self.state_root,
-                    &authority.cargo_cache().path,
-                    worktree.path(),
-                    &self.home,
-                    environment,
-                    cancel,
-                )
-            }
+            (AccessMode::WorktreeWrite(authority), Some((worktree, _))) => self.seed_cargo_target(
+                worktree.path(),
+                &authority.cargo_cache().path,
+                environment,
+                cancel,
+            ),
             _ => crate::cargo_seed::Outcome::skipped("read_only_lane"),
         };
         if let Some(warning) = target_outcome.fallback_warning("the Cargo target") {
@@ -1011,6 +1118,55 @@ impl LaunchConfinement {
             );
         }
     }
+
+    fn seed_cargo_target(
+        &self,
+        worktree: &Path,
+        cache: &Path,
+        environment: &[(OsString, OsString)],
+        cancel: &CancelToken,
+    ) -> crate::cargo_seed::Outcome {
+        use crate::cargo_seed::Outcome;
+        if !self.cargo_target_seed {
+            return Outcome::skipped("disabled");
+        }
+        let build = match crate::target_seed::cargo_build_directory(worktree, &self.writer_registry)
+        {
+            Ok(Some(build)) => build,
+            Ok(None) => return Outcome::skipped("non_cargo_project"),
+            Err(_) => {
+                return Outcome::fallback_detail(
+                    "toolchain_unverified",
+                    codes::CARGO_WORKSPACE_UNREADABLE,
+                );
+            }
+        };
+        if cfg!(unix)
+            && let Err(detail) =
+                verified_cargo_config(&build, &self.cargo_home.path).and_then(|()| {
+                    trusted_lane_toolchain(
+                        &self.home,
+                        worktree,
+                        environment,
+                        &provenant_confinement::write_grants(
+                            self.plan.permissions(),
+                            &self.profile,
+                        ),
+                    )
+                })
+        {
+            return Outcome::fallback_detail("toolchain_unverified", detail);
+        }
+        crate::cargo_seed::seed_target(
+            true,
+            &self.state_root,
+            cache,
+            worktree,
+            &self.home,
+            environment,
+            cancel,
+        )
+    }
     /// Run holds writer custody here: create the derived ref parents and the
     /// private lane cache, before they are anchored or used unsandboxed.
     pub(crate) fn prepare_writer_directories(&self) -> Result<()> {
@@ -1024,24 +1180,13 @@ impl LaunchConfinement {
     }
 
     pub(crate) fn command(
-        &self,
+        &mut self,
         argv: &[OsString],
         attempt: &provenant_core::AttemptId,
-        cancel: &CancelToken,
     ) -> Result<provenant_confinement::permissions::ConfinedCommand> {
-        let executor =
-            SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
-        let limits = launch_resource_limits(&self.state_root);
-        let backend = system_backend_with_limits(
-            &BackendContext {
-                executor: &executor,
-                cancel,
-                #[cfg(target_os = "macos")]
-                env: &[],
-            },
-            limits.limits,
-        )
-        .map_err(RunError::Confinement)?;
+        let backend = self.backend.as_ref().ok_or(RunError::Validation(
+            "sandbox backend was not bound before launch",
+        ))?;
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
         self.prepare_writer_directories()?;
         let directories = required_anchors(self.plan.permissions(), &self.profile, writer)
@@ -1055,8 +1200,8 @@ impl LaunchConfinement {
             worktree: writer,
         };
         self.plan
-            .compile(backend.as_ref(), &self.profile, &anchors)
-            .map_err(|error| RunError::Confinement(limits.annotate(error)))?
+            .compile(backend.backend.as_ref(), &self.profile, &anchors)
+            .map_err(|error| RunError::Confinement(backend.limits.annotate(error)))?
             .command(
                 argv,
                 attempt,
@@ -1346,25 +1491,9 @@ pub(super) fn verify_writer_git_paths(common: &Path, branch: &GitRefName) -> Res
 // Cargo configuration can override rustc independently of the rustup pin.
 // Refuse ambiguous configurations without executing or interpreting them.
 // Refusals are stable snake_case codes, recorded as the outcome `detail`.
-fn verified_cargo_config(
-    worktree: &Path,
-    cache: &Path,
-    environment: &[(OsString, OsString)],
-) -> std::result::Result<(), &'static str> {
-    for path in [worktree.join("tools"), worktree.join("tools/front-door")] {
-        if !std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
-            return Err(codes::WORKTREE_LAYOUT_UNEXPECTED);
-        }
-    }
-    let cargo_home = cache.join("cargo-home");
-    let mut values = environment.iter().filter(|(key, _)| key == "CARGO_HOME");
-    match (values.next(), values.next()) {
-        (Some((_, value)), None) if Path::new(value) == cargo_home => {}
-        (None, _) => return Err(codes::CARGO_HOME_ENV_MISSING),
-        _ => return Err(codes::CARGO_HOME_ENV_UNEXPECTED),
-    }
+fn verified_cargo_config(build: &Path, cargo_home: &Path) -> std::result::Result<(), &'static str> {
     let present = |directory: &Path| {
-        ["config", "config.toml"]
+        provenant_confinement::cargo::CONFIG_FILES
             .iter()
             .map(|name| directory.join(name))
             .filter(|path| {
@@ -1373,13 +1502,13 @@ fn verified_cargo_config(
             })
             .collect::<Vec<_>>()
     };
-    // The lane's own Cargo home is lane-writable state: any file there is refused.
-    if !present(&cargo_home).is_empty() {
-        return Err(codes::CARGO_HOME_CONFIG_PRESENT);
+    // The host config is data, with the same compiler-selection check as project config.
+    for path in present(cargo_home) {
+        cargo_config_cannot_select_compiler(&path)?;
     }
     // A checked-in `.cargo/config.toml` is ordinary (this repository has one).
     // It is read as data and refused only if it can select the compiler.
-    for ancestor in worktree.join("tools/front-door").ancestors() {
+    for ancestor in build.ancestors() {
         for path in present(&ancestor.join(".cargo")) {
             cargo_config_cannot_select_compiler(&path)?;
         }
@@ -1507,13 +1636,6 @@ fn trusted_lane_toolchain(
     Err(codes::RUSTC_NOT_ON_PATH)
 }
 
-fn record_cargo_setup(
-    directory: &Directory,
-    outcome: &crate::cargo_seed::Outcome,
-) -> std::result::Result<(), String> {
-    record_cargo_setup_file(directory, "cargo-setup.json", outcome)
-}
-
 fn record_cargo_setup_file(
     directory: &Directory,
     name: &str,
@@ -1539,6 +1661,40 @@ mod cargo_setup_tests {
     #[test]
     fn eight_complete_writer_preparations_overlap_config_updates()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
+        const CLEAN_ENV_CHILD: &str = "PROVENANT_WRITER_CONFIG_FIXTURE_CHILD";
+        if std::env::var_os(CLEAN_ENV_CHILD).is_none() {
+            use provenant_os::exec::{
+                ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
+            };
+            use std::{ffi::OsString, time::Duration};
+            let temp = tempfile::tempdir()?;
+            let home = temp.path().join("home");
+            std::fs::create_dir(&home)?;
+            let argv: Vec<OsString> = vec![
+                std::env::current_exe()?.into_os_string(),
+                "--exact".into(),
+                "writer::cargo_setup_tests::eight_complete_writer_preparations_overlap_config_updates".into(),
+                "--nocapture".into(),
+            ];
+            let env: Vec<_> = [
+                ("HOME", home.as_os_str().to_owned()),
+                ("PATH", "/usr/bin:/bin".into()),
+                ("GIT_CONFIG_GLOBAL", "/dev/null".into()),
+                ("GIT_CONFIG_SYSTEM", "/dev/null".into()),
+                ("GIT_CONFIG_NOSYSTEM", "1".into()),
+                (CLEAN_ENV_CHILD, "1".into()),
+            ]
+            .into_iter()
+            .map(|(key, value)| (OsString::from(key), value))
+            .collect();
+            let mut options = ExecOptions::new(&argv, temp.path(), Duration::from_secs(30));
+            options.env = Some(&env);
+            options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
+            options.stderr = StreamPolicy::Capture { limit: 64 * 1024 };
+            let output = SystemExecutor::new(1)?.execute(options)?;
+            assert_eq!(output.termination, Termination::Exit(0), "{output:?}");
+            return Ok(());
+        }
         let temp = tempfile::tempdir()?;
         let root = std::fs::canonicalize(temp.path())?;
         let project = root.join("project");
@@ -1546,7 +1702,8 @@ mod cargo_setup_tests {
         let second_lane = root.join("second-lane");
         let state = root.join("state");
         std::fs::create_dir(&project)?;
-        std::fs::create_dir(&state)?;
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(&state)?;
         let git_dir = project.join(".git");
         let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
         let run = |args: &[&str]| -> std::result::Result<String, Box<dyn std::error::Error>> {
@@ -1568,6 +1725,16 @@ mod cargo_setup_tests {
             Ok(String::from_utf8(output.stdout)?.trim().to_owned())
         };
         run(&["init", "-q"])?;
+        let home = root.join("home");
+        std::fs::create_dir(&home)?;
+        let mut roots = provenant_core::RootInputs::new(home, project.clone());
+        roots.state_dir = Some(state.clone());
+        let roots = roots.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let custody_project = provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::new(git_dir.clone())?,
+        )?
+        .project_id();
         std::fs::write(project.join("old name.txt"), "tracked")?;
         run(&["add", "old name.txt"])?;
         run(&["commit", "--allow-empty", "-qm", "initial"])?;
@@ -1605,7 +1772,6 @@ mod cargo_setup_tests {
             base: GitOid::parse(&expected)?,
             custody: None,
             facts: Default::default(),
-            review_exempt: Default::default(),
         };
         // Use a real unrelated root, so both named commits exist.
         let tree = run(&["rev-parse", "HEAD^{tree}"])?;
@@ -1691,7 +1857,6 @@ mod cargo_setup_tests {
             base: GitOid::parse(&expected)?,
             custody: None,
             facts: Default::default(),
-            review_exempt: Default::default(),
         };
         let mut siblings = Vec::new();
         for index in 2..8 {
@@ -1710,12 +1875,11 @@ mod cargo_setup_tests {
                 base: source_oid,
                 custody: None,
                 facts: Default::default(),
-                review_exempt: Default::default(),
             });
         }
-        // Eight real worktrees share .git/config. Start their preparations
-        // together, including the initial open, verification and custody reads,
-        // and require every launch to finish with both upstream keys.
+        // Eight real worktrees share .git/config. When a sibling holds an
+        // incomplete config, preparation reports busy without waiting. Retry
+        // after the sibling publishes.
         let start = std::sync::Barrier::new(8);
         let common = Directory::open_anchor(&git_dir)?;
         let clock = provenant_os::clock::SystemClock::new();
@@ -1749,28 +1913,31 @@ mod cargo_setup_tests {
                         start.wait();
                         entered.send(()).map_err(|error| error.to_string())?;
                         let request = WriterRequest {
-                            extra: Default::default(),
+                            extra: [("custody_project".into(), serde_json::json!(custody_project))]
+                                .into(),
                             project: project.clone(),
                             worktree: writer.worktree.path().to_path_buf(),
                         };
-                        let preparation = prepare_writer_with_facts(
+                        let result = prepare_writer_with_facts(
                             &request,
                             &state,
-                            ProjectId::from_bytes([1; 16]),
+                            custody_project,
                             &worktrees::RepoFacts::default(),
                         );
-                        prepared.send(()).map_err(|error| error.to_string())?;
-                        *writer = preparation.map_err(|error| error.to_string())?;
-                        prepare_writer_git(writer, &state, &root, None, &CancelToken::new())
-                            .map_err(|error| error.to_string())
+                        let busy = matches!(
+                            result,
+                            Err(RunError::Filesystem(FsError::LockTimeout { .. }))
+                        );
+                        prepared.send(busy).map_err(|error| error.to_string())?;
+                        Ok::<(), String>(())
                     })
                 })
                 .collect();
             let all_started = (0..8).all(|_| starting.recv_timeout(Duration::from_secs(5)).is_ok());
-            let blocked = matches!(
-                finished.recv_timeout(Duration::from_millis(200)),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-            );
+            let busy_results: Vec<_> = (0..8)
+                .map(|_| finished.recv_timeout(Duration::from_secs(5)))
+                .collect();
+            let all_busy = busy_results.iter().all(|result| matches!(result, Ok(true)));
             let restored = common
                 .atomic_write(
                     OsStr::new("config"),
@@ -1788,11 +1955,30 @@ mod cargo_setup_tests {
             }
             assert!(all_started, "writer preparations did not start");
             assert!(
-                blocked,
-                "initial preparation read config during a sibling update"
+                all_busy,
+                "preparation must report the held repository lock as busy"
             );
             Ok::<(), String>(())
         })?;
+        for writer in std::iter::once(&mut writer)
+            .chain(std::iter::once(&mut second))
+            .chain(siblings.iter_mut())
+        {
+            let request = WriterRequest {
+                extra: [("custody_project".into(), serde_json::json!(custody_project))].into(),
+                project: project.clone(),
+                worktree: writer.worktree.path().to_path_buf(),
+            };
+            *writer = prepare_writer_with_facts(
+                &request,
+                &state,
+                custody_project,
+                &worktrees::RepoFacts::default(),
+            )
+            .map_err(|error| error.to_string())?;
+            prepare_writer_git(writer, &state, &root, None, &CancelToken::new())
+                .map_err(|error| error.to_string())?;
+        }
         for writer in std::iter::once(&writer)
             .chain(std::iter::once(&second))
             .chain(&siblings)
@@ -1992,27 +2178,17 @@ mod cargo_setup_tests {
         let tmp = tempfile::tempdir().unwrap();
         let worktree = tmp.path().join("worktree");
         let cache = tmp.path().join("cache");
-        std::fs::create_dir_all(worktree.join("tools/front-door")).unwrap();
-        std::fs::create_dir_all(cache.join("cargo-home")).unwrap();
-        let env = vec![(
-            OsString::from("CARGO_HOME"),
-            cache.join("cargo-home").into_os_string(),
-        )];
-        assert!(verified_cargo_config(&worktree, &cache, &env).is_ok());
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(cache.join(".cargo")).unwrap();
+        assert!(verified_cargo_config(&worktree, &cache.join(".cargo")).is_ok());
+        let host_config = cache.join(".cargo/config.toml");
+        std::fs::write(&host_config, "[build]\nrustc = 'evil'\n").unwrap();
         assert_eq!(
-            verified_cargo_config(&worktree, &cache, &[]),
-            Err(codes::CARGO_HOME_ENV_MISSING)
+            verified_cargo_config(&worktree, &cache.join(".cargo")),
+            Err(codes::CARGO_CONFIG_SELECTS_COMPILER)
         );
-        std::fs::write(
-            cache.join("cargo-home/config.toml"),
-            "[build]\nrustc = 'evil'\n",
-        )
-        .unwrap();
-        assert_eq!(
-            verified_cargo_config(&worktree, &cache, &env),
-            Err(codes::CARGO_HOME_CONFIG_PRESENT)
-        );
-        std::fs::remove_file(cache.join("cargo-home/config.toml")).unwrap();
+        std::fs::write(&host_config, "[build]\njobs = 2\n").unwrap();
+        assert!(verified_cargo_config(&worktree, &cache.join(".cargo")).is_ok());
         std::fs::create_dir_all(worktree.join(".cargo")).unwrap();
         let config = worktree.join(".cargo/config.toml");
         // Selecting a compiler, directly or through include or [env], is refused.
@@ -2047,7 +2223,7 @@ mod cargo_setup_tests {
         ] {
             std::fs::write(&config, text).unwrap();
             assert_eq!(
-                verified_cargo_config(&worktree, &cache, &env),
+                verified_cargo_config(&worktree, &cache.join(".cargo")),
                 Err(expected),
                 "{text:?}"
             );
@@ -2055,7 +2231,7 @@ mod cargo_setup_tests {
         std::fs::write(worktree.join(".cargo/config"), "[build]\nrustc = 'evil'\n").unwrap();
         std::fs::remove_file(&config).unwrap();
         assert_eq!(
-            verified_cargo_config(&worktree, &cache, &env),
+            verified_cargo_config(&worktree, &cache.join(".cargo")),
             Err(codes::CARGO_CONFIG_SELECTS_COMPILER)
         );
     }
@@ -2068,50 +2244,58 @@ mod cargo_setup_tests {
         let tmp = tempfile::tempdir().unwrap();
         let worktree = tmp.path().join("worktree");
         let cache = tmp.path().join("cache");
-        std::fs::create_dir_all(worktree.join("tools/front-door/.cargo")).unwrap();
-        std::fs::create_dir_all(cache.join("cargo-home")).unwrap();
-        let env = vec![(
-            OsString::from("CARGO_HOME"),
-            cache.join("cargo-home").into_os_string(),
-        )];
-        let config = worktree.join("tools/front-door/.cargo/config.toml");
+        let nested = worktree.join("any/depth/rust/workspace");
+        std::fs::create_dir_all(nested.join(".cargo")).unwrap();
+        std::fs::create_dir_all(worktree.join(".provenant")).unwrap();
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.verify.workspace = "any/depth/rust/workspace".into();
+        std::fs::write(
+            worktree.join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&ports).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(nested.join("Cargo.toml"), "[workspace]\n").unwrap();
+        let build = crate::target_seed::cargo_build_directory(&worktree, tmp.path())
+            .unwrap()
+            .unwrap();
+        std::fs::create_dir_all(cache.join(".cargo")).unwrap();
+        let config = nested.join(".cargo/config.toml");
         for text in [
             "# comments only\n",
             "[alias]\nxtask = 'run -p xtask'\n[target.aarch64-apple-darwin]\nrustflags = ['-C', 'link-arg=-s']\n[env]\nFOO = 'bar'\n",
         ] {
             std::fs::write(&config, text).unwrap();
-            assert_eq!(verified_cargo_config(&worktree, &cache, &env), Ok(()));
+            assert_eq!(verified_cargo_config(&build, &cache.join(".cargo")), Ok(()));
         }
-        std::os::unix::fs::symlink(
-            "/etc/hosts",
-            worktree.join("tools/front-door/.cargo/config"),
-        )
-        .unwrap();
+        // An intermediate config belongs to this Cargo invocation's cone too.
+        let ancestor_config = nested.parent().unwrap().join(".cargo/config.toml");
+        std::fs::create_dir_all(ancestor_config.parent().unwrap()).unwrap();
+        std::fs::write(&ancestor_config, "[build]\nrustc = 'evil'\n").unwrap();
         assert_eq!(
-            verified_cargo_config(&worktree, &cache, &env),
+            verified_cargo_config(&build, &cache.join(".cargo")),
+            Err(codes::CARGO_CONFIG_SELECTS_COMPILER)
+        );
+        std::fs::remove_file(ancestor_config).unwrap();
+        std::os::unix::fs::symlink("/etc/hosts", nested.join(".cargo/config")).unwrap();
+        assert_eq!(
+            verified_cargo_config(&build, &cache.join(".cargo")),
             Err(codes::CARGO_CONFIG_UNREADABLE)
         );
     }
 
     #[test]
-    fn cargo_setup_record_reports_writer_and_read_only_outcomes() {
+    fn target_setup_record_reports_seed_outcomes_and_publication_failures() {
         let tmp = tempfile::tempdir().unwrap();
         let directory = Directory::open_anchor(tmp.path()).unwrap();
         for reason in ["disabled", "read_only_lane"] {
             let outcome = crate::cargo_seed::Outcome::skipped(reason);
-            record_cargo_setup(&directory, &outcome).unwrap();
+            record_cargo_setup_file(&directory, "cargo-target-setup.json", &outcome).unwrap();
             let record: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(tmp.path().join("cargo-setup.json")).unwrap(),
+                &std::fs::read(tmp.path().join("cargo-target-setup.json")).unwrap(),
             )
             .unwrap();
             assert_eq!(record["status"], "skipped");
             assert_eq!(record["reason"], reason);
-            record_cargo_setup_file(&directory, "cargo-git-setup.json", &outcome).unwrap();
-            let git_record: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(tmp.path().join("cargo-git-setup.json")).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(git_record["reason"], reason);
         }
         // A fallback names the specific refusal; other outcomes carry no detail.
         let refusal = crate::cargo_seed::Outcome::fallback_detail(
@@ -2127,11 +2311,15 @@ mod cargo_setup_tests {
             record,
             serde_json::json!({"status":"fallback","reason":"toolchain_unverified","detail":codes::PATH_ENTRY_WRITABLE})
         );
-        std::fs::remove_file(tmp.path().join("cargo-setup.json")).unwrap();
-        std::fs::create_dir(tmp.path().join("cargo-setup.json")).unwrap();
+        std::fs::remove_file(tmp.path().join("cargo-target-setup.json")).unwrap();
+        std::fs::create_dir(tmp.path().join("cargo-target-setup.json")).unwrap();
         assert!(
-            record_cargo_setup(&directory, &crate::cargo_seed::Outcome::skipped("disabled"))
-                .is_err()
+            record_cargo_setup_file(
+                &directory,
+                "cargo-target-setup.json",
+                &crate::cargo_seed::Outcome::skipped("disabled")
+            )
+            .is_err()
         );
     }
 }
@@ -2160,16 +2348,11 @@ impl crate::RunStore {
             .parent()
             .ok_or(RunError::Validation("writer evidence missing"))?;
         let evidence = Directory::open_anchor(parent)?;
-        let Some(raw) =
-            crate::artifacts::read_sealed(&evidence, "import-retained.json", crate::RECORD_LIMIT)?
-        else {
-            return Ok(false);
-        };
-        let marker: ImportFence = crate::db::decode(&raw)?;
-        if marker.schema_version != 1 || marker.scope != scope {
-            return Err(RunError::Conflict);
-        }
-        Ok(true)
+        Ok(matches!(
+            provenant_supervisor::custody::retained_import_decision(&evidence, scope)
+                .map_err(error("classify retained import", None))?,
+            Some(provenant_supervisor::custody::CustodyDecision::Pending(_))
+        ))
     }
 
     pub(crate) fn retain_import_fence(&self, record: &crate::AttemptRecord) -> Result<()> {
@@ -2189,6 +2372,8 @@ impl crate::RunStore {
             &crate::db::bytes(&ImportFence {
                 schema_version: 1,
                 scope: Self::scope(record),
+                lane: record.key.clone(),
+                run_attempt: self.attempt_dir(record.attempt_id, false)?.current_path()?,
             })?,
             crate::RECORD_LIMIT,
         )
@@ -2218,37 +2403,8 @@ impl crate::RunStore {
         let mut retained_scope = None;
         let checked = (|| -> Result<()> {
             call.check()?;
-            let listing = provenant_supervisor::custody::list_writer_reservations_in_slot(&slot)
-                .map_err(error("list predecessor writer reservations", None))?;
-            if !listing.issues.is_empty() {
-                return Err(RunError::Validation(
-                    "predecessor writer fence is unreadable",
-                ));
-            }
-            let slot_path = slot.current_path()?;
-            for mut fence in listing.reservations {
-                if fence.scope == scope {
-                    continue;
-                }
-                fence.reservation = slot_path.join(fence.reservation);
-                let parent = fence
-                    .reservation
-                    .parent()
-                    .ok_or(RunError::Validation("writer fence evidence missing"))?;
-                let evidence = Directory::open_anchor(parent)?;
-                if let Some(raw) = crate::artifacts::read_sealed(
-                    &evidence,
-                    "import-retained.json",
-                    crate::RECORD_LIMIT,
-                )? {
-                    let retained: ImportFence = crate::db::decode(&raw)?;
-                    if retained.schema_version != 1 || retained.scope != fence.scope {
-                        return Err(RunError::Conflict);
-                    }
-                    retained_scope = Some(fence.scope);
-                    return Ok(());
-                }
-            }
+            retained_scope = provenant_supervisor::custody::pending_import(&slot)
+                .map_err(error("classify predecessor writer custody", None))?;
             Ok(())
         })();
         if let Err(error) = checked {
@@ -2266,8 +2422,7 @@ impl crate::RunStore {
         }
         if let Some(retained) = retained_scope {
             let admission = provenant_supervisor::custody::CustodyError::ImportRetained {
-                run: retained.run,
-                attempt: retained.attempt,
+                fence: Box::new(retained),
             };
             lease
                 .withdraw_unlaunched()
@@ -2316,7 +2471,6 @@ impl crate::RunStore {
     pub fn writer_fences(&self) -> Result<Vec<WriterFence>> {
         Ok(self.writer_fence_listing()?.reservations)
     }
-    /// Perform the one-way custody cutover before a recovery scan.
     fn writer_registry_projects(&self) -> Result<Vec<ProjectId>> {
         let mut projects = vec![self.context.project_id];
         let root = match Directory::open_anchor(&self.writer_registry) {
@@ -2354,32 +2508,6 @@ impl crate::RunStore {
         Ok(projects)
     }
 
-    pub fn cutover_writer_reservations(&self, call: &crate::Request<'_>) -> Result<()> {
-        for project in self.writer_registry_projects()? {
-            let path = self
-                .writer_registry
-                .join("worktrees")
-                .join(project.to_string());
-            let directory = match Directory::open_anchor(&path) {
-                Ok(directory) => directory,
-                Err(error)
-                    if error.is_not_found()
-                        || error.raw_os_error() == Some(provenant_os::sys::errno::ENOTDIR) =>
-                {
-                    continue;
-                }
-                Err(error) => return Err(error.into()),
-            };
-            provenant_supervisor::custody::cutover_writer_reservations(
-                &directory,
-                call.cancel,
-                call.clock,
-            )
-            .map_err(error("cut over writer reservations", Some(&path)))?;
-        }
-        Ok(())
-    }
-
     pub fn writer_fence_listing(
         &self,
     ) -> Result<provenant_supervisor::custody::ReservationListing> {
@@ -2408,9 +2536,9 @@ impl crate::RunStore {
                 // follows only this graph project's accepted run namespace.
                 if !all_scopes && project != self.context.project_id {
                     let belongs: bool = self.db.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM runs WHERE id=?1 AND project=?2)",
+                        "SELECT EXISTS(SELECT 1 FROM attempts WHERE id=?1 AND project=?2 AND refused=0)",
                         rusqlite::params![
-                            reservation.scope.run.to_string(),
+                            reservation.scope.attempt.to_string(),
                             self.context.project_id.to_string()
                         ],
                         |row| row.get(0),
@@ -2457,6 +2585,7 @@ impl WriterLaunch {
         attempt: &Directory,
         scope: provenant_supervisor::custody::Scope,
     ) -> Result<()> {
+        let policy = writer_policy_for_attempt(state, attempt);
         seal_writer_ownership(attempt, &self.worktree)?;
         let utility = runtime(state)?;
         let head = self
@@ -2467,7 +2596,13 @@ impl WriterLaunch {
         if std::str::from_utf8(&head).map(str::trim).ok()
             != Some(format!("ref: {}", self.branch.as_str()).as_str())
         {
-            return Err(RunError::WriterHeadNotLaneBranch);
+            return Err(policy.boundary_error(
+                "WRITER_WRITERLAUNCH_SNAPSHOT_GIT_ISOLATION",
+                provenant_records::policy::Facts::violation(
+                    "writer worktree HEAD no longer names the selected lane branch",
+                ),
+                RunError::WriterHeadNotLaneBranch,
+            ));
         }
         let head = crate::objects::resolve_ref(
             utility.git_program_path(),
@@ -2475,7 +2610,13 @@ impl WriterLaunch {
             self.branch.as_str(),
         )?;
         if head != self.base {
-            return Err(RunError::Validation("writer base changed before launch"));
+            return Err(policy.boundary_error(
+                "WRITER_WRITERLAUNCH_SNAPSHOT_GIT_ISOLATION",
+                provenant_records::policy::Facts::violation(
+                    "writer selected branch head changed before launch",
+                ),
+                RunError::Validation("writer base changed before launch"),
+            ));
         }
         crate::artifacts::seal(
             attempt,
@@ -2494,7 +2635,15 @@ impl WriterLaunch {
             &reference,
         ) {
             Ok(current) if current == self.base => return Ok(()),
-            Ok(_) => return Err(RunError::Validation("writer Git base pin changed")),
+            Ok(_) => {
+                return Err(policy.boundary_error(
+                    "WRITER_WRITERLAUNCH_SNAPSHOT_GIT_ISOLATION",
+                    provenant_records::policy::Facts::violation(
+                        "writer lane-base reference changed after preparation",
+                    ),
+                    RunError::Validation("writer Git base pin changed"),
+                ));
+            }
             Err(_) => {}
         }
         crate::objects::command(
@@ -2512,6 +2661,218 @@ impl WriterLaunch {
         )?;
         Ok(())
     }
+    fn report_write_scope(
+        &self,
+        state: &Path,
+        attempt: &Directory,
+        base: GitOid,
+        head: GitOid,
+        source: Option<&crate::objects::ObjectSource>,
+    ) -> Result<()> {
+        let Some(raw) =
+            crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)?
+        else {
+            return Ok(());
+        };
+        let request: crate::CanonicalRequest = crate::db::decode(&raw)?;
+        let Some(scope) = request
+            .task
+            .profile
+            .extra
+            .get("write_scope")
+            .and_then(serde_json::Value::as_array)
+        else {
+            return Ok(());
+        };
+        let scope: Vec<_> = scope
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(Path::new)
+            .collect();
+        if scope.is_empty() {
+            return Ok(());
+        }
+        let policy = crate::launch_policy(
+            state,
+            request
+                .task
+                .profile
+                .extra
+                .get("policy_project")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(""),
+            &request.task,
+        );
+        let saved = crate::artifacts::read_sealed(
+            attempt,
+            "policy-write-scope.json",
+            provenant_records::run::TERMINAL_RECORD_LIMIT,
+        )
+        .map_err(|_| invalid_write_scope_snapshot(&policy))?;
+        if let Some(raw) = saved {
+            let report: WriteScopeSnapshot =
+                serde_json::from_slice(&raw).map_err(|_| invalid_write_scope_snapshot(&policy))?;
+            if report.schema_version != 1
+                || report.code != "WRITE_SCOPE"
+                || report.base != base.to_string()
+                || report.head != head.to_string()
+            {
+                return Err(invalid_write_scope_snapshot(&policy));
+            }
+            let effect = policy.check(
+                "WRITE_SCOPE",
+                provenant_records::policy::Facts {
+                    violated: !report.out_of_scope_paths.is_empty(),
+                    detail: format!(
+                        "{} paths outside declared write scope; see policy-write-scope.json",
+                        report.out_of_scope_paths.len()
+                    ),
+                },
+            );
+            if let Some(message) = effect.message() {
+                let _ = writeln!(std::io::stderr().lock(), "policy: {message}");
+            }
+            if effect.blocks() {
+                return Err(RunError::Validation("WRITE_SCOPE: strict scope policy"));
+            }
+            return Ok(());
+        }
+        let repo = self.worktree.repo();
+        let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
+        let source_refs = source
+            .map(|source| source.refs.current_path())
+            .transpose()?;
+        let source_objects = source
+            .map(|source| source.objects.current_path())
+            .transpose()?;
+        let refs = source_refs.as_deref().unwrap_or(repo.private_git_dir());
+        let ref_index = refs.join("index");
+        if let Some(source) = source {
+            source
+                .refs
+                .read_stable(OsStr::new("index"), 64 * 1024 * 1024)?;
+        } else {
+            repo.private_dir()
+                .read_stable(OsStr::new("index"), 64 * 1024 * 1024)?;
+        }
+        let mut indexes = vec![ref_index];
+        // The native index may contain staged deletions after the lane HEAD
+        // advances, so inspect it alongside private Git on the first snapshot.
+        repo.private_dir()
+            .read_stable(OsStr::new("index"), 64 * 1024 * 1024)?;
+        let native_index = repo.private_dir().current_path()?.join("index");
+        if !indexes.contains(&native_index) {
+            indexes.push(native_index);
+        }
+        let source_objects = source_objects.as_deref();
+        let alternate = repo.common_git_dir().join("objects");
+        let (changed, status) =
+            crate::objects::with_clean_view(&git, repo, head, None, |_, path| {
+                let run = |arguments: &[&str], index: &Path| {
+                    crate::objects::execute_bounded(
+                        &git,
+                        path,
+                        repo.root_path(),
+                        &arguments.iter().map(OsString::from).collect::<Vec<_>>(),
+                        None,
+                        crate::objects::Execution {
+                            object_directory: source_objects,
+                            index_file: Some(index),
+                            alternate_directory: Some(&alternate),
+                            ..Default::default()
+                        },
+                    )
+                };
+                run(&["update-ref", "HEAD", &head.to_string()], &indexes[0])?;
+                let changed = run(
+                    &[
+                        "diff",
+                        "--no-ext-diff",
+                        "--no-textconv",
+                        "--no-renames",
+                        "--name-only",
+                        "-z",
+                        &base.to_string(),
+                        &head.to_string(),
+                        "--",
+                    ],
+                    &indexes[0],
+                )?;
+                let mut status = Vec::new();
+                for index in &indexes {
+                    status.extend(run(
+                        &[
+                            "--no-optional-locks",
+                            "--work-tree",
+                            repo.root_path()
+                                .to_str()
+                                .ok_or(RunError::Validation("worktree path"))?,
+                            "status",
+                            "--porcelain",
+                            "-z",
+                            "--untracked-files=all",
+                            "--ignore-submodules=all",
+                        ],
+                        index,
+                    )?);
+                }
+                Ok((changed, status))
+            })?;
+        let mut paths: Vec<Vec<u8>> = changed
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(<[u8]>::to_vec)
+            .collect();
+        paths.extend(status_paths_raw(&status, true)?);
+        use std::os::unix::ffi::OsStringExt;
+        paths.retain(|path| {
+            let path = PathBuf::from(OsString::from_vec(path.clone()));
+            !scope
+                .iter()
+                .any(|root| *root == Path::new(".") || path.starts_with(root))
+        });
+        paths.sort();
+        paths.dedup();
+        let paths: Vec<_> = paths
+            .into_iter()
+            .map(|path| {
+                let path = PathBuf::from(OsString::from_vec(path));
+                let relative = provenant_core::RelativePath::parse(&path)
+                    .map_err(|_| RunError::Validation("invalid scope path"))?;
+                provenant_records::PathWire::from_relative(&relative)
+                    .map_err(|_| RunError::Validation("scope path encoding"))
+            })
+            .collect::<Result<_>>()?;
+        let effect = policy.check(
+            "WRITE_SCOPE",
+            provenant_records::policy::Facts {
+                violated: !paths.is_empty(),
+                detail: format!(
+                    "{} paths outside declared write scope; see policy-write-scope.json",
+                    paths.len()
+                ),
+            },
+        );
+        crate::artifacts::seal(
+            attempt,
+            "policy-write-scope.json",
+            &crate::db::bytes(&serde_json::json!({
+                "schema_version": 1, "code": "WRITE_SCOPE",
+                "base": base.to_string(), "head": head.to_string(),
+                "strength": policy.rule("WRITE_SCOPE").rule.strength,
+                "source": policy.rule("WRITE_SCOPE").source, "out_of_scope_paths": paths,
+            }))?,
+            provenant_records::run::TERMINAL_RECORD_LIMIT,
+        )?;
+        if let Some(message) = effect.message() {
+            let _ = writeln!(std::io::stderr().lock(), "policy: {message}");
+        }
+        if effect.blocks() {
+            return Err(RunError::Validation("WRITE_SCOPE: strict scope policy"));
+        }
+        Ok(())
+    }
+
     pub(crate) fn terminal(
         &self,
         state: &Path,
@@ -2587,6 +2948,40 @@ impl WriterLaunch {
             None => self.effective_head(attempt, base)?.0,
         };
         settlement.set_head(verified_tip)?;
+        if let Err(error) =
+            self.report_write_scope(state, attempt, base, verified_tip, source.as_ref())
+        {
+            if error.boundary_class() != provenant_records::diagnostic::BoundaryClass::None {
+                return Err(error);
+            }
+            let request: crate::CanonicalRequest = crate::db::decode(
+                &crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)?
+                    .ok_or(RunError::NotFound)?,
+            )?;
+            let policy = crate::launch_policy(
+                state,
+                request
+                    .task
+                    .profile
+                    .extra
+                    .get("policy_project")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(""),
+                &request.task,
+            );
+            let effect = policy.check(
+                "WRITE_SCOPE",
+                provenant_records::policy::Facts::violation(format!(
+                    "scope report unavailable: {error}"
+                )),
+            );
+            if effect.blocks() {
+                return Err(error);
+            }
+            if let Some(message) = effect.message() {
+                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+            }
+        }
         let import_cancel = settlement.cancellation();
         let merge_objects = source
             .as_ref()
@@ -2710,6 +3105,7 @@ impl WriterLaunch {
         {
             return Err(RunError::WriterHeadNotLaneBranch);
         }
+
         if !merge_objects.is_empty() {
             let source = source
                 .as_ref()
@@ -2810,11 +3206,57 @@ impl WriterLaunch {
 }
 /// How many dirty paths a reason names before it counts the rest.
 const UNCOMMITTED_LISTED: usize = 12;
+#[derive(serde::Deserialize)]
+struct WriteScopeSnapshot {
+    schema_version: u64,
+    code: String,
+    base: String,
+    head: String,
+    out_of_scope_paths: Vec<provenant_records::PathWire>,
+}
+
+fn invalid_write_scope_snapshot(policy: &provenant_records::policy::Policy) -> RunError {
+    policy.boundary_error(
+        "ARTIFACTS_RUNSTORE_ARTIFACT_BYTES_DATA_INTEGRITY",
+        provenant_records::policy::Facts::violation(
+            "sealed write-scope report does not match this writer settlement",
+        ),
+        RunError::artifact_mismatch(
+            crate::ArtifactCheck::SealConflict,
+            "policy-write-scope.json",
+            None,
+            None,
+        ),
+    )
+}
+
+fn writer_policy_for_attempt(
+    state: &Path,
+    attempt: &Directory,
+) -> provenant_records::policy::Policy {
+    let request = crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)
+        .ok()
+        .flatten()
+        .and_then(|raw| crate::db::decode::<crate::CanonicalRequest>(&raw).ok());
+    let Some(request) = request else {
+        return Default::default();
+    };
+    let project = request
+        .task
+        .profile
+        .extra
+        .get("policy_project")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    crate::launch_policy(state, project, &request.task)
+}
+
 impl WriterLaunch {
     /// A diagnostic naming the edits a writer left uncommitted, or `None` when
     /// it committed or its tree is clean. Call it after `terminal` succeeds.
     pub(crate) fn uncommitted(
         &self,
+        review_exempt: &provenant_confinement::review_exempt::ReviewExempt,
         state: &Path,
         custody: &provenant_supervisor::custody::Recovery,
         cancel: &CancelToken,
@@ -2839,12 +3281,10 @@ impl WriterLaunch {
             budget()?,
             cancel,
         );
-        let paths = git
-            .uncommitted_since(base, &self.review_exempt)
-            .map_err(error(
-                "read writer uncommitted changes",
-                Some(self.worktree.path()),
-            ))?;
+        let paths = git.uncommitted_since(base, review_exempt).map_err(error(
+            "read writer uncommitted changes",
+            Some(self.worktree.path()),
+        ))?;
         Ok(uncommitted_reason(&paths))
     }
 }
@@ -2926,7 +3366,7 @@ pub(crate) fn settle_launch_staging(attempt: &Directory) -> Result<()> {
     Ok(())
 }
 
-/// Preserve pre-upgrade launch evidence on replay without weakening its check.
+/// Preserve sealed current launch ownership evidence on replay.
 pub(crate) fn seal_writer_ownership(
     attempt: &Directory,
     tree: &provenant_confinement::VerifiedWorktree,
@@ -2944,13 +3384,9 @@ pub(crate) fn seal_writer_ownership(
         crate::artifacts::read_sealed(attempt, "writer-owned.json", crate::RECORD_LIMIT)?
     {
         let prior: WriterOwnership = crate::db::decode(&raw)?;
-        let fields: serde_json::Value = crate::db::decode(&raw)?;
-        let has_owner = fields
-            .as_object()
-            .is_some_and(|object| object.contains_key("owner"));
         if prior.schema_version != 1
             || prior.lane_owned != ownership.lane_owned
-            || (has_owner && prior.owner != ownership.owner)
+            || prior.owner != ownership.owner
         {
             return Err(RunError::Conflict);
         }
@@ -2970,15 +3406,35 @@ pub(crate) fn seal_writer_ownership(
 pub(crate) struct WriterOwnership {
     pub schema_version: u64,
     pub lane_owned: bool,
-    #[serde(default)]
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
     pub owner: Option<worktrees::WorktreeOwner>,
+}
+
+#[cfg(test)]
+mod writer_ownership_shape_tests {
+    use super::WriterOwnership;
+
+    #[test]
+    fn writer_ownership_requires_owner_member_but_accepts_unknown_owner() {
+        let current = serde_json::json!({
+            "schema_version": 1,
+            "lane_owned": false,
+            "owner": null,
+        });
+        let parsed: WriterOwnership = serde_json::from_value(current.clone()).unwrap();
+        assert_eq!(parsed.owner, None);
+
+        let mut absent = current;
+        absent.as_object_mut().unwrap().remove("owner");
+        assert!(serde_json::from_value::<WriterOwnership>(absent).is_err());
+    }
 }
 
 #[cfg(test)]
 mod custody_admission_tests {
     use super::*;
     use crate::tests::{call, clock, context};
-    use provenant_core::{AttemptId, RunId};
+    use provenant_core::AttemptId;
     use provenant_supervisor::custody::{self, Scope};
 
     #[test]
@@ -3003,7 +3459,6 @@ mod custody_admission_tests {
             .join("shared");
         std::fs::create_dir_all(&slot)?;
         let predecessor = Scope {
-            run: RunId::from_bytes([81; 16]),
             attempt: AttemptId::from_bytes([82; 16]),
             generation: 1,
         };
@@ -3022,6 +3477,8 @@ mod custody_admission_tests {
             &crate::db::bytes(&ImportFence {
                 schema_version: 1,
                 scope: predecessor,
+                lane: provenant_records::WorkKey::new(source_project, "retained", "writer", 1)?,
+                run_attempt: temp.path().join("retained-run"),
             })?,
             crate::RECORD_LIMIT,
         )?;
@@ -3041,7 +3498,6 @@ mod custody_admission_tests {
                 .join("unrelated-invalid-project"),
         )?;
         let next = Scope {
-            run: RunId::from_bytes([83; 16]),
             attempt: AttemptId::from_bytes([84; 16]),
             generation: 1,
         };
@@ -3062,7 +3518,7 @@ mod custody_admission_tests {
             &call,
         );
         assert!(
-            matches!(refused, Err(WriterCustodyError::Admission(custody::CustodyError::ImportRetained {run, attempt})) if run == predecessor.run && attempt == predecessor.attempt)
+            matches!(refused, Err(WriterCustodyError::Admission(custody::CustodyError::ImportRetained {fence})) if fence.scope == predecessor)
         );
         assert!(custody::reservation_present(
             &Directory::open_anchor(&slot)?,
@@ -3078,7 +3534,7 @@ mod custody_admission_tests {
             worktree: temp.path().join("checkout"),
         };
         assert_eq!(
-            store.writer_slot(&writer, context.project_id)?,
+            store.writer_slot(&writer)?,
             root.join("worktrees")
                 .join(source_project.to_string())
                 .join(worktrees::state_dir_name(&writer.worktree))
@@ -3097,7 +3553,6 @@ mod custody_admission_tests {
         let path = temp.path().join("slot");
         std::fs::create_dir(&path)?;
         let scope = Scope {
-            run: RunId::from_bytes([3; 16]),
             attempt: AttemptId::from_bytes([4; 16]),
             generation: 1,
         };
@@ -3140,7 +3595,8 @@ mod launch_resource_limit_tests {
             state.path().join("config.toml"),
             "schema_version=1\n[domains.run]\ngrant_limit=0\n",
         )?;
-        let limits = launch_resource_limits(state.path());
+        let policy = provenant_records::policy::Policy::default();
+        let limits = launch_resource_limits(state.path(), &policy);
         let defaults = ProfileLimits::default();
         assert_eq!(limits.limits.grant_limit, defaults.grant_limit);
         assert_eq!(
@@ -3170,7 +3626,7 @@ mod launch_resource_limit_tests {
             state.path().join("config.toml"),
             "schema_version=1\n[domains.run]\ngrant_limit=128\n",
         )?;
-        let explicit_default = launch_resource_limits(state.path());
+        let explicit_default = launch_resource_limits(state.path(), &policy);
         assert_eq!(
             explicit_default.grant_origin,
             provenant_records::diagnostic::SettingSource::Configuration
@@ -3183,7 +3639,7 @@ mod launch_resource_limit_tests {
             state.path().join("config.toml"),
             "schema_version=1\n[domains.run]\ngrant_limit=256\nprofile_limit_bytes=1048576\n",
         )?;
-        let configured = launch_resource_limits(state.path());
+        let configured = launch_resource_limits(state.path(), &policy);
         assert_eq!(configured.limits.grant_limit, 256);
         assert_eq!(
             configured.grant_origin,

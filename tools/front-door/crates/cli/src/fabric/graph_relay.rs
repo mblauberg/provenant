@@ -7,14 +7,14 @@
 //! checkpoint before the receipt is returned, so a lost reply is answered by
 //! replaying the same idempotency key.
 use super::Context;
-use provenant_core::{CancelToken, Clock, WaitBudget};
-use provenant_fabric_mcp::tools::{FacadeError, ServiceError};
+use provenant_core::{CancelToken, Clock, Pause, WaitBudget};
 use provenant_fabric_runtime::graph::{
     FileJournal, GraphJournal,
     patch::{LiveGraph, PatchContext, scan_for_secrets},
     relay::{self, RelayOp},
     template::{Layer, TemplateLibrary},
 };
+use provenant_fabric_runtime::relay::{FacadeError, ServiceError};
 use serde_json::{Value, json};
 
 fn refused(code: &str, message: impl Into<String>) -> ServiceError {
@@ -48,7 +48,6 @@ fn refused(code: &str, message: impl Into<String>) -> ServiceError {
         {
             Some(Cause::WriterComposite)
         }
-        "invalid" if message == "write_scope requires a writer child" => Some(Cause::WriteScope),
         "invalid" | "invalid_graph" => Some(Cause::InvalidLaunch),
         _ => None,
     };
@@ -70,14 +69,6 @@ fn patch_refused(error: provenant_fabric_runtime::graph::patch::PatchError) -> S
         Some(admission) => ServiceError::Facade(FacadeError::graph_admission(admission)),
         None => refused(error.code, error.message),
     }
-}
-
-fn cutover_refusal(findings: String) -> ServiceError {
-    use provenant_fabric_runtime::coordination::facade::InvalidInputDetail;
-    ServiceError::Facade(FacadeError::GraphRelayRefused {
-        refusal_code: "UPGRADE_DRAIN_REQUIRED".into(),
-        detail: Some(InvalidInputDetail::CutoverFindings(findings)),
-    })
 }
 
 fn journal_error<E>(_: E) -> ServiceError {
@@ -152,39 +143,22 @@ pub fn serve_with_read(
             .as_str()
             .filter(|id| !id.is_empty())
             .unwrap_or(&graph_id);
+        // Inside a lane a target names the calling graph's own nodes, as
+        // `NAME[/NODE[#N]]` or a bare `NODE[#N]` (cli.md "Targets"). Attempt
+        // IDs are not targets, so they resolve to nothing here.
         let selected = if requested == graph_id {
             graph_id.clone()
         } else {
-            let node = requested
+            let local = requested
                 .strip_prefix(&format!("{graph_id}/"))
                 .unwrap_or(requested);
-            let found = checkpoint.nodes.iter().find(|row| {
-                row.id == node || row.recorded_attempts().any(|attempt| {
-                    attempt.attempt_ref.as_deref().is_some_and(|reference| {
-                        reference == requested || reference.rsplit('/').next() == Some(requested)
-                    })
-                })
-            }).ok_or_else(|| refused("not_found", "the target is outside the calling lane's graph; use the graph or child ID from its launch receipt"))?;
-            // Canonicalise node and attempt selectors before calling the ordinary reader.
-            if node == found.id || input["op"] == "trace" || input["trace"] == true {
-                format!("{graph_id}/{}", found.id)
-            } else {
-                found
-                    .recorded_attempts()
-                    .find_map(|attempt| {
-                        attempt.attempt_ref.as_deref().filter(|reference| {
-                            *reference == requested
-                                || reference.rsplit('/').next() == Some(requested)
-                        })
-                    })
-                    .ok_or_else(|| {
-                        refused(
-                            "not_found",
-                            "the attempt is outside the calling lane's graph",
-                        )
-                    })?
-                    .to_owned()
-            }
+            let node = local.split_once('#').map_or(local, |(node, _)| node);
+            checkpoint
+                .nodes
+                .iter()
+                .find(|row| row.id == node)
+                .ok_or_else(|| refused("not_found", "the target is outside the calling lane's graph; use NAME/NODE from its launch receipt"))?;
+            format!("{graph_id}/{local}")
         };
         input["id"] = selected.into();
         return read(input);
@@ -233,13 +207,10 @@ pub fn serve_with_read(
             {
                 return Ok(serde_json::to_value(receipt)?);
             }
-            provenant_fabric_runtime::graph::cutover::pending_guard(state)
-                .map_err(cutover_refusal)?;
             let library = template_library(&context.home, &context.cwd)
                 .map_err(|error| refused("invalid_template", error))?;
-            let config =
-                provenant_config::read_with_domains(&context.roots, &crate::domains::SECTIONS)
-                    .map_err(|error| refused("invalid_config", error.to_string()))?;
+            let config = crate::config_reads::read_for(&context.roots, "run")
+                .map_err(|error| refused("invalid_config", error.to_string()))?;
             let resolvers = launch_resolvers_at_roots(
                 &context.roots,
                 &config.domains.routing.review,
@@ -252,6 +223,7 @@ pub fn serve_with_read(
                 resolvers: &resolvers,
                 scan: &scan_for_secrets,
                 limits: &context.config.graph.limits,
+                worktree_layout: context.port_table.worktree_layout.clone(),
             };
             fn needs_parent_source(node: &Value) -> bool {
                 (node["access"] == "worktree_write"
@@ -282,7 +254,10 @@ pub fn serve_with_read(
                 if let (None, Some(branch), Some(source)) = (
                     &parent_path,
                     &document.integration_branch,
-                    &checkpoint.bound_integration_base,
+                    &checkpoint
+                        .bases
+                        .and_then(|bases| bases.integration)
+                        .map(|base| base.to_string()),
                 ) {
                     Some((branch.clone(), source.clone()))
                 } else {
@@ -316,7 +291,10 @@ pub fn serve_with_read(
                             .to_owned()
                     });
                     let source = if parent_path.is_none() {
-                        checkpoint.bound_integration_base.clone()
+                        checkpoint
+                            .bases
+                            .and_then(|bases| bases.integration)
+                            .map(|base| base.to_string())
                     } else {
                         None
                     }
@@ -401,9 +379,8 @@ pub fn serve_with_read(
             }
             let library = template_library(&context.home, &context.cwd)
                 .map_err(|error| refused("invalid_template", error))?;
-            let config =
-                provenant_config::read_with_domains(&context.roots, &crate::domains::SECTIONS)
-                    .map_err(|error| refused("invalid_config", error.to_string()))?;
+            let config = crate::config_reads::read_for(&context.roots, "run")
+                .map_err(|error| refused("invalid_config", error.to_string()))?;
             let resolvers = launch_resolvers_at_roots(
                 &context.roots,
                 &config.domains.routing.review,
@@ -425,13 +402,10 @@ pub fn serve_with_read(
                     resolvers: &resolvers,
                     scan: &scan_for_secrets,
                     limits: &context.config.graph.limits,
+                    worktree_layout: context.port_table.worktree_layout.clone(),
                 },
             )
             .map_err(patch_refused)?;
-            if !admitted.replayed {
-                provenant_fabric_runtime::graph::cutover::pending_guard(state)
-                    .map_err(cutover_refusal)?;
-            }
             // Leave time to persist a refusal and deliver it to the caller.
             // The relay's transport reserve alone does not cover journal I/O.
             let now = clock.mono_now();
@@ -522,39 +496,52 @@ fn provision_added_writers(
     use provenant_fabric_runtime::graph::{AccessMode, NodeState, SourceBinding};
     let pending = relay::pending_provisioning(checkpoint);
     let mut fresh = Vec::new();
+    // A planned implementation's writer is provisioned, refused and retried
+    // as its boundary, the logical child; an inactive owner keeps it unborn.
+    let inactive = |id: &str| {
+        checkpoint.nodes.iter().any(|progress| {
+            progress.id == id
+                && (!matches!(progress.state, NodeState::Pending | NodeState::Running)
+                    // Recovery owns an already-started launch. An
+                    // unrelated add must not provision it again.
+                    || progress.launch_retry.is_some()
+                    || !progress.attempts.is_empty())
+        })
+    };
     let writers: Vec<_> = checkpoint
         .expansions
         .iter()
         .flat_map(|expansion| &expansion.nodes)
         .filter(|node| {
-            (added.is_empty() || added.contains(&node.id))
-                && !pending.iter().any(|(id, _, _)| id == &node.id)
-                && node.access == AccessMode::WorktreeWrite
+            node.access == AccessMode::WorktreeWrite
                 && node
                     .extra
                     .get("provision_worktree")
                     .and_then(Value::as_bool)
                     == Some(true)
-                && !checkpoint.nodes.iter().any(|progress| {
-                    (progress.worktree == node.worktree && progress.writer_binding.is_some())
-                        || (progress.id == node.id
-                            && (!matches!(progress.state, NodeState::Pending | NodeState::Running)
-                                // Recovery owns an already-started launch. An
-                                // unrelated add must not provision it again.
-                                || progress.launch_retry.is_some()
-                                || !progress.attempts.is_empty()))
-                })
         })
-        .cloned()
+        .map(|node| (relay::provisioning_owner(checkpoint, &node.id), node))
+        .filter(|(owner, node)| {
+            (added.is_empty() || added.contains(&node.id) || added.contains(owner))
+                && !pending
+                    .iter()
+                    .any(|(id, _, _)| id == &node.id || id == owner)
+                && !checkpoint.nodes.iter().any(|progress| {
+                    progress.worktree == node.worktree && progress.writer_binding.is_some()
+                })
+                && !inactive(&node.id)
+                && !inactive(owner)
+        })
+        .map(|(owner, node)| (owner, node.clone()))
         .collect();
-    for node in writers {
+    for (owner, node) in writers {
         let Some(path) = node.worktree.as_deref() else {
             continue;
         };
         let source = if let Some(source) = checkpoint
             .nodes
             .iter()
-            .find(|progress| progress.id == node.id)
+            .find(|progress| progress.id == owner)
             .and_then(|progress| progress.extra.get("provisioned_source"))
             .and_then(Value::as_str)
         {
@@ -564,7 +551,11 @@ fn provision_added_writers(
                 Some(SourceBinding::Commit { commit }) => commit,
                 // These sources become available only when dependencies settle.
                 Some(_) => continue,
-                None => match checkpoint.bound_integration_base.clone() {
+                None => match checkpoint
+                    .bases
+                    .and_then(|bases| bases.integration)
+                    .map(|base| base.to_string())
+                {
                     Some(source) => source,
                     None => {
                         let request = provenant_run::resolve_writer(
@@ -588,14 +579,14 @@ fn provision_added_writers(
         if let Some(progress) = checkpoint
             .nodes
             .iter_mut()
-            .find(|progress| progress.id == node.id)
+            .find(|progress| progress.id == owner)
         {
             progress
                 .extra
                 .insert("provisioned_source".into(), source.clone().into());
         }
-        relay::fence_provisioning(checkpoint, &node.id, path, &source);
-        fresh.push(node.id.clone());
+        relay::fence_provisioning(checkpoint, &owner, path, &source);
+        fresh.push(owner);
     }
     if !relay::pending_provisioning(checkpoint).is_empty() {
         journal.save(checkpoint).map_err(journal_error)?;
@@ -694,7 +685,11 @@ fn recover_provisioning(
             });
             journal.save(checkpoint).map_err(journal_error)?;
         }
-        let result = match path.strip_prefix(".worktrees/") {
+        let branch = context
+            .port_table
+            .managed_writer_branch(std::path::Path::new(&path))
+            .map(str::to_owned);
+        let result = match branch.as_deref() {
             Some(branch) => {
                 provision_writer_checked(context, &path, branch, &source, launch, cancel)
             }
@@ -734,7 +729,7 @@ fn recover_provisioning(
                     index,
                     facade,
                     Some(failed_at),
-                    context.config.graph.writer_launch_seconds,
+                    context.config.graph.writer_provision_seconds,
                     Default::default(),
                 )
                 .map_err(|_| ServiceError::Facade(FacadeError::StateCorrupt))?;
@@ -786,7 +781,7 @@ fn recover_provisioning(
                 progress.advance_error_code = Some("launch_refused".into());
                 progress.advance_owner_code = Some(error.code().into());
                 progress.advance_error = Some(format!(
-                    "writer provisioning refused [{}]; correct the cause, then retry with `provenant retry {} --node {node}`",
+                    "writer provisioning refused [{}]; correct the cause, then retry with `provenant retry {}/{node}`",
                     error.code(),
                     checkpoint.graph_id,
                 ));
@@ -948,15 +943,11 @@ fn launch_resolvers_with(
     let frame = !single && panel.frame;
     let verifiers = if single { 0 } else { panel.verifiers };
     let synthesis = !single && panel.synthesis == provenant_routing::ReviewSynthesis::Model;
-    resolvers.insert(
-        "review-topology".into(),
-        vec![format!(
-            "f{}-v{}-s{}",
-            u8::from(frame),
-            u8::from(verifiers > 0),
-            u8::from(synthesis)
-        )],
-    );
+    resolvers.extend(provenant_fabric_runtime::graph::when::review_stages(
+        frame,
+        verifiers > 0,
+        synthesis,
+    ));
     resolvers.insert(
         "review-verifiers".into(),
         (1..=verifiers.max(1))
@@ -1036,10 +1027,12 @@ pub fn provision_child_with_budget(
     budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<(), ServiceError> {
-    let branch = path
-        .strip_prefix(".worktrees/")
+    let branch = context
+        .port_table
+        .managed_writer_branch(std::path::Path::new(path))
+        .map(str::to_owned)
         .ok_or_else(|| refused("writer_worktree", "invalid managed worktree path"))?;
-    provision_writer(context, path, branch, source, budget, cancel)
+    provision_writer(context, path, &branch, source, budget, cancel)
 }
 
 /// Provision a graph-owned writer at its checkpointed source commit.
@@ -1052,6 +1045,7 @@ pub fn provision_writer(
     cancel: &CancelToken,
 ) -> Result<(), ServiceError> {
     provision_writer_checked(context, path, branch, source, budget, cancel)
+        .map(|_| ())
         .map_err(provisioning_refusal)
 }
 
@@ -1085,21 +1079,45 @@ fn provisioning_refusal(error: provenant_confinement::worktrees::WorktreeError) 
     }
 }
 
-/// Start a writer launch once; every later lock and retry uses this deadline.
+/// Start one independent provisioning allowance; later locks and retries reuse it.
+/// The caller's reader wait never extends or shortens writer provisioning.
 pub fn writer_launch_budget(
     context: &Context,
     clock: &dyn Clock,
-    caller: WaitBudget,
+    _caller: WaitBudget,
 ) -> WaitBudget {
     let now = clock.mono_now();
     let floor = provenant_core::DurationMicros::from_micros(
         context
             .config
             .graph
-            .writer_launch_seconds
+            .writer_provision_seconds
             .saturating_mul(1_000_000),
     );
-    WaitBudget::up_to(now, floor.max(caller.remaining(now)))
+    WaitBudget::up_to(now, floor)
+}
+
+/// Resolve a validated checkpoint path against the project root that owns it.
+fn resolve_managed_writer_path(
+    host_state: &std::path::Path,
+    project_root: &std::path::Path,
+    path: &str,
+    branch: &str,
+) -> Result<std::path::PathBuf, provenant_confinement::worktrees::WorktreeError> {
+    use provenant_confinement::worktrees::{self, WorktreeError};
+    if !project_root.is_absolute() {
+        return Err(WorktreeError::InvalidRequest);
+    }
+    let ports = provenant_config::PortTable::read_for(Some(project_root), host_state)
+        .map_err(WorktreeError::PortConfiguration)?;
+    let expected = ports
+        .managed_writer_path(branch)
+        .map_err(WorktreeError::PortConfiguration)?;
+    if std::path::Path::new(path) == expected.as_path() {
+        Ok(project_root.join(expected))
+    } else {
+        Err(WorktreeError::InvalidRequest)
+    }
 }
 
 /// Preserve the typed worktree failure for the graph launch owner.
@@ -1110,7 +1128,7 @@ pub fn provision_writer_checked(
     source: &str,
     budget: WaitBudget,
     cancel: &CancelToken,
-) -> Result<(), provenant_confinement::worktrees::WorktreeError> {
+) -> Result<std::path::PathBuf, provenant_confinement::worktrees::WorktreeError> {
     use provenant_confinement::worktrees;
     let clock = provenant_os::clock::SystemClock::new();
     if budget.remaining(clock.mono_now()).as_micros() == 0 {
@@ -1130,7 +1148,14 @@ pub fn provision_writer_checked(
                 lock_budget: budget,
                 ..*worktree_context
             };
-            provision_in_context(&worktree_context, path, branch, source, cancel)
+            let expected = resolve_managed_writer_path(
+                context.roots.state.as_path(),
+                worktree_context.repo.root_path(),
+                path,
+                branch,
+            )?;
+            provision_in_context(&worktree_context, path, branch, source, cancel)?;
+            Ok(expected)
         },
     )
 }
@@ -1143,10 +1168,12 @@ fn provision_in_context(
     cancel: &CancelToken,
 ) -> Result<(), provenant_confinement::worktrees::WorktreeError> {
     use provenant_confinement::worktrees::{self, WorktreeCreate, WorktreeError};
-    if path != format!(".worktrees/{}", branch.replace('/', "-")) {
-        return Err(WorktreeError::InvalidRequest);
-    }
-    let expected = context.repo.root_path().join(path);
+    let expected = resolve_managed_writer_path(
+        &context.host_state()?,
+        context.repo.root_path(),
+        path,
+        branch,
+    )?;
     // Inspect registration and custody without holding sibling worktrees open
     // for unrelated Git probes. The selected target's cleanliness is checked
     // below, under its writer lease.
@@ -1239,7 +1266,7 @@ pub fn from_lane(
         .ok()
         .and_then(|id| provenant_core::AttemptId::parse(&id).ok())
         .ok_or_else(|| refused("graph_relay_unavailable", "not running inside a lane"))?;
-    provenant_fabric_mcp::lane::graph(
+    provenant_fabric_runtime::relay::graph(
         &provenant_providers::LaneRuntime::fabric_socket(attempt),
         serde_json::to_value(op)?,
         cancel,
@@ -1253,14 +1280,37 @@ pub fn from_lane(
 pub fn wait_for_children(
     cancel: &CancelToken,
     within: std::time::Duration,
+    interval: std::time::Duration,
 ) -> Result<Value, ServiceError> {
     let clock = provenant_os::clock::SystemClock::new();
     let started = clock.mono_now();
     while_waiting(cancel, within, || {
-        poll_children(cancel, within, &clock, started, |remaining| {
+        poll_children(cancel, within, &clock, started, interval, |remaining| {
             from_lane(&RelayOp::Children, cancel, remaining)
         })
     })
+}
+
+pub fn child_wait_observation(interval: std::time::Duration) -> String {
+    format!(
+        "paced reread every {} ms (domains.wait.local_interval_ms); relay socket has no remote event subscription",
+        interval.as_millis()
+    )
+}
+
+fn pause_child_poll(cancel: &CancelToken, delay: std::time::Duration) {
+    let deadline = std::time::Instant::now() + delay;
+    while !cancel.is_cancelled() {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        Pause::wait(
+            &provenant_core::ThreadPause,
+            provenant_core::DurationMicros::from_micros(remaining.as_micros()),
+            cancel,
+        );
+    }
 }
 
 fn poll_children(
@@ -1268,6 +1318,7 @@ fn poll_children(
     within: std::time::Duration,
     clock: &dyn Clock,
     started: provenant_core::MonoTime,
+    interval: std::time::Duration,
     mut poll: impl FnMut(std::time::Duration) -> Result<Value, ServiceError>,
 ) -> Result<Value, ServiceError> {
     loop {
@@ -1290,7 +1341,14 @@ fn poll_children(
         if children.iter().all(|child| child["settled"] == true) {
             return Ok(value);
         }
-        provenant_os::sys::wait_pause(remaining.min(std::time::Duration::from_millis(100)));
+        let elapsed = std::time::Duration::from_micros(
+            clock
+                .mono_now()
+                .as_micros()
+                .saturating_sub(started.as_micros()),
+        );
+        let remaining = within.saturating_sub(elapsed);
+        pause_child_poll(cancel, remaining.min(interval));
     }
 }
 
@@ -1516,6 +1574,7 @@ mod child_wait_tests {
                         std::time::Duration::from_secs(2),
                         &provenant_os::clock::SystemClock::new(),
                         provenant_os::clock::SystemClock.mono_now(),
+                        std::time::Duration::from_millis(1),
                         |_| {
                             polls += 1;
                             if cancelled {
@@ -1571,6 +1630,7 @@ mod child_wait_tests {
                     std::time::Duration::from_secs(1),
                     &clock,
                     started,
+                    std::time::Duration::from_millis(1),
                     |_| panic!("must not poll after yield consumed the deadline"),
                 )
             },
@@ -1630,7 +1690,8 @@ mod provisioning_tests {
             .join("worktrees")
             .join(context.identity.project.to_string())
             .join(provenant_confinement::worktrees::state_dir_name(
-                &project.join(path),
+                // Slots are keyed by the canonical checkout path.
+                &project.canonicalize()?.join(path),
             ));
         let slot = Directory::open_anchor(&slot)?;
         let held =
@@ -1671,9 +1732,8 @@ mod provisioning_tests {
             &clock,
         )?;
         journal.bind(GraphExecution {
-            review_base: None,
             extra: Default::default(),
-            integration_base: None,
+            bases: None,
             directory: project.clone(),
             document,
         })?;
@@ -1728,13 +1788,13 @@ mod provisioning_tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let root = tempfile::tempdir()?;
         let socket = root.path().join("relay/socket");
-        let _host = provenant_fabric_mcp::lane::HostRelay::start_with_graph(
+        let _host = provenant_fabric_runtime::relay::HostRelay::start_with_graph(
             socket.clone(),
             Default::default(),
             |_, _, _| Err(ServiceError::FabricOwnerUnavailable),
             |_, _, _| Err(refused("writer_parent_required", "PROMPT_SENTINEL")),
         )?;
-        let error = provenant_fabric_mcp::lane::graph(
+        let error = provenant_fabric_runtime::relay::graph(
             &socket,
             json!({"op":"children"}),
             &CancelToken::new(),
@@ -1756,7 +1816,8 @@ mod provisioning_tests {
     fn writer_child_worktree_is_created_at_source_and_dirty_reuse_is_refused()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = tempfile::tempdir()?;
-        let home = root.path().join("home");
+        let canonical_root = root.path().canonicalize()?;
+        let home = canonical_root.join("home");
         let project = home.join("project");
         std::fs::create_dir_all(&project)?;
         for args in [
@@ -1780,8 +1841,14 @@ mod provisioning_tests {
         assert!(output.status.success());
         let source = String::from_utf8(output.stdout)?.trim().to_owned();
         let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
-        inputs.state_dir = Some(root.path().join("state"));
+        let state = root.path().join("state");
+        provenant_os::fixture::private_state_dir(&state)?;
+        inputs.state_dir = Some(state);
         let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::new(project.join(".git"))?,
+        )?;
         let context = Context::open(roots, &home, &project)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(provenant_os::clock::SystemClock.mono_now(), 55)?;
@@ -1813,8 +1880,8 @@ mod provisioning_tests {
             .is_err()
         );
         let path = ".worktrees/graph-parent--child";
-        // A child binding must survive registry contention beyond a short
-        // settlement deadline too. The original budget remains expired afterwards.
+        // Busy registry access is a retryable condition. It must not extend
+        // the caller's deadline or wait for the other writer to finish.
         let clock = provenant_os::clock::SystemClock;
         let directory = provenant_os::fs::Directory::open_anchor(&project.join(".git"))?;
         let held = directory.lock(
@@ -1824,24 +1891,27 @@ mod provisioning_tests {
             &cancel,
             &clock,
         )?;
-        let short = WaitBudget::cli(clock.mono_now(), 1)?;
-        std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
-            scope.spawn(move || {
-                let clock = provenant_os::clock::SystemClock;
-                clock
-                    .wait_until(
-                        clock
-                            .mono_now()
-                            .checked_add(provenant_core::DurationMicros::from_micros(2_000_000))
-                            .unwrap(),
-                    )
-                    .unwrap();
-                drop(held);
-            });
-            provision_child(&context, path, &source, short, &cancel)?;
-            Ok(())
-        })?;
-        assert_eq!(short.remaining(clock.mono_now()).as_micros(), 0);
+        let busy = provision_child_with_budget(
+            &context,
+            path,
+            &source,
+            WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+        );
+        assert!(matches!(
+            busy,
+            Err(ServiceError::Facade(FacadeError::WriterLockBusy))
+        ));
+        assert!(!project.join(path).exists());
+        drop(held);
+        // The caller retries once the registry is available.
+        provision_child_with_budget(
+            &context,
+            path,
+            &source,
+            WaitBudget::cli(clock.mono_now(), 1)?,
+            &cancel,
+        )?;
         let output = provenant_os::fixture::git_command()
             .current_dir(project.join(path))
             .args(["rev-parse", "HEAD"])
@@ -1978,13 +2048,19 @@ mod provisioning_tests {
             "nodes":[{"id":"parent","access":"read_only","prompt":"Go","route":{"alias":"senior"}}]
         }))?;
         let reference = format!("{}/caller", context.identity.host);
-        let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
-            "schema_version":1,"graph_id":"g-writers","plan_digest":"fixture","bound_integration_base":source,
+        let bases = provenant_fabric_runtime::graph::GraphBaseBinding::new(
+            None,
+            Some(provenant_core::GitOid::parse(&source)?),
+        )
+        .ok_or("integration base")?;
+        let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+            "schema_version":2,"graph_id":"g-writers","plan_digest":"fixture",
             "nodes":[{"id":"parent","state":"running","worktree":null,"attempts":[{
-                "launched":true,"key":{"graph_id":"g-writers","node_id":"parent","route_index":0},
+                "launched":true,"key":{"graph_id":"g-writers","node_id":"parent","route_index":0, "attempt": 1},
                 "route":{"alias":"senior"},"state":"running","attempt_ref":reference,"outcome":null,"launch_actor":"fixture"
             }]}]
         }))?;
+        checkpoint.bases = Some(bases);
         {
             let mut journal = FileJournal::open(
                 &context.roots.state,
@@ -1995,9 +2071,8 @@ mod provisioning_tests {
                 &clock,
             )?;
             journal.bind(GraphExecution {
-                review_base: None,
                 extra: Default::default(),
-                integration_base: Some(source.parse()?),
+                bases: Some(bases),
                 directory: project.clone(),
                 document,
             })?;
@@ -2043,302 +2118,6 @@ mod provisioning_tests {
     }
 
     #[test]
-    #[allow(clippy::disallowed_methods)] // Exercise real registry waits across the socket deadline.
-    fn child_launch_receipt_and_refusal_follow_the_confirmed_launch_deadline()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_fabric_runtime::graph::{GraphCheckpoint, GraphDocument, GraphExecution};
-        let root = tempfile::tempdir()?;
-        let home = root.path().join("home");
-        let project = home.join("project");
-        std::fs::create_dir_all(&project)?;
-        let git = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
-            let output = provenant_os::fixture::git_command()
-                .current_dir(&project)
-                .args(args)
-                .output()?;
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            Ok(String::from_utf8(output.stdout)?.trim().to_owned())
-        };
-        git(&["init", "-q"])?;
-        git(&["commit", "--allow-empty", "-qm", "base"])?;
-        let source = git(&["rev-parse", "HEAD"])?;
-        let branch = git(&["symbolic-ref", "--short", "HEAD"])?;
-        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
-        inputs.state_dir = Some(root.path().join("state"));
-        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-        let mut context = Context::open(roots, &home, &project)?;
-        context.config.graph.writer_launch_seconds = 60;
-        let cancel = CancelToken::new();
-        let clock = provenant_os::clock::SystemClock::new();
-        let budget = WaitBudget::cli(clock.mono_now(), 30)?;
-        let document: GraphDocument = serde_json::from_value(json!({
-            "schema_version":2,"graph_id":"g-writers","integration_branch":branch,"template_library":{},
-            "nodes":[{"id":"parent","access":"read_only","prompt":"Go","route":{"alias":"senior"}}]
-        }))?;
-        let reference = format!("{}/caller", context.identity.host);
-        let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
-            "schema_version":1,"graph_id":"g-writers","plan_digest":"fixture","bound_integration_base":source,
-            "nodes":[{"id":"parent","state":"running","worktree":null,"attempts":[{
-                "launched":true,"key":{"graph_id":"g-writers","node_id":"parent","route_index":0},
-                "route":{"alias":"senior"},"state":"running","attempt_ref":reference,"outcome":null,"launch_actor":"fixture"
-            }]}]
-        }))?;
-        {
-            let mut journal = FileJournal::open(
-                &context.roots.state,
-                context.identity.project,
-                "g-writers",
-                budget,
-                &cancel,
-                &clock,
-            )?;
-            journal.bind(GraphExecution {
-                review_base: None,
-                extra: Default::default(),
-                integration_base: Some(source.parse()?),
-                directory: project.clone(),
-                document,
-            })?;
-            journal.save(&checkpoint)?;
-        }
-
-        use provenant_os::fs::{Directory, LockMode};
-        let registry = context
-            .roots
-            .state
-            .as_path()
-            .join("worktrees")
-            .join(context.identity.project.to_string());
-        std::fs::create_dir_all(&registry)?;
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            registry.parent().ok_or("parent")?,
-            std::fs::Permissions::from_mode(0o700),
-        )?;
-        std::fs::set_permissions(&registry, std::fs::Permissions::from_mode(0o700))?;
-        let directory = Directory::open_anchor(&project.join(".git"))?;
-        let socket = root.path().join("relay/socket");
-        let context = std::sync::Arc::new(context);
-        let host = std::sync::Arc::clone(&context);
-        let _relay = provenant_fabric_mcp::lane::HostRelay::start_with_graph(
-            socket.clone(),
-            provenant_records::Limits::CONFIG,
-            |_, _, _| unreachable!("graph request expected"),
-            move |arguments, cancel, within| {
-                let clock = provenant_os::clock::SystemClock;
-                let budget = provenant_fabric_mcp::lane::host_budget(&clock, within)?;
-                serve(&host, "caller", arguments, budget, cancel, &clock)
-            },
-        )?;
-        // Disjoint scopes keep these independent children in separate checkouts.
-        let request = |id: &str| json!({"op":"add","id":id,"use":"implement","brief":"Write","writer":true,"write_scope":[format!("src/{id}")],"idempotency_key":id});
-        let held = directory.lock(
-            std::ffi::OsStr::new(provenant_confinement::worktrees::REPOSITORY_LOCK),
-            LockMode::Exclusive,
-            WaitBudget::nonblocking(clock.mono_now()),
-            &cancel,
-            &clock,
-        )?;
-        let settlement = WaitBudget::cli(clock.mono_now(), 1)?;
-        let launch = writer_launch_budget(&context, &clock, settlement);
-        let receipt = std::thread::scope(|scope| -> Result<Value, ServiceError> {
-            scope.spawn(move || {
-                let clock = provenant_os::clock::SystemClock;
-                clock
-                    .wait_until(
-                        clock
-                            .mono_now()
-                            .checked_add(provenant_core::DurationMicros::from_micros(56_000_000))
-                            .unwrap(),
-                    )
-                    .unwrap();
-                drop(held);
-            });
-            provenant_fabric_mcp::lane::graph(
-                &socket,
-                request("late"),
-                &cancel,
-                std::time::Duration::from_micros(launch.remaining(clock.mono_now()).as_micros())
-                    + std::time::Duration::from_secs(1),
-            )
-        })?;
-        assert_eq!(settlement.remaining(clock.mono_now()).as_micros(), 0);
-        assert_eq!(
-            git(&[
-                "-C",
-                receipt["worktree"].as_str().ok_or("worktree")?,
-                "rev-parse",
-                "HEAD"
-            ])?,
-            source
-        );
-        // A queued caller confirms only its remainder. The host must return a
-        // named refusal within that remainder instead of starting sixty seconds again.
-        let _held = directory.lock(
-            std::ffi::OsStr::new(provenant_confinement::worktrees::REPOSITORY_LOCK),
-            LockMode::Exclusive,
-            WaitBudget::nonblocking(clock.mono_now()),
-            &cancel,
-            &clock,
-        )?;
-        let started = std::time::Instant::now();
-        let error = provenant_fabric_mcp::lane::graph(
-            &socket,
-            request("refused"),
-            &cancel,
-            std::time::Duration::from_secs(3),
-        )
-        .expect_err("held registry refusal");
-        assert_eq!(error.code(), "writer_lock_busy");
-        assert!(error.structured_error().to_string().contains("retry"));
-        assert!(started.elapsed() < std::time::Duration::from_secs(5));
-        assert!(
-            !project
-                .join(".worktrees/g-writers-parent--refused")
-                .exists()
-        );
-        assert!(git(&["branch", "--list", "g-writers-parent--refused"])?.is_empty());
-        let checkpoint = FileJournal::read_checkpoint(
-            &context.roots.state,
-            context.identity.project,
-            "g-writers",
-        )?
-        .ok_or("checkpoint")?;
-        let refused = checkpoint
-            .nodes
-            .iter()
-            .find(|node| node.id.ends_with("--refused"))
-            .ok_or("refused node")?;
-        assert!(refused.attempts.is_empty());
-        assert_eq!(
-            refused.state,
-            provenant_fabric_runtime::graph::NodeState::Blocked
-        );
-        assert_eq!(
-            refused.advance_owner_code.as_deref(),
-            Some("writer_lock_busy")
-        );
-        assert!(relay::pending_provisioning(&checkpoint).is_empty());
-        let expired = refused
-            .last_launch_retry
-            .as_ref()
-            .and_then(|retry| retry.deadline)
-            .ok_or("refusal deadline")?;
-        // A fresh host must serve unrelated operations without resurrecting the
-        // refused admission. Only an explicit retry starts its launch again.
-        drop(_held);
-        drop(_relay);
-        let restarted = Context::open(context.roots.clone(), &home, &project)?;
-        let budget = WaitBudget::cli(clock.mono_now(), 30)?;
-        serve(
-            &restarted,
-            "caller",
-            json!({"op":"children"}),
-            budget,
-            &cancel,
-            &clock,
-        )?;
-        serve(
-            &restarted,
-            "caller",
-            request("another"),
-            budget,
-            &cancel,
-            &clock,
-        )?;
-        assert!(
-            !project
-                .join(".worktrees/g-writers-parent--refused")
-                .exists()
-        );
-        assert!(git(&["branch", "--list", "g-writers-parent--refused"])?.is_empty());
-        let mut journal = FileJournal::open(
-            &restarted.roots.state,
-            restarted.identity.project,
-            "g-writers",
-            budget,
-            &cancel,
-            &clock,
-        )?;
-        let mut checkpoint = journal.load("g-writers")?.ok_or("checkpoint")?;
-        let document = FileJournal::execution(
-            &restarted.roots.state,
-            restarted.identity.project,
-            "g-writers",
-        )?
-        .ok_or("execution")?
-        .document;
-        provenant_fabric_runtime::graph::patch::retry_node(
-            &mut LiveGraph {
-                document: &document,
-                checkpoint: &mut checkpoint,
-            },
-            "parent--refused",
-            None,
-            &PatchContext {
-                journal: None,
-                library: &TemplateLibrary::bundled(),
-                resolvers: &Default::default(),
-                scan: &scan_for_secrets,
-                limits: &restarted.config.graph.limits,
-            },
-        )?;
-        let retried = checkpoint
-            .nodes
-            .iter()
-            .find(|node| node.id == "parent--refused")
-            .ok_or("retried child")?;
-        assert!(retried.launch_retry.is_none());
-        journal.save(&checkpoint)?;
-        provision_added_writers(
-            &restarted,
-            &mut journal,
-            &mut checkpoint,
-            &["parent--refused".into()],
-            budget,
-            &cancel,
-        )?;
-        let retried = checkpoint
-            .nodes
-            .iter()
-            .find(|node| node.id == "parent--refused")
-            .ok_or("retried child")?;
-        assert!(
-            retried
-                .launch_retry
-                .as_ref()
-                .and_then(|retry| retry.deadline)
-                .is_some_and(|deadline| deadline > expired)
-        );
-        assert_eq!(
-            git(&[
-                "-C",
-                ".worktrees/g-writers-parent--refused",
-                "rev-parse",
-                "HEAD"
-            ])?,
-            source
-        );
-        assert!(relay::pending_provisioning(&checkpoint).is_empty());
-        drop(journal);
-        let replay = serve(
-            &restarted,
-            "caller",
-            request("refused"),
-            budget,
-            &cancel,
-            &clock,
-        )?;
-        assert_eq!(replay["replayed"], true);
-        assert_eq!(replay["node"], "parent--refused");
-        Ok(())
-    }
-
-    #[test]
     fn lost_child_receipt_replays_after_graph_settlement() -> Result<(), Box<dyn std::error::Error>>
     {
         use provenant_fabric_runtime::graph::{
@@ -2370,7 +2149,7 @@ mod provisioning_tests {
             let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
                 "schema_version":1,"graph_id":"g-lost-receipt","plan_digest":"fixture",
                 "nodes":[{"id":"parent","state":"running","worktree":null,"attempts":[{
-                    "launched":true,"key":{"graph_id":"g-lost-receipt","node_id":"parent","route_index":0},
+                    "launched":true,"key":{"graph_id":"g-lost-receipt","node_id":"parent","route_index":0, "attempt": 1},
                     "route":{"alias":"senior"},"state":"running","attempt_ref":reference,
                     "outcome":null,"launch_actor":"fixture"
                 }]}]
@@ -2388,9 +2167,8 @@ mod provisioning_tests {
             {
                 let mut journal = open()?;
                 journal.bind(GraphExecution {
-                    review_base: None,
                     extra: Default::default(),
-                    integration_base: None,
+                    bases: None,
                     directory: project.clone(),
                     document: serde_json::from_value(json!({
                         "schema_version":1,"graph_id":"g-lost-receipt","template_library":{},
@@ -2440,117 +2218,6 @@ mod provisioning_tests {
     }
 
     #[test]
-    fn mixed_legacy_state_allows_receipt_replay_but_refuses_new_child_admission()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_fabric_runtime::graph::{GraphCheckpoint, GraphExecution};
-        let root = tempfile::tempdir()?;
-        let home = root.path().join("home");
-        let project = home.join("project");
-        std::fs::create_dir_all(&project)?;
-        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
-        inputs.state_dir = Some(root.path().join("state"));
-        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-        let context = Context::open(roots, &home, &project)?;
-        let cancel = CancelToken::new();
-        let clock = provenant_os::clock::SystemClock::new();
-        let budget = WaitBudget::cli(clock.mono_now(), 5)?;
-        let reference = format!("{}/caller", context.identity.host);
-        let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
-            "schema_version":1,"graph_id":"current","plan_digest":"fixture",
-            "nodes":[{"id":"parent","state":"running","worktree":null,"attempts":[{
-                "launched":true,"key":{"graph_id":"current","node_id":"parent","route_index":0},
-                "route":{"alias":"senior"},"state":"running","attempt_ref":reference,
-                "outcome":null,"launch_actor":"fixture"
-            }]}]
-        }))?;
-        {
-            let mut journal = FileJournal::open(
-                &context.roots.state,
-                context.identity.project,
-                "current",
-                budget,
-                &cancel,
-                &clock,
-            )?;
-            journal.bind(GraphExecution {
-                review_base: None, extra: Default::default(), integration_base: None,
-                directory: project.clone(),
-                document: serde_json::from_value(json!({
-                    "schema_version":1,"graph_id":"current","template_library":{},
-                    "nodes":[{"id":"parent","access":"read_only","prompt":"Go","route":{"alias":"senior"}}]
-                }))?,
-            })?;
-            journal.save(&checkpoint)?;
-        }
-        let request = json!({"op":"add","id":"child","use":"task","brief":"Read","idempotency_key":"receipt"});
-        let receipt = serve(&context, "caller", request.clone(), budget, &cancel, &clock)?;
-        std::fs::remove_file(
-            context
-                .roots
-                .state
-                .as_path()
-                .join("graph-template-cutover-complete"),
-        )?;
-        {
-            let mut journal = FileJournal::open(
-                &context.roots.state,
-                context.identity.project,
-                "legacy",
-                budget,
-                &cancel,
-                &clock,
-            )?;
-            journal.bind(GraphExecution {
-                review_base: None, extra: Default::default(), integration_base: None,
-                directory: project.clone(),
-                document: serde_json::from_value(json!({"schema_version":1,"graph_id":"legacy","nodes":[{"id":"old","access":"read_only","prompt":"Old","route":{"alias":"senior"}}]}))?,
-            })?;
-            journal.save(&serde_json::from_value(json!({"schema_version":1,"graph_id":"legacy","plan_digest":"fixture","nodes":[{"id":"old","state":"pending","worktree":null,"attempts":[]}]}))?)?;
-        }
-        assert!(
-            provenant_fabric_runtime::graph::cutover::pending_guard(&context.roots.state).is_err()
-        );
-        let before = FileJournal::read_checkpoint(
-            &context.roots.state,
-            context.identity.project,
-            "current",
-        )?;
-        let replay = serve(&context, "caller", request.clone(), budget, &cancel, &clock)?;
-        assert_eq!(replay["node"], receipt["node"]);
-        assert_eq!(replay["revision"], receipt["revision"]);
-        assert_eq!(replay["replayed"], true);
-        let mut fresh = request;
-        fresh["idempotency_key"] = json!("new-child");
-        for request in [
-            fresh,
-            json!({"op":"edit","id":"current","patch":{"schema_version":1,"idempotency_key":"new-edit","nodes":[{"id":"another","use":"task","brief":"More"}]}}),
-        ] {
-            let error = serve(&context, "caller", request, budget, &cancel, &clock)
-                .expect_err("new relay work must be refused");
-            assert_eq!(error.code(), "UPGRADE_DRAIN_REQUIRED");
-            let ServiceError::Facade(error) = error else {
-                return Err("expected a facade refusal".into());
-            };
-            assert!(
-                error
-                    .diagnostic()
-                    .detail
-                    .unwrap_or_default()
-                    .contains("/legacy")
-            );
-            assert_eq!(
-                FileJournal::read_checkpoint(
-                    &context.roots.state,
-                    context.identity.project,
-                    "current"
-                )?,
-                before
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
     fn lane_edit_refuses_skip_and_replace_outside_its_subtree()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_fabric_runtime::graph::{GraphCheckpoint, GraphDocument, GraphExecution};
@@ -2579,7 +2246,7 @@ mod provisioning_tests {
             "schema_version":1,"graph_id":"edit-scope","plan_digest":"fixture",
             "nodes":[
                 {"id":"writer","state":"running","worktree":null,"attempts":[{
-                    "launched":true,"key":{"graph_id":"edit-scope","node_id":"writer","route_index":0},
+                    "launched":true,"key":{"graph_id":"edit-scope","node_id":"writer","route_index":0, "attempt": 1},
                     "route":{"alias":"senior"},"state":"running",
                     "attempt_ref":format!("{}/caller",context.identity.host),"outcome":null,"launch_actor":"fixture"
                 }]},
@@ -2596,9 +2263,8 @@ mod provisioning_tests {
                 &clock,
             )?;
             journal.bind(GraphExecution {
-                review_base: None,
                 extra: Default::default(),
-                integration_base: None,
+                bases: None,
                 directory: project.clone(),
                 document,
             })?;
@@ -2680,9 +2346,8 @@ mod provisioning_tests {
             ]
         }))?;
         journal.bind(GraphExecution {
-            review_base: None,
             extra: Default::default(),
-            integration_base: None,
+            bases: None,
             directory: project.clone(),
             document: document.clone(),
         })?;
@@ -2692,7 +2357,7 @@ mod provisioning_tests {
         let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
             "schema_version":1, "graph_id":"g-crash", "plan_digest":"fixture", "nodes":[
                 {"id":"a","state":"running","worktree":null,"attempts":[{
-                    "launched":true,"key":{"graph_id":"g-crash","node_id":"a","route_index":0},
+                    "launched":true,"key":{"graph_id":"g-crash","node_id":"a","route_index":0, "attempt": 1},
                     "route":{"alias":"senior"},"state":"running","attempt_ref":reference,
                     "outcome":null,"launch_actor":"fixture"
                 }]},
@@ -2952,6 +2617,8 @@ mod panel_tests {
                 limits: &limits,
                 scan: &|_| Ok(()),
                 journal: None,
+
+                worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
             },
         )
         .expect("relay resolvers expand the complete review composite");
@@ -2981,6 +2648,7 @@ mod panel_tests {
                 fixture_ref: "test".into(),
                 catalogue_revision: catalogue.revision().to_owned(),
                 account_key: Some("fixture-account".into()),
+                plan: None,
                 observed_models: vec!["test".into()],
                 observed_unix_seconds: 80,
                 expires_unix_seconds: 120,
@@ -2994,6 +2662,7 @@ mod panel_tests {
         let context = RoutingContext {
             policy_account_hint: None,
             choice_context: None,
+            selection_evidence: None,
             catalogue: &catalogue,
             config: &config,
             registry: provenant_providers::REGISTRY,

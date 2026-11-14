@@ -80,6 +80,9 @@ fn fixture() -> Result<TestRig> {
         fs::create_dir_all(rig.home.join(name))?;
     }
     fs::write(rig.home.join(".rustup/settings.toml"), b"")?;
+    for name in provenant_confinement::cargo::CREDENTIAL_FILES {
+        fs::write(rig.home.join(".cargo").join(name), b"synthetic cargo token")?;
+    }
     // The rig's CODEX_HOME is the auto-detected Codex identity.
     fs::write(
         rig.root.join("codex/auth.json"),
@@ -103,18 +106,23 @@ fn fixture() -> Result<TestRig> {
 }
 
 fn dispatch(rig: &TestRig, mode: &str) -> Result<PathBuf> {
-    let mut args = vec![
+    let prefix: Vec<std::ffi::OsString> = vec![
         "--state-dir".into(),
         rig.state.clone().into_os_string(),
         "--project".into(),
         rig.project.join(".worktrees/compose").into_os_string(),
+    ];
+    let mut args = prefix.clone();
+    args.extend([
         "run".into(),
+        "task".into(),
         "--model".into(),
         "codex/gpt-6-luna".into(),
         mode.into(),
-        "--wait=30s".into(),
+        "--name".into(),
+        "compose-dispatch".into(),
         "--json".into(),
-    ];
+    ]);
     if mode == "writer" {
         args.extend([
             "--mode".into(),
@@ -128,8 +136,24 @@ fn dispatch(rig: &TestRig, mode: &str) -> Result<PathBuf> {
     let executable = option_env!("CARGO_BIN_EXE_provenant")
         .ok_or("production binary path is only available to integration targets")?;
     let output = rig.execute_os(Path::new(executable), &args, None)?;
-    let stdout = String::from_utf8_lossy(&output.stdout.bytes).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr.bytes).into_owned();
+    let mut stderr = String::from_utf8_lossy(&output.stderr.bytes).into_owned();
+    // The launch names a graph; waiting settles it and status names its attempt.
+    let mut wait = prefix.clone();
+    wait.extend(
+        ["wait", "compose-dispatch", "--timeout", "30s", "--json"]
+            .into_iter()
+            .map(Into::into),
+    );
+    let waited = rig.execute_os(Path::new(executable), &wait, None)?;
+    stderr.push_str(&String::from_utf8_lossy(&waited.stderr.bytes));
+    let mut status = prefix;
+    status.extend(
+        ["status", "compose-dispatch", "--json"]
+            .into_iter()
+            .map(Into::into),
+    );
+    let status = rig.execute_os(Path::new(executable), &status, None)?;
+    let stdout = String::from_utf8_lossy(&status.stdout.bytes).into_owned();
     assert!(
         !stderr.contains("ignored invalid configuration"),
         "a domain section is not an unknown key to the census policy read"
@@ -139,15 +163,18 @@ fn dispatch(rig: &TestRig, mode: &str) -> Result<PathBuf> {
     // Codex's fixture protocol carries no observed answering model, so the
     // lane settles as failed. Check the provider's exit code independently
     // of that outcome, as compose-proof precedes its final protocol output.
-    let attempt_ref = value["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
-        .as_str()
+    let attempt_ref = value["data"]["rows"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|row| row["kind"] == "attempt")
+        .and_then(|row| row["attempt_id"].as_str())
         .ok_or_else(|| format!("no attempt: stdout={stdout} stderr={stderr}"))?;
     let (_, attempt) = attempt_ref.rsplit_once('/').ok_or("attempt reference")?;
-    let attempt = fs::read_dir(rig.state.join("runs"))?
-        .flatten()
-        .map(|run| run.path().join("attempts").join(attempt))
-        .find(|path| path.is_dir())
-        .ok_or_else(|| format!("no attempt directory: stdout={stdout}"))?;
+    let attempt = rig.state.join("attempts").join(attempt);
+    if !attempt.is_dir() {
+        return Err(format!("no attempt directory: stdout={stdout}").into());
+    }
     let record = attempt_record(rig, &attempt)?;
     assert_eq!(
         record["state"]["exit_code"],
@@ -214,7 +241,7 @@ pub(crate) fn read_only_dispatch_applies_bound_git_and_project_writes() -> Resul
         let mode = if configured { "reader" } else { "reader-empty" };
         let attempt = dispatch(&rig, mode)?;
         let cargo: serde_json::Value =
-            serde_json::from_slice(&fs::read(attempt.join("cargo-setup.json"))?)?;
+            serde_json::from_slice(&fs::read(attempt.join("cargo-target-setup.json"))?)?;
         assert_eq!(
             cargo,
             serde_json::json!({"status": "skipped", "reason": "read_only_lane"})
@@ -257,7 +284,7 @@ pub(crate) fn writer_dispatch_uses_lane_cache_and_narrow_provider_state() -> Res
     let cleanup = super::worktree_tests::writer_process_cleanup(&context);
     let attempt = dispatch(&rig, "writer")?;
     let cargo: serde_json::Value =
-        serde_json::from_slice(&fs::read(attempt.join("cargo-setup.json"))?)?;
+        serde_json::from_slice(&fs::read(attempt.join("cargo-target-setup.json"))?)?;
     assert_eq!(
         cargo,
         serde_json::json!({"status": "skipped", "reason": "disabled"})
@@ -310,13 +337,19 @@ pub(crate) fn provider() -> Result {
             PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").ok_or("CARGO_TARGET_DIR missing")?);
         let cargo = PathBuf::from(std::env::var_os("CARGO_HOME").ok_or("CARGO_HOME missing")?);
         let cache = target.parent().ok_or("cache")?;
-        // Cargo home is lane-private, inside the writer cache. The user's
-        // own stores and installed binaries are read-only.
-        assert_eq!(cargo, cache.join("cargo-home"));
+        // Source identity is shared with the host; only build output is private.
+        assert_eq!(cargo, home.join(".cargo"));
+        assert!(!cargo.starts_with(cache));
         fs::create_dir_all(&target)?;
         fs::write(target.join("compose-target"), b"target")?;
-        fs::create_dir_all(cargo.join("registry"))?;
-        fs::write(cargo.join("registry/compose-home"), b"cargo")?;
+        denied(&cargo.join("registry/compose-home"))?;
+        for name in provenant_confinement::cargo::CREDENTIAL_FILES {
+            assert!(fs::read(cargo.join(name)).is_err());
+            denied(&cargo.join(name))?;
+        }
+        for name in provenant_confinement::cargo::TRACKING_FILES {
+            fs::write(cargo.join(name), b"fixture tracking")?;
+        }
         let host_state = PathBuf::from(
             std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV)
                 .ok_or("host state missing")?,

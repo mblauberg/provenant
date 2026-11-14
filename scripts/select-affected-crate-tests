@@ -50,7 +50,7 @@ def select(root, base, head, is_main):
         metadata = json.loads(
             subprocess.run(
                 ["cargo", "metadata", "--format-version", "1", "--no-deps"],
-                cwd=root,
+                cwd=os.path.join(root, "tools/front-door"),
                 capture_output=True,
                 text=True,
                 check=True,
@@ -106,7 +106,8 @@ def select(root, base, head, is_main):
 
 
 def main():
-    root = os.path.abspath(os.environ.get("GITHUB_WORKSPACE", "."))
+    repository = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    root = os.path.abspath(os.environ.get("GITHUB_WORKSPACE", repository))
     expression, provider_affected = select(
         root,
         os.environ.get("BASE_SHA", ""),

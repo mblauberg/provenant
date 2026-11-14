@@ -210,6 +210,7 @@ fn upstream_files_are_listed_next_to_the_excerpts_and_the_launch_is_unchanged() 
         vec![vec![InputRequest {
             label: "parent".into(),
             attempt_ref: Some("host-a/attempt-1".into()),
+            attempt_key: Some(run.checkpoint.nodes[0].attempts[0].key.clone()),
             inline_findings: None,
             finding_prefix: None,
         }]]
@@ -376,6 +377,7 @@ fn truncation_notice_names_readable_staged_results() {
     let requests = vec![InputRequest {
         label: "reviews--a".into(),
         attempt_ref: None,
+        attempt_key: None,
         inline_findings: None,
         finding_prefix: Some("reviews--a:".into()),
     }];

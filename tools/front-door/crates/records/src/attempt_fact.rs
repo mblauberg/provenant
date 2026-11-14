@@ -1,12 +1,10 @@
-use provenant_core::{
-    ActorId, AttemptId, DeliveryId, GitOid, OperationId, ProjectId, TaskId, WallTime,
-};
-use serde::Serialize;
+use provenant_core::{ActorId, AttemptId, DeliveryId, GitOid, ProjectId, WallTime};
+use serde::{Deserialize, Serialize};
 
 use crate::{FileDigest, PathWire, Trace};
 
 /// Terminal attempt outcomes published to workflow, telemetry and the CLI.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttemptOutcome {
     Succeeded,
@@ -36,6 +34,9 @@ pub struct RouteFact {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub account_label: Option<String>,
+    /// The selected account key; identity is attributed only after applied and observed routes agree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_key: Option<String>,
 }
 
 /// Disjoint provider usage counts. Unknown categories remain absent.
@@ -93,11 +94,18 @@ pub struct AttemptFact {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<crate::run::WorkContext>,
     pub attempt_id: AttemptId,
-    pub task_id: TaskId,
+    /// The attempt's work identity.
+    pub key: crate::WorkKey,
     pub attempt_number: u64,
-    pub operation_id: OperationId,
     pub project_id: ProjectId,
     pub terminal_state: AttemptOutcome,
+    /// Source of the settlement cause, or an explicit unavailable state.
+    pub cause_source: crate::run::CauseSource,
+    /// Sealed settlement declaration, retained independently of the stop source.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settlement_reason: Option<crate::run::SettlementReason>,
+    /// Verified account identity for this attempt, or explicit unknown evidence.
+    pub account_identity: crate::AccountIdentity,
     pub exit_code: Option<i64>,
     pub queued_at: WallTime,
     pub started_at: Option<WallTime>,

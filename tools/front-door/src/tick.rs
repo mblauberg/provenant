@@ -189,11 +189,8 @@ pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
         };
         write_gc_result(&directory, clock.wall_now()?, "running", None)?;
         let collected = (|| -> Result<(), String> {
-            let config = provenant_config::read_with_domains(
-                &resolved.roots,
-                &provenant_cli::domains::SECTIONS,
-            )
-            .map_err(|error| error.to_string())?;
+            let config = provenant_cli::config_reads::read_for(&resolved.roots, "tick")
+                .map_err(|error| error.to_string())?;
             collect_graph_checkpoints(
                 &resolved.roots.state,
                 provenant_config::registered_projects(&resolved.roots)
@@ -292,20 +289,18 @@ struct SeedPass {
     built: usize,
     current: usize,
     busy: usize,
-    /// Projects with no front-door manifest, which have nothing to seed.
+    /// Projects with no selected Cargo manifest, which have nothing to seed.
     skipped: usize,
     /// Commits whose last build failed, waiting for `origin/main` to move.
     backed_off: Vec<String>,
     errors: Vec<String>,
 }
 
-/// What `target_seed_build::build` requires of a checkout.
-const SEED_MANIFEST: &str = "tools/front-door/Cargo.lock";
-
 /// Refresh each project in turn. A busy build is a no-op and one project's
 /// failure never stops the others.
 fn refresh_projects(
     projects: &[std::path::PathBuf],
+    host_state: &std::path::Path,
     refresh: impl Fn(
         &std::path::Path,
     ) -> Result<crate::target_seed_build::Refresh, Box<dyn std::error::Error>>,
@@ -313,12 +308,20 @@ fn refresh_projects(
     use crate::target_seed_build::Refresh;
     let mut pass = SeedPass::default();
     for project in projects {
-        if !project.join(SEED_MANIFEST).is_file() {
-            pass.skipped += 1;
-            continue;
+        match provenant_run::target_seed::cargo_build_directory(project, host_state) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                pass.skipped += 1;
+                continue;
+            }
+            Err(error) => {
+                pass.errors.push(format!("{}: {error}", project.display()));
+                continue;
+            }
         }
         match refresh(project) {
             Ok(Refresh::Built(_)) => pass.built += 1,
+            Ok(Refresh::NotCargo) => pass.skipped += 1,
             Ok(Refresh::Current) => pass.current += 1,
             Ok(Refresh::BackedOff(commit)) => pass.backed_off.push(commit),
             Ok(Refresh::Busy) => pass.busy += 1,
@@ -344,6 +347,7 @@ fn backed_off_note(commits: &[String]) -> Option<String> {
 /// disabled seed, returns without touching the result file.
 fn seed_pass(
     directory: &Directory,
+    host_state: &Path,
     clock: &dyn Clock,
     enabled: bool,
     projects: impl FnOnce() -> Result<Vec<std::path::PathBuf>, String>,
@@ -361,7 +365,7 @@ fn seed_pass(
         return write_result(directory, SEED_RESULT, "tick-seed", at()?, "disabled", None);
     }
     write_result(directory, SEED_RESULT, "tick-seed", at()?, "running", None)?;
-    let outcome = projects().map(|projects| refresh_projects(&projects, refresh));
+    let outcome = projects().map(|projects| refresh_projects(&projects, host_state, refresh));
     let (state, error) = match outcome {
         Ok(pass) if !pass.errors.is_empty() => ("failed", Some(pass.errors.join("; "))),
         Ok(pass) if pass.busy > 0 => (
@@ -400,13 +404,11 @@ pub(crate) fn seed_worker(globals: &Globals) -> u8 {
             &resolved.roots.state.as_path().join("tick"),
             true,
         )?;
-        let config = provenant_config::read_with_domains(
-            &resolved.roots,
-            &provenant_cli::domains::SECTIONS,
-        )?;
+        let config = provenant_cli::config_reads::read_for(&resolved.roots, "tick")?;
         let state = resolved.roots.state.as_path();
         seed_pass(
             &directory,
+            state,
             &SystemClock,
             config.domains.fabric.lanes.cargo_seed.enabled,
             || {
@@ -532,8 +534,7 @@ fn tick(
         crate::roots::Workspace::Home,
         crate::roots::Product::Required,
     )?;
-    let config =
-        provenant_config::read_with_domains(&resolved.roots, &provenant_cli::domains::SECTIONS)?;
+    let config = provenant_cli::config_reads::read_for(&resolved.roots, "tick")?;
     let clock = SystemClock;
     let now = clock.wall_now()?;
     let graphs =
@@ -554,17 +555,13 @@ fn tick(
                 true,
             )
             .map_err(|error| error.to_string())?;
-            let cancel = CancelToken::new();
-            let budget = WaitBudget::cli(clock.mono_now(), 1).map_err(|error| error.to_string())?;
-            let _lock = directory
-                .lock(
-                    "cadence.lock".as_ref(),
-                    LockMode::Exclusive,
-                    budget,
-                    &cancel,
-                    &clock,
-                )
-                .map_err(|error| error.to_string())?;
+            let _lock = match directory.try_lock("cadence.lock".as_ref(), LockMode::Exclusive) {
+                Ok(lock) => lock,
+                Err(provenant_os::fs::FsError::LockTimeout { .. }) => {
+                    return Ok("busy; next tick retries");
+                }
+                Err(error) => return Err(error.to_string()),
+            };
             queue_gc(&directory, now, || {
                 let executable = std::env::current_exe().map_err(|error| error.to_string())?;
                 let argv = [
@@ -768,6 +765,7 @@ mod tests {
         let listed = projects.clone();
         seed_pass(
             &directory,
+            &root,
             &seed_clock(),
             true,
             || Ok(listed),
@@ -787,7 +785,7 @@ mod tests {
             error.unwrap(),
             format!("{}: origin/main missing", projects[1].display())
         );
-        let pass = refresh_projects(&projects, |project| {
+        let pass = refresh_projects(&projects, &root, |project| {
             match project.file_name().unwrap().to_str().unwrap() {
                 "a" => Ok(Refresh::Busy),
                 "b" => Err("origin/main missing".into()),
@@ -802,6 +800,7 @@ mod tests {
         let clean = vec![projects[0].clone()];
         seed_pass(
             &directory,
+            &root,
             &seed_clock(),
             true,
             || Ok(clean),
@@ -817,6 +816,7 @@ mod tests {
         assert!(seed_retry_due(&directory, far), "busy is retried next tick");
         seed_pass(
             &directory,
+            &root,
             &seed_clock(),
             true,
             || Ok(vec![projects[0].clone()]),
@@ -839,6 +839,7 @@ mod tests {
         let called = std::cell::RefCell::new(Vec::new());
         seed_pass(
             &directory,
+            &root,
             &seed_clock(),
             true,
             || Ok(listed),
@@ -855,7 +856,7 @@ mod tests {
             note.unwrap(),
             "commit abc123 failed; waiting for origin/main to move"
         );
-        let pass = refresh_projects(&[bare], |_| panic!("no manifest, no refresh"));
+        let pass = refresh_projects(&[bare], &root, |_| panic!("no manifest, no refresh"));
         assert_eq!(
             pass,
             SeedPass {
@@ -868,9 +869,18 @@ mod tests {
     #[allow(dead_code)] // The worktree driver includes this module without libtest.
     fn seed_project(root: &std::path::Path, name: &str, manifest: bool) -> std::path::PathBuf {
         let project = root.join("projects").join(name);
-        std::fs::create_dir_all(project.join("tools/front-door")).unwrap();
+        let workspace = project.join("arbitrarily/nested/rust");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(project.join(".provenant")).unwrap();
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.verify.workspace = "arbitrarily/nested/rust".into();
+        std::fs::write(
+            project.join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&ports).unwrap(),
+        )
+        .unwrap();
         if manifest {
-            std::fs::write(project.join(SEED_MANIFEST), "").unwrap();
+            std::fs::write(workspace.join("Cargo.toml"), "[workspace]\n").unwrap();
         }
         project
     }
@@ -887,6 +897,7 @@ mod tests {
             .unwrap();
         seed_pass(
             &directory,
+            &root,
             &seed_clock(),
             true,
             || panic!("a second worker must not enumerate projects"),
@@ -919,6 +930,7 @@ mod tests {
         assert_eq!(seed_state(&directory), "disabled");
         seed_pass(
             &directory,
+            &root,
             &seed_clock(),
             true,
             || Err("registry unreadable".into()),

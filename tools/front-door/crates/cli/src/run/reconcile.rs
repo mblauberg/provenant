@@ -42,7 +42,7 @@ pub(super) fn reconcile_reply(outcome: Result<(Value, String), Fail>, fenced: bo
             code: "RECONCILE_INCOMPLETE".into(),
             message: out.human.trim().to_owned(),
             cause: None,
-            repair: Some("Inspect the reported custody or settlement reason, then retry `provenant reconcile --id <run>`.".into()),
+            repair: Some("Inspect the reported custody or settlement reason, then rerun `provenant reconcile NAME`.".into()),
         });
     }
     out
@@ -58,24 +58,6 @@ fn reservation_root(context: &run::ExecutionContext) -> PathBuf {
         .join(context.project_id.to_string())
 }
 
-fn prepare_reservations(
-    session: &Session,
-    call: &run::Request<'_>,
-    visited: &mut BTreeMap<provenant_core::ProjectId, run::ExecutionContext>,
-    issues: &mut Vec<provenant_supervisor::custody::ReservationIssue>,
-) {
-    if visited
-        .insert(session.context.project_id, session.context.clone())
-        .is_none()
-        && let Err(error) = session.store.cutover_writer_reservations(call)
-    {
-        issues.push(provenant_supervisor::custody::ReservationIssue {
-            reservation: reservation_root(&session.context),
-            reason: error.to_string(),
-        });
-    }
-}
-
 pub(super) fn reconcile_inner(
     command: Reconcile,
     edge: &Edge<'_>,
@@ -84,9 +66,13 @@ pub(super) fn reconcile_inner(
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     if let Some(target) = command.abandon {
-        let (session, selected) =
-            targets::open(edge, &target.0, false, &request(&clock, &cancel)?)?;
-        let id = selected.attempt.ok_or(run::RunError::NotFound)?;
+        let call = request(&clock, &cancel)?;
+        let (session, id) = key::open_attempt(
+            edge,
+            &target,
+            crate::Want::Attempt { settled: false },
+            &call,
+        )?;
         let reason = command
             .reason
             .ok_or(run::RunError::Validation("abandonment requires a reason"))?;
@@ -95,54 +81,39 @@ pub(super) fn reconcile_inner(
                 .service()
                 .abandon_settlement(id, &reason, &request(&clock, &cancel)?)?;
         return Ok((
-            json!({"run_id": selected.run, "attempt_id": id, "found": state}),
-            format!("{id} {}\n", reconcile_summary(&state)),
+            json!({"target": target.to_string(), "attempt_id": id, "found": state}),
+            format!("{target} {}\n", reconcile_summary(&state)),
         ));
     }
-    let mut visited = BTreeMap::new();
-    let mut cutover_issues = Vec::new();
-    let (runs, truncated) = if command.id.is_empty() {
-        let session = open(edge, &request(&clock, &cancel)?)?;
+    let session = open(edge, &request(&clock, &cancel)?)?;
+    let (attempts, truncated) = if command.targets.is_empty() {
         let call = request(&clock, &cancel)?;
-        prepare_reservations(&session, &call, &mut visited, &mut cutover_issues);
-        let mut runs = session.store.open_runs_readonly(SCAN + 1, &call)?;
-        let truncated = runs.len() as u64 > SCAN;
-        runs.truncate(SCAN as usize);
-        (
-            runs.into_iter()
-                .map(|run| Target {
-                    selection: None,
-                    run: Some(run),
-                    task: None,
-                    attempt: None,
-                })
-                .collect(),
-            truncated,
-        )
+        let mut attempts = session.store.open_attempts_readonly(SCAN + 1, &call)?;
+        let truncated = attempts.len() as u64 > SCAN;
+        attempts.truncate(SCAN as usize);
+        (attempts, truncated)
     } else {
-        (command.id, false)
+        let mut attempts = Vec::new();
+        for target in &command.targets {
+            let resolved = key::resolve_target(edge, target, crate::Want::Work)?;
+            attempts.extend(key::local_attempts(
+                &session,
+                &resolved,
+                &request(&clock, &cancel)?,
+            )?);
+        }
+        attempts.sort();
+        attempts.dedup();
+        (attempts, false)
     };
     let mut rows = Vec::new();
     let mut human = String::new();
-    for target in runs {
-        let (session, selected) = targets::open(edge, &target, true, &request(&clock, &cancel)?)?;
-        prepare_reservations(
-            &session,
-            &request(&clock, &cancel)?,
-            &mut visited,
-            &mut cutover_issues,
-        );
-        let run = selected.run.ok_or(run::RunError::NotFound)?;
-        let scoped_cwd = targets::cwd(edge, session.context.project_id)?;
-        let scoped_edge = Edge {
-            cwd: &scoped_cwd,
-            ..*edge
-        };
+    for run in attempts {
         let registry = Registry {
             roots: Some(edge.roots),
             home: Some(edge.home),
             assets: Some(edge.assets),
-            cwd: Some(&scoped_cwd),
+            cwd: Some(edge.cwd),
             state_root: Some(session.context.state_root.as_path()),
             project_id: Some(session.context.project_id),
             host: None,
@@ -157,12 +128,12 @@ pub(super) fn reconcile_inner(
             Err(fail) => {
                 *fenced = true;
                 human.push_str(&format!("{run} error: {}\n", fail.message));
-                rows.push(json!({ "run_id": run, "error": { "code": fail.kind.code(), "message": fail.message } }));
+                rows.push(json!({ "attempt_id": run, "error": { "code": fail.kind.code(), "message": fail.message } }));
                 continue;
             }
         };
         let started = if found.iter().any(|(_, r)| *r == run::Reconciled::Queued) {
-            request(&clock, &cancel).and_then(|call| launch(&session, run, &scoped_edge, &call))
+            request(&clock, &cancel).and_then(|call| launch(&session, run, edge, &call))
         } else {
             Ok(Vec::new())
         };
@@ -193,13 +164,13 @@ pub(super) fn reconcile_inner(
                 ) {
                     *fenced = true;
                 }
-                human.push_str(&format!("{run}/{id} {}\n", reconcile_summary(state)));
+                human.push_str(&format!("{id} {}\n", reconcile_summary(state)));
                 json!({ "attempt_id": id, "found": state })
             })
             .collect();
         *fenced |= !unknown.is_empty() || launch_error.is_some();
         rows.push(json!({
-            "run_id": run,
+            "attempt_id": run,
             "attempts": attempts,
             "launched": launched,
             "launch_unknown": unknown,
@@ -208,42 +179,28 @@ pub(super) fn reconcile_inner(
         }));
     }
     if rows.is_empty() {
-        human.push_str("no open runs\n");
+        human.push_str("no open attempts\n");
     }
     if truncated {
         human.push_str(&format!(
-            "more than {SCAN} open runs; name the rest with --id\n"
+            "more than {SCAN} open attempts; name the rest as targets\n"
         ));
     }
     let session = open(edge, &request(&clock, &cancel)?)?;
-    visited
-        .entry(session.context.project_id)
-        .or_insert(session.context);
-    let mut reservations = provenant_supervisor::custody::ReservationListing::default();
-    for context in visited.values() {
-        let call = request(&clock, &cancel)?;
-        let listing = (|| -> Result<_, run::RunError> {
-            let store = run::RunStore::open_read_only(context, &call)?
-                .ok_or(run::RunError::NotFound)?
-                .with_writer_registry(context.state_root.as_path());
-            store.writer_fence_listing()
-        })();
-        match listing {
-            Ok(listing) => {
-                reservations.reservations.extend(listing.reservations);
-                reservations.issues.extend(listing.issues);
-            }
-            Err(error) => {
-                reservations
-                    .issues
-                    .push(provenant_supervisor::custody::ReservationIssue {
-                        reservation: reservation_root(context),
-                        reason: error.to_string(),
-                    })
-            }
+    let listing = session.store.writer_fence_listing();
+    let mut reservations = match listing {
+        Ok(listing) => listing,
+        Err(error) => {
+            let mut listing = provenant_supervisor::custody::ReservationListing::default();
+            listing
+                .issues
+                .push(provenant_supervisor::custody::ReservationIssue {
+                    reservation: reservation_root(&session.context),
+                    reason: error.to_string(),
+                });
+            listing
         }
-    }
-    reservations.issues.extend(cutover_issues);
+    };
     reservations
         .reservations
         .sort_by(|left, right| left.reservation.cmp(&right.reservation));

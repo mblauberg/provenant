@@ -17,7 +17,6 @@ fn rig() -> Result<TestRig> {
     assert_eq!(code(&output), 0, "{output:?}");
     Ok(rig)
 }
-
 #[test]
 fn offline_pipeline_preserves_unattributed_and_unmeasured_evidence() -> Result {
     let rig = rig()?;
@@ -81,10 +80,20 @@ fn offline_pipeline_preserves_unattributed_and_unmeasured_evidence() -> Result {
 #[test]
 fn unreadable_graph_checkpoint_does_not_abort_pipeline() -> Result {
     let rig = rig()?;
-    terminal_run::seed(
+    let keys = terminal_run::seed(
         &rig,
         "unreadable-graph-fixture",
-        &[json!({"graph_id":"invalid/graph","node_id":"review"})],
+        &[json!({"graph_id":"unreadable-graph","node_id":"review"})],
+    )?;
+    let key = keys.first().ok_or("fixture work key")?;
+    let graph_dir = rig
+        .state
+        .join("fabric/graphs")
+        .join(key.project().to_string());
+    std::fs::create_dir_all(&graph_dir)?;
+    std::fs::write(
+        graph_dir.join(format!("graph-{}.json", key.graph())),
+        b"not a checkpoint",
     )?;
     let output = rig.command(&[
         "telemetry",
@@ -105,12 +114,15 @@ fn unreadable_graph_checkpoint_does_not_abort_pipeline() -> Result {
 }
 
 #[test]
-fn repeated_node_labels_without_a_graph_preserve_each_unattributed_row() -> Result {
+fn repeated_node_labels_in_distinct_graphs_preserve_each_unattributed_row() -> Result {
     let rig = rig()?;
     terminal_run::seed(
         &rig,
         "unattributed-fixture",
-        &[json!({"node_id":"review"}), json!({"node_id":"review"})],
+        &[
+            json!({"graph_id":"graph-one","node_id":"review"}),
+            json!({"graph_id":"graph-two","node_id":"review"}),
+        ],
     )?;
     let output = rig.command(&[
         "telemetry",
@@ -122,8 +134,20 @@ fn repeated_node_labels_without_a_graph_preserve_each_unattributed_row() -> Resu
     ])?;
     assert_eq!(code(&output), 0, "{output:?}");
     let report: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let rows = report["data"]["pipeline"]["outcomes"]["rows"]
+        .as_array()
+        .ok_or("missing outcome rows")?;
+    let graphs = rows
+        .iter()
+        .map(|row| row["evidence"]["graph"].as_str().ok_or("missing graph"))
+        .collect::<std::result::Result<std::collections::BTreeSet<_>, _>>()?;
     assert_eq!(
-        report["data"]["pipeline"]["outcomes"]["unattributed_rows"], 2,
+        graphs,
+        std::collections::BTreeSet::from(["graph-one", "graph-two"])
+    );
+    assert_eq!(
+        report["data"]["pipeline"]["outcomes"]["unattributed_rows"],
+        rows.len(),
         "{report}"
     );
     Ok(())
@@ -195,58 +219,5 @@ fn stats_reports_route_access_effort_outcomes_and_nonrandom_comparison() -> Resu
     assert!(human.contains("access=read-only effort=unknown n=1"));
     assert!(!human.contains("cost"));
     assert!(human.contains("time/success_ms=unknown"));
-    Ok(())
-}
-
-#[test]
-fn backfill_copies_each_attempt_once_and_outlives_the_run_store() -> Result {
-    let rig = rig()?;
-    terminal_run::seed(&rig, "backfill-fixture", &[Value::Null, Value::Null])?;
-    let output = rig.command(&["telemetry", "stats", "--json"])?;
-    assert_eq!(code(&output), 0, "{output:?}");
-    let report: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    let totals = &report["data"]["totals"];
-    let backfill = |rig: &TestRig| -> Result<Value> {
-        let output = rig.command(&["telemetry", "backfill", "--json"])?;
-        assert_eq!(code(&output), 0, "{output:?}");
-        Ok(serde_json::from_slice::<Value>(&output.stdout.bytes)?["data"].clone())
-    };
-    let first = backfill(&rig)?;
-    assert_eq!(first["added"], 2, "{first}");
-    assert_eq!(first["added"], totals["attempts"]);
-    let ledger = provenant_telemetry::ledger::read(&rig.state)?;
-    assert!(ledger.unrecognised.is_empty(), "{:?}", ledger.unrecognised);
-    assert!(totals.get("cost").is_none(), "stats no longer reports cost");
-    let cost = rig.command(&["telemetry", "cost", "--json"])?;
-    assert_eq!(code(&cost), 0, "{cost:?}");
-    let cost: Value = serde_json::from_slice(&cost.stdout.bytes)?;
-    assert_eq!(cost["data"]["totals"]["attempts"], 2, "{cost}");
-    assert!(
-        ledger
-            .rows
-            .iter()
-            .all(|row| row.labels.run.is_some() && row.labels.task.is_some())
-    );
-    let second = backfill(&rig)?;
-    assert_eq!(
-        (&second["added"], &second["present"]),
-        (&json!(0), &json!(2))
-    );
-    // Deleting the run store leaves the ledger whole.
-    for name in ["run.sqlite3", "run.sqlite3-wal", "run.sqlite3-shm"] {
-        match std::fs::remove_file(rig.state.join(name)) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
-            _ => {}
-        }
-    }
-    let after = backfill(&rig)?;
-    assert_eq!(
-        (&after["attempts"], &after["ledger_rows"]),
-        (&json!(0), &json!(2))
-    );
-    assert_eq!(
-        provenant_telemetry::ledger::read(&rig.state)?.rows,
-        ledger.rows
-    );
     Ok(())
 }

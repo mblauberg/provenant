@@ -1,6 +1,6 @@
-//! One typed execution API for command and MCP edges.
+//! One typed execution API for the command edge.
 use crate::*;
-use provenant_core::{AttemptId, CancelToken, OperationId, RunId};
+use provenant_core::{AttemptId, CancelToken, OperationId};
 use provenant_records::CanonicalV1;
 use std::path::Path;
 
@@ -8,7 +8,7 @@ use std::path::Path;
 /// They never enter the canonical request or an accepted operation's identity.
 #[derive(Clone, Debug, Default)]
 pub struct RefusalContext {
-    pub chair: Option<ChairBinding>,
+    pub chair: Option<Chair>,
     pub intent_digest: Option<provenant_core::Digest>,
 }
 
@@ -45,44 +45,6 @@ impl Service<'_> {
             LaneClass::ReadOnly
         }
     }
-
-    /// Resolve a bare ID, accepting runs only where the operation allows them.
-    /// Run and attempt IDs share a wire format, so a collision is ambiguous.
-    pub fn resolve_target(
-        &self,
-        id: AttemptId,
-        allow_run: bool,
-        call: &Request<'_>,
-    ) -> Result<LaneTarget> {
-        let attempt = match self.store.record(id, call) {
-            Ok(record) => Some(record),
-            Err(RunError::NotFound) => None,
-            Err(error) => return Err(error),
-        };
-        let run = if allow_run {
-            match self.store.run(RunId::from_bytes(*id.as_bytes()), call) {
-                Ok(record) => Some(record),
-                Err(RunError::NotFound) => None,
-                Err(error) => return Err(error),
-            }
-        } else {
-            None
-        };
-        match (attempt, run) {
-            (Some(_), Some(_)) => Err(RunError::Conflict),
-            (Some(record), None) => Ok(LaneTarget {
-                run: record.run_id,
-                task: Some(record.task_id),
-                attempt: Some(id),
-            }),
-            (None, Some(record)) => Ok(LaneTarget {
-                run: record.run_id,
-                task: None,
-                attempt: None,
-            }),
-            (None, None) => Err(RunError::NotFound),
-        }
-    }
 }
 impl<'a> Service<'a> {
     pub fn new(store: &'a RunStore) -> Self {
@@ -102,7 +64,7 @@ impl<'a> Service<'a> {
         input: DispatchRequest,
         cwd: &std::path::Path,
         call: &Request<'_>,
-    ) -> Result<RunRecord> {
+    ) -> Result<AttemptRecord> {
         // Reuse the originally resolved boundary before consulting Git. Retrying
         // the same operation must work even after its caller-supplied ref vanishes.
         let operation = self.store.operation(&input.operation_id, call)?;
@@ -122,7 +84,11 @@ impl<'a> Service<'a> {
         }
         let previous = match &operation {
             Some(operation) if operation.state == OperationState::Refused => None,
-            Some(operation) => match self.store.request(operation.run_id, call) {
+            Some(operation) => match self
+                .store
+                .operation_attempt(&input.operation_id, call)
+                .and_then(|attempt| self.store.request(attempt, call))
+            {
                 Ok(request) => Some(request),
                 // A prepared operation may have crashed before request publication;
                 // leave its existing adoption/repair path to RunStore::create.
@@ -131,12 +97,11 @@ impl<'a> Service<'a> {
             },
             None => None,
         };
-        let mut requests = Vec::new();
-        let mut attempts = Vec::new();
-        let mut contribution_branches = std::collections::BTreeMap::new();
+        let mut contribution_branch = None;
         let mut nested_refusal = None;
-        // Refuse every task's unsupported launch before any task prepares a writer.
-        for task in &input.tasks {
+        // Refuse an unsupported launch or a secret prompt before preparing a writer.
+        {
+            let task = &input.task;
             let route = Self::route(task.route.clone())?;
             if let Err(error) = check_launch_capabilities(task, &route) {
                 if input.parent_attempt.is_none() {
@@ -145,9 +110,8 @@ impl<'a> Service<'a> {
                 nested_refusal.get_or_insert((error, task.worktree.clone()));
             }
         }
-        // Scan every prompt before preparing any writer. A later task must not
-        // leave an earlier task's writer behind when its input is refused.
-        for task in &input.tasks {
+        {
+            let task = &input.task;
             if let Err(error) = Self::scan(&task.prompt) {
                 if input.parent_attempt.is_none() {
                     return self.preflight_refusal(&input, task, cwd, error, call);
@@ -155,7 +119,8 @@ impl<'a> Service<'a> {
                 nested_refusal.get_or_insert((error, task.worktree.clone()));
             }
         }
-        for mut task in input.tasks {
+        let (request, prompt) = {
+            let mut task = input.task;
             if task
                 .context
                 .as_ref()
@@ -202,20 +167,14 @@ impl<'a> Service<'a> {
                     Ok::<_, RunError>(writer)
                 })
                 .transpose()?;
-            // Preserve the sealed request and authority digest across custody metadata
-            // upgrades. Only the absent legacy attribution binding is equivalent.
+            // Preserve the sealed request and authority digest only when the
+            // complete current writer identity still matches.
             if let Some(saved) = previous
                 .as_ref()
-                .and_then(|request| {
-                    request
-                        .tasks
-                        .iter()
-                        .find(|prior| prior.task_id == task.task_id)
-                })
-                .and_then(|task| task.writer.as_ref())
-                && writer.as_ref().is_some_and(|resolved| {
-                    equivalent_writer(saved, resolved, self.store.context.project_id)
-                })
+                .and_then(|request| request.task.writer.as_ref())
+                && writer
+                    .as_ref()
+                    .is_some_and(|resolved| equivalent_writer(saved, resolved))
             {
                 writer = Some(saved.clone());
             }
@@ -242,27 +201,21 @@ impl<'a> Service<'a> {
                     )?,
                 };
                 if let Some(branch) = branch {
-                    contribution_branches.insert(
-                        task.task_id,
-                        (
-                            branch.as_str().trim_start_matches("refs/heads/").to_owned(),
-                            if writer.is_some() {
-                                "worker"
-                            } else {
-                                "read_only"
-                            },
-                        ),
-                    );
+                    contribution_branch = Some((
+                        branch.as_str().trim_start_matches("refs/heads/").to_owned(),
+                        if writer.is_some() {
+                            "worker"
+                        } else {
+                            "read_only"
+                        },
+                    ));
                 }
             }
             let base_ref = task.base.clone();
-            let prior = previous.as_ref().and_then(|request| {
-                request.tasks.iter().find(|prior| {
-                    prior.task_id == task.task_id
-                        && prior.base_ref == base_ref
-                        && prior.head == task.head
-                })
-            });
+            let prior = previous
+                .as_ref()
+                .map(|request| &request.task)
+                .filter(|prior| prior.base_ref == base_ref && prior.head == task.head);
             let git_cwd = writer.as_ref().map_or_else(
                 || {
                     task.access
@@ -359,13 +312,12 @@ impl<'a> Service<'a> {
             )
             .map_err(|error| input_error(ErrorKind::Io, error.to_string()))?;
 
-            requests.push(TaskRequest {
+            let mut request = TaskRequest {
                 context: task.context,
                 extra: Default::default(),
                 build_heavy: task.build_heavy,
                 title: task.title,
                 profile: task.profile,
-                task_id: task.task_id,
                 prompt_digest: CanonicalV1::file_digest(task.prompt.as_bytes()),
                 base_ref,
                 base,
@@ -379,57 +331,42 @@ impl<'a> Service<'a> {
                 delivery_id: task.delivery_id,
                 deliver: task.deliver,
                 access: task.access,
-            });
-            attempts.push(NewAttempt {
-                attempt_id: fresh(AttemptId::from_bytes)?,
-                task_id: task.task_id,
-                prompt: task.prompt,
-            });
-        }
-        let mut prepared = PreparedRun {
-            run_id: fresh(RunId::from_bytes)?,
+            };
+            let policy_project = self.store.context.project_id.to_string();
+            request.profile.extra.insert(
+                "policy_project".into(),
+                serde_json::json!(policy_project.clone()),
+            );
+            let policy =
+                crate::launch_policy(self.store.writer_registry(), &policy_project, &request);
+            request.profile.extra.insert(
+                "launch_policy".into(),
+                serde_json::to_value(policy)
+                    .map_err(|_| RunError::Validation("launch policy snapshot"))?,
+            );
+            (request, task.prompt)
+        };
+        let prepared = PreparedRun {
+            attempt_id: fresh(AttemptId::from_bytes)?,
             operation_id: input.operation_id,
             request: CanonicalRequest {
                 extra: Default::default(),
-                child_attempt_id_version: previous
-                    .as_ref()
-                    .map_or(input.parent_attempt.map(|_| 1), |request| {
-                        request.child_attempt_id_version
-                    }),
                 chair: previous
                     .as_ref()
                     .map_or(input.chair, |request| request.chair.clone()),
                 fresh_continuation: None,
                 schema_version: 1,
-                tasks: requests,
-                concurrency: input.concurrency,
+                task: request,
                 parent: None,
                 lane_depth: Some(input.lane_depth),
                 parent_attempt: input.parent_attempt,
             },
-            attempts,
+            prompt,
             created_at: call
                 .clock
                 .wall_now()
                 .map_err(|_| RunError::Validation("wall clock"))?,
         };
-        if let Some(id) = crate::correlation::child_run_id(
-            self.store.context.project_id,
-            &prepared.request,
-            &prepared.operation_id,
-        )? {
-            prepared.run_id = id;
-        }
-        for attempt in &mut prepared.attempts {
-            if let Some(id) = crate::correlation::child_attempt_id(
-                self.store.context.project_id,
-                prepared.run_id,
-                &prepared.request,
-                attempt.task_id,
-            )? {
-                attempt.attempt_id = id;
-            }
-        }
         if let Some((error, worktree)) = nested_refusal {
             let diagnostic = ErrorKind::from(&error)
                 .diagnostic()
@@ -456,19 +393,13 @@ impl<'a> Service<'a> {
             )));
         }
         let record = self.store.create(&prepared, call)?;
-        if !contribution_branches.is_empty() {
-            let captured = (|| {
-                let db = Contributions::open(self.store.writer_registry(), call)?;
-                // Read the accepted run, including on operation replay. Newly
-                // generated candidate IDs are not authoritative after create.
-                for attempt in self.store.contribution_attempts(record.run_id, call)? {
-                    if let Some((branch, role)) = contribution_branches.get(&attempt.task_id) {
-                        db.capture(&attempt, branch, role, call)?;
-                    }
-                }
-                Ok(())
-            })();
-            self.store.contribution_diagnostic(record.run_id, captured);
+        if let Some((branch, role)) = contribution_branch {
+            // Capture the accepted attempt, including on operation replay. A
+            // newly generated candidate ID is not authoritative after create.
+            let captured = Contributions::open(self.store.writer_registry(), call)
+                .and_then(|db| db.capture(&record, &branch, role, call));
+            self.store
+                .contribution_diagnostic(record.attempt_id, captured);
         }
         Ok(record)
     }
@@ -479,7 +410,7 @@ impl<'a> Service<'a> {
         cwd: &Path,
         error: RunError,
         call: &Request<'_>,
-    ) -> Result<RunRecord> {
+    ) -> Result<AttemptRecord> {
         let mut extra = provenant_records::ExtraFields::default();
         extra.insert("preflight_digest_version".into(), serde_json::json!(1));
         if let Some(notice) = task.profile.knobs.get("chair.refusal_notice") {
@@ -505,7 +436,6 @@ impl<'a> Service<'a> {
             operation_id: input.operation_id.clone(),
             kind: OperationKind::Dispatch,
             request_digest: preflight_digest(input, cwd)?,
-            run_id: fresh(RunId::from_bytes)?,
             state: OperationState::Refused,
             blocked_reason: None,
             refusal: Some(diagnostic),
@@ -517,7 +447,9 @@ impl<'a> Service<'a> {
             ),
             refusal_chair: self.refusal.chair.clone().or_else(|| input.chair.clone()),
         };
-        let saved = self.store.insert_refusal(record, call)?;
+        // A launch is refused under the work key it would have taken.
+        let key = crate::store::work_key(self.store.context.project_id, task.context.as_ref())?;
+        let saved = self.store.insert_refusal_under(&key, record, call)?;
         if saved.state != OperationState::Refused {
             return Err(RunError::OperationConflict);
         }
@@ -647,7 +579,7 @@ impl<'a> Service<'a> {
                 Some(!self.store.custody_released(&record, call).unwrap_or(false));
             let restored = self
                 .store
-                .attempt_dir(record.run_id, record.attempt_id, false)
+                .attempt_dir(record.attempt_id, false)
                 .ok()
                 .and_then(|attempt| {
                     crate::artifacts::read_sealed_observed(
@@ -696,31 +628,21 @@ impl<'a> Service<'a> {
         self.store
             .read_output(id, part, range, &self.store.context, call)
     }
-    /// Bind a cancel operation to its target once per command, before any
-    /// attempt is asked to stop.
-    pub fn bind_cancel(
-        &self,
-        operation: &OperationId,
-        target: &str,
-        call: &Request<'_>,
-    ) -> Result<()> {
-        self.store.bind_cancel(operation, target, call)
-    }
     pub fn cancel(&self, id: AttemptId, reason: &str, call: &Request<'_>) -> Result<CancelReceipt> {
         self.store.cancel(id, reason, call)
     }
     pub fn start(
         &self,
-        run: RunId,
+        attempt: AttemptId,
         providers: &dyn Providers,
         holder: &dyn Fn(&AttemptRecord, provenant_core::ActorId) -> Result<Vec<u8>>,
         expected: &CanonicalRequest,
         call: &Request<'_>,
     ) -> Result<Vec<Started>> {
         self.store
-            .start_checked(run, expected, providers, holder, call)
+            .start_checked(attempt, expected, providers, holder, call)
     }
-    pub fn resume(&self, input: &Resume, call: &Request<'_>) -> Result<RunRecord> {
+    pub fn resume(&self, input: &Resume, call: &Request<'_>) -> Result<AttemptRecord> {
         Self::scan(&input.prompt)?;
         self.store.resume(input, call)
     }
@@ -743,11 +665,11 @@ impl<'a> Service<'a> {
     }
     pub fn reconcile(
         &self,
-        run: RunId,
+        attempt: AttemptId,
         providers: &dyn Providers,
         call: &Request<'_>,
     ) -> Result<Vec<(AttemptId, Reconciled)>> {
-        self.store.reconcile(run, providers, call)
+        self.store.reconcile(attempt, providers, call)
     }
 }
 
@@ -787,6 +709,7 @@ error_kinds! {
     WorktreeUnregistered => "WORKTREE_UNREGISTERED", "The worktree is not registered with Provenant.";
     OperationConflict => "OPERATION_CONFLICT", "The operation ID was already used for a different request.";
     NotFound => "NOT_FOUND", "No run record matches in this scope.";
+    AmbiguousTarget => "AMBIGUOUS_TARGET", "The target names more than one node; name one of the listed nodes.";
     Nonterminal => "NONTERMINAL", "The attempt has not finished.";
     ProviderStateExpired => "PROVIDER_STATE_EXPIRED", "Retention removed the provider state this attempt needs to resume.";
     Conflict => "CONFLICT", "The run record changed concurrently or is immutable.";
@@ -834,7 +757,7 @@ error_kinds! {
     CredentialRoot => "CREDENTIAL_ROOT", "A requested grant overlaps a credential root.";
     WriterProjectMismatch => "WRITER_PROJECT_MISMATCH", "The writer worktree belongs to a different project than the selected one.";
     Confinement => "CONFINEMENT", "Confinement refused the requested access.";
-    DiskFloor => "DISK_FLOOR", "Free disk space is below gc.free_floor; run `provenant gc --apply`.";
+    DiskFloor => "DISK_FLOOR", "Free disk space is below gc.critical_free; run `provenant gc --apply`.";
     Processes => "HOST_PROCESSES", "The user process limit has insufficient headroom.";
     MemoryPressure => "MEMORY_PRESSURE", "Host memory pressure is too high to admit a lane.";
     MemoryFloor => "MEMORY_FLOOR", "Available host memory is below the advisory admission floor.";
@@ -877,6 +800,7 @@ impl ErrorKind {
             Self::Invalid
             | Self::OperationConflict
             | Self::NotFound
+            | Self::AmbiguousTarget
             | Self::WorktreeMissing
             | Self::UnknownAccount
             | Self::SharedSettingsNeverSynced
@@ -1005,7 +929,6 @@ pub struct DispatchTask {
     pub context: Option<provenant_records::run::WorkContext>,
     pub build_heavy: bool,
     pub title: Option<String>,
-    pub task_id: provenant_core::TaskId,
     pub prompt: String,
     pub base: Option<String>,
     /// Commit pinned by owned worktree creation. Keep `base` for replay comparison.
@@ -1023,10 +946,9 @@ pub struct DispatchTask {
     pub access: LaneAccess,
 }
 pub struct DispatchRequest {
-    pub chair: Option<ChairBinding>,
+    pub chair: Option<Chair>,
     pub operation_id: OperationId,
-    pub tasks: Vec<DispatchTask>,
-    pub concurrency: u64,
+    pub task: DispatchTask,
     pub lane_depth: u64,
     pub parent_attempt: Option<AttemptId>,
 }
@@ -1035,13 +957,7 @@ fn preflight_digest(input: &DispatchRequest, cwd: &Path) -> Result<provenant_cor
     Ok(CanonicalV1::record_digest(
         "dispatch-preflight",
         1,
-        &(
-            &input.tasks,
-            input.concurrency,
-            input.lane_depth,
-            input.parent_attempt,
-            cwd,
-        ),
+        &(&input.task, input.lane_depth, input.parent_attempt, cwd),
     )?)
 }
 fn input_error(kind: ErrorKind, message: impl Into<String>) -> RunError {
@@ -1091,8 +1007,6 @@ fn check_launch_capabilities(task: &DispatchTask, route: &RequestedRoute) -> Res
 #[cfg(test)]
 mod target_tests {
     use super::*;
-    use crate::tests::{call, clock, context, input};
-    use provenant_core::CancelToken;
 
     #[test]
     fn registry_lock_contention_is_distinct_from_a_live_writer() {
@@ -1113,48 +1027,5 @@ mod target_tests {
             ErrorKind::from(&RunError::Writer(WorktreeError::UnknownWriter)),
             ErrorKind::WriterUnknown
         );
-    }
-
-    #[test]
-    fn bare_target_resolves_attempts_and_unambiguous_runs()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let (clock, cancel) = (clock(), CancelToken::new());
-        let call = call(&clock, &cancel);
-        let store = RunStore::open(&context(temp.path())?, &call)?;
-        let first = input();
-        store.create(&first, &call)?;
-        let service = Service::new(&store);
-        let attempt_id = first.attempts[0].attempt_id;
-        let attempt = service.resolve_target(attempt_id, true, &call)?;
-        assert_eq!(attempt.run, first.run_id);
-        assert_eq!(attempt.attempt, Some(attempt_id));
-        let run_id = AttemptId::from_bytes(*first.run_id.as_bytes());
-        let run = service.resolve_target(run_id, true, &call)?;
-        assert_eq!(run.run, first.run_id);
-        assert_eq!(run.attempt, None);
-        assert!(matches!(
-            service.resolve_target(run_id, false, &call),
-            Err(RunError::NotFound)
-        ));
-        assert!(matches!(
-            service.resolve_target(AttemptId::from_bytes([9; 16]), true, &call),
-            Err(RunError::NotFound)
-        ));
-
-        let mut colliding = input();
-        colliding.operation_id = OperationId::parse("colliding")?;
-        colliding.run_id = RunId::from_bytes(*attempt_id.as_bytes());
-        colliding.attempts[0].attempt_id = AttemptId::from_bytes([8; 16]);
-        store.create(&colliding, &call)?;
-        assert!(matches!(
-            service.resolve_target(attempt_id, true, &call),
-            Err(RunError::Conflict)
-        ));
-        assert_eq!(
-            service.resolve_target(attempt_id, false, &call)?.attempt,
-            Some(attempt_id)
-        );
-        Ok(())
     }
 }

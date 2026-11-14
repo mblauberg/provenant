@@ -151,7 +151,7 @@ pub fn main() -> std::process::ExitCode {
             ExitCode::SUCCESS
         }
         // The compose fixture's lanes run in its `compose` worktree; other
-        // provider fixtures exercise lane MCP and nesting.
+        // provider fixtures exercise lane startup and nesting.
         Some("exec")
             if std::env::current_dir().is_ok_and(|cwd| cwd.ends_with(".worktrees/compose")) =>
         {
@@ -271,7 +271,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "existing_branch_with_base_names_the_repair_in_json_and_human_output",
             "create_from_remote_base_reports_ok_and_exists",
             "create_list_and_remove_a_managed_worktree",
-            "project_setup_runs_once_and_failure_retains_the_worktree",
+            "naming_and_post_create_ports_are_advisory_and_evidenced",
             "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache",
             "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_locks",
             "gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks",
@@ -388,8 +388,8 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "create_list_and_remove_a_managed_worktree" => {
                     create_list_and_remove_a_managed_worktree()
                 }
-                "project_setup_runs_once_and_failure_retains_the_worktree" => {
-                    project_setup_runs_once_and_failure_retains_the_worktree()
+                "naming_and_post_create_ports_are_advisory_and_evidenced" => {
+                    naming_and_post_create_ports_are_advisory_and_evidenced()
                 }
                 "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache" => {
                     gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache()
@@ -629,19 +629,19 @@ impl provenant_supervisor::Holder for FixtureHolder<'_> {
 pub(super) fn writer_process_cleanup(
     context: &provenant_run::ExecutionContext,
 ) -> provenant_supervisor::fixture::ProcessCleanupGuard {
-    // Guardian records live under runs, alongside worktree metadata and child stores.
+    // Guardian records live under the state root, alongside worktree metadata and attempt state.
     provenant_supervisor::fixture::ProcessCleanupGuard::new(context.state_root.as_path())
 }
 
 pub(super) fn start_writer(
     store: &provenant_run::RunStore,
-    run: provenant_core::RunId,
+    attempt: provenant_core::AttemptId,
     provider: &dyn provenant_run::Providers,
     holder: &dyn Fn(&provenant_run::AttemptRecord) -> provenant_run::Result<Vec<u8>>,
     call: &provenant_run::Request<'_>,
 ) -> Result<Vec<provenant_run::Started>> {
     Ok(store.start_with_writer_lease(
-        run,
+        attempt,
         provider,
         &|record, _| holder(record),
         &|directory, scope, binding| {
@@ -676,6 +676,79 @@ pub(super) fn writer_context(
     Ok((roots, context))
 }
 
+/// CLI targets resolve through a graph's checkpoint. Record graph `graph` with
+/// one read-only node `node` whose first attempt is `attempt` on this host, so
+/// `graph/node` names an attempt the fixture dispatched directly.
+pub(super) fn seed_graph_checkpoint(
+    rig: &TestRig,
+    context: &provenant_run::ExecutionContext,
+    graph: &str,
+    node: &str,
+    attempt: provenant_core::AttemptId,
+) -> Result {
+    use provenant_core::{CancelToken, WaitBudget};
+    use provenant_fabric_runtime::graph::{
+        AccessMode, AttemptKey, AttemptObservation, AttemptOwner, FileJournal, GraphDocument,
+        GraphExecution, GraphRoute, NodeInput, Replay,
+    };
+    struct Pending(String, String);
+    impl AttemptOwner for Pending {
+        type Error = std::io::Error;
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
+        fn actor(&self) -> String {
+            self.0.clone()
+        }
+        fn observe_or_start(
+            &mut self,
+            _key: &AttemptKey,
+            _node: NodeInput<'_>,
+            _route: &GraphRoute,
+            _access: AccessMode,
+            _worktree: Option<&str>,
+            _replay: Replay<'_>,
+        ) -> std::io::Result<AttemptObservation> {
+            Ok(AttemptObservation::Pending {
+                attempt_ref: Some(self.1.clone()),
+            })
+        }
+    }
+    let (roots, _) = writer_context(rig)?;
+    let host = provenant_cli::fabric::Context::open(roots, &rig.home, &rig.project)?
+        .identity
+        .host;
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":1,"graph_id":graph,
+        "nodes":[{"id":node,"access":"read_only","prompt":"fixture","route":{"alias":"senior"}}]
+    }))?;
+    let mut journal = FileJournal::open(
+        &context.state_root,
+        context.project_id,
+        graph,
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    journal.bind(GraphExecution {
+        extra: Default::default(),
+        bases: None,
+        directory: rig.project.clone(),
+        document: document.clone(),
+    })?;
+    provenant_fabric_runtime::graph::advance_with_budget(
+        &document,
+        &mut Pending(context.actor_id.to_string(), format!("{host}/{attempt}")),
+        &mut journal,
+        &Default::default(),
+        &Default::default(),
+    )?;
+    Ok(())
+}
+
 fn writer_call<'a>(
     clock: &'a provenant_os::clock::SystemClock,
     cancel: &'a provenant_core::CancelToken,
@@ -704,21 +777,24 @@ pub(super) fn writer_run(
     seed: u8,
     prompt: &str,
 ) -> Result<provenant_run::PreparedRun> {
-    let task = provenant_core::TaskId::from_bytes([seed; 16]);
     let attempt = provenant_core::AttemptId::from_bytes([seed.wrapping_add(1); 16]);
     let prompt_digest = provenant_records::CanonicalV1::file_digest(prompt.as_bytes());
     let clock = provenant_os::clock::SystemClock::new();
     Ok(provenant_run::PreparedRun {
-        run_id: provenant_core::RunId::from_bytes([seed.wrapping_add(2); 16]),
+        attempt_id: attempt,
         operation_id: provenant_core::OperationId::parse(operation)?,
         request: provenant_run::CanonicalRequest {
             extra: Default::default(),
-            child_attempt_id_version: None,
             chair: None,
             fresh_continuation: None,
             schema_version: 1,
-            tasks: vec![provenant_run::TaskRequest {
-                context: None,
+            task: provenant_run::TaskRequest {
+                context: Some(provenant_run::WorkContext {
+                    graph_id: Some(format!("lane-{attempt}")),
+                    node_id: Some("writer".into()),
+                    attempt: Some(1),
+                    ..Default::default()
+                }),
                 extra: Default::default(),
                 build_heavy: false,
                 title: None,
@@ -728,7 +804,6 @@ pub(super) fn writer_run(
                 base_ref: None,
                 account: None,
                 profile: provenant_run::HarnessProfile::default(),
-                task_id: task,
                 prompt_digest,
                 route: provenant_run::RequestedRoute::Model {
                     extra: Default::default(),
@@ -742,17 +817,12 @@ pub(super) fn writer_run(
                 delivery_id: None,
                 deliver: None,
                 access: Default::default(),
-            }],
-            concurrency: 1,
+            },
             parent: None,
             lane_depth: Some(1),
             parent_attempt: None,
         },
-        attempts: vec![provenant_run::NewAttempt {
-            attempt_id: attempt,
-            task_id: task,
-            prompt: prompt.into(),
-        }],
+        prompt: prompt.into(),
         created_at: clock.wall_now()?,
     })
 }
@@ -770,105 +840,137 @@ impl provenant_run::Providers for WriterProvider {
         _prompt: &str,
         paths: &provenant_run::LaunchPaths,
         resume: Option<&provenant_run::AttemptRecord>,
-    ) -> std::result::Result<provenant_run::PreparedLaunch, provenant_run::PrepareRefusal> {
-        if resume.is_some() {
-            return Err("writer fixture does not resume".into());
-        }
-        let request = task.writer.as_ref().ok_or("writer request missing")?;
-        let writer = provenant_run::prepare_writer(request, &self.state, self.project)
-            .map_err(|error| error.to_string())?;
-        let git = provenant_os::git::git_executable().ok_or("git")?;
-        if let Some(source) = &task.source_head {
-            writer
-                .require_continuation_source(
-                    &git,
-                    source.parse().map_err(|_| "source")?,
-                    task.head
-                        .as_deref()
-                        .ok_or("predecessor")?
-                        .parse()
-                        .map_err(|_| "head")?,
-                )
+    ) -> std::result::Result<provenant_run::PreparedLaunch, Box<provenant_run::PrepareRefusal>>
+    {
+        (|| -> std::result::Result<provenant_run::PreparedLaunch, Box<dyn std::error::Error>> {
+            if resume.is_some() {
+                return Err("writer fixture does not resume".into());
+            }
+            let request = task.writer.as_ref().ok_or("writer request missing")?;
+            let writer = provenant_run::prepare_writer(request, &self.state, self.project)
                 .map_err(|error| error.to_string())?;
-        } else if let Some(head) = &task.head {
-            writer
-                .require_source(head.parse().map_err(|_| "head")?)
-                .map_err(|error| error.to_string())?;
-        }
-        let executable =
-            fs::canonicalize(std::env::current_exe().map_err(|error| error.to_string())?)
-                .map_err(|error| error.to_string())?;
-        let argv = vec![
-            executable.clone().into_os_string(),
-            OsString::from("--writer-provider"),
-            OsString::from(self.mode),
-            writer.worktree.path().as_os_str().to_owned(),
-        ];
-        // Production lists every other checkout of the repository; the primary
-        // subtree covers each sibling here.
-        let primary = writer
-            .worktree
-            .path()
-            .parent()
-            .and_then(Path::parent)
-            .ok_or("fixture primary")?;
-        let protected = [provenant_confinement::permissions::PathGrant {
-            path: primary.to_owned(),
-            scope: provenant_confinement::permissions::PathScope::Subtree,
-        }];
-        let plan = provenant_cli::run::writer_fixture_plan(
-            self.project,
-            writer.worktree.path(),
-            &self.home,
-            &self.state,
-            &protected,
-            paths,
-            &writer,
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
-        )?;
-        let login = self.home.join(".fixture-login");
-        fs::write(&login, b"").map_err(|error| error.to_string())?;
-        let profile = provenant_confinement::permissions::ProviderProfile {
-            spec: provenant_confinement::permissions::ProviderProfileSpec {
-                authentication: vec![provenant_confinement::permissions::AuthenticationProfile {
-                    keychain: None,
-                    mechanism: "login".into(),
-                    // A placeholder stands in for a login file; no live
-                    // credential is read and this adds no write permission.
-                    roots: vec![provenant_confinement::permissions::PathGrant {
-                        path: login,
+            let git = provenant_os::git::git_executable().ok_or("git")?;
+            if let Some(source) = &task.source_head {
+                writer
+                    .require_continuation_source(
+                        &git,
+                        source.parse().map_err(|_| "source")?,
+                        task.head
+                            .as_deref()
+                            .ok_or("predecessor")?
+                            .parse()
+                            .map_err(|_| "head")?,
+                    )
+                    .map_err(|error| error.to_string())?;
+            } else if let Some(head) = &task.head {
+                writer
+                    .require_source(head.parse().map_err(|_| "head")?)
+                    .map_err(|error| error.to_string())?;
+            }
+            let executable =
+                fs::canonicalize(std::env::current_exe().map_err(|error| error.to_string())?)
+                    .map_err(|error| error.to_string())?;
+            let argv = vec![
+                executable.clone().into_os_string(),
+                OsString::from("--writer-provider"),
+                OsString::from(self.mode),
+                writer.worktree.path().as_os_str().to_owned(),
+            ];
+            // Production lists every other checkout of the repository; the primary
+            // subtree covers each sibling here.
+            let primary = writer
+                .worktree
+                .path()
+                .parent()
+                .and_then(Path::parent)
+                .ok_or("fixture primary")?;
+            let protected = [provenant_confinement::permissions::PathGrant {
+                path: primary.to_owned(),
+                scope: provenant_confinement::permissions::PathScope::Subtree,
+            }];
+            let plan = provenant_cli::run::writer_fixture_plan(
+                self.project,
+                writer.worktree.path(),
+                &self.home,
+                &self.state,
+                &protected,
+                paths,
+                &writer,
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+            )?;
+            let login = self.home.join(".fixture-login");
+            fs::write(&login, b"").map_err(|error| error.to_string())?;
+            let profile = provenant_confinement::permissions::ProviderProfile {
+                spec: provenant_confinement::permissions::ProviderProfileSpec {
+                    authentication: vec![
+                        provenant_confinement::permissions::AuthenticationProfile {
+                            keychain: None,
+                            mechanism: "login".into(),
+                            // A placeholder stands in for a login file; no live
+                            // credential is read and this adds no write permission.
+                            roots: vec![provenant_confinement::permissions::PathGrant {
+                                path: login,
+                                scope: provenant_confinement::permissions::PathScope::Exact,
+                            }],
+                            in_place_writes: Vec::new(),
+                        },
+                    ],
+                    process_executables: vec![provenant_confinement::permissions::PathGrant {
+                        path: executable,
                         scope: provenant_confinement::permissions::PathScope::Exact,
                     }],
-                    in_place_writes: Vec::new(),
-                }],
-                process_executables: vec![provenant_confinement::permissions::PathGrant {
-                    path: executable,
-                    scope: provenant_confinement::permissions::PathScope::Exact,
-                }],
-                ..Default::default()
-            },
-            observations: writer_observations(),
-        };
-        let route = fixture_route();
-        Ok(provenant_run::PreparedLaunch {
-            skipped_routes: Vec::new(),
-            argv,
-            environment: Vec::new(),
-            stdin: Vec::new(),
-            secret_input: None,
-            cwd: writer.worktree.path().to_owned(),
-            route,
-            confinement: Some(provenant_run::LaunchConfinement {
-                plan,
-                profile,
-                writer: Some(writer),
-                home: self.home.clone(),
-                cargo_registry_seed: false,
-                state_root: self.state.clone(),
-                sandboxed: true,
-            }),
-            observed_head: None,
-            repository: None,
+                    ..Default::default()
+                },
+                observations: writer_observations(),
+            };
+            let route = fixture_route();
+            Ok(provenant_run::PreparedLaunch {
+                // Custody refuses a launch without a wall-clock deadline, so
+                // the fixture carries the task's allowance as production does.
+                limits: provenant_records::LaneLimits {
+                    deadline_seconds: Some(provenant_records::Limit::new(
+                        task.provider_timeout_seconds,
+                        provenant_records::LimitSource::Launch,
+                        provenant_records::LimitStrength::Default,
+                    )),
+                    ..Default::default()
+                },
+                skipped_routes: Vec::new(),
+                argv,
+                environment: Vec::new(),
+                stdin: Vec::new(),
+                secret_input: None,
+                cwd: writer.worktree.path().to_owned(),
+                route,
+                confinement: Some(provenant_run::LaunchConfinement {
+                    plan,
+                    profile,
+                    writer: Some(writer),
+                    home: self.home.clone(),
+                    cargo_home: provenant_confinement::cargo::CargoHome::resolve(
+                        &self.home,
+                        |_| None,
+                    )
+                    .unwrap(),
+                    cargo_target_seed: false,
+                    state_root: self.state.clone(),
+                    sandbox: provenant_confinement::run_config::SandboxMode {
+                        requested: true,
+                        effective: true,
+                        source: provenant_confinement::run_config::SandboxSource::Knob,
+                        warning: None,
+                    },
+                    backend: None,
+                }),
+                observed_head: None,
+                repository: None,
+            })
+        })()
+        .map_err(|error| {
+            provenant_run::PrepareRefusal::boxed(
+                provenant_records::run::TerminalCause::HandoffRefused,
+                error.to_string(),
+            )
         })
     }
 
@@ -941,7 +1043,6 @@ pub(super) fn holder_context<'a>(
             roots: seed.clone(),
             project_id: attempt.project_id,
             actor_id: context.actor_id,
-            run_id: attempt.run_id,
             attempt_id: attempt.attempt_id,
             host_delivery: None,
             launch: None,
@@ -1134,7 +1235,12 @@ pub(crate) fn provider(args: &[OsString]) -> Result {
 }
 
 pub(super) fn json(output: &ExecOutcome) -> Result<Value> {
-    Ok(serde_json::from_slice(&output.stdout.bytes)?)
+    // Streaming commands emit event records before the final envelope.
+    serde_json::Deserializer::from_slice(&output.stdout.bytes)
+        .into_iter::<Value>()
+        .collect::<serde_json::Result<Vec<_>>>()?
+        .pop()
+        .ok_or_else(|| "command emitted no JSON result".into())
 }
 
 pub(super) fn ok(rig: &TestRig, args: &[&str]) -> Result<Value> {
@@ -1161,6 +1267,7 @@ fn prepare_lane_cache(rig: &TestRig, path: &Path, branch: &str) -> Result<PathBu
     let runtime = UtilityRuntime::new(
         fs::canonicalize(provenant_os::git::git_executable().ok_or("Git executable unavailable")?)?,
         rig.state.join("utility-home"),
+        &rig.state,
     )?;
     let executor = SystemExecutor::new(1)?;
     let repo = runtime.open_repo(
@@ -1312,34 +1419,16 @@ impl Executor for FixtureCredential {
     }
 }
 
-// Confinement startup exercises the shared graph child request without a
-// launch. The host relay tests own admission, depth limits and cancellation.
-fn assert_lane_child_preview(result: &Value) -> Result {
-    assert!(
-        result.get("isError").is_none_or(|value| value == false),
-        "{result}"
-    );
-    let operation: provenant_fabric_runtime::graph::relay::RelayOp =
-        serde_json::from_value(result["structuredContent"].clone())?;
-    let provenant_fabric_runtime::graph::relay::RelayOp::Add(request) = operation else {
-        return Err(format!("expected a graph child request: {result}").into());
-    };
-    assert_eq!(request.template, "task", "{result}");
-    assert_eq!(request.brief, "read only", "{result}");
-    assert!(!request.writer, "{result}");
+// Confinement startup runs Provenant from inside the lane. Identity is a read
+// of the host's state, so it fails if the profile withholds the Fabric reads.
+fn assert_lane_identity(stdout: &[u8]) -> Result {
+    let line = stdout
+        .split(|byte| *byte == b'\n')
+        .find(|line| line.first() == Some(&b'{'))
+        .ok_or("lane identity output")?;
+    let reply: Value = serde_json::from_slice(line)?;
+    assert!(reply["data"]["host"].is_string(), "{reply}");
     Ok(())
-}
-
-/// Identity reports errors in text; other tools keep structured codes.
-fn mcp_error_code(result: &Value) -> &str {
-    result["structuredContent"]["code"]
-        .as_str()
-        .unwrap_or_else(|| {
-            result["content"][0]["text"]
-                .as_str()
-                .and_then(|text| text.split_once(':'))
-                .map_or("", |(code, _)| code)
-        })
 }
 
 fn age_gc_output(path: &Path) -> Result {

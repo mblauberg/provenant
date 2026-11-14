@@ -1,23 +1,22 @@
-//! The usage ledger: one append-only row per terminal attempt, kept in dated
+//! The usage ledger: one logical row per terminal attempt, kept in dated
 //! segments under the state root with no age limit.
 //!
-//! Settlement appends a row once per attempt, and the format-1 backfill copies
-//! the run store's terminal attempts here, so lane usage outlives the run
+//! Settlement appends a row once per attempt, so lane usage outlives the run
 //! store. Rows are keyed by project and attempt: appending a row already
-//! present adds nothing. A row holds identifiers, route, times, token counts
-//! and the priced cost: never a prompt, a reply or a path.
+//! present adds nothing. Concurrent retries may append duplicate rows; readers
+//! reduce them by project and attempt so spend is counted once. A row holds graph and node identity, route, times,
+//! token counts and the priced cost: never a prompt, a reply or a path.
 //!
 //! Every reader reports a line it does not recognise, by segment and line
 //! number. None is skipped silently.
 use crate::{CostTotal, PriceTable, TelemetryError, reducer::Money, segments};
-use provenant_core::{CancelToken, Clock, DurationMicros, ProjectId, RunId, WaitBudget, WallTime};
-use provenant_os::fs::{Directory, FsError, LockMode};
-use provenant_records::AttemptFact;
+use provenant_core::{CancelToken, Clock, ProjectId, WallTime};
+use provenant_os::fs::{Directory, FsError, ledger::Ledger as JsonLedger};
+use provenant_records::{AccountIdentity, AttemptFact, WorkKey};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
-    io::Write,
     path::Path,
 };
 use thiserror::Error;
@@ -25,11 +24,9 @@ use thiserror::Error;
 /// Directory in the state root holding the segments.
 pub const DIRECTORY: &str = "usage-ledger";
 /// The one row format this build reads and writes.
-pub const FORMAT: &str = "provenant.usage-ledger.v1";
-const LOCK: &str = "ledger.lock";
+pub const FORMAT: &str = "provenant.usage-ledger.v3";
 /// Largest segment read. A segment holds one day of attempts.
 const SEGMENT_CAP: u64 = 64 << 20;
-const LOCK_WAIT_MICROS: u64 = 10_000_000;
 
 #[derive(Debug, Error)]
 pub enum LedgerError {
@@ -57,21 +54,10 @@ impl LedgerError {
 #[serde(rename_all = "snake_case")]
 pub enum Source {
     Settlement,
-    /// Copied from the format-1 run store.
-    Backfill,
-}
-
-/// Format-1 identifiers, kept as opaque text. Nothing parses them back.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Labels {
-    pub run: Option<String>,
-    pub task: Option<String>,
 }
 
 /// Disjoint token counts, as the provider reported them. Unknown stays absent.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Tokens {
     pub uncached_input: Option<u64>,
     pub cache_read: Option<u64>,
@@ -83,7 +69,6 @@ pub struct Tokens {
 
 /// API-equivalent cost at settlement, from the bundled price table.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Cost {
     /// Known cost in millionths of a microdollar, unrounded, so totals round once.
     pub picodollars: u64,
@@ -97,19 +82,17 @@ pub struct Cost {
 
 /// One terminal attempt.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Row {
     pub format: String,
     pub source: Source,
     pub project: ProjectId,
-    pub graph: Option<String>,
-    pub node: Option<String>,
+    pub graph: String,
+    pub node: String,
     pub attempt: String,
-    pub labels: Labels,
     pub provider: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
-    pub account: Option<String>,
+    pub identity: AccountIdentity,
     pub outcome: String,
     pub started: Option<WallTime>,
     pub finished: WallTime,
@@ -148,14 +131,16 @@ impl std::fmt::Display for Unrecognised {
     }
 }
 
-/// Build the row for a terminal attempt. `run` is the format-1 run, kept as a
-/// label. Without a price table the cost stays absent.
+/// Build the row for a terminal attempt using the store's authoritative work
+/// identity. Without a price table the cost stays absent.
 pub fn row(
     fact: &AttemptFact,
-    run: Option<RunId>,
-    source: Source,
+    key: &WorkKey,
     prices: Option<&PriceTable>,
 ) -> Result<Row, TelemetryError> {
+    if key.project() != fact.project_id {
+        return Err(TelemetryError::InvalidFact("work key project mismatch"));
+    }
     let route = fact.resolved_route.as_ref();
     let field = |pick: fn(&provenant_records::RouteFact) -> &Option<String>| {
         route.and_then(|route| pick(route).clone())
@@ -174,7 +159,6 @@ pub fn row(
             })
         })
         .transpose()?;
-    let context = fact.context.as_ref();
     let outcome = serde_json::to_value(fact.terminal_state)
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
@@ -182,19 +166,15 @@ pub fn row(
     let usage = &fact.usage;
     Ok(Row {
         format: FORMAT.into(),
-        source,
+        source: Source::Settlement,
         project: fact.project_id,
-        graph: context.and_then(|c| c.graph_id.clone()),
-        node: context.and_then(|c| c.node_id.clone()),
+        graph: key.graph().to_owned(),
+        node: key.node().to_owned(),
         attempt: fact.attempt_id.to_string(),
-        labels: Labels {
-            run: run.map(|run| run.to_string()),
-            task: Some(fact.task_id.to_string()),
-        },
         provider,
         model,
         effort: field(|r| &r.effort),
-        account: field(|r| &r.account_label),
+        identity: fact.account_identity.clone(),
         outcome,
         started: fact.started_at,
         finished: fact.finished_at,
@@ -221,13 +201,13 @@ pub struct Appended {
     pub unrecognised: Vec<Unrecognised>,
 }
 
-/// Append rows not already in the ledger, under the ledger lock. Creates the
+/// Append rows not already observed in the ledger, without a lock. Creates the
 /// ledger directory, never the state root. Each segment is read once.
 pub fn append(
     state: &Path,
     rows: &[Row],
-    clock: &dyn Clock,
-    cancel: &CancelToken,
+    _clock: &dyn Clock,
+    _cancel: &CancelToken,
 ) -> Result<Appended, LedgerError> {
     let mut appended = Appended::default();
     if rows.is_empty() {
@@ -240,11 +220,6 @@ pub fn append(
         Err(error) => return Err(error.into()),
     }
     let directory = root.open_directory(OsStr::new(DIRECTORY))?;
-    let budget = WaitBudget::up_to(
-        clock.mono_now(),
-        DurationMicros::from_micros(LOCK_WAIT_MICROS),
-    );
-    let _lock = directory.lock(OsStr::new(LOCK), LockMode::Exclusive, budget, cancel, clock)?;
     let mut segments = BTreeMap::<String, Vec<&Row>>::new();
     for row in rows {
         segments.entry(row.segment()).or_default().push(row);
@@ -263,29 +238,25 @@ pub fn append(
             }
         }
         // A torn last line keeps its own line; the new rows start fresh.
-        let mut out = if bytes.last().is_some_and(|last| *last != b'\n') {
+        let mut prefix = if bytes.last().is_some_and(|last| *last != b'\n') {
             vec![b'\n']
         } else {
             Vec::new()
         };
-        let mut added = 0;
+        let ledger = JsonLedger::new(&directory, OsStr::new(&segment));
         for row in rows {
             if held.insert(row.key()) {
-                serde_json::to_writer(&mut out, row)?;
-                out.push(b'\n');
-                added += 1;
+                let mut line = std::mem::take(&mut prefix);
+                serde_json::to_writer(&mut line, row)?;
+                line.push(b'\n');
+                ledger.append(&line)?;
+                appended.added += 1;
             } else {
                 appended.present += 1;
             }
         }
-        if added > 0 {
-            let mut file = directory.open_append(OsStr::new(&segment))?;
-            file.write_all(&out)?;
-            file.sync()?;
-            if created {
-                directory.sync()?;
-            }
-            appended.added += added;
+        if created && appended.added > 0 {
+            directory.sync()?;
         }
     }
     Ok(appended)
@@ -311,7 +282,7 @@ pub fn read(state: &Path) -> Result<Ledger, LedgerError> {
     let mut names = Vec::new();
     for entry in directory.entries()? {
         let entry = entry?;
-        if entry == OsStr::new(LOCK) || entry == "." || entry == ".." {
+        if entry == "." || entry == ".." {
             continue;
         }
         match entry.to_str().filter(|name| segments::is_segment(name)) {
@@ -324,11 +295,25 @@ pub fn read(state: &Path) -> Result<Ledger, LedgerError> {
         }
     }
     names.sort();
+    let mut seen = BTreeMap::<(ProjectId, String), Row>::new();
     for name in names {
         let bytes = read_segment(&directory, &name)?.unwrap_or_default();
-        for line in lines(&name, &bytes) {
+        for (line, number) in lines(&name, &bytes).zip(1u64..) {
             match line {
-                Ok(row) => ledger.rows.push(row),
+                Ok(row) => {
+                    if let Some(prior) = seen.get(&row.key()) {
+                        if prior != &row {
+                            ledger.unrecognised.push(Unrecognised {
+                                segment: name.clone(),
+                                line: Some(number),
+                                reason: "conflicting rows for one attempt".into(),
+                            });
+                        }
+                    } else {
+                        seen.insert(row.key(), row.clone());
+                        ledger.rows.push(row);
+                    }
+                }
                 Err(unrecognised) => ledger.unrecognised.push(unrecognised),
             }
         }

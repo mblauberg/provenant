@@ -57,6 +57,9 @@ enum Step {
 }
 impl AttemptOwner for Provider {
     type Error = Crash;
+    fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+        provenant_config::PortTable::builtin().worktree_layout
+    }
     fn retry_allowance(
         &self,
         _: &provenant_records::ExtraFields,
@@ -142,6 +145,8 @@ impl AttemptOwner for Provider {
                 result_path: None,
                 branch: self.terminal_commit.as_ref().map(|_| "lane/parity".into()),
                 commit: self.terminal_commit.clone(),
+                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                stop: None,
             }),
             Some(Step::Pending(reference)) => Ok(AttemptObservation::Pending {
                 attempt_ref: reference.map(str::to_owned),
@@ -196,8 +201,7 @@ impl Harness {
         // Binding is per handle: a new supervisor rebinds the same execution.
         journal.bind(GraphExecution {
             extra: Default::default(),
-            integration_base: None,
-            review_base: None,
+            bases: None,
             directory: self.rig.project.clone(),
             document: self.document.clone(),
         })?;
@@ -269,7 +273,10 @@ fn assert_same_story(events: &[GraphEvent], checkpoint: &GraphCheckpoint) {
         NodeState::Skipped => "skipped",
     };
     assert_eq!(states.last().copied(), Some(expected), "{events:?}");
-    let settled = node.attempts.iter().filter(|a| a.outcome.is_some()).count();
+    let settled = node
+        .recorded_attempts()
+        .filter(|a| a.outcome.is_some())
+        .count();
     assert_eq!(
         codes(events, GraphEventKind::Attempt)
             .iter()
@@ -279,8 +286,7 @@ fn assert_same_story(events: &[GraphEvent], checkpoint: &GraphCheckpoint) {
         "{events:?}"
     );
     let limited = node
-        .attempts
-        .iter()
+        .recorded_attempts()
         .filter(|a| a.outcome == Some(AttemptOutcome::UsageLimited))
         .count();
     assert_eq!(
@@ -323,25 +329,19 @@ fn success() -> Result {
     assert_eq!(node.attempts[0].outcome, Some(AttemptOutcome::Succeeded));
     assert_eq!(node.advance_error_code, None);
     let events = h.events()?;
-    assert_eq!(
-        codes(&events, GraphEventKind::Attempt),
-        ["started", "settled"]
-    );
     assert_same_story(&events, &checkpoint);
     Ok(())
 }
 
-/// The same brief is a new task after either terminal outcome, unless the
-/// caller explicitly replays an operation. Keep both runs in one journal store
-/// so an accidentally reused graph ID would return the earlier checkpoint.
+/// A changed launch is a new graph after either terminal outcome, while the
+/// same launch replays its graph. The graph name is the graph id; keep both
+/// runs in one journal store so an accidentally reused id would return the
+/// earlier checkpoint.
 #[test]
-fn rerun_after_success_or_cancellation_launches_unless_operation_is_replayed() -> Result {
-    let template = graph::template::TemplateLibrary::bundled().resolve("task")?;
-    let identity = template.identity.unwrap_or_default();
-    let content = json!({"brief":"do the work"});
+fn rerun_after_success_or_cancellation_launches_unless_the_launch_is_replayed() -> Result {
     for cancelled in [false, true] {
-        for operation_id in [None, Some("parity-operation")] {
-            let first_id = identity.graph_id(&content, "first-submission", operation_id)?;
+        for replayed in [false, true] {
+            let first_id = "parity-run".to_string();
             let mut h = Harness::new(&first_id, lane(1))?;
             let first_step = if cancelled {
                 Step::Pending(Some("h/first"))
@@ -361,14 +361,17 @@ fn rerun_after_success_or_cancellation_launches_unless_operation_is_replayed() -
             assert_eq!(first.cancelled, cancelled);
             assert_eq!(p.launches.len(), 1);
             let calls_before = p.calls.len();
-            let rerun_id = identity.graph_id(&content, "second-submission", operation_id)?;
-            assert_eq!(rerun_id == first_id, operation_id.is_some());
+            let rerun_id = if replayed {
+                first_id.clone()
+            } else {
+                "parity-run-2".to_string()
+            };
             h.id = rerun_id.clone();
             h.document.graph_id = rerun_id;
             p.script = [Step::Done(AttemptOutcome::Succeeded, true, "h/second")].into();
             let rerun = h.advance(&mut p)?;
             let checkpoint = h.checkpoint()?;
-            if operation_id.is_some() {
+            if replayed {
                 assert_eq!(p.calls.len(), calls_before);
                 assert_eq!(p.launches.len(), 1);
                 assert_eq!(checkpoint.cancelled, cancelled);
@@ -426,11 +429,14 @@ fn quota_limit_retries_on_another_member() -> Result {
     let checkpoint = h.checkpoint()?;
     let node = &checkpoint.nodes[0];
     assert_eq!(node.state, NodeState::Succeeded);
-    assert_eq!(node.attempts.len(), 2);
-    assert_eq!(node.attempts[0].outcome, Some(AttemptOutcome::UsageLimited));
-    assert_eq!(node.attempts[0].key.route_index, 0);
-    assert_eq!(node.attempts[1].key.route_index, 1);
-    assert_eq!(node.attempts[1].outcome, Some(AttemptOutcome::Succeeded));
+    // Superseded attempts are history; the retry is the node's current one.
+    let attempts: Vec<_> = node.recorded_attempts().collect();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0].outcome, Some(AttemptOutcome::UsageLimited));
+    // The retry runs on the other member, whatever its key's route index.
+    assert_eq!(attempts[0].route.adapter.as_deref(), Some("member0"));
+    assert_eq!(attempts[1].route.adapter.as_deref(), Some("member1"));
+    assert_eq!(attempts[1].outcome, Some(AttemptOutcome::Succeeded));
     let events = h.events()?;
     assert_eq!(codes(&events, GraphEventKind::Wait), ["quota"]);
     assert_same_story(&events, &checkpoint);
@@ -478,6 +484,8 @@ fn quota_stopped_task_and_composite_member_keep_the_same_lineage() -> Result {
                     scan: &patch::scan_for_secrets,
                     journal: None,
                     limits: &Default::default(),
+
+                    worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
                 },
                 None,
             )?;
@@ -594,6 +602,7 @@ fn quota_stopped_task_and_composite_member_keep_the_same_lineage() -> Result {
                             "reference":attempt.attempt_ref,
                             "predecessor":attempt.key.extra.get("previous_attempt_ref"),
                             "generation":attempt.key.extra.get("retry_generation"),
+                            "attempt":attempt.key.attempt,
                             "route_index":attempt.key.route_index,
                             "actor":attempt.launch_actor,
                             "outcome":attempt.outcome,

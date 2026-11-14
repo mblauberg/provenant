@@ -14,6 +14,8 @@ use std::{
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
+    /// No registrations is the default, so a configuration without them reads.
+    #[serde(default)]
     pub entries: std::collections::BTreeMap<String, Registration>,
     /// Claude settings kept identical across account directories.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -36,7 +38,7 @@ pub struct Registration {
     pub adapter: String,
     pub label: String,
     pub key: String,
-    /// Organisation recorded at first validation; absent on legacy records.
+    /// Organisation observed at validation; absent when the provider does not expose it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_fingerprint: Option<String>,
     pub directory: PathBuf,
@@ -82,47 +84,13 @@ pub struct Limits {
     pub weekly_anchor: Option<String>,
 }
 impl Settings {
-    /// The Console's Zen allowance shares a login with Go, but never its quota
-    /// or pacing identity. Derive it in memory without changing registrations.
-    pub fn with_derived_accounts(&self) -> Self {
+    /// One row per registered credential identity; no plan or account is invented.
+    pub fn unique_accounts(&self) -> Self {
         let mut settings = self.clone();
-        for spec in provenant_records::ADAPTER_SPECS {
-            let Some((key, _)) = spec.free_account else {
-                continue;
-            };
-            if settings
-                .entries
-                .values()
-                .any(|entry| entry.adapter == spec.name && entry.key == key)
-            {
-                continue;
-            }
-            let Some(mut entry) = settings
-                .entries
-                .values()
-                .find(|entry| entry.adapter == spec.name)
-                .cloned()
-            else {
-                continue;
-            };
-            entry.key = key.into();
-            entry.label = key.into();
-            entry.plan = None;
-            entry.plans.clear();
-            entry.directories.clear();
-            entry.limits = None;
-            entry.billing_anchor = None;
-            entry.display_name = None;
-            entry.hidden = false;
-            entry.order = None;
-            entry.headline = None;
-            entry.settings.clear();
-            let mut id = format!("{}-{key}", spec.name);
-            while settings.entries.contains_key(&id) {
-                id.push('_');
-            }
-            settings.entries.insert(id, entry);
-        }
+        let mut identities = std::collections::BTreeSet::new();
+        settings
+            .entries
+            .retain(|_, entry| identities.insert((entry.adapter.clone(), entry.key.clone())));
         settings
     }
 }
@@ -213,8 +181,8 @@ impl Settings {
 }
 impl Registration {
     /// Compares the probed organisation with the recorded one. Both present and
-    /// different refuses; an absent probe never refuses. `Ok(Some(org))` is a
-    /// legacy record to upgrade with the probed organisation (trust on first use).
+    /// different refuses; when registration could not observe an organisation,
+    /// the first available probe supplies it.
     pub fn check_org(&self, probed: Option<&str>) -> Result<Option<String>, ProviderError> {
         match (&self.org_fingerprint, probed) {
             (Some(stored), Some(probed)) if stored != probed => {
@@ -443,7 +411,7 @@ pub fn detect_with_org(
 
 /// Registration must observe the current identity, even when a recent probe is cached.
 pub fn detect_for_registration(
-    executor: &dyn Executor,
+    executor: &crate::host::HostProbeExecutor<'_>,
     adapter: &str,
     executable: &Path,
     home: &Path,
@@ -451,6 +419,7 @@ pub fn detect_for_registration(
     directory: &Path,
     probe_root: &Path,
 ) -> Result<(String, Option<String>), ProviderError> {
+    executor.preflight().map_err(exec_error)?;
     detect_with_org_inner(
         executor, adapter, executable, home, user, directory, probe_root, false,
     )
@@ -503,46 +472,14 @@ fn detect_with_org_inner(
             .ok_or(ProviderError::UnknownIdentity);
     }
     if adapter == "cursor" {
-        let db = directory.join("state.vscdb");
-        if db
-            .try_exists()
-            .map_err(|_| ProviderError::UnknownIdentity)?
-        {
-            let argv: Vec<OsString> = vec![
-                "/usr/bin/sqlite3".into(),
-                "-readonly".into(),
-                db.into(),
-                "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken' LIMIT 1".into(),
-            ];
-            let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(4));
-            options.stdout = StreamPolicy::Capture { limit: 65536 };
-            options.stderr = StreamPolicy::Discard;
-            options.stop_on_output_limit = true;
-            let out = executor.execute(options).map_err(exec_error)?;
-            if out.stdout.truncated || out.timed_out {
-                return Err(ProviderError::UnknownIdentity);
+        let identity = crate::cursor::read_identity(directory).map_err(|error| match error {
+            crate::cursor::CursorIdentityError::CredentialNotFound => {
+                ProviderError::CredentialNotFound
             }
-            if out.termination == Termination::Exit(0)
-                && let Some(key) = std::str::from_utf8(&out.stdout.bytes)
-                    .ok()
-                    .and_then(|token| crate::identity::cursor_account(token.trim()))
-            {
-                return Ok((key, None));
-            }
-        }
-        let bytes = read_following(
-            &directory.join("cli-config.json"),
-            ReadOptions { limit: 1024 * 1024 },
-        )
-        .map_err(credential_identity_read_error)?;
-        let config: serde_json::Value =
-            serde_json::from_slice(&bytes).map_err(|_| ProviderError::UnknownIdentity)?;
-        // authInfo.authId and the desktop JWT sub are the same subject, verified 27 Oct 2026.
-        let key = config["authInfo"]["authId"]
-            .as_str()
-            .and_then(crate::identity::digest)
-            .ok_or(ProviderError::UnknownIdentity)?;
-        return Ok((format!("cursor-{key}"), None));
+            crate::cursor::CursorIdentityError::Unavailable
+            | crate::cursor::CursorIdentityError::Malformed => ProviderError::UnknownIdentity,
+        })?;
+        return Ok((identity.account_key, None));
     }
     if adapter != "claude" || directory == home.join(".claude") {
         return Err(ProviderError::UnknownIdentity);
@@ -578,16 +515,8 @@ fn detect_with_org_inner(
     {
         return Err(ProviderError::UnknownIdentity);
     }
-    if out.termination != Termination::Exit(0) {
-        return Err(
-            if crate::Adapter::failure_cause(&crate::claude::Claude, &out.stderr.bytes)
-                == crate::FailureCause::AuthRequired
-            {
-                ProviderError::CredentialUnavailable
-            } else {
-                ProviderError::UnknownIdentity
-            },
-        );
+    if !matches!(out.termination, Termination::Exit(_)) {
+        return Err(ProviderError::UnknownIdentity);
     }
     #[derive(Deserialize)]
     struct Status {
@@ -602,6 +531,9 @@ fn detect_with_org_inner(
         serde_json::from_slice(&out.stdout.bytes).map_err(|_| ProviderError::UnknownIdentity)?;
     if !status.logged_in {
         return Err(ProviderError::LoginRequired);
+    }
+    if out.termination != Termination::Exit(0) {
+        return Err(ProviderError::UnknownIdentity);
     }
     let key = status
         .email
@@ -689,7 +621,7 @@ fn detect_agy(
         .map(|fingerprint| format!("agy-{fingerprint}"))
         .ok_or(ProviderError::UnknownIdentity)?;
     let stderr_str = std::str::from_utf8(&out.stderr.bytes).ok();
-    let models = crate::quota::extract_agy_models(Some(&payload), stderr_str);
+    let models = crate::quota::agy::extract_agy_models(Some(&payload), stderr_str);
     Ok((key, models))
 }
 
@@ -885,6 +817,45 @@ mod config_tests {
                     .unwrap();
             assert_eq!(config.domains.accounts.entries["work"].key, "work-key");
             assert_eq!(config.warnings.len(), 1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod account_pool_tests {
+    use super::*;
+    #[test]
+    fn registered_plans_enumerate_once_without_inventing_identities() {
+        let spec = provenant_records::AdapterSpec::get("opencode").unwrap();
+        let mut settings = Settings::default();
+        for (index, plan) in spec.account_model_plans.iter().enumerate() {
+            let entry: Registration = serde_json::from_value(serde_json::json!({
+                "adapter":spec.name, "label":plan.plan, "key":format!("identity-{index}"),
+                "directory":format!("/fixture/{index}"), "plan":plan.plan
+            }))
+            .unwrap();
+            settings
+                .entries
+                .insert(format!("entry-{index}"), entry.clone());
+            settings.entries.insert(format!("alias-{index}"), entry);
+            let effective = settings.unique_accounts();
+            let identities: std::collections::BTreeSet<_> = settings
+                .entries
+                .values()
+                .map(|entry| (&entry.adapter, &entry.key))
+                .collect();
+            assert_eq!(effective.entries.len(), identities.len());
+            for account in effective.entries.values() {
+                let plan = spec
+                    .account_model_plans
+                    .iter()
+                    .find(|plan| Some(plan.plan) == account.plan.as_deref())
+                    .unwrap();
+                assert!(spec.account_serves_model(
+                    account.plan.as_deref(),
+                    &format!("{}fixture", plan.model_prefix)
+                ));
+            }
         }
     }
 }

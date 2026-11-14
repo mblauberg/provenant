@@ -110,6 +110,19 @@ pub fn resolve_control(
     }
 }
 
+/// Build the shared refusal for a control receipt that cannot be delivered.
+pub fn unsupported_control_error(
+    receipt: &provenant_records::control::ControlReceipt,
+) -> CommandError {
+    CommandError {
+        diagnostic: None,
+        code: provenant_records::control::CONTROL_UNSUPPORTED.into(),
+        message: receipt.refusal_message(),
+        cause: None,
+        repair: Some(provenant_records::control::CONTROL_UNSUPPORTED_REPAIR.into()),
+    }
+}
+
 /// Compose Run's host lookup with the inbox owner without a runtime dependency.
 pub fn resolve_work(
     root: &provenant_core::StateRoot,
@@ -122,8 +135,8 @@ pub fn resolve_work(
         root,
         &provenant_run::WorkSelector {
             project,
-            run: work.run_id,
-            task: work.task_id,
+            graph: work.graph.clone(),
+            node: work.node.clone(),
             attempt: work.attempt_id,
             repository: work.repository.clone(),
             head: work.head,
@@ -183,12 +196,20 @@ pub struct Answer {
 }
 #[derive(Debug, Args)]
 pub struct Steer {
-    /// Attempt ID, graph ID or graph/node target
-    #[arg(value_name = "TARGET")]
-    pub attempt: String,
-    /// Read the message from standard input (at most 4 KiB; input must finish within 5 seconds)
-    #[arg(long, required = true)]
-    pub text_stdin: bool,
+    /// Attempt to steer, as NAME[/NODE[#N]]; a node steers its live attempt
+    #[arg(value_name = "TARGET", catalog_graph_target)]
+    pub target: crate::Target,
+    /// Steering message
+    #[arg(
+        long,
+        value_name = "TEXT",
+        catalog_required_unless = "brief_file",
+        conflicts_with = "brief_file"
+    )]
+    pub brief: Option<String>,
+    /// Read the message from a file, or from standard input given `-`
+    #[arg(long, catalog_required_unless = "brief", conflicts_with = "brief")]
+    pub brief_file: Option<PathBuf>,
     #[arg(long)]
     pub operation_id: Option<OperationId>,
 }
@@ -307,7 +328,6 @@ pub enum HumanCommand {
     Ask(Ask),
     Answer(Answer),
     Inbox(Inbox),
-    Steer(Steer),
     ChairMessage(ChairMessage),
 }
 impl HumanCommand {
@@ -339,15 +359,6 @@ impl HumanCommand {
                 },
                 expect_revision: args.expect_revision,
                 channel: interaction_channel(args.channel),
-                operation_id: args.operation_id,
-            },
-            Self::Steer(args) => InboxInput::Steer {
-                extra: Default::default(),
-                attempt: args
-                    .attempt
-                    .parse()
-                    .map_err(|_| Error::Input("expected an attempt ID"))?,
-                text: read_text()?,
                 operation_id: args.operation_id,
             },
             Self::ChairMessage(args) => InboxInput::ChairMessage {
@@ -523,7 +534,7 @@ fn request_content(bytes: &[u8]) -> Result<RequestDraft, Error> {
     ) || !known(&value["supersedes"], &["id", "expect_revision"])
         || !known(
             &value["work"],
-            &["run_id", "task_id", "attempt_id", "repository", "head"],
+            &["graph", "node", "attempt_id", "repository", "head"],
         )
         || !known(&value["work"]["repository"], &["relative_to_root"])
         || !known(
@@ -587,7 +598,7 @@ fn chosen_peers(
     roots: &provenant_core::Roots,
     hosts: &str,
 ) -> Result<(Vec<(String, provenant_core::HostId)>, u64), Error> {
-    let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+    let config = crate::config_reads::read_for(roots, "inbox")
         .map_err(crate::fabric::EdgeError::from)?
         .domains
         .fabric;
@@ -945,35 +956,26 @@ fn host_wide(
     }
 }
 
-/// Select a unique live graph attempt before reading or delivering steering text.
-/// Reservations without a reference still count towards ambiguity.
+/// The `HOST/ATTEMPT` reference of the resolved attempt while it is live.
+/// Steering reaches only a running attempt; a settled one is refused.
 pub fn live_steer_reference<'a>(
     checkpoint: &'a provenant_fabric_runtime::graph::GraphCheckpoint,
-    node: Option<&str>,
-    selected_reference: Option<&str>,
+    resolved: &crate::target::Resolved,
 ) -> Result<&'a str, &'static str> {
     use provenant_fabric_runtime::graph::AttemptState;
-    if node.is_some_and(|id| !checkpoint.nodes.iter().any(|node| node.id == id)) {
-        return Err("target node was not found");
-    }
-    let mut live = checkpoint
-        .nodes
-        .iter()
-        .filter(|candidate| node.is_none_or(|id| candidate.id == id))
-        .flat_map(|candidate| &candidate.attempts)
-        .filter(|attempt| attempt.state != AttemptState::Terminal)
-        .filter(|attempt| {
-            selected_reference
-                .is_none_or(|reference| attempt.attempt_ref.as_deref() == Some(reference))
-        });
-    let first = live.next().ok_or("target has no live attempt")?;
-    if live.next().is_some() {
-        return Err("target has several live attempts; select graph/node or an attempt ID");
-    }
-    first
+    let reference = resolved
         .attempt_ref
         .as_deref()
-        .ok_or("live attempt has no resolved attempt ID yet; retry after launch resolves")
+        .ok_or("attempt has not launched yet; retry after launch resolves")?;
+    checkpoint
+        .nodes
+        .iter()
+        .filter(|node| resolved.node.as_deref() == Some(node.id.as_str()))
+        .flat_map(|node| node.recorded_attempts())
+        .find(|attempt| attempt.attempt_ref.as_deref() == Some(reference))
+        .filter(|attempt| attempt.state != AttemptState::Terminal)
+        .and_then(|attempt| attempt.attempt_ref.as_deref())
+        .ok_or("target attempt has settled; steering reaches only a live attempt")
 }
 
 fn execute(
@@ -1236,22 +1238,13 @@ pub fn run(
             if receipt.state == provenant_records::control::ControlState::Unsupported =>
         {
             // Refused before any side effect; the receipt still names the reason.
-            let message = receipt.refusal_message();
+            let error = unsupported_control_error(&receipt);
             let mut result = CommandResult::new(
                 path,
                 Outcome::Refused,
                 Some(InboxResult::Control { receipt }),
             );
-            result.error = Some(CommandError {
-            diagnostic: None,
-                code: provenant_records::control::CONTROL_UNSUPPORTED.into(),
-                message,
-                cause: None,
-                repair: Some(
-                    "Read `provenant help --all --json` provider_controls for what each provider supports; use `provenant retry` to continue a lane."
-                        .into(),
-                ),
-            });
+            result.error = Some(error);
             result
         }
         Ok(data) => CommandResult::new(path, Outcome::Ok, Some(data)),
@@ -1316,58 +1309,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn graph_steer_resolves_unique_live_attempt_and_refuses_ambiguity() {
+    fn steer_reaches_only_the_resolved_live_attempt() {
+        use crate::target::{Target, Want, resolve};
         use provenant_fabric_runtime::graph::{AttemptState, GraphCheckpoint};
         let host = provenant_core::HostId::from_bytes([1; 16]);
-        let attempt = provenant_core::AttemptId::from_bytes([2; 16]);
-        let reference = format!("{host}/{attempt}");
+        let reference =
+            |n: u8| format!("{host}/{}", provenant_core::AttemptId::from_bytes([n; 16]));
+        let attempt = |n: u8, state: &str| {
+            serde_json::json!({
+            // Each attempt carries its own WorkKey number; `#N` names it.
+            "key":{"graph_id":"g", "node_id":"task", "route_index":0, "attempt": n},
+            "launched":true, "route":{"alias":"senior"}, "state":state,
+            "attempt_ref":reference(n), "outcome":null, "launch_actor":"fixture"})
+        };
         let mut checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
             "schema_version":1, "graph_id":"g", "plan_digest":"digest",
             "nodes":[{"id":"task", "state":"running", "worktree":null,
-                "attempts":[{"key":{"graph_id":"g", "node_id":"task", "route_index":0},
-                    "launched":true, "route":{"alias":"senior"}, "state":"running",
-                    "attempt_ref":format!("{host}/{attempt}"), "outcome":null, "launch_actor":"fixture"}]}]
-        })).unwrap();
-        assert_eq!(
-            live_steer_reference(&checkpoint, None, None).unwrap(),
-            reference
-        );
-        assert_eq!(
-            live_steer_reference(&checkpoint, Some("task"), None).unwrap(),
-            reference
-        );
-        assert!(matches!(
-            live_steer_reference(&checkpoint, Some("missing"), None),
-            Err("target node was not found")
-        ));
-        let mut second = checkpoint.nodes[0].clone();
-        second.id = "other".into();
-        checkpoint.nodes.push(second);
-        let error = live_steer_reference(&checkpoint, None, None).unwrap_err();
-        assert!(error.to_string().contains("several live attempts"));
-        assert_eq!(
-            live_steer_reference(&checkpoint, Some("task"), None).unwrap(),
-            reference
-        );
-        checkpoint.nodes[0].attempts[0].attempt_ref = None;
-        assert!(
-            live_steer_reference(&checkpoint, None, None)
-                .unwrap_err()
-                .contains("several live attempts")
-        );
-        assert!(
-            live_steer_reference(&checkpoint, Some("task"), None)
-                .unwrap_err()
-                .to_string()
-                .contains("no resolved attempt ID")
-        );
-        checkpoint.nodes[0].attempts[0].state = AttemptState::Terminal;
-        assert!(
-            live_steer_reference(&checkpoint, Some("task"), None)
-                .unwrap_err()
-                .to_string()
-                .contains("no live attempt")
-        );
+                "attempts":[attempt(1, "terminal"), attempt(2, "running")]}]
+        }))
+        .unwrap();
+        let steer = |checkpoint: &GraphCheckpoint, spelling: &str| {
+            let resolved = resolve(
+                &Target::parse(spelling).unwrap(),
+                Want::Attempt { settled: false },
+                |_| Ok::<_, ()>(Some(checkpoint.clone())),
+            )
+            .unwrap();
+            live_steer_reference(checkpoint, &resolved).map(str::to_owned)
+        };
+        assert_eq!(steer(&checkpoint, "g"), Ok(reference(2)));
+        assert_eq!(steer(&checkpoint, "g/task#2"), Ok(reference(2)));
+        assert!(steer(&checkpoint, "g/task#1").is_err());
+        checkpoint.nodes[0].attempts[1].state = AttemptState::Terminal;
+        assert!(steer(&checkpoint, "g/task").is_err());
+        checkpoint.nodes[0].attempts[1].attempt_ref = None;
+        assert!(steer(&checkpoint, "g/task").is_err());
     }
 
     #[test]
@@ -1376,12 +1352,18 @@ mod tests {
             "kind": "decision", "title": "Repair", "body": "Choose a repair",
             "supersedes": {"id": "01".repeat(16), "expect_revision": 1},
             "work": {
-                "run_id": "02".repeat(16),
+                "graph": "repair",
+                "node": "review",
                 "repository": {"relative_to_root": {"encoding": "utf8", "path": "repo"}}
             },
             "options": [{"id": "repair", "label": "Repair", "description": "Fix the check"}]
         });
         assert!(request_content(&serde_json::to_vec(&value).unwrap()).is_ok());
+        for retired in ["run_id", "task_id"] {
+            let mut forged = value.clone();
+            forged["work"][retired] = serde_json::json!("02".repeat(16));
+            assert!(request_content(&serde_json::to_vec(&forged).unwrap()).is_err());
+        }
         for path in [
             "",
             "/supersedes",
@@ -1414,5 +1396,30 @@ mod tests {
                 matches!(error, Error::Remote { operation_id: Some(id), .. } if id == operation)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod unsupported_receipt_tests {
+    #[test]
+    fn unsupported_control_has_the_shared_code_message_and_retry_alternative() {
+        use provenant_records::control::*;
+        let receipt = ControlReceipt {
+            extra: Default::default(),
+            operation_id: "steer-refusal".parse().unwrap(),
+            control: ControlKind::Steer,
+            target: "attempt".into(),
+            launch: LaunchKind::Lane,
+            support: ControlSupport::Unsupported,
+            transport: None,
+            state: ControlState::Unsupported,
+            reason: "no live control path".into(),
+            message_id: None,
+        };
+        let error = super::unsupported_control_error(&receipt);
+        assert_eq!(error.code, CONTROL_UNSUPPORTED);
+        assert_eq!(error.message, receipt.refusal_message());
+        assert!(error.message.contains("retry"));
+        assert_eq!(error.repair.as_deref(), Some(CONTROL_UNSUPPORTED_REPAIR));
     }
 }

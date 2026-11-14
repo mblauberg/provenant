@@ -4,10 +4,13 @@ use provenant_cli::{
     Check, Globals,
     check::{CheckError, CheckPage, GitContext},
 };
-use provenant_config::{Release, Targets};
+use provenant_config::{
+    PortBackend, PortCommandDisposition, PortSource, PortTable, Release, Targets,
+};
 use provenant_core::CancelToken;
-use provenant_os::{exec::SystemExecutor, fs};
-use provenant_records::{CommandResult, Outcome};
+use provenant_os::exec::SystemExecutor;
+use provenant_os::fs;
+use provenant_records::{CanonicalV1, CommandResult, Finding, Outcome, PathWire};
 use std::{
     io::{self, Write},
     path::{Path, PathBuf},
@@ -34,11 +37,29 @@ enum Error {
     Exec(#[from] provenant_os::exec::ExecError),
     #[error(transparent)]
     Writing(#[from] provenant_workflow::writing::WritingError),
+    #[error(transparent)]
+    Port(#[from] ReleasePortFailure),
+}
+#[derive(Debug, Error)]
+enum ReleasePortFailure {
+    #[error("release port is disabled")]
+    Disabled,
+    #[error("release command returned {0}")]
+    Command(&'static str),
+    #[error("release command returned incomplete or truncated output")]
+    Incomplete,
+    #[error("release command returned invalid finding JSON")]
+    InvalidOutput,
+    #[error("cannot record release command evidence")]
+    Evidence,
+    #[error("cannot start release command executor")]
+    Executor,
 }
 impl Error {
     fn outcome(&self) -> Outcome {
         match self {
             Self::Check(error) => error.outcome(),
+            Self::Port(_) => Outcome::Unavailable,
             Self::Writing(
                 provenant_workflow::writing::WritingError::Invalid(_)
                 | provenant_workflow::writing::WritingError::Rules
@@ -49,6 +70,20 @@ impl Error {
         }
     }
 }
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReleaseCommandOutput {
+    findings: Vec<ReleaseCommandFinding>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReleaseCommandFinding {
+    rule: String,
+    path: PathWire,
+    line: usize,
+    message: String,
+}
+
 enum Inspectable {
     Writing {
         paths: Vec<PathBuf>,
@@ -66,8 +101,13 @@ enum Inspectable {
         page: provenant_cli::Page,
     },
 }
-pub fn run(check: Check, globals: &Globals) -> u8 {
+pub fn run(
+    check: Check,
+    globals: &Globals,
+    workers: &'static dyn provenant_confinement::worktrees::WorkerObserver,
+) -> u8 {
     let (name, check) = match check {
+        Check::Providers(args) => return crate::check_providers::run(args, globals, workers),
         Check::Config(page) => ("check config", Inspectable::Config(page)),
         Check::Install { source, page } => ("check install", Inspectable::Install { source, page }),
         Check::Release { base, head, page } => {
@@ -242,9 +282,7 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
             let mut targets = Targets::new(roots.clone(), &home, &[]);
             // A configuration defect is `check config`'s finding. It must not
             // stop this check, which then has no registered accounts to compare.
-            if let Ok(config) =
-                provenant_config::read_with_domains(&roots, &provenant_cli::domains::SECTIONS)
-            {
+            if let Ok(config) = provenant_cli::config_reads::read_for(&roots, "check install") {
                 targets.accounts = provenant_cli::accounts::homes(&config.domains.accounts);
                 targets.shared_settings =
                     crate::install::shared_settings(&config.domains.accounts, &home)
@@ -271,28 +309,132 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 &page,
             )?)
         }),
-        Inspectable::Release { base, head, page } => git_page(&project, |git| {
-            let range = match base.zip(head) {
-                Some((base, head)) => Some((
-                    provenant_cli::check::resolve_revision(git, &base)?,
-                    provenant_cli::check::resolve_revision(git, &head)?,
-                )),
-                None => None,
-            };
-            provenant_cli::check::release_page(
-                git,
-                range,
-                (
+        Inspectable::Release { base, head, page } => {
+            git_page(&project, roots.state.as_path(), |git| {
+                let range = match base.zip(head) {
+                    Some((base, head)) => Some((
+                        provenant_cli::check::resolve_revision(git, &base)?,
+                        provenant_cli::check::resolve_revision(git, &head)?,
+                    )),
+                    None => None,
+                };
+                let selector = (
                     "release",
                     range.map(|(a, b)| (a.to_string(), b.to_string())),
                     selector,
-                ),
-                &page,
-            )
-        }),
+                );
+                let ports = PortTable::read_for(Some(&project), roots.state.as_path())?;
+                match ports.release.backend {
+                    PortBackend::Builtin => {
+                        provenant_cli::check::release_page(git, range, selector, &page)
+                    }
+                    PortBackend::Command { command } => command_release_page(
+                        &project,
+                        roots.state.as_path(),
+                        command,
+                        ports.release.source,
+                        range,
+                        selector,
+                        &page,
+                    ),
+                    PortBackend::None => Err(ReleasePortFailure::Disabled.into()),
+                }
+            })
+        }
     }?;
     Ok(Inspection::Check(page))
 }
+fn command_release_page(
+    project: &Path,
+    state: &Path,
+    command: provenant_config::PortCommand,
+    source: PortSource,
+    range: Option<(provenant_core::GitOid, provenant_core::GitOid)>,
+    selector: impl serde::Serialize,
+    page: &provenant_cli::Page,
+) -> Result<CheckPage, Error> {
+    let executor = SystemExecutor::new(1).map_err(|_| ReleasePortFailure::Executor)?;
+    let mut arguments = Vec::new();
+    if let Some((base, head)) = range {
+        arguments.push(std::ffi::OsString::from("--base"));
+        arguments.push(std::ffi::OsString::from(base.to_string()));
+        arguments.push(std::ffi::OsString::from("--head"));
+        arguments.push(std::ffi::OsString::from(head.to_string()));
+    }
+    let cancel = CancelToken::new();
+    let mut execution = provenant_config::execute_port_command(
+        &executor,
+        &command,
+        project,
+        &arguments,
+        &[],
+        Duration::from_secs(60),
+        &cancel,
+    );
+    let output = (|| {
+        let outcome = execution
+            .outcome
+            .as_ref()
+            .ok_or_else(|| ReleasePortFailure::Command(disposition_name(execution.disposition)))?;
+        if execution.disposition != PortCommandDisposition::Succeeded {
+            return Err(ReleasePortFailure::Command(disposition_name(
+                execution.disposition,
+            )));
+        }
+        if !execution.capture_complete() {
+            return Err(ReleasePortFailure::Incomplete);
+        }
+        let output: ReleaseCommandOutput = serde_json::from_slice(&outcome.stdout.bytes)
+            .map_err(|_| ReleasePortFailure::InvalidOutput)?;
+        if output.findings.iter().any(|finding| finding.line == 0) {
+            return Err(ReleasePortFailure::InvalidOutput);
+        }
+        Ok(output)
+    })();
+    if output.is_err() && execution.disposition == PortCommandDisposition::Succeeded {
+        execution.disposition = PortCommandDisposition::Unknown;
+    }
+    let range_key = range.map_or_else(
+        || "working-tree".to_owned(),
+        |(base, head)| format!("{base}:{head}"),
+    );
+    let key = format!(
+        "{}:{range_key}",
+        CanonicalV1::file_digest(project.as_os_str().as_encoded_bytes())
+    );
+    provenant_config::record_port_command(state, "release", source, "check", &key, &execution)
+        .map_err(|_| ReleasePortFailure::Evidence)?;
+    let output: ReleaseCommandOutput = output?;
+    let normalized =
+        serde_json::to_vec(&output.findings).map_err(|_| ReleasePortFailure::InvalidOutput)?;
+    let findings_digest = CanonicalV1::file_digest(&normalized);
+    let findings = output
+        .findings
+        .into_iter()
+        .map(|finding| Finding {
+            rule: finding.rule,
+            path: finding.path,
+            line: finding.line,
+            message: finding.message,
+        })
+        .collect();
+    let evidence = vec![("release-command-findings".to_owned(), findings_digest)];
+    Ok(provenant_cli::check::findings_page(
+        findings, evidence, selector, page,
+    )?)
+}
+
+fn disposition_name(disposition: PortCommandDisposition) -> &'static str {
+    match disposition {
+        PortCommandDisposition::Succeeded => "succeeded",
+        PortCommandDisposition::Unknown => "unknown",
+        PortCommandDisposition::Refused => "refused",
+        PortCommandDisposition::TimedOut => "timed_out",
+        PortCommandDisposition::Cancelled => "cancelled",
+        PortCommandDisposition::Failed => "failed",
+    }
+}
+
 fn private_home<T>(operation: impl FnOnce(&Path) -> Result<T, Error>) -> Result<T, Error> {
     let temp = fs::canonicalize(&std::env::temp_dir()).map_err(io::Error::from)?;
     let anchor = provenant_os::fs::Directory::open_anchor(&temp)?;
@@ -314,13 +456,14 @@ fn private_home<T>(operation: impl FnOnce(&Path) -> Result<T, Error>) -> Result<
 }
 fn git_page(
     project: &Path,
+    host_state: &Path,
     operation: impl FnOnce(&GitContext<'_>) -> Result<CheckPage, CheckError>,
 ) -> Result<CheckPage, Error> {
     private_home(|home| {
         let git = provenant_os::git::git_executable()
             .ok_or(CheckError::Evidence("Git executable unavailable"))?;
         let git = fs::canonicalize(&git)?;
-        let runtime = provenant_confinement::UtilityRuntime::new(git, home)?;
+        let runtime = provenant_confinement::UtilityRuntime::new(git, home, host_state)?;
         let executor = SystemExecutor::new(1)?;
         let cancel = CancelToken::new();
         let repo = runtime.open_read_repo(
@@ -330,6 +473,7 @@ fn git_page(
             &cancel,
         )?;
         Ok(operation(&GitContext {
+            host_state,
             repo: &repo,
             runtime: &runtime,
             executor: &executor,

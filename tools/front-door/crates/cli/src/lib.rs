@@ -2,15 +2,19 @@
 #![forbid(unsafe_code)]
 use provenant_core::edit_distance;
 pub mod accounts;
+pub mod brief;
 pub mod check;
 pub mod cloud;
+pub mod config_reads;
 pub mod console;
 pub mod domains;
+pub mod external_contract;
 pub mod fabric;
 pub mod quota;
 pub(crate) mod quota_history;
 pub mod route;
 pub mod run;
+pub mod target;
 pub mod tracker;
 pub mod wait;
 pub mod workflow;
@@ -32,6 +36,7 @@ pub mod telemetry_args;
 pub mod telemetry_value;
 use clap::{Arg, ArgAction, ArgGroup, CommandFactory, FromArgMatches};
 pub use grammar::*;
+pub use provenant_config::removed::{REMOVED, Removed};
 use provenant_records::{HelpArgument, HelpCatalogue, HelpCommand, HelpErrorCode, HelpGroup};
 pub use render::*;
 use std::ffi::OsString;
@@ -137,6 +142,11 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
                         } else {
                             expanded_scoped_help(&scope)
                         };
+                        let text = if is_core_scope(&model, &scope) {
+                            append_child_index(text, &scope)
+                        } else {
+                            text
+                        };
                         ParseOutcome::Help {
                             text,
                             catalog,
@@ -160,7 +170,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
     if let Some(error) = duplicate {
         return ParseOutcome::Invalid { error, globals };
     }
-    let mut invocation = match RawInvocation::from_arg_matches(&matches) {
+    let invocation = match RawInvocation::from_arg_matches(&matches) {
         Ok(value) => Invocation {
             globals,
             command: value.command,
@@ -176,17 +186,6 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
             };
         }
     };
-    if let Command::Run(request) = &mut invocation.command
-        && argv
-            .iter()
-            .skip(1)
-            .take_while(|arg| *arg != "--")
-            .any(|arg| arg == "--wait")
-        && let Some(brief) = request.brief.as_deref()
-        && duration_seconds(brief).is_ok()
-    {
-        request.bare_wait_value = Some(brief.to_owned());
-    }
     if let Command::Help { command, all } = &invocation.command {
         let scope = format!("provenant {}", command.join(" "));
         let mut expanded = if *all || (!command.is_empty() && !is_core_scope(&model, &scope)) {
@@ -211,16 +210,20 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
                 }
             };
         }
+        let text = if command.is_empty() && !all {
+            core_help(&model)
+        } else if command.is_empty() && *all {
+            all_command_help(selected)
+        } else {
+            selected.render_long_help().to_string()
+        };
+        let text = if !command.is_empty() && !all && is_core_scope(&model, &scope) {
+            append_child_index(text, &scope)
+        } else {
+            text
+        };
         return ParseOutcome::Help {
-            text: if command.is_empty() && !all {
-                core_help(&model)
-            } else {
-                if command.is_empty() && *all {
-                    all_command_help(selected)
-                } else {
-                    selected.render_long_help().to_string()
-                }
-            },
+            text,
             catalog: scoped(
                 catalog(if command.is_empty() && !all {
                     &model
@@ -240,16 +243,23 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
         },
     }
 }
-fn retired_verb_replacement(argv: &[OsString]) -> Option<(&'static str, &'static str, String)> {
+
+/// The removed spelling `argv` uses, read from its command words and options.
+fn removed_spelling(argv: &[OsString]) -> Option<&'static Removed> {
     let model = expanded_model();
     let mut words = Vec::new();
+    let mut flags = Vec::new();
     let mut args = argv.iter().skip(1);
     while let Some(arg) = args.next() {
         let word = arg.to_str()?;
+        if word == "--" {
+            break;
+        }
         if let Some(option) = word.strip_prefix("--") {
             let (name, joined) = option
                 .split_once('=')
                 .map_or((option, false), |(name, _)| (name, true));
+            // Skip the value of a global option, which is never a command word.
             if !joined
                 && model.get_arguments().any(|arg| {
                     arg.get_long() == Some(name)
@@ -261,68 +271,22 @@ fn retired_verb_replacement(argv: &[OsString]) -> Option<(&'static str, &'static
             {
                 args.next();
             }
+            flags.push(name);
         } else if !word.starts_with('-') {
             words.push(word);
         }
     }
-    if words.is_empty() {
-        return None;
-    }
-    match words[0] {
-        "dispatch" => Some((
-            "dispatch",
-            "run",
-            "provenant run 'Meet the acceptance criteria' --use task".into(),
-        )),
-        "lanes" => Some(("lanes", "status", "provenant status".into())),
-        "resume" => {
-            let target = words.get(1).copied().unwrap_or("ID");
-            Some(("resume", "retry", format!("provenant retry {target}")))
-        }
-        "cancel" => {
-            let target = words.get(1).copied().unwrap_or("ID");
-            Some(("cancel", "stop", format!("provenant stop {target}")))
-        }
-        "preset" => Some(("preset", "templates", "provenant templates".into())),
-        "review" => Some((
-            "review",
-            "run --use review",
-            "provenant run --use review".into(),
-        )),
-        "continue" => {
-            let target = words.get(1).copied().unwrap_or("ID");
-            Some(("continue", "retry", format!("provenant retry {target}")))
-        }
-        "redo" => {
-            let target = words.get(1).copied().unwrap_or("ID");
-            Some(("redo", "retry", format!("provenant retry {target}")))
-        }
-        "pr" if words.get(1) == Some(&"land") => {
-            let pr = words.get(2).copied().unwrap_or("2199");
-            Some(("pr land", "land", format!("provenant land {pr} --wait")))
-        }
-        "fabric" if words.get(1) == Some(&"graph") => {
-            if words.get(2) == Some(&"status") {
-                let target = words.get(3).map(|id| format!(" {id}")).unwrap_or_default();
-                Some((
-                    "fabric graph status",
-                    "status",
-                    format!("provenant status{target}"),
-                ))
-            } else if words.get(2) == Some(&"cancel") {
-                let target = words.get(3).copied().unwrap_or("ID");
-                Some((
-                    "fabric graph cancel",
-                    "stop",
-                    format!("provenant stop {target}"),
-                ))
-            } else {
-                Some(("fabric graph", "status", "provenant status".into()))
-            }
-        }
-        "fabric_graph" => Some(("fabric_graph", "run", "provenant run".into())),
-        _ => None,
-    }
+    REMOVED
+        .iter()
+        .filter(|removed| removed.config_key.is_none() && removed.diagnostic_code.is_none())
+        .find(|removed| {
+            words.len() >= removed.words.len()
+                && words
+                    .iter()
+                    .zip(removed.words)
+                    .all(|(word, path)| word == path)
+                && removed.flag.is_none_or(|flag| flags.contains(&flag))
+        })
 }
 
 fn clap_error(mut error: clap::Error, argv: &[OsString]) -> CliError {
@@ -356,12 +320,11 @@ fn clap_error(mut error: clap::Error, argv: &[OsString]) -> CliError {
         }
     }
 
-    if let Some((verb, replacement, runnable)) = retired_verb_replacement(argv) {
+    if let Some(removed) = removed_spelling(argv) {
         return CliError::Invalid {
-            message: format!(
-                "retired verb '{verb}' was replaced by '{replacement}'\nexample: {runnable}"
-            ),
-            repair: Some(runnable),
+            // The message names the replacement, so the error stays one line.
+            message: removed.message(),
+            repair: None,
         };
     }
 
@@ -514,7 +477,7 @@ fn usage_example(argv: &[OsString]) -> Option<String> {
         path = "provenant land".into();
     }
     let lands = matches!(path.as_str(), "provenant land" | "provenant pr land");
-    if lands || path == "provenant pr status" {
+    if lands {
         // `--wait` takes its duration only as `--wait=5m`; a spaced one is
         // read as a positional, so name the joined spelling.
         let spaced = argv
@@ -528,9 +491,8 @@ fn usage_example(argv: &[OsString]) -> Option<String> {
                     && value.bytes().next().is_some_and(|b| b.is_ascii_digit())
             });
         if let Some(value) = spaced {
-            let target = if lands { "land 2199" } else { "pr status 2199" };
             let proposed = format!("--wait={value}");
-            let command = format!("provenant {target} {proposed}");
+            let command = format!("provenant land 2199 {proposed}");
             let words = command
                 .split_whitespace()
                 .map(OsString::from)
@@ -538,7 +500,7 @@ fn usage_example(argv: &[OsString]) -> Option<String> {
             return Some(if command_model().try_get_matches_from(words).is_ok() {
                 command
             } else {
-                format!("provenant {target} --wait=30m")
+                "provenant land 2199 --wait=30m".into()
             });
         }
     }
@@ -588,9 +550,9 @@ fn usage_example(argv: &[OsString]) -> Option<String> {
     match path.as_str() {
         "provenant land" | "provenant pr land" => Some("provenant land 2199 --wait".into()),
         "provenant route resolve" => Some("provenant route resolve senior".into()),
-        "provenant output" => Some("provenant output ATTEMPT --host HOST".into()),
-        "provenant steer" => Some("provenant steer ID --text-stdin".into()),
-        "provenant run" => Some("provenant run 'Meet the acceptance criteria' --use task".into()),
+        "provenant output" => Some("provenant output fix-login/review".into()),
+        "provenant steer" => Some("provenant steer fix-login/implement --brief-file -".into()),
+        "provenant run" => Some("provenant run task 'Meet the acceptance criteria'".into()),
         _ => {
             if let Some(core) = selected.get::<metadata::CoreCommand>() {
                 return Some(core.1.to_string());
@@ -604,7 +566,7 @@ fn usage_example(argv: &[OsString]) -> Option<String> {
                     let name = arg.get_id().as_str();
                     let token = match name {
                         "number" | "numbers" => "2199",
-                        "id" | "graph" | "task" | "attempt" => "ID",
+                        "target" | "targets" => "NAME",
                         "brief" | "prompt" => "'Task'",
                         "branch" => "BRANCH",
                         "host" => "HOST",
@@ -768,6 +730,9 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
                 command = command.arg(global.clone());
             }
         }
+        if path == "provenant wait" {
+            command = command.after_help(WAIT_JSON_CONTRACT);
+        }
         command = command
             .disable_help_flag(true)
             .disable_version_flag(true)
@@ -855,13 +820,8 @@ fn route_valid(route: &RouteRequest) -> Result<(), CliError> {
     Ok(())
 }
 fn validate(inv: &Invocation) -> Result<(), CliError> {
-    if inv.globals.json
-        && matches!(
-            inv.command,
-            Command::Hook(_) | Command::Internal(_) | Command::Fabric(Fabric::Mcp { .. })
-        )
-    {
-        return invalid("--json is invalid for hook/MCP/internal execution");
+    if inv.globals.json && matches!(inv.command, Command::Hook(_) | Command::Internal(_)) {
+        return invalid("--json is invalid for hook/internal execution");
     }
     match &inv.command {
         Command::Route(Route::Resolve(resolve)) => {
@@ -877,8 +837,8 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
             }
             route_valid(&resolve.request)?
         }
-        Command::Reconcile(reconcile) if reconcile.id.len() > 100 => {
-            return invalid("at most 100 IDs are allowed");
+        Command::Reconcile(reconcile) if reconcile.targets.len() > 100 => {
+            return invalid("at most 100 targets are allowed");
         }
         Command::Worktree(Worktree::Remove(remove)) if remove.branch.len() > 100 => {
             return invalid("at most 100 branches are allowed");
@@ -970,8 +930,48 @@ fn scoped(mut catalogue: HelpCatalogue, scope: &str) -> HelpCatalogue {
     });
     catalogue
 }
+fn command_at_path<'a>(root: &'a clap::Command, path: &str) -> Option<&'a clap::Command> {
+    path.split_whitespace()
+        .skip(1)
+        .try_fold(root, |command, part| command.find_subcommand(part))
+}
+fn append_child_index(mut text: String, scope: &str) -> String {
+    let full = expanded_model();
+    let Some(command) = command_at_path(&full, scope) else {
+        return text;
+    };
+    let children: Vec<_> = command
+        .get_subcommands()
+        .filter(|child| !child.is_hide_set())
+        .collect();
+    if children.is_empty() {
+        return text;
+    }
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str("\nSubcommands:\n");
+    for child in children {
+        let description = child
+            .get_about()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        text.push_str(&format!("  {:<14} {}\n", child.get_name(), description));
+    }
+    text.push_str(&format!(
+        "For focused help, run `provenant help {} SUBCOMMAND`.\n",
+        scope.trim_start_matches("provenant ")
+    ));
+    text
+}
 fn catalog(model: &clap::Command) -> HelpCatalogue {
-    fn walk(command: &clap::Command, path: String, commands: &mut Vec<HelpCommand>) {
+    let full = expanded_model();
+    fn walk(
+        command: &clap::Command,
+        path: String,
+        commands: &mut Vec<HelpCommand>,
+        full: &clap::Command,
+    ) {
         if command.is_hide_set() {
             return;
         }
@@ -1006,6 +1006,10 @@ fn catalog(model: &clap::Command) -> HelpCatalogue {
                     },
                     requires: arg
                         .get::<metadata::Requirements>()
+                        .map(|value| value.0.clone())
+                        .unwrap_or_default(),
+                    required_unless: arg
+                        .get::<metadata::RequiredUnless>()
                         .map(|value| value.0.clone())
                         .unwrap_or_default(),
                     name,
@@ -1051,19 +1055,35 @@ fn catalog(model: &clap::Command) -> HelpCatalogue {
                 multiple: group.clone().is_multiple(),
             })
             .collect();
+        let full_command = command_at_path(full, &path);
         commands.push(HelpCommand {
             command: path.clone(),
             description: command.get_about().map(ToString::to_string),
+            subcommands: full_command
+                .into_iter()
+                .flat_map(|command| command.get_subcommands())
+                .filter(|child| !child.is_hide_set())
+                .map(|child| child.get_name().to_owned())
+                .collect(),
+            config_domains: crate::config_reads::domains_for(&path)
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
             arguments,
             groups,
             constraints: constraints(&path),
         });
         for child in command.get_subcommands() {
-            walk(child, format!("{path} {}", child.get_name()), commands);
+            walk(
+                child,
+                format!("{path} {}", child.get_name()),
+                commands,
+                full,
+            );
         }
     }
     let mut commands = Vec::new();
-    walk(model, "provenant".into(), &mut commands);
+    walk(model, "provenant".into(), &mut commands, &full);
     let error_codes = provenant_run::ErrorKind::ALL
         .iter()
         .map(|kind| HelpErrorCode {
@@ -1078,7 +1098,7 @@ fn catalog(model: &clap::Command) -> HelpCatalogue {
     }
 }
 /// Canonical installed verb paths. Never derived from raw caller arguments.
-pub fn usage_verbs() -> Vec<String> {
+pub fn command_verbs() -> Vec<String> {
     fn walk(command: &clap::Command, path: String, verbs: &mut Vec<String>) {
         let children: Vec<_> = command.get_subcommands().collect();
         if children.is_empty() && !path.is_empty() {
@@ -1102,14 +1122,23 @@ pub fn usage_verbs() -> Vec<String> {
             }
         }
     }
-    let mut verbs = vec!["parse".into(), "version".into()];
+    let mut verbs = Vec::new();
     walk(&command_model(), String::new(), &mut verbs);
     verbs
 }
+
+/// Command paths plus the two non-command events recorded by usage telemetry.
+pub fn usage_verbs() -> Vec<String> {
+    let mut verbs = vec!["parse".into(), "version".into()];
+    verbs.extend(command_verbs());
+    verbs
+}
+const WAIT_JSON_CONTRACT: &str = "With --json, wait writes JSONL: zero or more event objects followed by one terminal command-result envelope. Events have an `event` field; the terminal envelope has `command`, `status` and `data`. Settlement events are emitted without --follow; --follow also emits each observed transition.";
+
 fn constraints(path: &str) -> Vec<String> {
     if path == "provenant output" {
         return vec![
-            "target is an ATTEMPT ID, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT".into(),
+            "target is NAME[/NODE[#N]]; a node reads its newest settled attempt".into(),
             format!("tail above {0} lines is clamped to {0}", limits::TAIL_LINES),
             format!(
                 "a result shows whole up to {} KiB, then its head and tail; at most {} changed paths of {} bytes are named; missing evidence is null",
@@ -1122,9 +1151,9 @@ fn constraints(path: &str) -> Vec<String> {
     }
     let values: &[&str] = match path {
         "provenant run" => &[
-            "a brief uses task by default; --use selects a layered template",
-            "--set binds template parameters using TOML values",
-            "--file accepts a graph document or a plain text brief",
+            "run needs a template; `provenant templates` lists them",
+            "--set binds a string parameter as written and any other type as TOML; quote nothing for a string",
+            "--file reads a graph document; a plain text brief goes in BRIEF, --brief or --brief-file",
             "inside a lane, work joins the calling node's graph as a child",
         ],
         "provenant route resolve" => &[
@@ -1136,9 +1165,7 @@ fn constraints(path: &str) -> Vec<String> {
             "since must precede until",
         ],
         "provenant retry" => &[
-            "target is an ATTEMPT ID, RUN/ATTEMPT or RUN/TASK/ATTEMPT",
-            "prompt is at most 1 MiB; expected generation is 0",
-            "operation-id is generated when omitted; supply it for planned retries",
+            "target is NAME[/NODE[#N]]: a graph recovers, a node starts its next attempt, an attempt continues",
         ],
         "provenant chair log append" => &[
             "operation-id and issued-at are generated when omitted; supply both for planned retries",
@@ -1149,14 +1176,13 @@ fn constraints(path: &str) -> Vec<String> {
             "already-merged PRs retry safe cleanup without CI or another merge",
         ],
         "provenant status" => &[
-            "wait requires at least one target via ID or repeated --target, up to domains.wait.max_targets (default 64); no duration uses domains.wait.timeout_seconds",
-            "--target without --wait reports each target's current status once",
-            "with --wait, --json emits newline-delimited snapshot/transition events and a final end event; timeout exits 124",
-            "follow waits for all targets to be terminal; land targets only observe their PR",
+            "every unsettled graph is shown; settled graphs from the last 24 hours fill up to 20 rows, with an omission count",
+            "--all pages every graph with --limit and --cursor",
         ],
-        "provenant pr status" => &[
-            "one head-and-checks snapshot per PR; unavailable PRs preserve other rows",
-            "wait without a value means five minutes; unchanged snapshots exit 124",
+        "provenant wait" => &[
+            "every target resolves before the wait starts; no target waits for this project's running graphs",
+            "exit 0 success, 1 settled without success, 2 invalid or not found, 5 needs input, 124 timeout, 130 cancelled",
+            WAIT_JSON_CONTRACT,
         ],
         "provenant hook" | "provenant internal" => &["json transport is invalid for execution"],
         _ => &[],
@@ -1172,6 +1198,7 @@ mod tests {
     fn run_accepts_writer_branch_base_and_named_route() {
         let invocation = valid(&[
             "run",
+            "implement",
             "Fix parser",
             "--mode",
             "worktree-write",
@@ -1190,13 +1217,21 @@ mod tests {
         assert_eq!(request.brief.as_deref(), Some("Fix parser"));
         assert_eq!(request.branch.as_deref(), Some("fix/parser"));
         assert_eq!(request.base.as_deref(), Some("origin/main"));
-        assert_eq!(request.tier.as_deref(), Some("senior"));
+        assert_eq!(request.template.as_deref(), Some("implement"));
+        assert_eq!(request.route.as_deref(), Some("senior"));
         assert_eq!(request.write_scope, vec!["src"]);
-        valid(&["run", "Fix parser", "--worktree", ".worktrees/fix-parser"]);
-        invalid(&["run", "Fix parser", "--branch", "fix/parser"]);
-        invalid(&["run", "Fix parser", "--base", "HEAD"]);
+        valid(&[
+            "run",
+            "implement",
+            "Fix parser",
+            "--worktree",
+            ".worktrees/fix-parser",
+        ]);
+        invalid(&["run", "implement", "Fix parser", "--branch", "fix/parser"]);
+        invalid(&["run", "implement", "Fix parser", "--base", "HEAD"]);
         invalid(&[
             "run",
+            "implement",
             "Fix parser",
             "--branch",
             "fix/parser",
@@ -1473,59 +1508,6 @@ mod tests {
         );
     }
     #[test]
-    fn unified_lifecycle_commands_accept_graph_node_and_attempt_ids() {
-        for id in [
-            "graph-build",
-            "graph-build/verify",
-            "verify",
-            "a",
-            "face",
-            "DEADBEEF",
-            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-            "11111111111111111111111111111111",
-        ] {
-            valid(&["status", id, "--wait", "--json"]);
-            valid(&["output", id]);
-            valid(&["steer", id, "--text-stdin"]);
-            valid(&["stop", id]);
-            valid(&["retry", id]);
-            let Command::Retry(retry) = valid(&[
-                "retry",
-                id,
-                "--node",
-                "verify",
-                "--brief",
-                "Repair the failure",
-                "--extend",
-                "budget=20",
-            ])
-            .command
-            else {
-                panic!("retry command");
-            };
-            assert_eq!(retry.node.as_deref(), Some("verify"));
-            assert_eq!(retry.brief.as_deref(), Some("Repair the failure"));
-            assert_eq!(retry.extend, ["budget=20"]);
-        }
-        let long_node = "n".repeat(200);
-        valid(&["output", &long_node]);
-        let Command::Stop(stop) = valid(&["stop", "DEADBEEF"]).command else {
-            panic!("stop");
-        };
-        assert_eq!(stop.target.selection.as_deref(), Some("DEADBEEF"));
-        for words in [
-            &["lanes"][..],
-            &["resume", "graph-build"],
-            &["continue", "graph-build"],
-            &["cancel", "graph-build"],
-            &["redo", "graph-build"],
-            &["fabric", "graph", "status", "graph-build"],
-        ] {
-            invalid(words);
-        }
-    }
-
-    #[test]
     fn core_path_help_and_defaults() {
         for words in [&[][..], &["help"][..]] {
             let ParseOutcome::Help { text, catalog, .. } = parsed(words) else {
@@ -1537,10 +1519,17 @@ mod tests {
                 .filter_map(|entry| entry.command.strip_prefix("provenant "))
                 .filter(|path| !path.contains(' ') && *path != "help")
                 .collect::<std::collections::BTreeSet<_>>();
-            assert!(
-                actual.len() <= 10,
-                "compact help has {} verbs",
-                actual.len()
+            let marked = command_model()
+                .get_subcommands()
+                .filter(|command| command.get::<metadata::CoreCommand>().is_some())
+                .map(|command| command.get_name().to_owned())
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                actual,
+                marked
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<std::collections::BTreeSet<_>>()
             );
             assert!(text.contains("help --all"));
         }
@@ -1567,7 +1556,7 @@ mod tests {
             .iter()
             .find(|command| command.command == "provenant run")
             .unwrap();
-        for flag in ["tier", "over", "file"] {
+        for flag in ["route", "over", "file"] {
             assert!(
                 run.arguments
                     .iter()
@@ -1583,7 +1572,7 @@ mod tests {
             .iter()
             .find(|command| command.command == "provenant land")
             .unwrap();
-        for flag in ["head", "batch", "shadow", "tier"] {
+        for flag in ["head", "shadow", "tier"] {
             assert!(
                 land.arguments
                     .iter()
@@ -1637,9 +1626,10 @@ mod tests {
     fn graph_run_and_template_controls_parse() {
         let Command::Run(request) = valid(&[
             "run",
-            "Inspect the code",
-            "--use",
             "explore",
+            "Inspect the code",
+            "--name",
+            "inspect",
             "--route",
             "junior",
             "--over",
@@ -1650,32 +1640,62 @@ mod tests {
             "limit=3",
             "--explain",
             "--detached",
-            "--wait=30m",
         ])
         .command
         else {
             panic!("run")
         };
-        assert_eq!(request.brief.as_deref(), Some("Inspect the code"));
         assert_eq!(request.template.as_deref(), Some("explore"));
-        assert_eq!(request.tier.as_deref(), Some("junior"));
+        assert_eq!(request.brief.as_deref(), Some("Inspect the code"));
+        assert_eq!(request.brief_text, None);
+        assert_eq!(request.name.as_deref(), Some("inspect"));
+        assert_eq!(request.route.as_deref(), Some("junior"));
         assert_eq!(request.over, ["cli", "runtime"]);
         assert_eq!(request.set, ["limit=3"]);
         assert!(request.explain);
         assert!(request.detached);
-        assert_eq!(request.wait, Some(1800));
         valid(&["run", "--file", "work.toml", "--explain"]);
-        invalid(&["run", "--preset", "task"]);
-        valid(&["stats", "--by", "tier"]);
-        valid(&["stats", "--by", "node"]);
-        valid(&["status", "--stats", "--by", "tier"]);
-        valid(&["status", "--stats", "--by", "template"]);
-        invalid(&["status", "--by", "tier"]);
-        valid(&["status", "--stats", "--by", "node"]);
+        // A template is the first positional; a document and a brief file each
+        // replace the template and brief they stand for, never add to them.
+        invalid(&["run"]);
+        invalid(&["run", "explore", "--file", "work.toml"]);
+        invalid(&["run", "explore", "brief", "--brief-file", "brief.md"]);
+        valid(&["run", "explore", "--brief-file", "-"]);
+        let Command::Run(named) = valid(&["run", "explore", "--brief", "Named brief"]).command
+        else {
+            panic!("run")
+        };
+        assert_eq!(named.brief_text.as_deref(), Some("Named brief"));
+        invalid(&["run", "explore", "positional", "--brief", "named"]);
+        valid(&[
+            "retry",
+            "fix-login/implement",
+            "--brief",
+            "Try the parser again",
+        ]);
+        valid(&["retry", "fix-login/implement", "--brief-file", "-"]);
+        invalid(&[
+            "retry",
+            "fix-login/implement",
+            "--brief",
+            "a",
+            "--brief-file",
+            "b",
+        ]);
+        invalid(&[
+            "retry",
+            "fix-login/implement",
+            "--brief-file",
+            "-",
+            "--extend",
+            "x=1",
+        ]);
+        invalid(&["run", "explore", "--name", "Not_A_Name"]);
+        valid(&["run", "explore", "--route", "writer=junior,review=senior"]);
         valid(&["config", "schema", "--all"]);
-        valid(&["run", "--tier", "junior"]);
         valid(&[
             "run",
+            "task",
             "--model",
             "codex/gpt-6-luna",
             "--effort",
@@ -1684,25 +1704,29 @@ mod tests {
             "work",
             "--host",
             "workshop",
-            "--operation-id",
-            "planned-run",
         ]);
-        invalid(&["run", "--model", "codex/gpt-6-luna", "--tier", "junior"]);
+        invalid(&[
+            "run",
+            "task",
+            "--model",
+            "codex/gpt-6-luna",
+            "--route",
+            "junior",
+        ]);
         for flag in [
             "--deliver",
             "--build-heavy",
             "--confidential",
             "--provider-timeout",
         ] {
-            invalid(&["run", flag, "example"]);
+            invalid(&["run", "task", flag, "example"]);
         }
-        invalid(&["run", "--tier", "senior", "--route", "junior"]);
         valid(&["templates"]);
         valid(&["templates", "review.security", "--file", "inline.toml"]);
         valid(&["edit", "example", "--file", "patch.toml"]);
         invalid(&["edit", "example"]);
         for flag in ["--preset", "--prompt-file", "--manifest", "--plan"] {
-            invalid(&["run", flag, "example"]);
+            invalid(&["run", "task", flag, "example"]);
         }
     }
     #[test]
@@ -1722,47 +1746,139 @@ mod tests {
                 .is_some_and(|text| !text.is_empty())
         );
         for name in [
-            "brief", "template", "tier", "model", "effort", "account", "host", "over", "set",
-            "file", "explain", "wait",
+            "template",
+            "brief",
+            "name",
+            "brief_file",
+            "route",
+            "model",
+            "effort",
+            "account",
+            "host",
+            "over",
+            "set",
+            "file",
+            "explain",
         ] {
             assert!(
                 run.arguments.iter().any(|argument| argument.name == name),
                 "{name}"
             );
         }
-        let status = catalog
+        let branch = run.arguments.iter().find(|a| a.name == "branch").unwrap();
+        assert_eq!(branch.requires, ["base"]);
+        let base = run.arguments.iter().find(|a| a.name == "base").unwrap();
+        assert_eq!(base.requires, ["branch"]);
+        let route_set = catalog
             .commands
             .iter()
-            .find(|c| c.command == "provenant status")
+            .find(|c| c.command == "provenant route override set")
             .unwrap();
-        let requires = |name: &str| {
-            status
+        assert_eq!(
+            route_set
                 .arguments
                 .iter()
-                .find(|a| a.name == name)
+                .find(|a| a.name == "model")
                 .unwrap()
-                .requires
-                .clone()
-        };
-        // `--target` alone reports each target's status once (#3124).
-        assert!(requires("target").is_empty());
-        for name in ["until", "follow"] {
-            assert_eq!(requires(name), ["wait"]);
-        }
-        assert!(
-            status
-                .constraints
-                .iter()
-                .any(|c| c.contains("newline-delimited"))
+                .requires,
+            ["risk_tier", "task_kind", "until"]
         );
+        assert_eq!(
+            route_set
+                .arguments
+                .iter()
+                .find(|a| a.name == "risk_tier")
+                .unwrap()
+                .requires,
+            ["model"]
+        );
+        assert_eq!(
+            route_set
+                .arguments
+                .iter()
+                .find(|a| a.name == "task_kind")
+                .unwrap()
+                .requires,
+            ["model"]
+        );
+        assert_eq!(
+            route_set
+                .arguments
+                .iter()
+                .find(|a| a.name == "policy")
+                .unwrap()
+                .required_unless,
+            ["model"]
+        );
+        let wait = catalog
+            .commands
+            .iter()
+            .find(|c| c.command == "provenant wait")
+            .unwrap();
+        assert!(wait.constraints.iter().any(|c| c == WAIT_JSON_CONTRACT));
     }
     #[test]
-    fn retry_help_shows_graph_node_selector() {
-        let ParseOutcome::Help { text, .. } = parsed(&["help", "retry"]) else {
-            panic!("retry help");
+    fn focused_wait_help_documents_jsonl_events_and_terminal_envelope() {
+        let ParseOutcome::Help { text, catalog, .. } = parsed(&["help", "wait"]) else {
+            panic!("wait help");
         };
-        assert!(text.contains("--node"), "{text}");
-        assert!(text.contains("GRAPH/NODE"), "{text}");
+        assert!(text.contains("JSONL"), "{text}");
+        assert!(text.contains("terminal command-result envelope"), "{text}");
+        let wait = catalog
+            .commands
+            .iter()
+            .find(|c| c.command == "provenant wait")
+            .unwrap();
+        assert!(wait.constraints.iter().any(|c| c == WAIT_JSON_CONTRACT));
+    }
+
+    #[test]
+    fn compact_quota_help_indexes_children_from_the_full_grammar() {
+        let ParseOutcome::Help { text, catalog, .. } = parsed(&["help", "quota"]) else {
+            panic!("quota help");
+        };
+        let model = expanded_model();
+        let expected: Vec<_> = model
+            .find_subcommand("quota")
+            .unwrap()
+            .get_subcommands()
+            .filter(|child| !child.is_hide_set())
+            .map(|child| child.get_name().to_owned())
+            .collect();
+        for child in &expected {
+            assert!(text.contains(child), "missing {child} from {text}");
+        }
+        let quota = catalog
+            .commands
+            .iter()
+            .find(|c| c.command == "provenant quota")
+            .unwrap();
+        assert_eq!(quota.subcommands, expected);
+    }
+
+    #[test]
+    fn help_constraints_name_only_options_the_command_has() {
+        let ParseOutcome::Help { catalog, .. } = parsed(&["help", "--all"]) else {
+            panic!("catalog");
+        };
+        for command in &catalog.commands {
+            for constraint in &command.constraints {
+                for flag in constraint
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                    .filter(|word| word.starts_with("--") && word.len() > 2)
+                {
+                    let long = flag.trim_start_matches("--");
+                    assert!(
+                        command
+                            .arguments
+                            .iter()
+                            .any(|a| a.long.as_deref() == Some(long)),
+                        "{}: constraint names --{long}, which it lacks: {constraint}",
+                        command.command
+                    );
+                }
+            }
+        }
     }
     #[test]
     fn chair_log_help_explains_generated_retry_keys() {
@@ -1869,12 +1985,9 @@ mod tests {
     }
     #[test]
     fn batch_land_and_policy_explanation_parse() -> Result<(), Box<dyn std::error::Error>> {
-        let inv = valid(&[
-            "land", "12", "34", "--batch", "--shadow", "--tier", "crucial",
-        ]);
+        let inv = valid(&["land", "12", "34", "--shadow", "--tier", "crucial"]);
         let Command::Land {
             numbers,
-            batch,
             shadow,
             tier,
             ..
@@ -1883,11 +1996,11 @@ mod tests {
             return Err("expected land command".into());
         };
         assert_eq!(numbers, [12, 34]);
-        assert!(batch && shadow);
+        assert!(shadow);
         assert_eq!(tier.as_deref(), Some("crucial"));
         invalid(&["land", "12", "--tier", "high"]);
         valid(&["land", "--explain", "--json"]);
-        invalid(&["land", "0", "--batch"]);
+        invalid(&["land", "0", "--shadow"]);
         Ok(())
     }
 
@@ -1898,17 +2011,19 @@ mod tests {
         valid(&["land", "2199", "--wait"]);
         valid(&["land", "--wait=30m", "2199"]);
         invalid(&["land", "2199", "--wait=0"]);
-        invalid(&["land", "2199", "--wait=5h"]);
-        let attempt = "11".repeat(16);
-        valid(&["output", "--host", "workshop", &attempt, "--json"]);
-        invalid(&["output", &attempt, "--summary"]);
+        let Command::Land { wait, .. } = valid(&["land", "2199", "--wait=5h"]).command else {
+            panic!("land command")
+        };
+        assert_eq!(wait, Some(provenant_core::MAX_LANE_RUNTIME_SECONDS));
+        valid(&["output", "fix-login", "--json"]);
+        invalid(&["output", "fix-login", "--summary"]);
     }
     #[test]
     fn common_usage_errors_name_the_correct_invocation() {
-        let ParseOutcome::Invalid { error, .. } = parsed(&["status", "--wait=5h"]) else {
+        let ParseOutcome::Invalid { error, .. } = parsed(&["wait", "--timeout", "0"]) else {
             panic!("expected duration error");
         };
-        assert!(error.to_string().contains("--wait"), "{error}");
+        assert!(error.to_string().contains("--timeout"), "{error}");
         let ParseOutcome::Invalid { error, .. } = parsed(&["quota", "history", "--until", "0d"])
         else {
             panic!("expected span error");
@@ -1919,15 +2034,11 @@ mod tests {
                 vec!["route", "resolve", "one", "two"],
                 "provenant route resolve senior",
             ),
-            (
-                vec!["output", "--host"],
-                "provenant output ATTEMPT --host HOST",
-            ),
+            (vec!["output"], "provenant output fix-login/review"),
             (
                 vec!["land", "2199", "--wait", "5m"],
                 "provenant land 2199 --wait=5m",
             ),
-            (vec!["pr", "land", "2199"], "provenant land 2199 --wait"),
         ] {
             let ParseOutcome::Invalid { error, .. } = parsed(&words) else {
                 panic!("expected usage error");
@@ -1968,26 +2079,21 @@ mod tests {
     fn invalid_invocations_across_command_groups_name_field_and_correction() {
         for (words, expected_field, expected_repair) in [
             (
-                vec!["status", "--wait=5h"],
+                vec!["land", "2199", "--wait=0"],
                 "--wait",
-                "provenant status --wait=30m",
+                "provenant land 2199 --wait=30m",
             ),
             (
-                vec!["--project", "/path with spaces", "status", "--wait=5h"],
+                vec!["--project", "/path with spaces", "land", "2199", "--wait=0"],
                 "--wait",
-                "provenant --project '/path with spaces' status --wait=30m",
-            ),
-            (
-                vec!["status", "--wait=5h", "--bogus"],
-                "--wait",
-                "provenant status",
+                "provenant --project '/path with spaces' land 2199 --wait=30m",
             ),
             (vec!["land", "--head"], "--head", "provenant land"),
-            (vec!["output"], "attempt", "provenant output"),
-            (vec!["stop"], "target", "provenant stop ID"),
-            (vec!["retry"], "target", "provenant retry ID"),
-            (vec!["steer"], "target", "provenant steer ID"),
-            (vec!["edit"], "id", "provenant edit ID"),
+            (vec!["output"], "target", "provenant output"),
+            (vec!["stop"], "target", "provenant stop"),
+            (vec!["retry"], "target", "provenant retry"),
+            (vec!["steer"], "target", "provenant steer"),
+            (vec!["edit"], "name", "provenant edit"),
             (vec!["route", "resolve"], "route", "provenant route resolve"),
             (vec!["pr", "watch"], "number", "provenant pr watch"),
             (vec!["config"], "subcommand", "provenant config show"),
@@ -2061,7 +2167,7 @@ mod tests {
     }
 
     #[test]
-    fn config_without_subcommand_prints_usage_and_retired_verbs_name_replacement() {
+    fn config_without_subcommand_prints_usage() {
         let ParseOutcome::Invalid { error, .. } = parsed(&["config"]) else {
             panic!("expected invalid for config without subcommand");
         };
@@ -2070,92 +2176,308 @@ mod tests {
             text.contains("Usage: provenant config [OPTIONS] <COMMAND>"),
             "{text}"
         );
-        assert!(text.contains("Commands:"), "{text}");
         assert_eq!(error.repair(), Some("provenant config show"));
+    }
 
-        for (verb, replacement, expected_repair) in [
-            (vec!["dispatch", "Meet acceptance"], "run", "provenant run"),
-            (
-                vec!["--project", "/path with spaces", "dispatch"],
-                "run",
-                "provenant run",
-            ),
-            (vec!["lanes"], "status", "provenant status"),
-            (
-                vec!["resume", "attempt-1"],
-                "retry",
-                "provenant retry attempt-1",
-            ),
-            (
-                vec!["cancel", "attempt-1"],
-                "stop",
-                "provenant stop attempt-1",
-            ),
-            (vec!["preset"], "templates", "provenant templates"),
-            (
-                vec!["review"],
-                "run --use review",
-                "provenant run --use review",
-            ),
-            (
-                vec!["continue", "attempt-1"],
-                "retry",
-                "provenant retry attempt-1",
-            ),
-            (
-                vec!["redo", "attempt-1"],
-                "retry",
-                "provenant retry attempt-1",
-            ),
-            (
-                vec!["pr", "land", "2199"],
-                "land",
-                "provenant land 2199 --wait",
-            ),
-            (
-                vec!["fabric", "graph", "status"],
-                "status",
-                "provenant status",
-            ),
-            (
-                vec!["fabric", "graph", "cancel", "attempt-1"],
-                "stop",
-                "provenant stop attempt-1",
-            ),
-            (vec!["fabric_graph"], "run", "provenant run"),
-        ] {
-            let ParseOutcome::Invalid { error, .. } = parsed(&verb) else {
-                panic!("expected invalid for retired verb {verb:?}");
+    /// The words that spell `removed`, with a value after a removed flag so
+    /// that a flag which took a value is still refused.
+    fn removed_words(removed: &Removed) -> Vec<String> {
+        let mut words: Vec<String> = removed.words.iter().map(|w| (*w).into()).collect();
+        if let Some(flag) = removed.flag {
+            words.push(format!("--{flag}"));
+            words.push("fix-login".into());
+        }
+        words
+    }
+
+    #[test]
+    fn each_removed_spelling_exits_2_with_one_line_naming_its_replacement() {
+        for removed in REMOVED
+            .iter()
+            .filter(|removed| removed.config_key.is_none() && removed.diagnostic_code.is_none())
+        {
+            let words = removed_words(removed);
+            let ParseOutcome::Invalid { error, .. } = parse(words.iter().map(OsString::from))
+            else {
+                panic!("{words:?} still parses");
             };
+            // Invalid input exits 2, and with no repair the error is one line.
+            assert!(matches!(error, CliError::Invalid { .. }), "{words:?}");
             let text = error.to_string();
-            assert!(
-                text.contains("retired verb"),
-                "{verb:?}: expected retired verb message, got: {text}"
-            );
-            assert!(
-                text.contains(replacement),
-                "{verb:?}: expected replacement '{replacement}', got: {text}"
-            );
-            let repair = error
-                .repair()
-                .unwrap_or_else(|| panic!("{verb:?}: missing repair"));
-            assert!(
-                repair.starts_with(expected_repair),
-                "{verb:?}: expected repair starting with '{expected_repair}', got '{repair}'"
-            );
+            assert_eq!(text.lines().count(), 1, "{words:?}: {text}");
+            assert!(text.contains(removed.replacement), "{words:?}: {text}");
+            assert_eq!(error.repair(), None, "{words:?}");
         }
     }
 
     #[test]
-    fn config_migrate_takes_dry_run() {
-        for (words, expected) in [
-            (vec!["config", "migrate"], false),
-            (vec!["config", "migrate", "--dry-run"], true),
-        ] {
-            let Command::Config(Config::Migrate { dry_run }) = valid(&words).command else {
-                panic!("config migrate")
+    fn every_absent_v1_11_1_clap_member_has_a_refusal_row() {
+        fn command_at<'a>(command: &'a clap::Command, path: &[&str]) -> Option<&'a clap::Command> {
+            let (head, tail) = path.split_first()?;
+            let next = command.get_subcommands().find(|child| {
+                child.get_name() == *head || child.get_all_aliases().any(|alias| alias == *head)
+            })?;
+            if tail.is_empty() {
+                Some(next)
+            } else {
+                command_at(next, tail)
+            }
+        }
+        fn retired_command(path: &[&str]) -> bool {
+            REMOVED.iter().any(|removed| {
+                removed.config_key.is_none()
+                    && removed.diagnostic_code.is_none()
+                    && removed.flag.is_none()
+                    && removed.words.len() <= path.len()
+                    && path
+                        .iter()
+                        .zip(removed.words)
+                        .all(|(word, removed)| *word == *removed)
+            })
+        }
+        fn has_option(command: &clap::Command, root: &clap::Command, name: &str) -> bool {
+            command.get_arguments().any(|argument| {
+                argument.get_long() == Some(name)
+                    || argument
+                        .get_all_aliases()
+                        .is_some_and(|aliases| aliases.contains(&name))
+            }) || root.get_arguments().any(|argument| {
+                argument.get_long() == Some(name)
+                    || argument
+                        .get_all_aliases()
+                        .is_some_and(|aliases| aliases.contains(&name))
+            })
+        }
+
+        let model = expanded_model();
+        let fixture = include_str!("removed-cli-1.11.1.txt");
+        let mut rows = 0;
+        let mut missing = Vec::new();
+        for line in fixture
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        {
+            rows += 1;
+            let columns: Vec<_> = line.splitn(3, '\t').collect();
+            assert_eq!(columns.len(), 3, "malformed historical clap row: {line}");
+            let path: Vec<_> = if columns[0] == "." {
+                Vec::new()
+            } else {
+                columns[0].split_whitespace().collect()
             };
-            assert_eq!(dry_run, expected);
+            let current = if path.is_empty() {
+                Some(&model)
+            } else {
+                command_at(&model, &path)
+            };
+            if !path.is_empty() && current.is_none() {
+                if !retired_command(&path) {
+                    missing.push(format!("command {}", path.join(" ")));
+                }
+                continue;
+            }
+            let current = current.expect("root command exists");
+            for child in columns[1].split_whitespace() {
+                let mut child_path = path.clone();
+                child_path.push(child);
+                if !current.get_subcommands().any(|command| {
+                    command.get_name() == child
+                        || command.get_all_aliases().any(|alias| alias == child)
+                }) && !retired_command(&child_path)
+                {
+                    missing.push(format!("command {}", child_path.join(" ")));
+                }
+            }
+            for option in columns[2].split_whitespace() {
+                let name = option
+                    .strip_prefix("--")
+                    .expect("fixture options use long spellings");
+                let exact = REMOVED.iter().any(|removed| {
+                    removed.config_key.is_none()
+                        && removed.diagnostic_code.is_none()
+                        && removed.flag == Some(name)
+                        && removed.words == path
+                });
+                if !has_option(current, &model, name) && !exact && !retired_command(&path) {
+                    missing.push(format!("option {option} at {}", path.join(" ")));
+                }
+            }
+        }
+        assert!(rows > 0, "the 1.11.1 clap fixture must not be empty");
+        assert!(
+            missing.is_empty(),
+            "unrefused historical members: {missing:?}"
+        );
+    }
+
+    /// Target parsers declared on the command model, with the option that takes one.
+    fn target_commands() -> Vec<(Vec<String>, String, super::metadata::TargetSyntax)> {
+        fn walk(
+            command: &clap::Command,
+            words: &[String],
+            found: &mut Vec<(Vec<String>, String, super::metadata::TargetSyntax)>,
+        ) {
+            for argument in command.get_arguments() {
+                if argument.is_hide_set() {
+                    continue;
+                }
+                let Some(grammar) = argument.get::<super::metadata::TargetGrammar>() else {
+                    continue;
+                };
+                let flag = argument
+                    .get_long()
+                    .map(|long| format!("--{long}"))
+                    .unwrap_or_default();
+                found.push((words.to_vec(), flag, grammar.0));
+            }
+            for child in command
+                .get_subcommands()
+                .filter(|child| !child.is_hide_set())
+            {
+                let mut path = words.to_vec();
+                path.push(child.get_name().into());
+                walk(child, &path, found);
+            }
+        }
+        let mut found = Vec::new();
+        walk(&expanded_model(), &[], &mut found);
+        found
+    }
+
+    /// Argument words that satisfy a command's other required arguments.
+    fn required_extras(words: &[String], flag: &str) -> Vec<&'static str> {
+        let words: Vec<&str> = words.iter().map(String::as_str).collect();
+        match (words.as_slice(), flag) {
+            (["steer"], _) => vec!["--brief-file", "-"],
+            (["edit"], _) => vec!["--file", "patch.json"],
+            (["pr", "open"], "--review") => {
+                vec!["--from-attempt", "fix-login", "--summary-file", "s.md"]
+            }
+            (["pr", "open"], _) => vec!["--summary-file", "s.md"],
+            (["reconcile"], "--abandon") => vec!["--reason", "superseded"],
+            _ => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn every_target_verb_parses_the_generated_target_table_alike() {
+        let names = ["a", "fix-login", "g-0123abcd", &"n".repeat(48)];
+        let nodes = ["review", "build.v2", "x_y-z", &"N".repeat(200)];
+        let mut graph_targets = Vec::new();
+        for name in names {
+            graph_targets.push(name.to_string());
+            for node in nodes {
+                graph_targets.push(format!("{name}/{node}"));
+                for number in [1, 2, 10, u32::MAX] {
+                    graph_targets.push(format!("{name}/{node}#{number}"));
+                }
+            }
+        }
+        let graph_refused = [
+            "",
+            "Fix",
+            "1fix",
+            "fix-",
+            "fix--login",
+            "lane:fix",
+            "graph:fix",
+            "operation:op",
+            "land:12",
+            "fix/",
+            "fix/node#0",
+            "fix/node#01",
+            "fix/node#",
+            "fix#1",
+            "fix/a/b",
+        ];
+        for text in &graph_targets {
+            let target: Target = text.parse().unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert_eq!(target.to_string(), *text);
+            assert_eq!(target.to_string().parse::<Target>().ok(), Some(target));
+        }
+        for text in graph_refused {
+            assert!(text.parse::<Target>().is_err(), "{text}");
+        }
+        let graph_names = names
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
+        let branch_names = ["main", "release/2.0", "feature_x", "@"].map(str::to_owned);
+        let branch_refused = ["", "-main", "HEAD", "main..next", "release/", "x @{y"];
+        let cases = [
+            (
+                super::metadata::TargetSyntax::Graph,
+                graph_targets,
+                graph_refused
+                    .iter()
+                    .map(|value| (*value).to_owned())
+                    .collect(),
+            ),
+            (
+                super::metadata::TargetSyntax::GraphName,
+                graph_names,
+                vec!["fix/review".to_owned(), "fix#1".to_owned()],
+            ),
+            (
+                super::metadata::TargetSyntax::Branch,
+                branch_names,
+                branch_refused
+                    .iter()
+                    .map(|value| (*value).to_owned())
+                    .collect(),
+            ),
+        ];
+        let commands = target_commands();
+        assert!(
+            !commands.is_empty(),
+            "command grammar has no target declarations"
+        );
+        for (words, flag, syntax) in &commands {
+            let (accepted_values, refused_values) = cases
+                .iter()
+                .find(|(kind, _, _)| kind == syntax)
+                .map(|(_, accepted, refused)| (accepted, refused))
+                .expect("every target declaration has a case table");
+            let extras = required_extras(words, flag);
+            let mut observed = Vec::new();
+            for text in accepted_values
+                .iter()
+                .chain(refused_values)
+                .map(String::as_str)
+            {
+                let mut argv: Vec<&str> = words.iter().map(String::as_str).collect();
+                if !flag.is_empty() {
+                    argv.push(flag);
+                }
+                argv.push(text);
+                argv.extend(&extras);
+                observed.push(matches!(parsed(&argv), ParseOutcome::Invocation(_)));
+            }
+            let expected = accepted_values
+                .iter()
+                .map(|text| match syntax {
+                    super::metadata::TargetSyntax::Graph => text.parse::<Target>().is_ok(),
+                    super::metadata::TargetSyntax::GraphName => text
+                        .parse::<Target>()
+                        .is_ok_and(|target| target.node.is_none()),
+                    super::metadata::TargetSyntax::Branch => {
+                        provenant_confinement::repo::GitRefName::branch(text).is_ok()
+                    }
+                })
+                .chain(refused_values.iter().map(|text| {
+                    match syntax {
+                        super::metadata::TargetSyntax::Graph => text.parse::<Target>().is_ok(),
+                        super::metadata::TargetSyntax::GraphName => text
+                            .parse::<Target>()
+                            .is_ok_and(|target| target.node.is_none()),
+                        super::metadata::TargetSyntax::Branch => {
+                            provenant_confinement::repo::GitRefName::branch(text).is_ok()
+                        }
+                    }
+                }))
+                .collect::<Vec<_>>();
+            assert_eq!(observed, expected, "{words:?} {flag} {syntax:?}");
         }
     }
 
@@ -2172,54 +2494,49 @@ mod tests {
         invalid(&["internal", "supervise", "2", "4", "5", "6", "7"]);
     }
     #[test]
-    fn bounded_waits_counts_and_byte_windows() {
-        let Command::Status(default_wait) =
-            valid(&["status", "--wait", "--target", "pr:2721"]).command
-        else {
-            panic!("expected status")
-        };
-        assert!(matches!(default_wait.until, Condition::All));
+    fn wait_and_output_bounds() {
+        valid(&["wait"]);
         valid(&[
-            "status", "--wait", "--target", "pr:2721", "--until", "all", "--follow",
+            "wait",
+            "fix-login",
+            "fix-login/review#2",
+            "--pr",
+            "2721",
+            "--any",
         ]);
-        valid(&[
-            "status",
-            "--wait=2m",
-            "--target",
-            "graph:build",
-            "--target",
-            "pr:2721",
-        ]);
-        invalid(&["status", "--wait=0"]);
-        invalid(&["status", "--wait=5h"]);
-        invalid(&["status", "--follow"]);
-        valid(&["status", "--target", "pr:2721"]);
-        for wait in ["1", "14400"] {
-            valid(&["status", &format!("--wait={wait}")]);
+        valid(&["wait", "--pr", "2721", "--follow", "--timeout", "2m"]);
+        for timeout in ["1", "4h", "14400"] {
+            valid(&["wait", "fix-login", "--timeout", timeout]);
         }
-        for wait in ["0", "14401", "-1", "1.5", "18446744073709551616"] {
-            invalid(&["status", &format!("--wait={wait}")]);
+        for timeout in [
+            "14401",
+            "5h",
+            "99d",
+            "18446744073709551615d",
+            "999999999999999999999999999999h",
+        ] {
+            let Command::Wait(wait) = valid(&["wait", "fix-login", "--timeout", timeout]).command
+            else {
+                panic!("wait command")
+            };
+            assert_eq!(
+                crate::wait::Settings::default().timeout(wait.timeout, None),
+                provenant_core::MAX_LANE_RUNTIME_SECONDS
+            );
         }
-        valid(&["status", "--limit", "100"]);
-        invalid(&["status", "--limit", "101"]);
-        let attempt = "11".repeat(16) + &format!("/{}/{}", "22".repeat(16), "33".repeat(16));
-        valid(&["output", &attempt, "--tail", "500", "--max-bytes", "65536"]);
-        valid(&["output", &attempt, "--tail", "501"]);
-        invalid(&["output", &attempt, "--tail", "0"]);
-        invalid(&["output", &attempt, "--max-bytes", "65537"]);
-        invalid(&["output", &attempt, "--offset", "0", "--tail", "1"]);
-        valid(&["output", &attempt, "--trace"]);
-        valid(&["telemetry", "trace", "--peers", "--run", &"11".repeat(16)]);
-        invalid(&["output", &attempt, "--trace", "--part", "prompt"]);
-        invalid(&["output", &attempt, "--trace", "--part", "receipt"]);
-        invalid(&["output", &attempt, "--trace", "--tail", "1"]);
-        valid(&["output", &"11".repeat(16)]);
-        valid(&["output", &"11".repeat(16), "--host", "workshop"]);
-        valid(&[
-            "output",
-            &format!("{}/{}", "11".repeat(16), "33".repeat(16)),
-        ]);
-        invalid(&["output", &format!("{}/", "11".repeat(16))]);
+        for timeout in ["0", "-1", "1.5"] {
+            invalid(&["wait", "fix-login", "--timeout", timeout]);
+        }
+        invalid(&["wait", "--pr", "0"]);
+        valid(&["status", "--limit", "100000"]);
+        invalid(&["status", "--limit", "0"]);
+        let attempt = "fix-login/review#2";
+        valid(&["output", attempt, "--tail", "500", "--max-bytes", "65536"]);
+        valid(&["output", attempt, "--tail", "501"]);
+        invalid(&["output", attempt, "--tail", "0"]);
+        invalid(&["output", attempt, "--max-bytes", "65537"]);
+        invalid(&["output", attempt, "--offset", "0", "--tail", "1"]);
+        valid(&["telemetry", "trace", "--peers", "fix-login"]);
     }
     #[test]
     fn session_handoff_names_a_peer_and_an_account() {
@@ -2293,10 +2610,26 @@ mod tests {
         invalid(&["disk", "report", "--dry-run"]);
     }
     #[test]
-    fn control_commands_require_piped_text_and_a_channel() {
-        let attempt = "11111111111111111111111111111111";
-        valid(&["steer", attempt, "--text-stdin", "--operation-id", "s-1"]);
+    fn control_commands_validate_brief_sources_and_channels() {
+        let attempt = "fix-login/implement#1";
+        valid(&[
+            "steer",
+            attempt,
+            "--brief",
+            "Please continue",
+            "--operation-id",
+            "s-1",
+        ]);
+        valid(&["steer", attempt, "--brief-file", "-"]);
         invalid(&["steer", attempt]);
+        invalid(&["steer", attempt, "--brief", "a", "--brief-file", "b"]);
+        invalid(&[
+            "steer",
+            "11111111111111111111111111111111",
+            "--brief-file",
+            "-",
+        ]);
+        invalid(&["steer", attempt, "--text-stdin"]);
         valid(&[
             "chair",
             "message",
@@ -2307,7 +2640,7 @@ mod tests {
         ]);
         invalid(&["chair", "message", "chair-a", "--text-stdin"]);
         invalid(&["chair", "message", "chair-a", "--channel", "console"]);
-        invalid(&["steer", attempt, "--text-stdin", "--approve"]);
+        invalid(&["steer", attempt, "--brief-file", "-", "--approve"]);
     }
     #[test]
     fn mail_cursors_can_be_scoped_to_one_chair_session() {
@@ -2345,18 +2678,6 @@ mod tests {
         );
     }
     #[test]
-    fn telemetry_stats_parses_every_grouping_dimension() {
-        for dimension in [
-            "route", "pr", "issue", "graph", "node", "pattern", "preset", "role",
-        ] {
-            let invocation = valid(&["telemetry", "stats", "--by", dimension]);
-            let Command::Telemetry(Telemetry::Stats(stats)) = invocation.command else {
-                panic!("telemetry stats");
-            };
-            assert!(stats.by.is_some(), "{dimension}");
-        }
-    }
-    #[test]
     fn experiment_show_parses_the_experiment_id_and_comparison_options() {
         let invocation = valid(&[
             "telemetry",
@@ -2377,7 +2698,6 @@ mod tests {
     #[test]
     fn paging_recovery_and_removal_require_explicit_scopes() {
         invalid(&["status", "--until", "all"]);
-        invalid(&["status", "--wait=1", "--cursor", "1"]);
         invalid(&["worktree", "remove", "--merged", "--integration", "main"]);
         valid(&[
             "worktree",
@@ -2413,14 +2733,18 @@ mod tests {
     }
     #[test]
     fn collection_caps_are_not_per_occurrence_caps() {
-        for (prefix, flag, max) in [
-            (vec!["reconcile"], "--id", 100),
-            (
-                vec!["worktree", "remove", "--merged", "--integration", "main"],
-                "--branch",
-                100,
-            ),
-        ] {
+        let mut words = vec!["reconcile".to_string()];
+        words.extend((0..100).map(|i| format!("graph-{i}")));
+        let argv: Vec<&str> = words.iter().map(String::as_str).collect();
+        valid(&argv);
+        let mut over = argv.clone();
+        over.push("graph-100");
+        invalid(&over);
+        for (prefix, flag, max) in [(
+            vec!["worktree", "remove", "--merged", "--integration", "main"],
+            "--branch",
+            100,
+        )] {
             let id = "a".repeat(32);
             let mut words = prefix;
             for _ in 0..max {
@@ -2430,9 +2754,8 @@ mod tests {
             words.extend([flag, &id]);
             invalid(&words);
         }
-        let target = "a".repeat(32);
         let reason = "é".repeat(129);
-        invalid(&["stop", &target, "--operation-id", "op", "--reason", &reason]);
+        invalid(&["stop", "fix-login", "--reason", &reason]);
     }
     #[test]
     fn parsed_globals_survive_help_version_and_failures() {
@@ -2558,10 +2881,10 @@ mod tests {
             .commands
             .iter()
             .find(|command| command.command == "provenant status");
-        assert!(
-            status
-                .is_some_and(|command| { command.arguments.iter().any(|arg| arg.name == "wait") })
-        );
+        let status = status.expect("status help");
+        assert!(!status.arguments.iter().any(|arg| arg.name == "wait"));
+        invalid(&["status", "--wait"]);
+        valid(&["wait", "fix-login"]);
         let ParseOutcome::Help { catalog, .. } = parsed(&["help", "reconcile", "--json"]) else {
             panic!("reconcile help")
         };

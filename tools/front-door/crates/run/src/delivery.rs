@@ -42,9 +42,8 @@ struct BoundDelivery {
     lane_branch: String,
     pull_request_repo: Option<String>,
     git_dir: PathBuf,
-    /// Host repository authority, independent of lane-writable `commondir`.
-    #[serde(default)]
-    common_git_dir: Option<PathBuf>,
+    /// Host repository authority, independent of lane-writable commondir.
+    common_git_dir: PathBuf,
     host_cwd: PathBuf,
     /// Destination sealed at launch; a later request edit cannot redirect it.
     destination: WriterDeliveryRequest,
@@ -641,7 +640,7 @@ impl HostDeliveryContext {
                 pull_request_repo: None,
                 git_dir: std::fs::canonicalize(git_dir)
                     .map_err(|error| prepare_error("git dir", error))?,
-                common_git_dir: Some(common_git_dir),
+                common_git_dir,
                 host_cwd: writer.project.clone(),
                 destination: request.clone(),
             });
@@ -720,7 +719,7 @@ impl HostDeliveryContext {
                 .map_err(|error| prepare_error("remote URL", error))?,
             git_dir: std::fs::canonicalize(git_dir)
                 .map_err(|error| prepare_error("git dir", error))?,
-            common_git_dir: Some(common_git_dir),
+            common_git_dir,
             host_cwd: writer.project.clone(),
             destination: request.clone(),
         });
@@ -1068,13 +1067,15 @@ impl HostDeliveryContext {
     fn host_environment(&mut self, writer: &WriterRequest) -> Result<()> {
         // A graph delivery runs in the project checkout itself, which is not a
         // lane.
-        self.lane_roots = (writer.worktree != writer.project)
-            .then(|| writer.worktree.clone())
-            .into_iter()
-            .collect();
-        self.lane_roots.extend(
-            [".worktrees", ".provenant", ".agent-run"].map(|name| writer.project.join(name)),
-        );
+        self.lane_roots = provenant_confinement::transport::LaneRoots::project(
+            &writer.project,
+            &self.writer_registry,
+        )
+        .map_err(|error| prepare_error("lane roots", error))?
+        .into_paths();
+        if writer.worktree != writer.project {
+            self.lane_roots.push(writer.worktree.clone());
+        }
         if let Some(run_state) = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV) {
             self.lane_roots.push(PathBuf::from(run_state));
         }
@@ -1471,12 +1472,8 @@ impl HostDeliveryContext {
     }
 
     pub(super) fn common_git_dir(&self, project: &Path, stage: Stage) -> Result<PathBuf> {
-        match self
-            .bound
-            .as_ref()
-            .and_then(|bound| bound.common_git_dir.clone())
-        {
-            Some(common) => Ok(common),
+        match self.bound.as_ref() {
+            Some(bound) => Ok(bound.common_git_dir.clone()),
             None => self.discover_common_git_dir(project, stage),
         }
     }
@@ -2360,7 +2357,7 @@ pub(super) fn stdout_limit(commit_log: bool, args: &[&str]) -> usize {
 
 /// The failed receipt state for a delivery error. A staged error keeps its
 /// stage; a host limit or prepare refusal also keeps its redacted reason under
-/// `reason`, which older readers retain as an extra field. Any other error is
+/// `reason`. Any other error is
 /// a failed push.
 pub(crate) fn failed_state(error: &RunError) -> WriterDeliveryState {
     let (stage, reason) = match error {
@@ -2580,9 +2577,8 @@ impl crate::RunStore {
         receipt: &WriterDeliveryReceipt,
         call: &crate::Request<'_>,
     ) {
-        use provenant_confinement::worktrees::{
-            RefEndpoint, RefLedger, RefObservation, RefOrigin, WorktreeError,
-        };
+        use provenant_confinement::worktrees::{RefLedger, RefObservation, WorktreeError};
+        use provenant_records::custody::{RefEndpoint, RefOrigin};
         if matches!(request.mode, crate::DeliveryMode::Integrate(_))
             || !matches!(receipt.state, WriterDeliveryState::Delivered { .. })
         {
@@ -2593,6 +2589,18 @@ impl crate::RunStore {
         };
         let Some(push_url) = integration.push_url.as_ref() else {
             return;
+        };
+        let operation_id = match self.attempt_operation(record.attempt_id, call) {
+            Ok(operation) => Some(operation.operation_id),
+            Err(error) => {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: could not record ownership of delivered ref {}: {error}; it is retained as unobserved",
+                    integration.target
+                );
+                return;
+            }
         };
         let result = (|| -> std::result::Result<(), WorktreeError> {
             let reference =
@@ -2616,7 +2624,7 @@ impl crate::RunStore {
                     tip: integration.integrated,
                     recorded_at,
                     attempt_id: Some(record.attempt_id),
-                    operation_id: Some(record.operation_id.clone()),
+                    operation_id,
                 },
                 call.clock,
                 call.cancel,
@@ -2638,7 +2646,7 @@ impl crate::RunStore {
         call: &crate::Request<'_>,
     ) -> Result<Option<(WriterDeliveryRequest, WriterDeliveryReceipt)>> {
         let record = self.record(id, call)?;
-        let attempt = self.attempt_dir(record.run_id, id, false)?;
+        let attempt = self.attempt_dir(id, false)?;
         match attempt.read_stable(OsStr::new("delivery-pickup.json"), crate::RECORD_LIMIT) {
             Ok(raw) => {
                 let pickup: PickupReceipt = crate::db::decode(&raw)?;
@@ -2654,11 +2662,9 @@ impl crate::RunStore {
             return Ok(None);
         };
         let request = self
-            .request(record.run_id, call)?
-            .tasks
-            .into_iter()
-            .find(|task| task.task_id == record.task_id)
-            .and_then(|task| task.deliver)
+            .request(record.attempt_id, call)?
+            .task
+            .deliver
             .ok_or(RunError::Validation("delivered destination missing"))?;
         Ok(Some((request, receipt)))
     }
@@ -2667,8 +2673,8 @@ impl crate::RunStore {
         id: provenant_core::AttemptId,
         call: &crate::Request<'_>,
     ) -> Result<Option<serde_json::Value>> {
-        let record = self.record(id, call)?;
-        let attempt = self.attempt_dir(record.run_id, id, false)?;
+        self.record(id, call)?;
+        let attempt = self.attempt_dir(id, false)?;
         match attempt.read_stable(OsStr::new("worktree-settlement.json"), crate::RECORD_LIMIT) {
             Ok(raw) => Ok(Some(crate::db::decode(&raw)?)),
             Err(error) if error.is_not_found() => Ok(None),
@@ -2695,8 +2701,8 @@ impl crate::RunStore {
         admit: impl FnOnce(Option<&serde_json::Value>) -> bool,
         call: &crate::Request<'_>,
     ) -> Result<bool> {
-        let record = self.record(id, call)?;
-        let attempt = self.attempt_dir(record.run_id, id, false)?;
+        self.record(id, call)?;
+        let attempt = self.attempt_dir(id, false)?;
         let _lock = attempt.lock(
             OsStr::new("worktree-settlement.lock"),
             provenant_os::fs::LockMode::Exclusive,
@@ -2765,12 +2771,7 @@ impl crate::RunStore {
                 ));
             }
         };
-        let task = self
-            .request(record.run_id, call)?
-            .tasks
-            .into_iter()
-            .find(|task| task.task_id == record.task_id)
-            .ok_or(RunError::NotFound)?;
+        let task = self.request(record.attempt_id, call)?.task;
         let writer = task
             .writer
             .ok_or(RunError::Validation("delivery needs a writer"))?;
@@ -2783,7 +2784,7 @@ impl crate::RunStore {
         let head = record
             .head
             .ok_or(RunError::Validation("receipt has no settled head"))?;
-        let attempt = self.attempt_dir(record.run_id, id, false)?;
+        let attempt = self.attempt_dir(id, false)?;
         let key = provenant_core::hex(
             provenant_records::CanonicalV1::file_digest(
                 &serde_json::to_vec(&(head, &request))
@@ -2791,17 +2792,16 @@ impl crate::RunStore {
             )
             .bytes(),
         );
-        // New successful receipts never collide with a legacy failed seal.
         let receipt_name = format!("delivery-complete-{key}.json");
-        for name in [&receipt_name, &format!("delivery-{key}.json")] {
-            if let Some(raw) = crate::artifacts::read_sealed(&attempt, name, crate::RECORD_LIMIT)? {
-                let receipt: WriterDeliveryReceipt = crate::db::decode(&raw)?;
-                if matches!(receipt.state, WriterDeliveryState::Delivered { .. }) {
-                    // Recover a crash between sealing success and publishing
-                    // the mutable pickup pointer used by graph observation.
-                    publish_pickup(&attempt, &request, &receipt)?;
-                    return Ok(receipt);
-                }
+        if let Some(raw) =
+            crate::artifacts::read_sealed(&attempt, &receipt_name, crate::RECORD_LIMIT)?
+        {
+            let receipt: WriterDeliveryReceipt = crate::db::decode(&raw)?;
+            if matches!(receipt.state, WriterDeliveryState::Delivered { .. }) {
+                // Recover a crash between sealing success and publishing
+                // the mutable pickup pointer used by graph observation.
+                publish_pickup(&attempt, &request, &receipt)?;
+                return Ok(receipt);
             }
         }
         if let Some(receipt) = record.delivery.as_ref()
@@ -2859,7 +2859,7 @@ impl crate::RunStore {
             .commit_body(
                 &writer,
                 head,
-                &format!("Run {}\nAttempt {id}", record.run_id),
+                &format!("Run {}\nAttempt {id}", record.attempt_id),
             )
             .and_then(|body| host.push(&writer, &request, head, &body));
         let (state, integration) = match result {

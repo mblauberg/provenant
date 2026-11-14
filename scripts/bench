@@ -161,22 +161,24 @@ run)
         "$bin" worktree create "$branch" --base "$parent" --project "$tmp/repo" --json > "$tmp/worktree.json"
         printf '%s\n' "$prompt" > "$tmp/prompt.md"
         op=bench-$(date +%s)-$count
-        set -- --project "$tmp/repo" --prompt-file "$tmp/prompt.md" --operation-id "$op"
+        set -- task --project "$tmp/repo" --brief-file "$tmp/prompt.md" --name "$op"
         case "$model" in */*) set -- "$@" --model "$model" ;; *) set -- "$@" --route "$model" ;; esac
-        set -- "$@" --mode worktree-write --worktree "$worktree" --wait 10800 --json
+        set -- "$@" --mode worktree-write --worktree "$worktree" --json
         [ -z "$effort" ] || set -- "$@" --effort "$effort"
-        dispatch_exit=0
-        "$bin" dispatch "$@" > "$tmp/dispatch.json" || dispatch_exit=$?
-        if [ "$dispatch_exit" -eq 0 ]; then
-            run_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["data"]["run_id"])' "$tmp/dispatch.json")
-            "$bin" telemetry stats --project "$tmp/repo" --run-id "$run_id" --json > "$tmp/stats.json" || printf '{"data":null}\n' > "$tmp/stats.json"
+        run_exit=0
+        "$bin" run "$@" > "$tmp/run.json" || run_exit=$?
+        if [ "$run_exit" -eq 0 ]; then
+            "$bin" wait "$op" --project "$tmp/repo" --timeout 10800 --json > "$tmp/wait.json" || run_exit=$?
+        fi
+        if [ "$run_exit" -eq 0 ]; then
+            "$bin" telemetry cost "$op" --project "$tmp/repo" --json > "$tmp/stats.json" || printf '{"data":null}\n' > "$tmp/stats.json"
         else
             printf '{"data":null}\n' > "$tmp/stats.json"
         fi
         passed=false
         reason=
-        if [ "$dispatch_exit" -ne 0 ]; then
-            reason="dispatch failed (exit $dispatch_exit)"
+        if [ "$run_exit" -ne 0 ]; then
+            reason="run or wait failed (exit $run_exit)"
         elif ! git -C "$worktree" apply --unidiff-zero "$patch"; then
             reason='hidden patch failed to apply'
         elif (cd "$worktree" && sh -c "$command") > "$tmp/test.log" 2>&1; then
@@ -187,11 +189,9 @@ run)
 import json,sys
 report=json.load(open(sys.argv[6])).get("data")
 totals=None if report is None else report["totals"]
-categories={} if totals is None else totals["usage"]
-missing=sum(item["missing"] for item in categories.values())
-tokens=None if totals is None or missing else sum(item["known"] for item in categories.values())
-complete=None if totals is None else totals["cost"]["complete"]
-cost=None if complete is None else complete["usd"]
+# The cost ledger reports money coverage, not aggregate token categories.
+tokens=None
+cost=None if totals is None or not totals["complete"] else totals["usd"]
 turns=None if totals is None else totals["attempts"]
 print(json.dumps({"task":sys.argv[1],"route":sys.argv[2],"model":sys.argv[3],"pass":None if sys.argv[7] else sys.argv[4]=="true","reason":sys.argv[7] or None,"tokens":tokens,"cost":cost,"turns":turns,"seconds":int(sys.argv[5])},separators=(",",":")))
 PY

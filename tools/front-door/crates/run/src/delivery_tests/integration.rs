@@ -20,8 +20,11 @@ fn terminal_settles_a_private_rewind() -> std::result::Result<(), Box<dyn std::e
         let scratch = attempt.join("tmp/candidate-0");
         std::fs::create_dir_all(&scratch)?;
         let executable = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-        let runtime =
-            provenant_confinement::UtilityRuntime::new(&executable, fixture.root.join("home"))?;
+        let runtime = provenant_confinement::UtilityRuntime::new(
+            &executable,
+            fixture.root.join("home"),
+            fixture.root.join("state"),
+        )?;
         let repo = runtime.open_repo(
             &SystemExecutor::new(1)?,
             &fixture.writer.project,
@@ -377,8 +380,10 @@ fn origin_refresh_updates_tracking_refs_and_reports_fetch_failure()
     run(&git_dir, &["push", "-q", "origin", "HEAD:refs/heads/main"])?;
     let expected = run(&git_dir, &["rev-parse", "HEAD"])?;
     run(&git_dir, &["update-ref", "-d", "refs/remotes/origin/main"])?;
+    let custody_project =
+        registered_writer_project_id(&project, &home, &root.join("checkout"), &root.join("state"))?;
     let writer = WriterRequest {
-        extra: Default::default(),
+        extra: writer_custody_extra(custody_project),
         project: project.clone(),
         worktree: project.clone(),
     };

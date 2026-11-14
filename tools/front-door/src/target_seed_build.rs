@@ -116,7 +116,7 @@ fn checkout_commit(project: &Path, checkout: &Path, commit: &str) -> Result<()> 
 }
 
 /// The pinned remote-tracking commit every seed build starts from.
-fn origin_main(project: &Path) -> Result<String> {
+fn origin_main(host_state: &Path, project: &Path) -> Result<String> {
     use provenant_confinement::{
         repo::GitRefName,
         utility::{UtilityBudget, UtilityRuntime},
@@ -124,7 +124,7 @@ fn origin_main(project: &Path) -> Result<String> {
     };
     let executable =
         provenant_os::git::git_executable().ok_or_else(|| io::Error::other("git unavailable"))?;
-    let utility = UtilityRuntime::read_only(executable)?;
+    let utility = UtilityRuntime::read_only(executable, host_state)?;
     let executor = SystemExecutor::new(1)?;
     let budget = UtilityBudget::bounded(Duration::from_secs(4 * 60 * 60))?;
     let cancel = provenant_core::CancelToken::new();
@@ -139,6 +139,8 @@ fn origin_main(project: &Path) -> Result<String> {
 /// What a refresh did.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Refresh {
+    /// This project has no selected Cargo workspace; nothing to seed.
+    NotCargo,
     /// The newest complete generation already builds this `origin/main`.
     Current,
     /// Another host seed build holds the build lock; nothing was started.
@@ -161,9 +163,12 @@ pub enum Refresh {
 #[allow(dead_code)]
 pub fn refresh(state: &Path, project: &Path) -> Result<Refresh> {
     refuse_in_lane()?;
-    let commit = origin_main(project)?;
+    if target_seed::cargo_build_directory(project, state)?.is_none() {
+        return Ok(Refresh::NotCargo);
+    }
+    let commit = origin_main(state, project)?;
     refresh_with(state, &marker_name(project), &commit, |stage| {
-        build_into(stage, project, &commit)
+        build_into(stage, project, state, &commit)
     })
 }
 
@@ -282,14 +287,15 @@ fn refuse_in_lane() -> Result<()> {
 
 pub fn build(state: &Path, project: &Path) -> Result<String> {
     refuse_in_lane()?;
-    let commit = origin_main(project)?;
-    publish(state, |stage| build_into(stage, project, &commit))
+    let commit = origin_main(state, project)?;
+    publish(state, |stage| build_into(stage, project, state, &commit))
 }
 
-fn build_into(stage: &Path, project: &Path, commit: &str) -> Result<Manifest> {
+fn build_into(stage: &Path, project: &Path, host_state: &Path, commit: &str) -> Result<Manifest> {
     let checkout = stage.join("checkout");
     checkout_commit(project, &checkout, commit)?;
-    let worktree = checkout.join("tools/front-door");
+    let worktree = target_seed::cargo_build_directory(&checkout, host_state)?
+        .ok_or_else(|| io::Error::other("project has no selected Cargo workspace"))?;
     let target = stage.join("target");
     fs::create_dir(&target)?;
     let (rustc_vv, host_triple) = target_seed::rustc_metadata(&worktree)?;
@@ -451,7 +457,9 @@ mod checkout_tests {
         let local = String::from_utf8(git(&project, &["rev-parse".into(), "main".into()]).unwrap())
             .unwrap();
         assert_ne!(pinned, local.trim());
-        assert_eq!(origin_main(&project).unwrap(), pinned);
+        let state = temp.path().join("state");
+        fs::create_dir(&state).unwrap();
+        assert_eq!(origin_main(&state, &project).unwrap(), pinned);
         checkout_commit(&project, &checkout, pinned).unwrap();
         assert_eq!(fs::read_to_string(checkout.join("file")).unwrap(), "second");
         let actual =

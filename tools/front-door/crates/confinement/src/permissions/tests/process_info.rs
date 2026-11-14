@@ -145,7 +145,7 @@ fn process_info_includes_host_and_reports_own_rss() -> Result<(), Box<dyn std::e
             AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
                 git_grants_digest: [7; 32],
                 publishing: false,
-                common_git_dir: Some("/fixture/git".into()),
+                common_git_dir: "/fixture/git".into(),
                 cargo_cache: PathGrant {
                     path: root.join("cache"),
                     scope: PathScope::Subtree,
@@ -444,7 +444,7 @@ fn ambient_profiles_deny_host_task_memory_ptrace_and_keychain_ipc()
             AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
                 git_grants_digest: [7; 32],
                 publishing: false,
-                common_git_dir: Some("/fixture/git".into()),
+                common_git_dir: "/fixture/git".into(),
                 cargo_cache: PathGrant {
                     path: root.join("cache"),
                     scope: PathScope::Subtree,
@@ -532,7 +532,7 @@ fn ambient_pty_creation_keeps_host_terminals_private() -> Result<(), Box<dyn std
             AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
                 git_grants_digest: [7; 32],
                 publishing: false,
-                common_git_dir: Some("/fixture/git".into()),
+                common_git_dir: "/fixture/git".into(),
                 cargo_cache: PathGrant {
                     path: root.join("cache"),
                     scope: PathScope::Subtree,

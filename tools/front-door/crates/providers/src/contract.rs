@@ -2,7 +2,8 @@ use crate::{
     ExitObservation, LaunchSpec, PrepareInput, ProviderEvent, ProviderOutcome, StreamState,
 };
 use provenant_records::ResolvedRoute;
-use serde::Serialize;
+use provenant_records::policy::{Effect, Facts, Policy};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
@@ -34,6 +35,8 @@ pub enum ProviderError {
     InvalidPath,
     #[error("confinement plan asks for a policy this adapter cannot honour")]
     UnsupportedPolicy,
+    #[error("provider cannot honour configured policy action for {code}")]
+    PolicyActionUnsupported { code: &'static str },
     #[error(
         "agy isolated keychain {0} is missing or not a regular file; re-register with \
          `provenant accounts register --adapter agy --directory ~ <label>` if this is the \
@@ -42,6 +45,8 @@ pub enum ProviderError {
     IsolatedKeychainUnavailable(String),
     #[error("provider login token is unavailable")]
     CredentialUnavailable,
+    #[error("provider token refresh is pending")]
+    RefreshDeferred,
     #[error("provider login token was not found")]
     CredentialNotFound,
     #[error("provider login token has expired")]
@@ -52,6 +57,14 @@ pub enum ProviderError {
 }
 
 impl ProviderError {
+    /// Return the policy rule that required an action this provider cannot perform.
+    pub fn policy_code(&self) -> Option<&'static str> {
+        match self {
+            Self::PolicyActionUnsupported { code } => Some(code),
+            _ => None,
+        }
+    }
+
     pub fn resource_fact(&self) -> Option<provenant_records::diagnostic::ResourceFact> {
         match self {
             Self::PromptTooLarge { limit, origin } => Some(
@@ -76,11 +89,13 @@ impl ProviderError {
             | Self::Malformed
             | Self::MalformedResult(_)
             | Self::Overflow
+            | Self::PolicyActionUnsupported { .. }
             | Self::ProbeDirectory(_)
             | Self::LoginRequired
             | Self::CredentialUnavailable
             | Self::CredentialNotFound
-            | Self::CredentialExpired => B::None,
+            | Self::CredentialExpired
+            | Self::RefreshDeferred => B::None,
         }
     }
 }
@@ -98,6 +113,20 @@ fn provider_failure_boundary_depends_on_typed_cause() {
         B::Authority
     );
     assert_eq!(
+        ProviderError::PolicyActionUnsupported {
+            code: "ARGV_PROMPT"
+        }
+        .boundary_class(),
+        B::None
+    );
+    assert_eq!(
+        ProviderError::PolicyActionUnsupported {
+            code: "ARGV_PROMPT"
+        }
+        .policy_code(),
+        Some("ARGV_PROMPT")
+    );
+    assert_eq!(
         ProviderError::CredentialReadFailed("sentinel".into()).boundary_class(),
         B::Credentials
     );
@@ -112,17 +141,21 @@ fn provider_failure_boundary_depends_on_typed_cause() {
     );
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+/// Published per attempt as `availability.json`, which the depletion ladder
+/// reads back as the stopped attempt's observed readiness.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AvailabilityRecord {
     pub schema_version: u64,
     pub adapter: String,
     pub executable: String,
     pub version: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_update: Option<crate::update::UpdateRecord>,
     pub fixture_ref: String,
     pub catalogue_revision: String,
     pub account_key: Option<String>,
+    /// Registered plan identity, independent of the account key.
+    pub plan: Option<String>,
     pub observed_models: Vec<String>,
     pub observed_unix_seconds: i64,
     pub expires_unix_seconds: i64,
@@ -201,14 +234,32 @@ impl Prompt {
     pub fn text(&self) -> &str {
         &self.text
     }
-    pub fn check_argv(&self) -> Result<(), ProviderError> {
-        if self.text.len() > self.argv_limit {
-            Err(ProviderError::PromptTooLarge {
-                limit: self.argv_limit,
-                origin: self.argv_origin,
-            })
-        } else {
-            Ok(())
+    pub fn argv_limit_exceeded(&self) -> bool {
+        self.text.len() > self.argv_limit
+    }
+
+    pub fn check_argv(&self, policy: &Policy) -> Result<(), ProviderError> {
+        if !self.argv_limit_exceeded() {
+            return Ok(());
+        }
+        let error = || ProviderError::PromptTooLarge {
+            limit: self.argv_limit,
+            origin: self.argv_origin,
+        };
+        let detail = format!(
+            "argv prompt is {} bytes, over the configured {} byte limit (source: {})",
+            self.text.len(),
+            self.argv_limit,
+            self.argv_origin.description()
+        );
+        match policy.check("ARGV_PROMPT", Facts::violation(detail)) {
+            Effect::Proceed => Ok(()),
+            Effect::Warn(message) => {
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                Ok(())
+            }
+            Effect::Refuse(_) => Err(error()),
         }
     }
 }
@@ -231,6 +282,13 @@ pub struct Continuation {
     grant_digest: String,
 }
 impl Continuation {
+    fn authority_error(message: &str, error: ProviderError) -> ProviderError {
+        provenant_records::policy::Policy::default().boundary_error(
+            "CONTRACT_CONTINUATION_VALIDATE_AUTHORITY",
+            provenant_records::policy::Facts::violation(message),
+            error,
+        )
+    }
     pub(crate) fn from_outcome(
         adapter: &str,
         outcome: &ProviderOutcome,
@@ -239,16 +297,29 @@ impl Continuation {
         model_on_wire: bool,
     ) -> Result<Self, ProviderError> {
         if outcome.adapter() != adapter || route.adapter != adapter {
-            return Err(ProviderError::IdentityMismatch);
+            return Err(Self::authority_error(
+                "provider outcome does not match the applied route adapter",
+                ProviderError::IdentityMismatch,
+            ));
         }
-        let session = outcome.session().ok_or(ProviderError::UnknownIdentity)?;
+        let session = outcome.session().ok_or_else(|| {
+            Self::authority_error(
+                "provider outcome did not identify its session",
+                ProviderError::UnknownIdentity,
+            )
+        })?;
         // Requested models cannot substitute for answering-model evidence.
         // Codex's exec stream has no model position; its resume argv pins the
         // same `-m`, and any model it does report must still match.
         match outcome.model() {
             Some(model) if model == route.model => {}
             None if !model_on_wire => {}
-            _ => return Err(ProviderError::UnknownIdentity),
+            _ => {
+                return Err(Self::authority_error(
+                    "provider outcome did not identify its applied model",
+                    ProviderError::UnknownIdentity,
+                ));
+            }
         }
         Self::retained(adapter, session, route, grant_digest)
     }
@@ -262,12 +333,17 @@ impl Continuation {
         grant_digest: &str,
     ) -> Result<Self, ProviderError> {
         if route.adapter != adapter || session.is_empty() {
-            return Err(ProviderError::IdentityMismatch);
+            return Err(Self::authority_error(
+                "retained session does not match its applied route",
+                ProviderError::IdentityMismatch,
+            ));
         }
-        let account_key = route
-            .account_key
-            .clone()
-            .ok_or(ProviderError::UnknownIdentity)?;
+        let account_key = route.account_key.clone().ok_or_else(|| {
+            Self::authority_error(
+                "applied route has no account identity",
+                ProviderError::UnknownIdentity,
+            )
+        })?;
         Ok(Self {
             adapter: adapter.into(),
             session: session.into(),
@@ -284,7 +360,10 @@ impl Continuation {
         state: &mut StreamState,
     ) -> Result<(), ProviderError> {
         if self.adapter != adapter {
-            return Err(ProviderError::IdentityMismatch);
+            return Err(Self::authority_error(
+                "provider stream does not match the continuation adapter",
+                ProviderError::IdentityMismatch,
+            ));
         }
         state.bind_identity(&self.session, &self.model);
         Ok(())
@@ -300,7 +379,10 @@ impl Continuation {
             || self.effort != route.effort
             || self.grant_digest != grant_digest
         {
-            return Err(ProviderError::IdentityMismatch);
+            return Err(Self::authority_error(
+                "continuation identity differs from the resolved route or write grant",
+                ProviderError::IdentityMismatch,
+            ));
         }
         Ok(())
     }
@@ -395,6 +477,15 @@ pub trait Adapter: Sync {
         None
     }
     fn id(&self) -> &'static str;
+    /// Verify the account identity for one provider session. The directory selects
+    /// provider auth state; it is never used as identity evidence.
+    fn session_identity(
+        &self,
+        _live: &crate::quota_live::LiveQuota,
+        _directory: &std::path::Path,
+    ) -> Result<provenant_records::AccountIdentity, ProviderError> {
+        Err(ProviderError::UnknownIdentity)
+    }
     fn account(&self, state: &StreamState) -> Result<AccountDetection, ProviderError>;
     fn prepare(&self, input: PrepareInput<'_>) -> Result<LaunchSpec, ProviderError>;
     fn stream(&self, continuation: Option<&Continuation>) -> Result<StreamState, ProviderError>;

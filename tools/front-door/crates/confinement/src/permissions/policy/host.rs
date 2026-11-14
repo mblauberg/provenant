@@ -46,6 +46,13 @@ pub fn host_credential_roots(lookup: impl Fn(&str) -> Option<OsString>) -> Vec<P
             scope: PathScope::Exact,
         });
     }
+    if let Some(path) = lookup("CARGO_HOME").filter(|value| !value.is_empty()) {
+        let path = std::path::absolute(PathBuf::from(path)).expect("host cwd resolves CARGO_HOME");
+        roots.extend(crate::cargo::CREDENTIAL_FILES.iter().map(|name| PathGrant {
+            path: path.join(name),
+            scope: PathScope::Exact,
+        }));
+    }
     roots.retain(|root| root.path.is_absolute());
     roots
 }
@@ -408,6 +415,20 @@ impl MandatoryRoots {
             mandatory.add_github(root.clone())?;
         }
         let resolved_source = resolve_boundary_path(source)?;
+        // Freeze each declared credential root in both launch modes. Sandbox
+        // mode controls recursive inventory, not mandatory alias validation.
+        for root in mandatory.credentials().to_vec() {
+            let alias = resolve_boundary_path(&root.path)?;
+            if alias != root.path {
+                mandatory.add_credentials_alias(
+                    &root,
+                    PathGrant {
+                        path: alias,
+                        scope: root.scope,
+                    },
+                )?;
+            }
+        }
         if sandboxed {
             let endpoints: std::collections::BTreeSet<_> = provenant_records::ADAPTER_SPECS
                 .iter()
@@ -418,16 +439,6 @@ impl MandatoryRoots {
             let resolved_home = resolve_boundary_path(home)?;
             let mut summary = InventorySummary::default();
             for root in mandatory.credentials().to_vec() {
-                let alias = resolve_boundary_path(&root.path)?;
-                if alias != root.path {
-                    mandatory.add_credentials_alias(
-                        &root,
-                        PathGrant {
-                            path: alias,
-                            scope: root.scope,
-                        },
-                    )?;
-                }
                 if root.scope == PathScope::Subtree {
                     inventory_links(
                         &mut mandatory,
@@ -528,13 +539,12 @@ impl MandatoryRoots {
                 continue;
             }
             controls.push((subtree(common), true));
-            controls.push((
-                subtree(
-                    &crate::worktrees::allocation_directory(common)
-                        .map_err(|_| inventory_error(common, "worktree allocation inventory"))?,
-                ),
-                false,
-            ));
+            for allocation in
+                crate::worktrees::allocation_directories(common, roots.state.as_path())
+                    .map_err(|_| inventory_error(common, "worktree allocation inventory"))?
+            {
+                controls.push((subtree(&allocation), false));
+            }
             let project_state = roots
                 .state
                 .as_path()
@@ -597,6 +607,33 @@ impl MandatoryRoots {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relocated_cargo_credentials_are_mandatory_denials() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let roots = fixture_roots(&root)?;
+        let home = root.join("home");
+        let cargo = root.join("custom-cargo");
+        let inventory = host_credential_roots(|name| {
+            (name == "CARGO_HOME").then(|| cargo.clone().into_os_string())
+        });
+        let mandatory =
+            MandatoryRoots::for_host(&roots, &home, &root.join("source"), &inventory, &[], &[])?;
+        for name in crate::cargo::CREDENTIAL_FILES {
+            let credential = PathGrant {
+                path: cargo.join(name),
+                scope: PathScope::Exact,
+            };
+            assert!(mandatory.credentials().contains(&credential));
+            assert!(matches!(
+                mandatory.validate_extra_write(&credential),
+                Err(PermissionError::CredentialRootAt { .. })
+            ));
+        }
+        Ok(())
+    }
 
     fn fixture_roots(root: &Path) -> Result<Roots, Box<dyn std::error::Error>> {
         for name in ["home", "state", "source"] {
@@ -1447,7 +1484,13 @@ mod tests {
                 &roots,
                 provenant_config::ProjectLocation::new(common)?,
             )?;
-            allocations.push(primary.join(".worktrees"));
+            let config = primary.join(".provenant");
+            std::fs::create_dir_all(&config)?;
+            let mut ports = provenant_config::PortTable::builtin();
+            ports.worktree_layout.roots = vec![PathBuf::from(".claude/worktrees")];
+            ports.worktree_layout.default = PathBuf::from(".claude/worktrees/<branch>");
+            std::fs::write(config.join("ports.json"), serde_json::to_vec(&ports)?)?;
+            allocations.push(primary.join(".claude/worktrees"));
         }
         let separate = root.join("separate-project");
         let common = separate.join("git-meta");
@@ -1455,7 +1498,13 @@ mod tests {
         std::fs::write(common.join("HEAD"), b"ref: refs/heads/main\n")?;
         std::fs::write(separate.join(".git"), b"gitdir: git-meta\n")?;
         provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(common)?)?;
-        allocations.push(separate.join(".worktrees"));
+        let config = separate.join(".provenant");
+        std::fs::create_dir_all(&config)?;
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.worktree_layout.roots = vec![PathBuf::from(".claude/worktrees")];
+        ports.worktree_layout.default = PathBuf::from(".claude/worktrees/<branch>");
+        std::fs::write(config.join("ports.json"), serde_json::to_vec(&ports)?)?;
+        allocations.push(separate.join(".claude/worktrees"));
         let inventory = MandatoryRoots::for_host(
             &roots,
             &root.join("home"),

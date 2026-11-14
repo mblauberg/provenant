@@ -3,8 +3,7 @@ use crate::launch::{exact, subtree};
 use crate::{ProviderError, SetupStep};
 use provenant_confinement::permissions::ProviderProfileSpec;
 use provenant_core::{AttemptId, RUN_STATE_DIRECTORY_ENV, STATE_DIRECTORY_ENV};
-use provenant_records::Harness;
-use serde_json::Value;
+use provenant_records::policy::{Facts, Policy};
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
@@ -41,7 +40,11 @@ impl crate::LaunchSpec {
             .as_deref()
             .is_some_and(|selected| selected != git)
         {
-            return Err(ProviderError::InvalidPath);
+            return Err(self.policy.boundary_error(
+                "LANE_GIT_WRAPPER_AUTHORITY",
+                Facts::violation("the configured Git wrapper selected a different executable"),
+                ProviderError::InvalidPath,
+            ));
         }
         self.git_wrapper.git = Some(git.to_owned());
         install_git(
@@ -51,6 +54,7 @@ impl crate::LaunchSpec {
             &mut self.setup,
             &self.git_wrapper,
             true,
+            &self.policy,
         )
     }
     /// Restore selected environment before the provider starts a shell command.
@@ -72,7 +76,7 @@ impl crate::LaunchSpec {
     /// Put a `cargo` shim first on the lane's PATH. Cargo commands that compile
     /// take one host build slot (`slots` across every project on this state
     /// directory) before the real `cargo` runs, and keep it until it exits.
-    /// Waiting blocks only that command.
+    /// Busy slots warn and the command proceeds.
     ///
     /// The host provisions the slot files (`BuildSlots::provision`) before
     /// the lane starts. The lane is granted read access to that directory and
@@ -84,10 +88,29 @@ impl crate::LaunchSpec {
         &mut self,
         scratch: &Path,
         gate: &BuildSlotGate<'_>,
-    ) -> Result<(), ProviderError> {
+    ) -> Result<BuildSlotSetupOutcome, ProviderError> {
         if self.native_environment() {
-            return Ok(());
+            return Ok(BuildSlotSetupOutcome::Skipped);
         }
+        match self.configure_build_slots_inner(scratch, gate) {
+            Ok(()) => Ok(BuildSlotSetupOutcome::Configured),
+            Err(ProviderError::InvalidPath) => {
+                crate::launch::policy_warning(
+                    &self.policy,
+                    "LANE_LAUNCHSPEC_CONFIGURE_BUILD_SLOTS_NONE",
+                    "the optional build-slot shim could not be represented; the launch remains ungated",
+                )?;
+                Ok(BuildSlotSetupOutcome::Skipped)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn configure_build_slots_inner(
+        &mut self,
+        scratch: &Path,
+        gate: &BuildSlotGate<'_>,
+    ) -> Result<(), ProviderError> {
         let text = |path: &Path| -> Result<String, ProviderError> {
             let value = path.to_str().ok_or(ProviderError::InvalidPath)?;
             if !path.is_absolute() || value.chars().any(char::is_control) {
@@ -95,19 +118,27 @@ impl crate::LaunchSpec {
             }
             Ok(shell_quote(value))
         };
-        if !(1..=64).contains(&gate.slots)
-            || gate.wait_seconds == 0
-            || !["all", "check", "none"].contains(&gate.local_cargo)
+        if !(1..=64).contains(&gate.slots) || !["all", "check", "none"].contains(&gate.local_cargo)
         {
             return Err(ProviderError::Malformed);
         }
         let bin = scratch.join("bin");
+        let disk = gate
+            .disk_limits
+            .as_ref()
+            .map(|limits| {
+                let json = serde_json::to_string(&limits).map_err(|_| ProviderError::Malformed)?;
+                Ok::<_, ProviderError>(format!(
+                    "PROVENANT_BUILD_DISK_LIMITS={}\nexport PROVENANT_BUILD_DISK_LIMITS\n",
+                    shell_quote(&json)
+                ))
+            })
+            .transpose()?
+            .unwrap_or_default();
         let script = format!(
-            "#!/bin/sh\nPROVENANT_BUILD_SLOT_STATE={} PROVENANT_BUILD_SLOTS={} PROVENANT_BUILD_WAIT_SECS={} PROVENANT_BUILD_WAIT_MARKER={} PROVENANT_LOCAL_CARGO={}\nexport PROVENANT_BUILD_SLOT_STATE PROVENANT_BUILD_SLOTS PROVENANT_BUILD_WAIT_SECS PROVENANT_BUILD_WAIT_MARKER PROVENANT_LOCAL_CARGO\nexec {} internal build-slot -- {} \"$@\"\n",
+            "#!/bin/sh\n{disk}PROVENANT_BUILD_SLOT_STATE={} PROVENANT_BUILD_SLOTS={} PROVENANT_LOCAL_CARGO={}\nexport PROVENANT_BUILD_SLOT_STATE PROVENANT_BUILD_SLOTS PROVENANT_LOCAL_CARGO\nexec {} internal build-slot -- {} \"$@\"\n",
             text(gate.state)?,
             gate.slots,
-            gate.wait_seconds,
-            text(gate.wait_marker)?,
             gate.local_cargo,
             text(gate.provenant)?,
             text(gate.cargo)?,
@@ -156,7 +187,7 @@ impl crate::LaunchSpec {
         git: &Path,
         gh: &Path,
         home: &Path,
-        policy: &provenant_config::GithubPolicy,
+        shim: &GhShim<'_>,
     ) -> Result<(), ProviderError> {
         let text = |path: &Path| -> Result<String, ProviderError> {
             if !path.is_absolute() {
@@ -168,8 +199,22 @@ impl crate::LaunchSpec {
             }
             Ok(value.to_owned())
         };
-        let git_path = text(git)?;
-        let gh_path = text(gh)?;
+        let git_path = text(git).map_err(|error| {
+            self.policy.boundary_error(
+                "LANE_LAUNCHSPEC_CONFIGURE_PUBLISHING_AUTHORITY",
+                Facts::violation("the selected Git path is not representable for publishing"),
+                error,
+            )
+        })?;
+        let gh_path = text(gh).map_err(|error| {
+            self.policy.boundary_error(
+                "LANE_LAUNCHSPEC_CONFIGURE_PUBLISHING_AUTHORITY",
+                Facts::violation(
+                    "the selected GitHub CLI path is not representable for publishing",
+                ),
+                error,
+            )
+        })?;
         // A host-resolved token needs no persisted gh login. Give gh its own
         // empty configuration directory so linked or unreadable host dotfiles
         // cannot prevent a token-authenticated publishing command.
@@ -191,7 +236,15 @@ impl crate::LaunchSpec {
                 .map(|(_, value)| PathBuf::from(value))
                 .unwrap_or_else(|| home.join(".config/gh"))
         };
-        let gh_config = shell_quote(&text(&gh_config_root)?);
+        let gh_config = shell_quote(&text(&gh_config_root).map_err(|error| {
+            self.policy.boundary_error(
+                "LANE_LAUNCHSPEC_CONFIGURE_PUBLISHING_AUTHORITY",
+                Facts::violation(
+                    "the selected GitHub configuration directory is not representable",
+                ),
+                error,
+            )
+        })?);
         let gh = format!("GH_CONFIG_DIR={gh_config} {}", shell_quote(&gh_path));
         let config = scratch.join("publishing.gitconfig");
         let config_text = format!(
@@ -199,7 +252,18 @@ impl crate::LaunchSpec {
             serde_json::to_string(&format!("!{gh} auth git-credential"))
                 .map_err(|_| ProviderError::Malformed)?,
         );
-        let include = shell_quote(&format!("include.path={}", text(&config)?));
+        let include = shell_quote(&format!(
+            "include.path={}",
+            text(&config).map_err(|error| {
+                self.policy.boundary_error(
+                    "LANE_LAUNCHSPEC_CONFIGURE_PUBLISHING_AUTHORITY",
+                    Facts::violation(
+                        "the private publishing Git configuration path is not representable",
+                    ),
+                    error,
+                )
+            })?
+        ));
         self.git_wrapper.scrub = true;
         self.git_wrapper.include = Some(include);
         self.write_git_wrapper(&scratch.join("bin"), git)?;
@@ -210,7 +274,13 @@ impl crate::LaunchSpec {
             },
             SetupStep::WriteExecutable {
                 path: scratch.join("bin/gh"),
-                bytes: gh_wrapper(&gh_path, &gh_config, policy).into_bytes(),
+                bytes: gh_wrapper(
+                    &gh_path,
+                    Some(&gh_config),
+                    &shell_quote(&text(&scratch.join(provenant_config::GH_INVOCATIONS_FILE))?),
+                    shim,
+                )
+                .into_bytes(),
             },
         ]);
         // Cursor and Agy do not use LaneRuntime::grant for Git.
@@ -238,6 +308,86 @@ impl crate::LaunchSpec {
             .runtime_reads
             .push(exact(Path::new(&gh_path)));
         Ok(())
+    }
+
+    /// Put the counting `gh` wrapper first on an unsandboxed lane's PATH. The
+    /// lane keeps the user's own gh configuration and login, exactly as a CLI
+    /// started by hand would; the wrapper only counts, advises and applies the
+    /// project's advisory deny list before running the host-selected `gh`.
+    pub fn configure_gh_shim(
+        &mut self,
+        scratch: &Path,
+        gh: &Path,
+        shim: &GhShim<'_>,
+    ) -> Result<(), ProviderError> {
+        let text = |path: &Path| -> Result<String, ProviderError> {
+            let value = path.to_str().ok_or(ProviderError::InvalidPath)?;
+            if !path.is_absolute() || value.chars().any(char::is_control) {
+                return Err(ProviderError::InvalidPath);
+            }
+            Ok(value.to_owned())
+        };
+        let gh_path = text(gh)?;
+        let counter = shell_quote(&text(&scratch.join(provenant_config::GH_INVOCATIONS_FILE))?);
+        let bin = scratch.join("bin");
+        let path_index = self
+            .env
+            .iter()
+            .position(|(key, _)| key == "PATH")
+            .ok_or(ProviderError::InvalidPath)?;
+        let path = &self.env[path_index].1;
+        let next_path = if std::env::split_paths(path).next().as_deref() == Some(bin.as_path()) {
+            path.clone()
+        } else {
+            std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(path)))
+                .map_err(|_| ProviderError::InvalidPath)?
+        };
+        let create = SetupStep::CreateDir(bin.clone());
+        if !self.setup.contains(&create) {
+            self.setup.push(create);
+        }
+        let wrapper = bin.join("gh");
+        self.setup.retain(
+            |step| !matches!(step, SetupStep::WriteExecutable { path, .. } if path == &wrapper),
+        );
+        self.setup.push(SetupStep::WriteExecutable {
+            path: wrapper,
+            bytes: gh_wrapper(&gh_path, None, &counter, shim).into_bytes(),
+        });
+        self.env[path_index].1 = next_path;
+        Ok(())
+    }
+}
+
+/// What the lane's `gh` wrapper does besides running the host-selected `gh`.
+/// Every part is advisory: the lane can run the real `gh` path or another
+/// API client directly, so the wrapper paces and informs, it does not bound.
+pub struct GhShim<'a> {
+    /// The project's advisory deny lists.
+    pub policy: &'a provenant_config::GithubPolicy,
+    /// Invocations after which, and at each multiple of which, the wrapper
+    /// prints one warning. 0 counts without warning.
+    pub budget: u64,
+    /// Where the budget came from, shown in the warning.
+    pub budget_source: &'a str,
+    /// A workflow in this repository runs on pull request label events, so a
+    /// label change starts CI: say so when a command changes labels.
+    pub label_ci_warning: bool,
+}
+
+impl Default for GhShim<'static> {
+    /// No deny list, the default budget, no label advisory.
+    fn default() -> Self {
+        static NO_POLICY: provenant_config::GithubPolicy = provenant_config::GithubPolicy {
+            deny_verbs: Vec::new(),
+            deny_labels: Vec::new(),
+        };
+        Self {
+            policy: &NO_POLICY,
+            budget: provenant_config::DEFAULT_GH_BUDGET,
+            budget_source: "default",
+            label_ci_warning: false,
+        }
     }
 }
 
@@ -374,12 +524,29 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
     use std::os::unix::ffi::OsStrExt;
     let git = git.as_os_str().as_bytes();
     if git.contains(&0) {
-        return Err(ProviderError::InvalidPath);
+        return Err(Policy::default().boundary_error(
+            "LANE_GIT_WRAPPER_AUTHORITY",
+            Facts::violation(
+                "the Git executable contains a NUL byte and cannot identify a command",
+            ),
+            ProviderError::InvalidPath,
+        ));
     }
+    let wrapper_error = |detail| {
+        Policy::default().boundary_error(
+            "LANE_GIT_WRAPPER_AUTHORITY",
+            Facts::violation(detail),
+            ProviderError::InvalidPath,
+        )
+    };
     let mut bytes = b"#!/bin/sh\n".to_vec();
     if options.scrub {
         let global = if let Some(config) = &options.identity_config {
-            shell_quote_os(config.as_os_str())?
+            shell_quote_os(config.as_os_str()).map_err(|_| {
+                wrapper_error(
+                    "the private Git configuration path cannot be represented in the wrapper",
+                )
+            })?
         } else {
             "'/dev/null'".to_owned()
         };
@@ -390,11 +557,16 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
             bytes.extend_from_slice(b"GIT_CONFIG_NOSYSTEM=1\nexport GIT_CONFIG_NOSYSTEM\n");
         }
         if let Some(bound) = &options.bound {
-            bytes.extend_from_slice(bound_exports(bound)?.as_bytes());
+            let exports = bound_exports(bound).map_err(|_| {
+                wrapper_error("the private Git binding cannot be represented in the wrapper")
+            })?;
+            bytes.extend_from_slice(exports.as_bytes());
         }
     }
     if let Some(exec_path) = host_exec_path(Path::new(std::ffi::OsStr::from_bytes(git))) {
-        let exec_path = exec_path.to_str().ok_or(ProviderError::InvalidPath)?;
+        let exec_path = exec_path.to_str().ok_or_else(|| {
+            wrapper_error("the selected Git exec path cannot be represented in the wrapper")
+        })?;
         bytes.extend_from_slice(
             format!(
                 "GIT_EXEC_PATH={}\nexport GIT_EXEC_PATH\n",
@@ -443,8 +615,59 @@ fn install_git(
     setup: &mut Vec<SetupStep>,
     options: &GitWrapper,
     wrapper: bool,
+    policy: &Policy,
 ) -> Result<(), ProviderError> {
     let path = bin.join("git");
+    let index = match env.iter().position(|(key, _)| key == "PATH") {
+        Some(index) => index,
+        None => {
+            crate::launch::policy_warning(
+                policy,
+                "LANE_INSTALL_GIT_NONE",
+                "the lane PATH is missing; system defaults will precede the private Git launcher",
+            )?;
+            env.push(("PATH".into(), "/usr/bin:/bin".into()));
+            env.len() - 1
+        }
+    };
+    let search_path = &env[index].1;
+    let next_path = if std::env::split_paths(search_path).next().as_deref() == Some(bin) {
+        search_path.clone()
+    } else {
+        match std::env::join_paths(
+            std::iter::once(bin.to_owned()).chain(std::env::split_paths(search_path)),
+        ) {
+            Ok(value) => value,
+            Err(_) if options.bound.is_none() && options.include.is_none() => {
+                crate::launch::policy_warning(
+                    policy,
+                    "LANE_INSTALL_GIT_NONE_2",
+                    "the unbound Git launcher cannot be encoded in PATH and was omitted",
+                )?;
+                return Ok(());
+            }
+            Err(_) => {
+                let mut error = ProviderError::InvalidPath;
+                if options.bound.is_some() {
+                    error = policy.boundary_error(
+                        "LANE_INSTALL_GIT_GIT_ISOLATION",
+                        Facts::violation(
+                            "the bound private Git launcher cannot be placed first in PATH",
+                        ),
+                        error,
+                    );
+                }
+                if options.include.is_some() {
+                    error = policy.boundary_error(
+                        "LANE_LAUNCHSPEC_CONFIGURE_PUBLISHING_CREDENTIALS",
+                        Facts::violation("the publishing credential configuration cannot be reached through the Git launcher"),
+                        error,
+                    );
+                }
+                return Err(error);
+            }
+        }
+    };
     let step = if wrapper {
         SetupStep::WriteExecutable {
             path: path.clone(),
@@ -461,39 +684,34 @@ fn install_git(
         setup.push(SetupStep::CreateDir(bin.to_owned()));
     }
     setup.push(step);
-    let index = match env.iter().position(|(key, _)| key == "PATH") {
-        Some(index) => index,
-        None => {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: lane PATH is missing; using system defaults"
-            );
-            env.push(("PATH".into(), "/usr/bin:/bin".into()));
-            env.len() - 1
-        }
-    };
-    let search_path = &mut env[index].1;
-    if std::env::split_paths(&*search_path).next().as_deref() != Some(bin) {
-        match std::env::join_paths(
-            std::iter::once(bin.to_owned()).chain(std::env::split_paths(&*search_path)),
-        ) {
-            Ok(value) => *search_path = value,
-            Err(_) if options.bound.is_none() && options.include.is_none() => {
-                use std::io::Write;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: the Git launcher cannot be included in PATH; continuing without it"
-                );
-            }
-            Err(_) => return Err(ProviderError::InvalidPath),
-        }
-    }
+    env[index].1 = next_path;
     Ok(())
 }
 
-fn gh_wrapper(gh: &str, gh_config: &str, policy: &provenant_config::GithubPolicy) -> String {
-    let mut guard = String::new();
+/// The lane's `gh` wrapper. `counter` is the quoted path of the invocation
+/// count file: one byte appended per call (`O_APPEND`, no lock), so its size
+/// is the count the host records at settlement. Only shell builtins run
+/// before the real `gh`, so a sandbox that admits `/bin/sh` admits the
+/// wrapper.
+fn gh_wrapper(gh: &str, gh_config: Option<&str>, counter: &str, shim: &GhShim<'_>) -> String {
+    let policy = shim.policy;
+    let mut guard = format!(
+        "gh_count_file={counter}\nif printf . >> \"$gh_count_file\" 2>/dev/null; then\n  gh_count_dots=\n  IFS= read -r gh_count_dots < \"$gh_count_file\" || :\n  gh_count=${{#gh_count_dots}}\n"
+    );
+    if shim.budget > 0 {
+        let warning = shell_quote(&format!(
+            "(lanes.gh_budget = {}, source: {}). The call proceeds; batch reads, avoid polling and prefer one gh api graphql query over many calls.",
+            shim.budget, shim.budget_source
+        ));
+        guard.push_str(&format!(
+            "  if [ \"$gh_count\" -gt 0 ] && [ $((gh_count % {budget})) -eq 0 ]; then\n    printf 'warning: provenant: this lane has run gh %s times %s\\n' \"$gh_count\" {warning} >&2\n  fi\n",
+            budget = shim.budget
+        ));
+    }
+    guard.push_str("fi\n");
+    if shim.label_ci_warning {
+        guard.push_str("case \"$1 $2\" in\n  'pr create'|'pr edit')\n    for gh_arg in \"$@\"; do\n      case $gh_arg in\n        --label|--label=*|--add-label|--add-label=*|--remove-label|--remove-label=*|-l|-l?*)\n          printf '%s\\n' 'warning: provenant: a pull request label change starts CI workflows in this repository; change labels only when you mean to run them' >&2\n          break ;;\n      esac\n    done ;;\nesac\n");
+    }
     for verb in &policy.deny_verbs {
         let words: Vec<_> = verb.split_whitespace().collect();
         if words.is_empty() {
@@ -518,8 +736,11 @@ fn gh_wrapper(gh: &str, gh_config: &str, policy: &provenant_config::GithubPolicy
         }
         guard.push_str("      case \"$value\" in *,*) value=${value#*,} ;; *) break ;; esac\n    done\n    shift\n  done\n}\ncheck_labels \"$@\"\n");
     }
+    let config = gh_config
+        .map(|config| format!("GH_CONFIG_DIR={config}\nexport GH_CONFIG_DIR\n"))
+        .unwrap_or_default();
     format!(
-        "#!/bin/sh\n{guard}GH_CONFIG_DIR={gh_config}\nexport GH_CONFIG_DIR\nexec {} \"$@\"\n",
+        "#!/bin/sh\n{guard}{config}exec {} \"$@\"\n",
         shell_quote(gh)
     )
 }
@@ -536,30 +757,34 @@ pub struct BuildSlotGate<'a> {
     pub state: &'a Path,
     /// How many builds the host runs at once.
     pub slots: u64,
-    /// Seconds a build waits for a slot or a Cargo lock before giving up.
-    pub wait_seconds: u64,
+    /// Resolved advisory and critical limits, with their host configuration sources.
+    pub disk_limits: Option<provenant_config::DiskLimits>,
     /// The real `cargo` the shim runs once it holds a slot.
     pub cargo: &'a Path,
-    /// File in the lane's private temporary directory where a waiting build
-    /// says so, for the host's `lanes` and `status`.
-    pub wait_marker: &'a Path,
     /// Cargo commands the lane may run: `all`, `check` or `none`. The shim
     /// refuses the rest; see the `lanes.local_cargo` knob.
     pub local_cargo: &'a str,
 }
 
+/// Whether launch preparation installed the optional build-slot shim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuildSlotSetupOutcome {
+    /// The shim and its matching read grants were installed.
+    Configured,
+    /// The lane does not use the shim, or its optional setup was omitted.
+    Skipped,
+}
+
 /// Canonical runtime paths supplied by the composition edge.
 pub struct LaneRuntime<'a> {
     pub executable: &'a Path,
-    /// Canonical host-selected Git, also pinned in MCP and hook environments.
+    /// Canonical host-selected Git, also pinned in the launcher and hook environments.
     pub git: &'a Path,
     pub state: &'a Path,
     pub home: &'a Path,
     pub depth: u64,
     pub attempt: AttemptId,
     pub assets: &'a Path,
-    /// `fabric.mcp_server`: launch the lane with the Fabric MCP server.
-    pub fabric_mcp: bool,
 }
 
 impl LaneRuntime<'_> {
@@ -575,112 +800,63 @@ impl LaneRuntime<'_> {
             .join("relay.sock")
     }
 
-    pub(crate) fn mcp(&self, harness: Harness) -> Result<Value, ProviderError> {
-        if ![
-            self.executable,
-            self.git,
-            self.state,
-            self.assets,
-            self.home,
-        ]
-        .iter()
-        .all(|p| p.is_absolute() && p.to_str().is_some())
-        {
-            return Err(ProviderError::InvalidPath);
-        }
-        let mut entry = provenant_config::mcp_entry(harness, self.executable, self.state)
-            .map_err(|_| ProviderError::UnsupportedPolicy)?;
-        entry["env"] = serde_json::json!({
-            "PROVENANT_AGENT_LABEL": format!("lane-{}", self.attempt),
-            "PROVENANT_LANE_DEPTH": self.depth.to_string(),
-            "PROVENANT_PARENT_ATTEMPT_ID": self.attempt.to_string(),
-            RUN_STATE_DIRECTORY_ENV: self.state,
-            STATE_DIRECTORY_ENV: self.state,
-            "HOME": self.home,
-            "PROVENANT_ROOT": self.assets,
-            "PROVENANT_GIT": self.git,
-        });
-        Ok(entry)
+    /// The environment every lane launcher pins: host identity, state roots
+    /// and the selected Git. Paths must be absolute and UTF-8.
+    pub(crate) fn pinned_environment(&self) -> Result<Vec<(&'static str, String)>, ProviderError> {
+        let path = |path: &Path| {
+            if !path.is_absolute() {
+                return Err(ProviderError::InvalidPath);
+            }
+            path.to_str()
+                .map(str::to_owned)
+                .ok_or(ProviderError::InvalidPath)
+        };
+        path(self.executable)?;
+        Ok(vec![
+            ("PROVENANT_AGENT_LABEL", format!("lane-{}", self.attempt)),
+            ("PROVENANT_LANE_DEPTH", self.depth.to_string()),
+            ("PROVENANT_PARENT_ATTEMPT_ID", self.attempt.to_string()),
+            (RUN_STATE_DIRECTORY_ENV, path(self.state)?),
+            (STATE_DIRECTORY_ENV, path(self.state)?),
+            ("HOME", path(self.home)?),
+            ("PROVENANT_ROOT", path(self.assets)?),
+            ("PROVENANT_GIT", path(self.git)?),
+        ])
     }
 
     pub(crate) fn claude(
         &self,
         scratch: &Path,
         argv: &mut Vec<OsString>,
+        policy: &Policy,
         allowed_tools: Option<&str>,
         image_rules: &[String],
     ) -> Result<Vec<SetupStep>, ProviderError> {
-        let mcp = match self.mcp(Harness::Claude) {
-            _ if !self.fabric_mcp => serde_json::json!({"mcpServers": {}}),
-            Ok(entry) => serde_json::json!({"mcpServers": {"fabric": entry}}),
-            Err(error) => {
-                use std::io::Write;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: Fabric MCP configuration is unavailable ({error}); continuing without Fabric MCP"
-                );
-                serde_json::json!({"mcpServers": {}})
-            }
-        };
         let mut settings = provenant_config::claude_lane_settings(self.executable, self.state)
-            .map_err(|_| ProviderError::UnsupportedPolicy)?;
+            .map_err(|_| {
+                policy.boundary_error(
+                    "LANE_LANERUNTIME_CLAUDE_AUTHORITY",
+                    Facts::violation(
+                        "Claude's Provenant hook settings cannot represent the selected executable or state path",
+                    ),
+                    ProviderError::InvalidPath,
+                )
+            })?;
         settings["attribution"] = serde_json::json!({"commit": "", "pr": ""});
         if !image_rules.is_empty() {
             settings["permissions"]["allow"] = serde_json::json!(image_rules);
         }
         let mut steps = Vec::new();
-        for (flag, name, value) in [
-            ("--mcp-config", "provenant-mcp.json", mcp),
-            ("--settings", "provenant-settings.json", settings),
-        ] {
-            let path = scratch.join(name);
-            let bytes = serde_json::to_vec(&value).map_err(|_| ProviderError::Malformed)?;
-            argv.extend([flag.into(), path.clone().into_os_string()]);
-            steps.push(SetupStep::WriteFile { path, bytes });
-        }
+        let path = scratch.join("provenant-settings.json");
+        let bytes = serde_json::to_vec(&settings).map_err(|_| ProviderError::Malformed)?;
+        argv.extend(["--settings".into(), path.clone().into_os_string()]);
+        steps.push(SetupStep::WriteFile { path, bytes });
         // Settings are explicitly sourced from our generated document only.
         argv.extend(["--setting-sources".into(), "".into()]);
         if let Some(tools) = allowed_tools {
             argv.extend(["--allowedTools".into(), tools.into()]);
         }
         Ok(steps)
-    }
-
-    pub(crate) fn codex(&self, argv: &mut Vec<OsString>) -> Result<(), ProviderError> {
-        if !self.fabric_mcp {
-            return Ok(());
-        }
-        let mcp = match self.mcp(Harness::Codex) {
-            Ok(entry) => entry,
-            Err(error) => {
-                use std::io::Write;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: Fabric MCP configuration is unavailable ({error}); continuing without Fabric MCP"
-                );
-                return Ok(());
-            }
-        };
-        for key in ["command", "args", "env"] {
-            // JSON values are TOML-compatible except object separators.
-            let value = if key == "env" {
-                let env = mcp[key].as_object().ok_or(ProviderError::Malformed)?;
-                format!(
-                    "{{{}}}",
-                    env.iter()
-                        .map(|(key, value)| { format!("{key}={value}") })
-                        .collect::<Vec<_>>()
-                        .join(",")
-                )
-            } else {
-                mcp[key].to_string()
-            };
-            argv.extend([
-                "-c".into(),
-                format!("mcp_servers.fabric.{key}={value}").into(),
-            ]);
-        }
-        Ok(())
     }
 
     /// `scrubbed_git_config` is for a provider whose shell subprocesses lose
@@ -692,23 +868,51 @@ impl LaneRuntime<'_> {
         env: &mut Vec<(OsString, OsString)>,
         setup: &mut Vec<SetupStep>,
         scrubbed_git_config: bool,
+        policy: &Policy,
     ) -> Result<(), ProviderError> {
         // Pin the CLI's context in its launcher too: providers may replace
         // HOME or scrub the shell environment. Children still use the host's
         // configuration; writer Git identity is installed into a lane-private config
         // after adapter preparation, with custody in the private Run store.
-        let entry = self.mcp(Harness::Codex)?;
+        let pinned = self.pinned_environment().map_err(|error| {
+            policy.boundary_error(
+                "LANE_LANERUNTIME_ENVIRONMENT_AUTHORITY",
+                Facts::violation(
+                    "the required Provenant command environment cannot represent its selected paths",
+                ),
+                error,
+            )
+        })?;
         let mut script = String::from("#!/bin/sh\n");
-        for (key, value) in entry["env"].as_object().ok_or(ProviderError::Malformed)? {
-            let value = value.as_str().ok_or(ProviderError::InvalidPath)?;
+        for (key, value) in pinned {
             if value.chars().any(char::is_control) {
-                return Err(ProviderError::InvalidPath);
+                return Err(policy.boundary_error(
+                    "LANE_LANERUNTIME_ENVIRONMENT_AUTHORITY",
+                    Facts::violation(
+                        "the required Provenant command environment contains control characters",
+                    ),
+                    ProviderError::InvalidPath,
+                ));
             }
-            script.push_str(&format!("export {key}={}\n", shell_quote(value)));
+            script.push_str(&format!("export {key}={}\n", shell_quote(&value)));
         }
-        let executable = self.executable.to_str().ok_or(ProviderError::InvalidPath)?;
+        let executable = self.executable.to_str().ok_or_else(|| {
+            policy.boundary_error(
+                "LANE_LANERUNTIME_ENVIRONMENT_AUTHORITY",
+                Facts::violation(
+                    "the Provenant executable cannot be represented in the command environment",
+                ),
+                ProviderError::InvalidPath,
+            )
+        })?;
         if executable.chars().any(char::is_control) {
-            return Err(ProviderError::InvalidPath);
+            return Err(policy.boundary_error(
+                "LANE_LANERUNTIME_ENVIRONMENT_AUTHORITY",
+                Facts::violation(
+                    "the Provenant executable contains control characters in the command environment",
+                ),
+                ProviderError::InvalidPath,
+            ));
         }
         script.push_str(&format!("exec {} \"$@\"\n", shell_quote(executable)));
         // A private name also pins ordinary shell `git`, independently of
@@ -723,6 +927,7 @@ impl LaneRuntime<'_> {
                 ..Default::default()
             },
             scrubbed_git_config,
+            policy,
         )?;
         setup.push(SetupStep::WriteExecutable {
             path: scratch.join("bin/provenant"),
@@ -1261,9 +1466,11 @@ mod tests {
                 &mut setup,
                 &options,
                 scrub,
+                crate::tests::fixture_policy(),
             )
             .unwrap();
             assert_eq!(env[0].1, "/usr/bin:/bin");
+            assert!(setup.is_empty());
         }
         let mut env = vec![("PATH".into(), "/usr/bin:/bin".into())];
         let mut setup = Vec::new();
@@ -1282,7 +1489,8 @@ mod tests {
                 &mut env,
                 &mut setup,
                 &options,
-                true
+                true,
+                crate::tests::fixture_policy(),
             ),
             Err(ProviderError::InvalidPath)
         ));
@@ -1300,6 +1508,7 @@ mod tests {
             &mut setup,
             &GitWrapper::default(),
             false,
+            crate::tests::fixture_policy(),
         )
         .unwrap();
         let path = env.iter().find(|(key, _)| key == "PATH").unwrap();
@@ -1759,9 +1968,20 @@ mod tests {
             deny_verbs: vec!["release create".into()],
             deny_labels: vec![" ci ".into(), "".into(), "needs review".into()],
         };
+        let counter = temp.path().join("count");
         fs::write(
             &shim,
-            gh_wrapper(real_gh.to_str().unwrap(), "'/tmp'", &policy),
+            gh_wrapper(
+                real_gh.to_str().unwrap(),
+                Some("'/tmp'"),
+                &shell_quote(counter.to_str().unwrap()),
+                &GhShim {
+                    policy: &policy,
+                    budget: 0,
+                    budget_source: "default",
+                    label_ci_warning: false,
+                },
+            ),
         )?;
         fs::set_permissions(&shim, fs::Permissions::from_mode(0o700))?;
         let executor = SystemExecutor::new(1)?;
@@ -1797,6 +2017,66 @@ mod tests {
         );
         assert!(run(&["pr", "create", "--title", "docs"])?.termination == Termination::Exit(0));
         assert!(run(&["release", "view"])?.termination == Termination::Exit(0));
+        Ok(())
+    }
+
+    /// The gh budget warns and never stops: every call runs, the count file
+    /// holds one byte per call, and a label change warns only when asked.
+    #[test]
+    fn gh_budget_counts_and_warns_without_stopping() -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+        use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
+        let temp = tempfile::tempdir()?;
+        let real_gh = temp.path().join("real-gh");
+        fs::write(&real_gh, "#!/bin/sh\nexit 0\n")?;
+        fs::set_permissions(&real_gh, fs::Permissions::from_mode(0o700))?;
+        let policy = provenant_config::GithubPolicy::default();
+        let executor = SystemExecutor::new(1)?;
+        let shim_with = |name: &str, label_ci_warning: bool| -> std::io::Result<PathBuf> {
+            let shim = temp.path().join(name);
+            let counter = temp.path().join(format!("{name}.count"));
+            fs::write(
+                &shim,
+                gh_wrapper(
+                    real_gh.to_str().unwrap_or_default(),
+                    None,
+                    &shell_quote(counter.to_str().unwrap_or_default()),
+                    &GhShim {
+                        policy: &policy,
+                        budget: 2,
+                        budget_source: "launch",
+                        label_ci_warning,
+                    },
+                ),
+            )?;
+            fs::set_permissions(&shim, fs::Permissions::from_mode(0o700))?;
+            Ok(shim)
+        };
+        let run = |shim: &Path, args: &[&str]| {
+            let argv: Vec<_> = std::iter::once(shim.as_os_str().to_owned())
+                .chain(args.iter().map(OsString::from))
+                .collect();
+            executor.execute(ExecOptions::new(&argv, temp.path(), Duration::from_secs(5)))
+        };
+        let shim = shim_with("gh", false)?;
+        let mut warnings = 0;
+        for _ in 0..5 {
+            let output = run(&shim, &["pr", "edit", "1", "--add-label", "x"])?;
+            assert_eq!(output.termination, Termination::Exit(0));
+            let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+            assert!(!stderr.contains("label change"));
+            if stderr.contains("lanes.gh_budget = 2, source: launch") {
+                warnings += 1;
+            }
+        }
+        assert_eq!(warnings, 2);
+        assert_eq!(fs::metadata(temp.path().join("gh.count"))?.len(), 5);
+        let labelled = shim_with("labelled", true)?;
+        let output = run(&labelled, &["pr", "edit", "1", "--add-label", "x"])?;
+        assert_eq!(output.termination, Termination::Exit(0));
+        assert!(String::from_utf8_lossy(&output.stderr.bytes).contains("label change starts CI"));
+        let output = run(&labelled, &["pr", "view", "1"])?;
+        assert!(!String::from_utf8_lossy(&output.stderr.bytes).contains("label change"));
         Ok(())
     }
 
@@ -1843,7 +2123,12 @@ mod tests {
                 Path::new("/fixture/git/bin/git"),
                 Path::new("/fixture/gh"),
                 Path::new("/fixture/home"),
-                &provenant_config::GithubPolicy::default(),
+                &GhShim {
+                    policy: &provenant_config::GithubPolicy::default(),
+                    budget: 100,
+                    budget_source: "default",
+                    label_ci_warning: false,
+                },
             );
             assert!(
                 result.is_ok(),
@@ -2075,6 +2360,7 @@ mod tests {
             user_skills: Default::default(),
             tool_requirements: Default::default(),
             git_wrapper: Default::default(),
+            policy: Policy::default(),
             profile: provenant_confinement::permissions::ProviderProfile {
                 spec: ProviderProfileSpec::default(),
                 observations: Default::default(),
@@ -2094,15 +2380,22 @@ mod tests {
         spec.cwd = root.clone();
         let provenant = root.join("fake provenant");
         let gate = BuildSlotGate {
+            disk_limits: Some(provenant_config::DiskLimits {
+                free_floor: 50,
+                free_floor_source: provenant_records::diagnostic::SettingSource::Configuration,
+                critical_free: 10,
+                critical_free_source: provenant_records::diagnostic::SettingSource::ShippedDefault,
+            }),
             provenant: &provenant,
             state: &state,
             slots: 3,
-            wait_seconds: 1800,
             cargo: Path::new("/home/.cargo/bin/cargo"),
-            wait_marker: Path::new("/tmp/lane/build-slot-wait"),
             local_cargo: "all",
         };
-        spec.configure_build_slots(&scratch, &gate).unwrap();
+        assert!(matches!(
+            spec.configure_build_slots(&scratch, &gate),
+            Ok(BuildSlotSetupOutcome::Configured)
+        ));
         let (_, path) = spec.env.iter().find(|(key, _)| key == "PATH").unwrap();
         assert_eq!(
             std::env::split_paths(path).next().unwrap(),
@@ -2136,7 +2429,7 @@ mod tests {
         // and the host's slot environment, with hostile values in the lane's.
         std::fs::write(
             &provenant,
-            "#!/bin/sh\nprintf '<%s>' \"$@\"\nprintf '[%s|%s|%s]' \"$PROVENANT_BUILD_SLOT_STATE\" \"$PROVENANT_BUILD_SLOTS\" \"$PROVENANT_BUILD_WAIT_SECS\"\n",
+            "#!/bin/sh\nprintf '<%s>' \"$@\"\nprintf '[%s|%s|%s]' \"$PROVENANT_BUILD_SLOT_STATE\" \"$PROVENANT_BUILD_SLOTS\" \"$PROVENANT_BUILD_DISK_LIMITS\"\n",
         )
         .unwrap();
         let shim = root.join("cargo");
@@ -2148,17 +2441,18 @@ mod tests {
             .args(["test", "--", "two words"])
             .env("PROVENANT_BUILD_SLOT_STATE", "/lane/chosen")
             .env("PROVENANT_BUILD_SLOTS", "64")
-            .env("PROVENANT_BUILD_WAIT_SECS", "1")
+            .env("PROVENANT_BUILD_DISK_LIMITS", "lane value")
             .output()
             .unwrap();
         assert!(output.status.success());
         assert_eq!(
             String::from_utf8(output.stdout).unwrap(),
             format!(
-                "<internal><build-slot><--></home/.cargo/bin/cargo><test><--><two words>[{}|3|1800]",
-                state.display()
+                "<internal><build-slot><--></home/.cargo/bin/cargo><test><--><two words>[{}|3|{}]",
+                state.display(),
+                serde_json::to_string(&gate.disk_limits.unwrap()).unwrap(),
             ),
-            "the host's slot directory, count and wait override the lane's environment"
+            "the shim forwards its sealed slots and disk limits"
         );
     }
 
@@ -2187,16 +2481,17 @@ mod tests {
         input.provenant.state = &state;
         let mut spec = Codex.prepare(input).unwrap();
         let gate = BuildSlotGate {
+            disk_limits: None,
             provenant: Path::new("/fixture/bin/provenant"),
             state: &state,
             slots: 2,
-            wait_seconds: 60,
             cargo: Path::new("/home/.cargo/bin/cargo"),
-            wait_marker: Path::new("/tmp/lane/build-slot-wait"),
             local_cargo: "all",
         };
-        spec.configure_build_slots(&base.join("scratch"), &gate)
-            .unwrap();
+        assert!(matches!(
+            spec.configure_build_slots(&base.join("scratch"), &gate),
+            Ok(BuildSlotSetupOutcome::Configured)
+        ));
         // The lane reads the slot directory so it can lock a slot file.
         assert!(spec.profile.spec.runtime_reads.contains(&subtree(&slots)));
         let grants = write_grants(plan.permissions(), &spec.profile);
@@ -2218,41 +2513,49 @@ mod tests {
 
     #[test]
     fn the_cargo_shim_refuses_settings_that_cannot_be_trusted() {
-        let mut spec = bare_spec("/usr/bin");
-        for (state, slots, wait) in [
-            ("/s", 0, 60),
-            ("/s", 65, 60),
-            ("/s", 1, 0),
-            ("relative", 1, 60),
-            ("/s\nx", 1, 60),
-        ] {
+        for (state, slots) in [("/s", 0), ("/s", 65)] {
+            let mut spec = bare_spec("/usr/bin");
             let gate = BuildSlotGate {
+                disk_limits: None,
                 provenant: Path::new("/p"),
                 state: Path::new(state),
                 slots,
-                wait_seconds: wait,
                 cargo: Path::new("/c"),
-                wait_marker: Path::new("/t/build-slot-wait"),
                 local_cargo: "all",
             };
             assert!(
                 spec.configure_build_slots(Path::new("/scratch"), &gate)
                     .is_err(),
-                "{state} {slots} {wait}"
+                "{state} {slots}"
             );
+            assert!(spec.setup.is_empty());
         }
-        assert!(spec.setup.is_empty());
+        for state in ["relative", "/s\nx"] {
+            let mut spec = bare_spec("/usr/bin");
+            let gate = BuildSlotGate {
+                disk_limits: None,
+                provenant: Path::new("/p"),
+                state: Path::new(state),
+                slots: 1,
+                cargo: Path::new("/c"),
+                local_cargo: "all",
+            };
+            assert!(matches!(
+                spec.configure_build_slots(Path::new("/scratch"), &gate),
+                Ok(BuildSlotSetupOutcome::Skipped)
+            ));
+            assert!(spec.setup.is_empty(), "{state}");
+        }
     }
 
     #[test]
-    fn rejected_build_slot_shim_leaves_launch_unchanged() {
+    fn unrepresentable_build_slot_shim_is_skipped_without_mutating_launch() {
         let gate = BuildSlotGate {
+            disk_limits: None,
             provenant: Path::new("/runtime"),
             state: Path::new("/state"),
             slots: 1,
-            wait_seconds: 60,
             cargo: Path::new("/cargo"),
-            wait_marker: Path::new("/scratch/wait"),
             local_cargo: "all",
         };
         for missing_path in [true, false] {
@@ -2267,7 +2570,10 @@ mod tests {
             } else {
                 Path::new("/scratch:invalid")
             };
-            assert!(spec.configure_build_slots(scratch, &gate).is_err());
+            assert!(matches!(
+                spec.configure_build_slots(scratch, &gate),
+                Ok(BuildSlotSetupOutcome::Skipped)
+            ));
             assert_eq!(spec.env, env);
             assert_eq!(spec.profile.spec, profile);
             assert!(spec.setup.is_empty());
@@ -2514,103 +2820,114 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn unrepresentable_mcp_paths_warn_and_preserve_claude_settings() -> Result<(), ProviderError> {
-        use std::os::unix::ffi::OsStringExt;
-        let bad = PathBuf::from(OsString::from_vec(b"/fixture/\xff".to_vec()));
-        let lane = LaneRuntime {
+    fn fixture_lane<'a>(git: &'a Path, byte: u8) -> LaneRuntime<'a> {
+        LaneRuntime {
             executable: Path::new("/fixture/provenant"),
-            git: &bad,
+            git,
             state: Path::new("/fixture/state"),
             home: Path::new("/fixture/home"),
             depth: 1,
-            attempt: AttemptId::from_bytes([1; 16]),
+            attempt: AttemptId::from_bytes([byte; 16]),
             assets: Path::new("/fixture/assets"),
-            fabric_mcp: true,
-        };
+        }
+    }
+
+    #[test]
+    fn unrepresentable_paths_are_refused_and_claude_settings_survive() -> Result<(), ProviderError>
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let bad = PathBuf::from(OsString::from_vec(b"/fixture/\xff".to_vec()));
         assert!(matches!(
-            lane.mcp(Harness::Codex),
+            fixture_lane(&bad, 1).pinned_environment(),
             Err(ProviderError::InvalidPath)
         ));
-        let mut codex = Vec::new();
-        lane.codex(&mut codex)?;
-        assert!(codex.is_empty());
+        let lane = fixture_lane(Path::new("/fixture/git"), 1);
         let mut claude = Vec::new();
         let setup = lane.claude(
             Path::new("/fixture/scratch"),
             &mut claude,
+            crate::tests::fixture_policy(),
             Some("Bash"),
             &[],
         )?;
-        let documents: Vec<Value> = setup
+        let documents: Vec<serde_json::Value> = setup
             .iter()
             .filter_map(|step| match step {
                 SetupStep::WriteFile { bytes, .. } => serde_json::from_slice(bytes).ok(),
                 _ => None,
             })
             .collect();
-        assert_eq!(documents[0]["mcpServers"], serde_json::json!({}));
-        assert!(documents[1]["hooks"].is_object());
+        assert_eq!(documents.len(), 1);
+        assert!(documents[0]["hooks"].is_object());
         assert!(claude.iter().any(|arg| arg == "--setting-sources"));
+        assert!(claude.iter().all(|arg| arg != "--mcp-config"));
         Ok(())
     }
 
     #[test]
-    fn lanes_launch_without_the_fabric_server_unless_opted_in() -> Result<(), ProviderError> {
-        for fabric_mcp in [false, true] {
-            let lane = LaneRuntime {
-                executable: Path::new("/fixture/provenant"),
-                git: Path::new("/fixture/git"),
-                state: Path::new("/fixture/state"),
-                home: Path::new("/fixture/home"),
-                depth: 1,
-                attempt: AttemptId::from_bytes([1; 16]),
-                assets: Path::new("/fixture/assets"),
-                fabric_mcp,
-            };
-            let mut codex = Vec::new();
-            lane.codex(&mut codex)?;
-            assert_eq!(!codex.is_empty(), fabric_mcp);
-            let mut claude = Vec::new();
-            let setup = lane.claude(Path::new("/fixture/scratch"), &mut claude, None, &[])?;
-            let servers = setup.iter().find_map(|step| match step {
-                SetupStep::WriteFile { bytes, .. } => serde_json::from_slice::<Value>(bytes)
-                    .ok()
-                    .and_then(|document| document.get("mcpServers").cloned()),
-                _ => None,
-            });
+    fn pinned_environments_have_attempt_unique_agent_labels() -> Result<(), ProviderError> {
+        let label = |byte| {
+            fixture_lane(Path::new("/fixture/git"), byte)
+                .pinned_environment()
+                .map(|env| {
+                    env.into_iter()
+                        .find_map(|(key, value)| (key == "PROVENANT_AGENT_LABEL").then_some(value))
+                })
+        };
+        assert_ne!(label(1)?, label(2)?);
+        assert!(label(1)?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn required_lane_context_paths_preserve_authority_errors() {
+        use std::os::unix::ffi::OsStringExt;
+        let bad = PathBuf::from(OsString::from_vec(b"/fixture/\xff".to_vec()));
+        let lane = LaneRuntime {
+            executable: &bad,
+            git: Path::new("/fixture/git"),
+            state: Path::new("/fixture/state"),
+            home: Path::new("/fixture/home"),
+            depth: 1,
+            attempt: AttemptId::from_bytes([1; 16]),
+            assets: Path::new("/fixture/assets"),
+        };
+        let policy = crate::tests::fixture_policy();
+
+        for code in [
+            "LANE_LANERUNTIME_CLAUDE_AUTHORITY",
+            "LANE_LANERUNTIME_ENVIRONMENT_AUTHORITY",
+        ] {
+            let rule = &policy.rule(code).rule;
             assert_eq!(
-                servers
-                    .ok_or(ProviderError::Malformed)?
-                    .get("fabric")
-                    .is_some(),
-                fabric_mcp
+                rule.boundary,
+                provenant_records::policy::Boundary::Authority
             );
+            assert_eq!(rule.strength, provenant_records::policy::Strength::Refuse);
+            assert!(rule.knob.is_none());
         }
-        Ok(())
-    }
 
-    #[test]
-    fn lane_mcp_entries_have_attempt_unique_agent_labels() -> Result<(), ProviderError> {
-        for harness in [Harness::Claude, Harness::Codex] {
-            for byte in [1, 2] {
-                let lane = LaneRuntime {
-                    executable: Path::new("/fixture/provenant"),
-                    git: Path::new("/fixture/git"),
-                    state: Path::new("/fixture/state"),
-                    home: Path::new("/fixture/home"),
-                    depth: 1,
-                    attempt: AttemptId::from_bytes([byte; 16]),
-                    assets: Path::new("/fixture/assets"),
-                    fabric_mcp: true,
-                };
-                assert_eq!(
-                    lane.mcp(harness)?["env"]["PROVENANT_AGENT_LABEL"],
-                    format!("lane-{}", lane.attempt)
-                );
-            }
-        }
-        Ok(())
+        let mut argv = Vec::new();
+        assert!(matches!(
+            lane.claude(Path::new("/fixture/scratch"), &mut argv, policy, None, &[],),
+            Err(ProviderError::InvalidPath)
+        ));
+        let mut env = Vec::new();
+        let mut setup = Vec::new();
+        let error = lane
+            .environment(
+                Path::new("/fixture/scratch"),
+                &mut env,
+                &mut setup,
+                false,
+                policy,
+            )
+            .expect_err("the required command context cannot encode the selected executable");
+        assert_eq!(
+            error.boundary_class(),
+            provenant_records::diagnostic::BoundaryClass::Authority
+        );
+        assert!(matches!(error, ProviderError::InvalidPath));
     }
 
     #[test]
@@ -2687,10 +3004,7 @@ mod tests {
                 .state_writes
                 .contains(&subtree(&host_state))
         );
-        for args in [
-            vec!["run", "--use", "task", "two words"],
-            vec!["output", "child-id"],
-        ] {
+        for args in [vec!["run", "task", "two words"], vec!["output", "child-id"]] {
             let output = std::process::Command::new("/bin/sh")
                 .args(["-c", "exec provenant \"$@\"", "lane"])
                 .args(&args)

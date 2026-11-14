@@ -6,7 +6,7 @@
 use provenant_cli::Globals;
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use provenant_workflow::session::{
-    CommandPrefix, LaneLine, PrLine, PrUnread, SessionState, Unavailable, WorktreeLine,
+    CommandPrefix, LaneLine, SessionState, Unavailable, WorktreeLine,
 };
 use serde_json::Value;
 use std::{
@@ -18,32 +18,12 @@ use std::{
 const OUTPUT_CAP: usize = 512 * 1024;
 const LANE_PAGE: &str = "100";
 const LISTING_TIME: Duration = Duration::from_secs(3);
-const PR_TIME: Duration = Duration::from_secs(3);
-/// Outcomes after which a lane no longer runs. `input_required` is included:
-/// the lane stopped and waits for the chair.
-const TERMINAL: [&str; 15] = [
-    "succeeded",
-    "review_required",
-    "failed",
-    "rejected",
-    "timed_out",
-    "rate_limited",
-    "quota_limited",
-    "auth_required",
-    "model_unavailable",
-    "permission_denied",
-    "quarantined",
-    "lost",
-    "uncommitted",
-    "cancelled",
-    "input_required",
-];
 
 pub struct Want {
     pub worktrees: bool,
     /// Unix seconds; lanes settled after this count as new.
     pub settled_after_unix: i64,
-    pub pr_refs: Vec<u64>,
+    pub session: Option<String>,
 }
 
 /// This binary's own read commands, run in `cwd` with the hook's state root.
@@ -191,7 +171,7 @@ pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) ->
         commands: CommandPrefix::new(globals.state_dir.as_deref(), cwd),
         ..Default::default()
     };
-    let executor = match SystemExecutor::new(4 + want.pr_refs.len()) {
+    let executor = match SystemExecutor::new(5) {
         Ok(executor) => executor,
         Err(error) => {
             unavailable_sources(
@@ -229,20 +209,13 @@ fn collect_with_cli(
         let worktrees = want
             .worktrees
             .then(|| scope.spawn(move || cli.worktree_listing(deadline)));
-        let prs: Vec<_> = want
-            .pr_refs
-            .iter()
-            .map(|number| {
-                let number = *number;
-                scope.spawn(move || {
-                    let argument = number.to_string();
-                    (
-                        number,
-                        cli.data(&["pr", "status", &argument], PR_TIME, deadline),
-                    )
-                })
-            })
-            .collect();
+        let custody = scope.spawn(move || {
+            let mut args = vec!["status", "--mine", "--limit", LANE_PAGE];
+            if let Some(session) = want.session.as_deref() {
+                args.extend(["--session", session]);
+            }
+            cli.data(&args, LISTING_TIME, deadline)
+        });
         match active.join() {
             Ok(Ok((lanes, next, skipped))) => {
                 state.active = lanes;
@@ -289,19 +262,35 @@ fn collect_with_cli(
                 }),
             }
         }
-        for handle in prs {
-            match handle.join() {
-                Ok((number, Ok(data))) => state.prs.push(PrLine {
-                    number,
-                    state: pr_status(&data).0,
-                    summary: pr_status(&data).1,
-                }),
-                Ok((number, Err(_))) => state.prs_unread.push(PrUnread {
-                    number,
-                    command: state.commands.command(&format!("pr status {number}")),
-                }),
-                Err(_) => {}
+        match custody.join() {
+            Ok(Ok(data)) => {
+                match serde_json::from_value::<provenant_records::custody::CustodyStatus>(data) {
+                    Ok(view) => {
+                        for item in view.items {
+                            state
+                                .custody
+                                .push(format!("{} ({:?})", item.record.subject, item.presence));
+                        }
+                        state.custody_more = view.next.map(|cursor| {
+                            state
+                                .commands
+                                .command(&format!("status --mine --cursor {cursor}"))
+                        });
+                    }
+                    Err(error) => state.unavailable.push(Unavailable {
+                        source: "custody".into(),
+                        reason: format!("invalid custody response: {error}"),
+                    }),
+                }
             }
+            Ok(Err(reason)) => state.unavailable.push(Unavailable {
+                source: "custody".into(),
+                reason,
+            }),
+            Err(_) => state.unavailable.push(Unavailable {
+                source: "custody".into(),
+                reason: "listing worker panicked".into(),
+            }),
         }
     });
     state
@@ -365,10 +354,12 @@ fn parse_lanes(data: &Value, settled_after_unix: Option<i64>) -> (Vec<LaneLine>,
     let rows = data["lanes"].as_array().map_or(&[][..], Vec::as_slice);
     for lane in rows {
         if let Some(after) = settled_after_unix {
-            if !lane["state"]
-                .as_str()
-                .is_some_and(|state| TERMINAL.contains(&state))
-            {
+            if !lane["state"].as_str().is_some_and(|state| {
+                serde_json::from_value::<provenant_records::AttemptOutcome>(Value::String(
+                    state.to_owned(),
+                ))
+                .is_ok()
+            }) {
                 continue;
             }
             let finished = lane["finished_at"]
@@ -379,11 +370,15 @@ fn parse_lanes(data: &Value, settled_after_unix: Option<i64>) -> (Vec<LaneLine>,
                 continue;
             }
         }
+        // The lane's target: its work key as `NAME/NODE#N`.
+        let key = &lane["key"];
         let id = format!(
-            "{}/{}/{}",
-            lane["run_id"].as_str().unwrap_or("?"),
-            lane["task_id"].as_str().unwrap_or("?"),
-            lane["attempt_id"].as_str().unwrap_or("?")
+            "{}/{}#{}",
+            key["graph"].as_str().unwrap_or("?"),
+            key["node"].as_str().unwrap_or("?"),
+            key["attempt"]
+                .as_u64()
+                .map_or_else(|| "?".to_owned(), |n| n.to_string())
         );
         lanes.push(LaneLine {
             id,
@@ -491,32 +486,6 @@ fn parse_worktree_stream(bytes: &[u8]) -> Option<(Vec<WorktreeLine>, usize)> {
     let skipped = total.saturating_sub(entries.len().max(1));
     Some((parse_worktrees(&Value::Array(entries)), skipped))
 }
-/// Read the first line of the CLI's status array; unknown fields stay unknown.
-fn pr_status(data: &Value) -> (String, String) {
-    let data = data
-        .as_array()
-        .and_then(|lines| lines.first())
-        .unwrap_or(data);
-    let state = data["state"].as_str().unwrap_or("unknown").to_owned();
-    let head: String = data["head"]
-        .as_str()
-        .unwrap_or("unknown")
-        .chars()
-        .take(7)
-        .collect();
-    let checks = match (
-        data["checks_passed"].as_u64(),
-        data["checks_total"].as_u64(),
-        data["checks_failed"].as_u64(),
-        data["checks_pending"].as_u64(),
-    ) {
-        (Some(passed), Some(total), Some(failed), Some(pending)) => {
-            format!("checks={passed}/{total} failed={failed} pending={pending}")
-        }
-        _ => "checks=unavailable".to_owned(),
-    };
-    (state, format!("{head} {checks}"))
-}
 
 #[cfg(test)]
 mod tests {
@@ -534,7 +503,7 @@ mod tests {
 case "$*" in
   *worktree*) printf '%s\n' '{"total":3}' '{"worktree":{"path":"/primary"}}' '{"worktree":{"path":"/lane","branch":"refs/heads/lane"}}' ;;
   *--all*) printf '%s\n' '{"total":0,"next":null}' ;;
-  *) printf '%s\n' '{"total":2,"next":null}' '{"cursor":2,"lane":{"run_id":"r","task_id":"t","attempt_id":"a","state":"running"}}' ;;
+  *) printf '%s\n' '{"total":2,"next":null}' '{"cursor":2,"lane":{"key":{"graph":"g","node":"a","attempt":1},"attempt_id":"a","state":"running"}}' ;;
 esac
 /bin/sleep 5
 "##,
@@ -555,12 +524,12 @@ esac
             &Want {
                 worktrees: true,
                 settled_after_unix: 0,
-                pr_refs: vec![],
+                session: None,
             },
             crate::hooks::session_collection_deadline(host_deadline),
         );
         let digest = state.digest(provenant_workflow::session::DIGEST_LIMIT);
-        assert!(digest.contains("r/t/a"), "{digest}");
+        assert!(digest.contains("g/a#1"), "{digest}");
         assert!(digest.contains("/lane"), "{digest}");
         assert!(
             digest.contains("1 lane record was not inspected"),
@@ -602,7 +571,7 @@ esac
             "hook response missed its deadline"
         );
         for text in [
-            "r/t/a",
+            "g/a#1",
             "/lane",
             "1 lane record was not inspected",
             "1 worktree skipped during inventory",
@@ -618,7 +587,7 @@ esac
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
         let script = temp.path().join("lanes");
-        std::fs::write(&script, "#!/bin/sh\nprintf '%s\\n' '{\"total\":3,\"next\":7}' '{\"cursor\":20,\"lane\":{\"run_id\":\"r\",\"task_id\":\"t\",\"attempt_id\":\"a\",\"state\":\"running\"}}'\n/bin/sleep 5\n").unwrap();
+        std::fs::write(&script, "#!/bin/sh\nprintf '%s\\n' '{\"total\":3,\"next\":7}' '{\"cursor\":20,\"lane\":{\"key\":{\"graph\":\"g\",\"node\":\"a\",\"attempt\":1},\"attempt_id\":\"a\",\"state\":\"running\"}}'\n/bin/sleep 5\n").unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
         let executor = SystemExecutor::new(1).unwrap();
         let cli = Cli {
@@ -630,7 +599,7 @@ esac
         let (lanes, next, skipped) = cli
             .lane_listing(Instant::now() + Duration::from_secs(1), None)
             .unwrap();
-        assert_eq!(lanes[0].id, "r/t/a");
+        assert_eq!(lanes[0].id, "g/a#1");
         assert_eq!(next.as_deref(), Some("20"));
         assert_eq!(skipped, 2);
     }
@@ -638,10 +607,10 @@ esac
     #[test]
     fn lane_stream_preserves_partial_page_and_resumes_after_last_record() {
         use super::*;
-        let bytes = b"{\"total\":3,\"next\":7}\n{\"cursor\":20,\"lane\":{\"run_id\":\"r\",\"task_id\":\"t\",\"attempt_id\":\"a\",\"state\":\"running\"}}\n{\"cursor\":19";
+        let bytes = b"{\"total\":3,\"next\":7}\n{\"cursor\":20,\"lane\":{\"key\":{\"graph\":\"g\",\"node\":\"a\",\"attempt\":1},\"attempt_id\":\"a\",\"state\":\"running\"}}\n{\"cursor\":19";
         let (lanes, next, skipped) = parse_lane_stream(bytes, None).unwrap();
         assert_eq!(lanes.len(), 1);
-        assert_eq!(lanes[0].id, "r/t/a");
+        assert_eq!(lanes[0].id, "g/a#1");
         assert_eq!(next.as_deref(), Some("20"));
         assert_eq!(skipped, 2);
         let state = SessionState {
@@ -651,7 +620,7 @@ esac
             ..Default::default()
         };
         let digest = state.digest(provenant_workflow::session::DIGEST_LIMIT);
-        assert!(digest.contains("r/t/a"), "{digest}");
+        assert!(digest.contains("g/a#1"), "{digest}");
         assert!(
             digest.contains("2 lane records were not inspected"),
             "{digest}"
@@ -660,10 +629,10 @@ esac
         let (_, next, skipped) = parse_lane_stream(b"{\"total\":1,\"next\":null}\n", None).unwrap();
         assert_eq!(next.as_deref(), Some(""));
         assert_eq!(skipped, 1);
-        let settled = b"{\"total\":2,\"next\":null}\n{\"cursor\":2,\"lane\":{\"state\":\"running\"}}\n{\"cursor\":1,\"lane\":{\"run_id\":\"r\",\"task_id\":\"t\",\"attempt_id\":\"done\",\"state\":\"failed\",\"finished_at\":\"2026-10-27T01:00:00Z\"}}\n";
+        let settled = b"{\"total\":2,\"next\":null}\n{\"cursor\":2,\"lane\":{\"state\":\"running\"}}\n{\"cursor\":1,\"lane\":{\"key\":{\"graph\":\"g\",\"node\":\"done\",\"attempt\":1},\"attempt_id\":\"done\",\"state\":\"failed\",\"finished_at\":\"2026-10-27T01:00:00Z\"}}\n";
         let (lanes, next, skipped) = parse_lane_stream(settled, Some(0)).unwrap();
         assert_eq!(lanes.len(), 1);
-        assert_eq!(lanes[0].id, "r/t/done");
+        assert_eq!(lanes[0].id, "g/done#1");
         assert_eq!(next, None);
         assert_eq!(skipped, 0);
     }
@@ -741,7 +710,7 @@ esac
         let want = Want {
             worktrees: true,
             settled_after_unix: 0,
-            pr_refs: vec![],
+            session: None,
         };
         let mut state = SessionState::default();
         unavailable_sources(&mut state, &want, "executable unavailable".into());
@@ -762,14 +731,14 @@ esac
         use super::*;
         use serde_json::json;
         let data = json!({"lanes":[
-            {"run_id":"r","task_id":"t","attempt_id":"a","state":"running",
+            {"key":{"graph":"g","node":"a","attempt":1},"attempt_id":"a","state":"running",
              "applied_route":{"model":"m"}, "worktree":{"kind":"path","root":"/","relative":{"path":"w/x"}}},
-            {"run_id":"r","task_id":"t","attempt_id":"b","state":"queued",
+            {"key":{"graph":"g","node":"b","attempt":1},"attempt_id":"b","state":"queued",
              "requested_route":{"kind":"named","name":"utility"}}
         ],"next_cursor":"7"});
         let (lanes, next) = parse_lanes(&data, None);
         assert_eq!(next.as_deref(), Some("7"));
-        assert_eq!(lanes[0].id, "r/t/a");
+        assert_eq!(lanes[0].id, "g/a#1");
         assert_eq!(lanes[0].route, "m");
         assert_eq!(lanes[0].worktree.as_deref(), Some("/w/x"));
         assert_eq!(lanes[1].route, "utility");
@@ -780,18 +749,23 @@ esac
     fn settled_lanes_need_a_finish_after_the_baseline() {
         use super::*;
         use serde_json::json;
+        let outcome = |outcome| serde_json::to_value(outcome).unwrap();
         let data = json!({"lanes":[
-            {"run_id":"r","task_id":"t","attempt_id":"new","state":"failed","reason":"boom","finished_at":"2026-10-27T01:00:00Z"},
-            {"run_id":"r","task_id":"t","attempt_id":"old","state":"succeeded","finished_at":"2026-10-27T00:00:00Z"},
-            {"run_id":"r","task_id":"t","attempt_id":"none","state":"lost"}
+            {"key":{"graph":"g","node":"new","attempt":1},"attempt_id":"new","state":outcome(provenant_records::AttemptOutcome::Failed),"reason":"boom","finished_at":"2026-10-27T01:00:00Z"},
+            {"key":{"graph":"g","node":"old","attempt":1},"attempt_id":"old","state":outcome(provenant_records::AttemptOutcome::Succeeded),"finished_at":"2026-10-27T00:00:00Z"},
+            {"key":{"graph":"g","node":"no_finish","attempt":1},"attempt_id":"no-finish","state":outcome(provenant_records::AttemptOutcome::Lost)},
+            {"key":{"graph":"g","node":"active","attempt":1},"attempt_id":"active","state":"running"}
         ],"next_cursor":null});
         let after = "2026-10-27T00:30:00Z"
             .parse::<jiff::Timestamp>()
             .unwrap()
             .as_second();
         let (lanes, _) = parse_lanes(&data, Some(after));
-        assert_eq!(lanes.len(), 1);
-        assert_eq!(lanes[0].reason.as_deref(), Some("boom"));
+        let identities: std::collections::BTreeSet<_> =
+            lanes.iter().map(|lane| lane.id.as_str()).collect();
+        assert_eq!(identities, ["g/new#1"].into());
+        let recent = lanes.iter().find(|lane| lane.id == "g/new#1").unwrap();
+        assert_eq!(recent.reason.as_deref(), Some("boom"));
     }
 
     #[test]
@@ -802,7 +776,7 @@ esac
         // More than a page of lanes: the settled listing is newest-queued
         // first, so a lane on a later page can still have finished recently.
         let data = json!({"lanes":[
-            {"run_id":"r","task_id":"t","attempt_id":"a","state":"failed","finished_at":"2026-10-27T01:00:00Z"}
+            {"key":{"graph":"g","node":"a","attempt":1},"attempt_id":"a","state":"failed","finished_at":"2026-10-27T01:00:00Z"}
         ],"next_cursor":"1042"});
         let (lanes, next) = parse_lanes(&data, Some(0));
         let cwd = Path::new("/work");
@@ -843,29 +817,6 @@ esac
                 "{note}"
             );
         }
-        // The unread PR hint carries the same state directory.
-        assert_eq!(
-            commands(None).command("pr status 9"),
-            "provenant pr status 9"
-        );
-        assert_eq!(
-            commands(Some(Path::new("rel/state"))).command("pr status 9"),
-            "provenant --state-dir '/work/rel/state' pr status 9"
-        );
-        let unread = SessionState {
-            prs_unread: vec![PrUnread {
-                number: 9,
-                command: commands(Some(Path::new("rel/state"))).command("pr status 9"),
-            }],
-            ..Default::default()
-        };
-        let shown = unread.digest(provenant_workflow::session::DIGEST_LIMIT);
-        assert!(
-            shown.contains(
-                "#9 status unavailable; run `provenant --state-dir '/work/rel/state' pr status 9`"
-            ),
-            "{shown}"
-        );
         let state = SessionState {
             settled: lanes,
             settled_more: Some(command),
@@ -900,43 +851,5 @@ esac
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].branch, "feat/a");
         assert_eq!(list[0].path, "/p/.worktrees/a");
-    }
-
-    #[test]
-    fn digest_reports_unavailable_checks_without_claiming_zero() {
-        use super::*;
-        use serde_json::json;
-        let (state, summary) = pr_status(
-            &json!([{"state":"OPEN", "head":"abcdef123456", "checks_passed":null, "checks_total":null, "checks_failed":null, "checks_pending":null}]),
-        );
-        let digest = SessionState {
-            prs: vec![PrLine {
-                number: 42,
-                state,
-                summary,
-            }],
-            ..Default::default()
-        }
-        .digest(provenant_workflow::session::DIGEST_LIMIT);
-        assert!(
-            digest.contains("#42 abcdef1 checks=unavailable"),
-            "{digest}"
-        );
-        assert!(!digest.contains("0/0"));
-        let (_, zero) = pr_status(
-            &json!([{"state":"OPEN", "head":"abcdef1", "checks_passed":0, "checks_total":0, "checks_failed":0, "checks_pending":0}]),
-        );
-        assert!(zero.contains("checks=0/0"));
-    }
-
-    #[test]
-    fn pr_status_reads_cli_array() {
-        use super::*;
-        use serde_json::json;
-        let (state, summary) = pr_status(
-            &json!([{"state":"OPEN", "head":"abcdef123456", "checks_passed":2, "checks_total":3, "checks_failed":0, "checks_pending":1}]),
-        );
-        assert_eq!(state, "OPEN");
-        assert_eq!(summary, "abcdef1 checks=2/3 failed=0 pending=1");
     }
 }

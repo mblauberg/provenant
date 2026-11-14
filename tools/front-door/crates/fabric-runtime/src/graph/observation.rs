@@ -58,5 +58,17 @@ pub enum AttemptObservation {
         result_path: Option<String>,
         branch: Option<String>,
         commit: Option<String>,
+        /// The stop cause the run sealed, if the attempt stopped.
+        stop: Option<provenant_records::StopCause>,
+        /// Exact settlement classification persisted by the run store.
+        settlement_reason: Option<provenant_records::run::SettlementReason>,
     },
+}
+
+/// An already-admitted continuation. Its WorkKey and reference are read from
+/// the same RunStore record; the graph never invents a successor identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttemptContinuation {
+    pub key: provenant_records::WorkKey,
+    pub attempt_ref: String,
 }

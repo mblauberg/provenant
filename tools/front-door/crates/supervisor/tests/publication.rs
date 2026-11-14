@@ -1,7 +1,7 @@
 // Integration tests use real time to bound process and filesystem coordination.
 #![allow(clippy::disallowed_methods)]
 
-use provenant_core::{AttemptId, CancelToken, RunId, WaitBudget};
+use provenant_core::{AttemptId, CancelToken, WaitBudget};
 use provenant_os::{clock::SystemClock, fs::Directory};
 use provenant_supervisor::{ExitPublisher, GuardianHooks, custody::*, fixture};
 use std::error::Error;
@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 fn scope() -> Scope {
     Scope {
-        run: RunId::from_bytes([11; 16]),
         attempt: AttemptId::from_bytes([12; 16]),
         generation: 1,
     }
@@ -43,13 +42,14 @@ fn start(root: &Path, name: &str, scenario: &str) -> Result<(CustodyLease, Custo
         &clock,
     )?;
     let command = ProviderCommand {
+        policy: Default::default(),
         profile_file: None,
         priority: 0,
         lane_ports: None,
         requester: provenant_core::ActorId::from_bytes([4; 16]),
         resolved_route: "fixture/provider".into(),
         permission_plan_digest: provenant_core::Digest::from_bytes([0; 32]),
-        task: provenant_core::TaskId::from_bytes([13; 16]),
+        key: provenant_supervisor::custody::fixture_key(13),
         protected_commands: fixture::protected_commands(),
         config_environment: fixture::config_environment(),
         argv: fixture::argv(scenario)?,

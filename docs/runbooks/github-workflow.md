@@ -29,38 +29,25 @@ stay open. Link a pull request with `Closes #N` only when merge leaves no user
 or external-action gate; otherwise `References #N`. Commits never carry a
 closing keyword.
 
-Project `2` (owner `mblauberg`) holds Status. To set it:
-
-```sh
-item=$(gh project item-list 2 --owner mblauberg --limit 200 --format json \
-  --jq '.items[] | select(.content.number == 148) | .id')
-gh project item-edit --project-id PVT_kwHOBiwkrc4BdU1c --id "$item" \
-  --field-id PVTSSF_lAHOBiwkrc4BdU1czhX3Kn4 --single-select-option-id 5c9ddb06
-```
-
-Option IDs: `Backlog` `c764d63a`, `Ready` `a5ebd55b`, `In progress`
-`5c9ddb06`, `In review` `27873f75`, `Awaiting user` `129da224`, `Done`
-`93d6cd26`. If one stops matching, re-derive it with `gh project field-list 2
---owner mblauberg --format json`.
+Use `gh project item-list`, `gh project field-list` and `gh project item-edit`
+to find the project item and current Status options before changing it.
 
 ## Branch, commit, pull request
 
-Name the branch `<type>/<area>-<slug>`, at most 48 characters, `<type>` one of
-`feat fix refactor perf test docs chore ci build`; no issue number and no run
-vocabulary (batch, wave, lane, model name). Create it with
+Name the branch `<type>/<area>-<slug>` without an issue number or run
+vocabulary. Create it with
 `provenant worktree create BRANCH --base main`; to record the issue link on
 GitHub, create the branch first with `gh issue develop N --name BRANCH`.
 `worktree remove NAME` refuses dirty worktrees; `--discard` also deletes an
 unmerged branch.
 
-Push with `git push -u origin BRANCH`; a writer pushes its own branch unless
-`lanes.publish=false`, when the `deliver` template's host delivery does it.
+See [lane delivery](lane-lifecycle.md#delivery) for publishing.
 
 `gh pr create --body` bypasses
 [the template](../../.github/pull_request_template.md): fill a copy (evidence
 rows bound to the exact head, the independent-review block) and pass it with
 `--body-file`, or build it from recorded attempts with
-`provenant pr open --from-attempt A --review B --summary-file summary.md --issue N --dry-run`.
+`provenant pr open --from-attempt TARGET --review TARGET --summary-file summary.md --issue N --dry-run`.
 Complete rows marked `pending` before asking for review.
 
 A stack is a linear chain of dependent slices: the bottom PR targets `main`,
@@ -71,7 +58,7 @@ heads and review evidence. Land bottom-first with `provenant land`.
 ## Merge
 
 Agents merge directly: once a pull request has the lens review its risk
-requires (`provenant run --use review`) and `ci-status`
+requires (`provenant run review`) and `ci-status`
 is green on the exact head, merge without waiting for the user. A change that
 only repairs CI or restores a red `main` merges on green `ci-status` alone; one
 that skips or weakens a check takes its normal review. Before merging a
@@ -88,39 +75,22 @@ branches outside authorised merges.
 
 ### Land
 
-```sh
-provenant land 148 149              # ordered batch
-provenant land 148 --shadow         # gate and record without publishing
-provenant land 148 --wait=30m       # single-PR path
-provenant land --tier substantial --explain --json
-```
-
-By default (`integration = "batch"`) `land` builds one merge commit per PR onto
-the fetched target, gates the exact candidate and publishes it
-([ADR 0037](../adr/0037-batched-exact-candidate-landing.md)). `--wait`,
-`--head` or `integration = "single"` select the single-PR path, which waits for
-CI (up to four hours) and merges over REST at the verified head. `--explain
---json` shows the effective policy and its sources; settings live under
-`[domains.pr.land]` (`config schema` lists the keys).
+Use `provenant land --help` for options and `provenant land --explain` for
+the effective policy and its sources. The landing owner gates the exact
+candidate; see [ADR 0037](../adr/0037-batched-exact-candidate-landing.md).
+Rerun the same request when a landing is pending or busy.
 
 Sharp edges:
 
 - Changing `candidate_ref_prefix` needs a matching CI trigger (the bundled one
   covers `land/**`). A command gate runs without `GH_TOKEN`, `GITHUB_TOKEN` and
   `GH_ENTERPRISE_TOKEN` unless `gate.env_passthrough` names them.
-- Approval. `approval = "forge"` (default) needs an approving forge review at
-  the head; `receipt` takes an accepted delivery receipt instead. This
-  repository's host uses `receipt`: save it before landing, with a `pr` subject
-  naming `number` and the reviewed `head`. A merge-in from the target, or a
-  rebase with an unchanged delta, keeps the review; an unchanged head retargeted
-  past the branch below does not. Any other change needs a receipt whose
-  `subject` adds `delta_from` (the reviewed head), or
-  `land N --accept-delta REASON`, which warns and records the reason.
-  `approval_tier = "auto"` needs no review for changes touching only tests,
-  docs or review-exempt paths.
-- Single-PR exits: 124 is a CI timeout (nothing merged), 5 is `pending`
-  (rerun with `--wait`). `CI_CONFLICT`: the PR conflicts with its base, so CI
-  never starts; rebase or merge, then push. `MERGE_STATE_UNKNOWN`: rerun `land`.
+- Review must be independent of the writer and cover the exact head. Inspect
+  `land --explain` for the effective approval policy and its sources; a changed
+  head needs fresh evidence.
+- `LAND_PENDING` and `LAND_BUSY` exit as `pending`; rerun the same `land`.
+  `LAND_CONFLICT`: the PR conflicts with the target; rebase or merge, then push.
+  `LAND_PUBLICATION_UNKNOWN`: rerun `land` (see below).
 - Cleanup after merge (fast-forward base, delete build output, worktree and
   local branch) runs only when the local tip is exactly the merged head. A
   refused step reports `cleanup_pending` and the merge still exits 0; fix the
@@ -134,8 +104,10 @@ it to force a retry.
 
 Restore forge access, check `git merge-base --is-ancestor CANDIDATE origin/TARGET`
 after fetching and `gh pr view N --json state,headRefOid,mergeCommit` per PR,
-then after `publish_settle_seconds` rerun `provenant land N` without `--shadow`:
-recovery observes the outcome, finishes receipts and deletes the marker last.
+then rerun `provenant land N` without `--shadow`: recovery observes the outcome,
+finishes receipts and deletes the marker last. Recovery never sleeps: a marker
+younger than `publish_settle_seconds` that it cannot yet prove stays for the
+next run.
 
 REST merges use the authenticated GitHub account's commit email, not local
 `user.email`: configure it in GitHub first and check the merge commit's author;

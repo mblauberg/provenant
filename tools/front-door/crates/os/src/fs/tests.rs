@@ -1,6 +1,35 @@
 use super::*;
 
 #[test]
+fn symlink_unlink_checks_identity_and_preserves_targets_even_for_lock_names() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    std::fs::write(temp.path().join("target"), b"keep").unwrap();
+    for leaf in ["link", "owner.lock", "Cargo.lock"] {
+        let name = OsStr::new(leaf);
+        // Use the OS fixture to create reserved names that ordinary mutations refuse.
+        std::os::unix::fs::symlink("target", temp.path().join(leaf)).unwrap();
+        let before = dir.metadata_at(name, false).unwrap();
+        std::fs::rename(temp.path().join(leaf), temp.path().join("held-link")).unwrap();
+        std::os::unix::fs::symlink("target", temp.path().join(leaf)).unwrap();
+        assert!(matches!(
+            dir.unlink_symlink(name, &before),
+            Err(FsError::RaceRefused { .. })
+        ));
+        assert_eq!(
+            std::fs::read_link(temp.path().join(leaf)).unwrap(),
+            Path::new("target")
+        );
+        std::fs::remove_file(temp.path().join(leaf)).unwrap();
+        std::fs::rename(temp.path().join("held-link"), temp.path().join(leaf)).unwrap();
+        let observed = dir.metadata_at(name, false).unwrap();
+        dir.unlink_symlink(name, &observed).unwrap();
+        assert!(std::fs::symlink_metadata(temp.path().join(leaf)).is_err());
+        assert_eq!(std::fs::read(temp.path().join("target")).unwrap(), b"keep");
+    }
+}
+
+#[test]
 fn retired_owner_lock_refuses_stale_and_shared_guards() {
     let temp = tempfile::tempdir().unwrap();
     let directory = Directory::open_anchor(temp.path()).unwrap();
@@ -858,16 +887,26 @@ fn concurrent_owner_lock_creation_of_one_new_name_succeeds_for_every_caller() {
 }
 
 #[test]
-fn creating_owner_lock_stops_after_five_persistent_not_found_errors() {
+fn create_open_retries_transient_and_bounds_persistent_not_found() {
     let mut attempts = 0;
-    let error = open_lock_creating_with(|| {
+    let recovered = crate::sys::fs::retry_create_open(|| {
         attempts += 1;
-        assert!(attempts <= 5, "lock open retried beyond its limit");
+        if attempts == 1 {
+            return Err(io::Error::from_raw_os_error(errno::ENOENT));
+        }
+        Ok(attempts)
+    })
+    .unwrap();
+    assert_eq!(recovered, 2);
+
+    let mut attempts = 0;
+    let error = crate::sys::fs::retry_create_open::<()>(|| {
+        attempts += 1;
         Err(io::Error::from_raw_os_error(errno::ENOENT))
     })
     .unwrap_err();
 
-    assert_eq!(attempts, 5);
+    assert_eq!(attempts, crate::sys::fs::CREATE_OPEN_ATTEMPTS);
     assert_eq!(error.raw_os_error(), Some(errno::ENOENT));
 }
 

@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "source_digest": "sha256:0101010101010101010101010101010101010101010101010101010101010101",
+  "manifest_digest": "sha256:0202020202020202020202020202020202020202020202020202020202020202",
+  "asset_digest": "sha256:0303030303030303030303030303030303030303030303030303030303030303",
+  "target": "fixture",
+  "toolchain": "fixture",
+  "bin_dir": {
+    "relative_to_root": {
+      "encoding": "utf8",
+      "path": "fixture/home/.local/bin"
+    }
+  },
+  "harnesses": [
+    "claude"
+  ],
+  "harness_targets": [
+    {
+      "harness": "claude",
+      "skills_dir": {
+        "relative_to_root": {
+          "encoding": "utf8",
+          "path": "fixture/home/.claude/skills"
+        }
+      },
+      "mcp_file": {
+        "relative_to_root": {
+          "encoding": "utf8",
+          "path": "fixture/home/.claude.json"
+        }
+      },
+      "hook_file": {
+        "relative_to_root": {
+          "encoding": "utf8",
+          "path": "fixture/home/.claude/settings.json"
+        }
+      },
+      "instruction": {
+        "relative_to_root": {
+          "encoding": "utf8",
+          "path": "fixture/home/.claude/CLAUDE.md"
+        }
+      }
+    }
+  ],
+  "entries": [
+    {
+      "path": {
+        "relative_to_root": {
+          "encoding": "utf8",
+          "path": "fixture/home/.local/bin/provenant"
+        }
+      },
+      "harness": null,
+      "selector": "binary",
+      "expected": {
+        "kind": "link",
+        "target": {
+          "relative_to_root": {
+            "encoding": "utf8",
+            "path": "fixture/home/.local/share/provenant/v1/releases/sha256:0101010101010101010101010101010101010101010101010101010101010101/bin/provenant"
+          }
+        }
+      }
+    },
+    {
+      "path": {
+        "relative_to_root": {
+          "encoding": "utf8",
+          "path": "fixture/home/.claude.json"
+        }
+      },
+      "harness": "claude",
+      "selector": "json:/mcpServers/fabric",
+      "expected": {
+        "kind": "selector",
+        "value": {
+          "command": "/fixture/home/.local/bin/provenant",
+          "args": [
+            "fabric",
+            "mcp"
+          ]
+        }
+      }
+    }
+  ]
+}

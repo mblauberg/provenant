@@ -21,8 +21,8 @@ pub(crate) fn guidance() -> &'static str {
 impl RunStore {
     /// Read the host's immutable settlement snapshot, never provider history.
     pub fn handoff(&self, record: &AttemptRecord) -> Result<Option<Handoff>> {
-        let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
-        read_snapshot(&attempt)
+        let attempt = self.attempt_dir(record.attempt_id, false)?;
+        Ok(read_snapshot(&attempt)?.map(|handoff| attach_scope_report(&attempt, &handoff)))
     }
 
     pub(crate) fn capture_handoff(
@@ -32,7 +32,7 @@ impl RunStore {
         decoded: &Decoded,
     ) -> Result<Option<Handoff>> {
         if let Some(handoff) = read_snapshot(attempt)? {
-            return Ok(Some(handoff));
+            return Ok(Some(attach_scope_report(attempt, &handoff)));
         }
         let interrupted = !decoded.complete
             || matches!(
@@ -76,8 +76,6 @@ impl RunStore {
             .context
             .state_root
             .as_path()
-            .join("runs")
-            .join(record.run_id.to_string())
             .join("attempts")
             .join(record.attempt_id.to_string())
             .join("provider-state");
@@ -121,6 +119,47 @@ pub fn sanitise_handoff(handoff: &Handoff) -> Result<Handoff> {
             .map_err(|_| RunError::Validation("handoff redaction failed"))?;
         String::from_utf8(safe).map_err(|_| RunError::Validation("handoff UTF-8"))
     })
+}
+
+/// Attach the sealed write-scope evidence to the in-memory handoff view. The
+/// original `handoff.json` is an immutable provider snapshot, so derived scope
+/// facts are never resealed over it. Oversized full reports fall back to a
+/// pointer to the bounded artifact; if even that does not fit, retain the
+/// original safe handoff.
+pub(crate) fn attach_scope_report(attempt: &Directory, handoff: &Handoff) -> Handoff {
+    let Ok(Some(raw)) = read_sealed(
+        attempt,
+        "policy-write-scope.json",
+        provenant_records::run::TERMINAL_RECORD_LIMIT,
+    ) else {
+        return handoff.clone();
+    };
+    let Ok(report) = serde_json::from_slice::<serde_json::Value>(&raw) else {
+        return handoff.clone();
+    };
+    let mut full = handoff.clone();
+    full.extra.insert("write_scope".into(), report.clone());
+    if let Ok(safe) = sanitise_handoff(&full) {
+        return safe;
+    }
+
+    let count = report
+        .get("out_of_scope_paths")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    let mut compact = handoff.clone();
+    compact.extra.insert(
+        "write_scope".into(),
+        serde_json::json!({
+            "code": report.get("code").cloned().unwrap_or(serde_json::json!("WRITE_SCOPE")),
+            "strength": report.get("strength"),
+            "source": report.get("source"),
+            "paths_artifact": "policy-write-scope.json",
+            "out_of_scope_count": count,
+            "paths_omitted_from_handoff": true,
+        }),
+    );
+    sanitise_handoff(&compact).unwrap_or_else(|_| handoff.clone())
 }
 
 /// Transform decoded values and object keys, including nested forward fields,
@@ -169,19 +208,56 @@ fn read_snapshot(attempt: &Directory) -> Result<Option<Handoff>> {
 /// The verification and slot-wait rules every writer lane is told. A writer's `cargo` commands
 /// that compile take one of the host's shared build slots, and a lane that
 /// stopped to report the wait cost a whole task (#2484).
-pub const BUILD_SLOT_GUIDANCE: &str = "Verification: where the repository has CI, CI runs the tests and lints on your pushed branch. Run at most one cheap compile check (`cargo check` on the one package you changed), then commit and push; do not run test suites, clippy or nextest locally, and do not restart a build that was stopped. The repository's test tiers (T0 to T3) describe what CI and a configured host run; they are not a checklist for you. A `cargo` command the host refuses because CI runs it is final: do not look for another way to run it.\nBuild slots: your `cargo` commands that compile wait for one of the host's shared build slots, and other lanes and projects hold them. A wait is normal and bounded; the command proceeds when a slot frees. Keep waiting. Do not stop, abandon the task or report review_required because a build is queued; use the time to review or plan.\n";
+pub const BUILD_SLOT_GUIDANCE: &str = "Verification: where the repository has CI, CI runs the tests and lints on pull requests and the integrated branch, not on every push; the CI scope line below says what CI, if any, you wait for. Run at most one cheap compile check (`cargo check` on the one package you changed), then commit and push; do not run test suites, clippy or nextest locally, and do not restart a build that was stopped. The repository's test tiers (T0 to T3) describe what CI and a configured host run; they are not a checklist for you. A `cargo` command the host refuses because CI runs it is final: do not look for another way to run it.\nBuild slots: compiling `cargo` commands try one advisory slot. Busy or unavailable slots warn and the build proceeds; Cargo manages its own build locks.\n";
 
 /// The reading rule every lane is told. Tool output stays in a lane's context and is
 /// paid for again on every later turn, so whole-file and large-range reads dominate its cost.
 pub const READING_GUIDANCE: &str = "Reading: locate before you read. Search with line numbers (`rg -n`), then read a bounded range of the lines you need; avoid whole-file `cat` or `sed` reads and unbounded `git diff` or `rg` output. Everything you print stays in your context and is paid for again on every later turn.\n";
 
-/// The text placed before a lane's task: model policy, the build-slot rule for
-/// writers only, the handoff file, then the reading rule.
-pub fn lane_preamble(model_guidance: &str, writer: bool, handoff: Option<&Path>) -> String {
+/// The text placed before a lane's task: model policy, then for writers
+/// (`ci_scope` is `Some`) the build-slot rule, the CI scope and the gh
+/// budget, then the handoff file and the reading rule.
+pub fn lane_preamble(
+    model_guidance: &str,
+    limits: &provenant_records::LaneLimits,
+    ci_scope: Option<crate::ResolvedCiScope>,
+    handoff: Option<&Path>,
+) -> String {
+    let writer = ci_scope
+        .map(|scope| {
+            let budget = limits
+                .gh_invocations
+                .as_ref()
+                .map(|limit| {
+                    format!(
+                        "GitHub calls: gh commands through your gh wrapper are counted, with a warning after {} (source: {}; lanes.gh_budget). They spend the user's API quota: batch reads, do not poll, and prefer one gh api graphql query over many calls. The warning never stops a command.\n",
+                        limit.value,
+                        limit.source.as_str()
+                    )
+                })
+                .unwrap_or_default();
+            format!("{BUILD_SLOT_GUIDANCE}{}{budget}", scope.preamble())
+        })
+        .unwrap_or_default();
     format!(
-        "{model_guidance}\n{}{}{READING_GUIDANCE}",
-        if writer { BUILD_SLOT_GUIDANCE } else { "" },
+        "{model_guidance}\n{}{writer}{}{READING_GUIDANCE}",
+        limits.preamble(),
         handoff.map(handoff_progress_guidance).unwrap_or_default()
+    )
+}
+
+/// Effective guards are rendered by the same table used by enforcement.
+pub fn lane_preamble_with_policy(
+    model_guidance: &str,
+    limits: &provenant_records::LaneLimits,
+    ci_scope: Option<crate::ResolvedCiScope>,
+    handoff: Option<&Path>,
+    policy: &provenant_records::policy::Policy,
+) -> String {
+    format!(
+        "{}Launch policy (code, boundary, strength, source, knob):\n{}",
+        lane_preamble(model_guidance, limits, ci_scope, handoff),
+        policy.render()
     )
 }
 
@@ -200,17 +276,32 @@ mod tests {
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
     #[test]
-    fn writer_preamble_states_the_slot_wait_rule_and_read_only_does_not() {
+    fn writer_preamble_states_advisory_build_policy_and_read_only_does_not() {
         let handoff = Path::new("/state/handoff.json");
-        let writer = lane_preamble("Model policy.", true, Some(handoff));
+        let writer = lane_preamble(
+            "Model policy.",
+            &Default::default(),
+            Some(crate::ResolvedCiScope::resolve(&Default::default())),
+            Some(handoff),
+        );
         assert!(writer.contains("Build slots:"));
+        assert!(writer.contains("CI scope: none (source: default"));
+        assert!(!reader_has_ci_scope(handoff));
         assert!(writer.contains("Progress handoff JSON: /state/handoff.json"));
-        let reader = lane_preamble("Model policy.", false, Some(handoff));
+        let reader = lane_preamble("Model policy.", &Default::default(), None, Some(handoff));
         assert!(!reader.contains("Build slots"));
         assert!(reader.starts_with("Model policy.\nProgress handoff JSON"));
-        assert!(!lane_preamble("Model policy.", false, None).contains("handoff.json"));
+        assert!(
+            !lane_preamble("Model policy.", &Default::default(), None, None)
+                .contains("handoff.json")
+        );
         assert!(writer.contains("locate before you read"));
         assert!(reader.contains("locate before you read"));
+    }
+
+    fn reader_has_ci_scope(handoff: &Path) -> bool {
+        lane_preamble("Model policy.", &Default::default(), None, Some(handoff))
+            .contains("CI scope")
     }
 
     fn snapshot(status: &str) -> Vec<u8> {
@@ -241,6 +332,49 @@ mod tests {
     }
 
     #[test]
+    fn scope_report_falls_back_to_its_artifact_without_replacing_snapshot() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let input = input();
+        store.create(&input, &call)?;
+        let record = store.record(input.attempt_id, &call)?;
+        let attempt = store.attempt_dir(record.attempt_id, false)?;
+        let raw = snapshot("done");
+        let original = Handoff::from_json(&raw).map_err(std::io::Error::other)?;
+        seal(
+            &attempt,
+            AttemptFile::Handoff.name(),
+            &raw,
+            HANDOFF_BYTES as u64,
+        )?;
+        let report = serde_json::json!({
+            "code": "WRITE_SCOPE",
+            "strength": "warn",
+            "source": "project",
+            "out_of_scope_paths": ["x".repeat(HANDOFF_BYTES * 2)],
+        });
+        seal(
+            &attempt,
+            "policy-write-scope.json",
+            &crate::db::bytes(&report)?,
+            provenant_records::run::TERMINAL_RECORD_LIMIT,
+        )?;
+
+        let attached = attach_scope_report(&attempt, &original);
+        assert_eq!(
+            attached.extra["write_scope"]["paths_artifact"],
+            "policy-write-scope.json"
+        );
+        assert_eq!(attached.extra["write_scope"]["out_of_scope_count"], 1);
+        assert_eq!(read_snapshot(&attempt)?, Some(original));
+        assert_eq!(store.handoff(&record)?, Some(attached));
+        Ok(())
+    }
+
+    #[test]
     fn read_only_plan_progress_is_collected_at_settlement() -> TestResult {
         use provenant_confinement::{
             ConfinedPlan, PlanRequest,
@@ -254,15 +388,16 @@ mod tests {
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let input = input();
         store.create(&input, &call)?;
-        let mut record = store.record(input.attempts[0].attempt_id, &call)?;
-        assert!(input.request.tasks[0].access.write_roots.is_empty());
-        let attempt = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let mut record = store.record(input.attempt_id, &call)?;
+        assert!(input.request.task.access.write_roots.is_empty());
+        let attempt = store.attempt_dir(record.attempt_id, false)?;
         let state = crate::artifacts::subdir(&attempt, OsStr::new("provider-state"), true)?;
         let candidate = crate::artifacts::subdir(&state, OsStr::new("candidate-0"), true)?;
-        let base = store.context.state_root.as_path().join(format!(
-            "runs/{}/attempts/{}",
-            record.run_id, record.attempt_id
-        ));
+        let base = store
+            .context
+            .state_root
+            .as_path()
+            .join(format!("attempts/{}", record.attempt_id));
         let subtree = |path| PathGrant {
             path,
             scope: PathScope::Subtree,
@@ -328,8 +463,10 @@ mod tests {
             _: &str,
             _: &LaunchPaths,
             _: Option<&AttemptRecord>,
-        ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
-            Err("holder-only fixture does not launch".into())
+        ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
+            Err(crate::fixture_refusal(
+                "holder-only fixture does not launch",
+            ))
         }
         fn decode(
             &self,
@@ -367,15 +504,12 @@ mod tests {
             worktree.join("partial.txt"),
             "parser implementation survives",
         )?;
-        input.request.tasks[0]
-            .access
-            .write_roots
-            .push(worktree.clone());
+        input.request.task.access.write_roots.push(worktree.clone());
         store.create(&input, &call)?;
         seal_observation(&store, &input, &exit())?;
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         let mut old = store.record(id, &call)?;
-        let attempt = store.attempt_dir(old.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let root = crate::artifacts::subdir(&attempt, OsStr::new("provider-state"), true)?;
         let candidate = crate::artifacts::subdir(&root, OsStr::new("candidate-1"), true)?;
         let secret_shape = "sk-abcdefghijklmnopqrstuvwx";
@@ -399,10 +533,11 @@ mod tests {
             &serde_json::to_vec(&progress)?,
             HANDOFF_BYTES as u64,
         )?;
-        let candidate_path = store.context.state_root.as_path().join(format!(
-            "runs/{}/attempts/{id}/provider-state/candidate-1",
-            old.run_id
-        ));
+        let candidate_path = store
+            .context
+            .state_root
+            .as_path()
+            .join(format!("attempts/{id}/provider-state/candidate-1"));
         grant(&mut old, &candidate_path)?;
         let route = RouteRecord {
             account_label: Some("one".into()),
@@ -458,8 +593,8 @@ mod tests {
                 let store = RunStore::open(&context(temp.path())?, &call)?;
                 let input = input();
                 store.create(&input, &call)?;
-                let record = store.record(input.attempts[0].attempt_id, &call)?;
-                let attempt = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+                let record = store.record(input.attempt_id, &call)?;
+                let attempt = store.attempt_dir(record.attempt_id, false)?;
                 let secret = format!("{prefix}sk-abcdefghijklmnopqrstuvwx");
                 let mut value: serde_json::Value = serde_json::from_slice(&snapshot("done"))?;
                 value[field] = match field {
@@ -516,14 +651,14 @@ mod tests {
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let mut input = input();
-        input.attempts[0].prompt = "x".repeat(RECORD_LIMIT as usize - 64);
-        input.request.tasks[0].prompt_digest =
-            provenant_records::CanonicalV1::file_digest(input.attempts[0].prompt.as_bytes());
+        input.prompt = "x".repeat(RECORD_LIMIT as usize - 64);
+        input.request.task.prompt_digest =
+            provenant_records::CanonicalV1::file_digest(input.prompt.as_bytes());
         store.create(&input, &call)?;
         seal_observation(&store, &input, &exit())?;
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         let old = store.record(id, &call)?;
-        let attempt = store.attempt_dir(old.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let mut result = decoded();
         result.result = Handoff::from_json(&snapshot("stopped_early"))?.fenced();
         store.capture_handoff(&attempt, &old, &result)?;
@@ -540,7 +675,6 @@ mod tests {
                 ..
             }
         ));
-        assert!(store.pending_attempts(input.run_id, &call)?.is_empty());
         Ok(())
     }
 
@@ -553,14 +687,15 @@ mod tests {
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let input = input();
         store.create(&input, &call)?;
-        let mut record = store.record(input.attempts[0].attempt_id, &call)?;
-        let attempt = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let mut record = store.record(input.attempt_id, &call)?;
+        let attempt = store.attempt_dir(record.attempt_id, false)?;
         let state = crate::artifacts::subdir(&attempt, OsStr::new("provider-state"), true)?;
         let candidate = crate::artifacts::subdir(&state, OsStr::new("candidate-0"), true)?;
-        let base = store.context.state_root.as_path().join(format!(
-            "runs/{}/attempts/{}/provider-state",
-            record.run_id, record.attempt_id
-        ));
+        let base = store
+            .context
+            .state_root
+            .as_path()
+            .join(format!("attempts/{}/provider-state", record.attempt_id));
         grant(&mut record, &base.join("candidate-0"))?;
         assert!(
             store
@@ -614,14 +749,15 @@ mod tests {
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let input = input();
         store.create(&input, &call)?;
-        let mut record = store.record(input.attempts[0].attempt_id, &call)?;
-        let attempt = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let mut record = store.record(input.attempt_id, &call)?;
+        let attempt = store.attempt_dir(record.attempt_id, false)?;
         let state = crate::artifacts::subdir(&attempt, OsStr::new("provider-state"), true)?;
         let candidate = crate::artifacts::subdir(&state, OsStr::new("candidate-0"), true)?;
-        let base = store.context.state_root.as_path().join(format!(
-            "runs/{}/attempts/{}/provider-state",
-            record.run_id, record.attempt_id
-        ));
+        let base = store
+            .context
+            .state_root
+            .as_path()
+            .join(format!("attempts/{}/provider-state", record.attempt_id));
         grant(&mut record, &base.join("candidate-0"))?;
         let outside = temp.path().join("outside.json");
         std::fs::write(&outside, snapshot("stopped_early"))?;

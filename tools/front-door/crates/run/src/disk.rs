@@ -16,12 +16,11 @@ impl RunStore {
     /// creating missing directories. Nested child stores are counted once.
     pub fn disk_usage(&self, report: &mut DiskReport) -> Result<()> {
         let terminal = {
-            let mut query = self.db.prepare("SELECT run,id,terminal FROM attempts")?;
+            let mut query = self
+                .db
+                .prepare("SELECT id,terminal FROM attempts WHERE refused=0")?;
             let rows = query.query_map([], |row| {
-                Ok((
-                    (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
-                    row.get::<_, bool>(2)?,
-                ))
+                Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
             })?;
             rows.collect::<std::result::Result<BTreeMap<_, _>, _>>()?
         };
@@ -59,7 +58,7 @@ impl RunStore {
 fn scan_store(
     root: &Directory,
     path: &Path,
-    terminal: &BTreeMap<(String, String), bool>,
+    terminal: &BTreeMap<String, bool>,
     report: &mut DiskReport,
 ) {
     let mut other = DiskEntry {
@@ -70,9 +69,9 @@ fn scan_store(
     let mut observed_other = false;
     for name in entries(root, path, report) {
         let child = path.join(&name);
-        if name == "runs" {
-            if let Some(runs) = open(root, &name, path, report) {
-                scan_runs(&runs, &child, terminal, report);
+        if name == "attempts" {
+            if let Some(attempts) = open(root, &name, path, report) {
+                scan_attempts(&attempts, &child, terminal, report);
             }
         } else if name == "children" {
             if let Some(children) = open(root, &name, path, report) {
@@ -98,121 +97,91 @@ fn scan_store(
     }
 }
 
-fn scan_runs(
-    runs: &Directory,
-    path: &Path,
-    terminal: &BTreeMap<(String, String), bool>,
+fn scan_attempts(
+    attempts: &Directory,
+    child: &Path,
+    terminal: &BTreeMap<String, bool>,
     report: &mut DiskReport,
 ) {
     let mut provider_state = DiskEntry {
         class: "provider_state".into(),
-        path: path.into(),
+        path: child.into(),
         ..Default::default()
     };
-    for run_name in entries(runs, path, report) {
-        let run_path = path.join(&run_name);
-        let Some(run) = open(runs, &run_name, path, report) else {
+    let mut other = DiskEntry {
+        class: "other_state".into(),
+        path: child.into(),
+        ..Default::default()
+    };
+    let mut logs = DiskEntry {
+        class: "attempt_logs".into(),
+        path: child.into(),
+        ..Default::default()
+    };
+    let mut retained = DiskEntry {
+        class: "attempt_retained".into(),
+        path: child.into(),
+        ..Default::default()
+    };
+    let (mut observed_other, mut observed_retained) = (false, false);
+    for attempt_name in entries(attempts, child, report) {
+        let attempt_path = child.join(&attempt_name);
+        let Some(attempt) = open(attempts, &attempt_name, child, report) else {
             continue;
         };
-        let mut other = DiskEntry {
-            class: "other_state".into(),
-            path: run_path.clone(),
-            ..Default::default()
-        };
-        let mut logs = DiskEntry {
-            class: "attempt_logs".into(),
-            path: run_path.clone(),
-            ..Default::default()
-        };
-        let mut retained = DiskEntry {
-            class: "attempt_retained".into(),
-            path: run_path.clone(),
-            ..Default::default()
-        };
-        let (mut observed_other, mut observed_retained) = (false, false);
-        for name in entries(&run, &run_path, report) {
-            let child = run_path.join(&name);
-            if name != "attempts" {
-                report.measure_into_at(&mut other, &run, &name, &child);
-                observed_other = true;
+        let is_terminal = attempt_name
+            .to_str()
+            .and_then(|attempt| terminal.get(attempt))
+            .copied();
+        for part in entries(&attempt, &attempt_path, report) {
+            if matches!(
+                part.to_str(),
+                Some("stdout.log" | "stderr.log" | "stdout.log.tail" | "stderr.log.tail")
+            ) {
+                report.measure_into_at(&mut logs, &attempt, &part, &attempt_path.join(&part));
+                logs.count = Some(logs.count.unwrap_or(0) + 1);
                 continue;
             }
-            let Some(attempts) = open(&run, &name, &run_path, report) else {
-                continue;
+            let class = match part
+                .to_str()
+                .and_then(AttemptFile::from_name)
+                .map(AttemptFile::class)
+            {
+                Some(AttemptFileClass::Temporary) => "attempt_tmp",
+                Some(AttemptFileClass::ProviderState) => "provider_state",
+                Some(AttemptFileClass::Retained) => "attempt_retained",
+                _ => "other_state",
             };
-            for attempt_name in entries(&attempts, &child, report) {
-                let attempt_path = child.join(&attempt_name);
-                let Some(attempt) = open(&attempts, &attempt_name, &child, report) else {
-                    continue;
-                };
-                let is_terminal = run_name
-                    .to_str()
-                    .zip(attempt_name.to_str())
-                    .and_then(|(run, attempt)| terminal.get(&(run.into(), attempt.into())))
-                    .copied();
-                for part in entries(&attempt, &attempt_path, report) {
-                    if matches!(
-                        part.to_str(),
-                        Some("stdout.log" | "stderr.log" | "stdout.log.tail" | "stderr.log.tail")
-                    ) {
-                        report.measure_into_at(
-                            &mut logs,
-                            &attempt,
-                            &part,
-                            &attempt_path.join(&part),
-                        );
-                        logs.count = Some(logs.count.unwrap_or(0) + 1);
-                        continue;
+            let part_path = attempt_path.join(&part);
+            match class {
+                "provider_state" => {
+                    report.measure_into_at(&mut provider_state, &attempt, &part, &part_path);
+                    provider_state.count = Some(provider_state.count.unwrap_or(0) + 1);
+                }
+                "attempt_tmp" => {
+                    if let Some(index) = report.measure_at(class, &attempt, &part, &part_path) {
+                        report.entries[index].leak = is_terminal;
                     }
-                    let class = match part
-                        .to_str()
-                        .and_then(AttemptFile::from_name)
-                        .map(AttemptFile::class)
-                    {
-                        Some(AttemptFileClass::Temporary) => "attempt_tmp",
-                        Some(AttemptFileClass::ProviderState) => "provider_state",
-                        Some(AttemptFileClass::Retained) => "attempt_retained",
-                        _ => "other_state",
-                    };
-                    let part_path = attempt_path.join(&part);
-                    match class {
-                        "provider_state" => {
-                            report.measure_into_at(
-                                &mut provider_state,
-                                &attempt,
-                                &part,
-                                &part_path,
-                            );
-                            provider_state.count = Some(provider_state.count.unwrap_or(0) + 1);
-                        }
-                        "attempt_tmp" => {
-                            if let Some(index) =
-                                report.measure_at(class, &attempt, &part, &part_path)
-                            {
-                                report.entries[index].leak = is_terminal;
-                            }
-                        }
-                        "attempt_retained" => {
-                            report.measure_into_at(&mut retained, &attempt, &part, &part_path);
-                            observed_retained = true;
-                        }
-                        _ => {
-                            report.measure_into_at(&mut other, &attempt, &part, &part_path);
-                            observed_other = true;
-                        }
-                    }
+                }
+                "attempt_retained" => {
+                    report.measure_into_at(&mut retained, &attempt, &part, &part_path);
+                    observed_retained = true;
+                }
+                _ => {
+                    report.measure_into_at(&mut other, &attempt, &part, &part_path);
+                    observed_other = true;
                 }
             }
         }
-        if logs.count.is_some() {
-            report.add_rollup(logs);
-        }
-        if observed_other {
-            report.add_rollup(other);
-        }
-        if observed_retained {
-            report.add_rollup(retained);
-        }
+    }
+    if logs.count.is_some() {
+        report.add_rollup(logs);
+    }
+    if observed_other {
+        report.add_rollup(other);
+    }
+    if observed_retained {
+        report.add_rollup(retained);
     }
     if provider_state.count.is_some() {
         report.add_rollup(provider_state);
@@ -286,10 +255,7 @@ mod tests {
         let input = input();
         writer.create(&input, &call)?;
         let state = context.state_root.as_path();
-        let attempt = state.join(format!(
-            "runs/{}/attempts/{}",
-            input.run_id, input.attempts[0].attempt_id
-        ));
+        let attempt = state.join(format!("attempts/{}", input.attempt_id));
         for part in ["tmp", "scratch", "provider-state", "quarantine"] {
             fs::create_dir(attempt.join(part))?;
             fs::write(attempt.join(part).join("keep"), part)?;
@@ -297,10 +263,8 @@ mod tests {
         for name in ["stdout.log", "stderr.log"] {
             fs::write(attempt.join(name), "capture")?;
         }
-        let child = state
-            .join("children")
-            .join(input.attempts[0].attempt_id.to_string());
-        fs::create_dir_all(child.join("runs/nested/attempts/child/tmp"))?;
+        let child = state.join("children").join(input.attempt_id.to_string());
+        fs::create_dir_all(child.join("attempts/child/tmp"))?;
         fs::write(child.join("run.sqlite3"), "opaque child store")?;
         let before = snapshot(state)?;
         let reader = RunStore::open_disk_read_only(&context, &call)?.ok_or("missing store")?;
@@ -347,7 +311,7 @@ mod tests {
                 .any(|entry| entry.class == "child_store" && entry.path == child)
         );
         writer.withdraw(
-            input.attempts[0].attempt_id,
+            input.attempt_id,
             AttemptState::Queued {
                 extra: Default::default(),
             },
@@ -447,7 +411,7 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let context = context(temp.path())?;
         let state = context.state_root.as_path();
-        let temporary = state.join("runs/run/attempts/attempt/tmp");
+        let temporary = state.join("attempts/attempt/tmp");
         fs::create_dir_all(&temporary)?;
         fs::write(temporary.join("keep"), "unindexed")?;
         let target = temporary.join("candidate-0/target");
@@ -479,7 +443,7 @@ mod tests {
         let context = context(temp.path())?;
         let state = context.state_root.as_path();
         for index in 0..100 {
-            let attempt = state.join(format!("runs/run/attempts/{index}"));
+            let attempt = state.join(format!("attempts/{index}"));
             fs::create_dir_all(attempt.join("provider-state"))?;
             for part in [
                 "result.md",
@@ -521,7 +485,7 @@ mod tests {
         assert_eq!(provider[0].count, Some(100));
         assert!(
             runs.iter()
-                .all(|entry| entry.path == state.join("runs/run"))
+                .all(|entry| entry.path == state.join("attempts"))
         );
         assert!(
             report
@@ -571,18 +535,18 @@ mod tests {
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context, &call)?;
         let state = context.state_root.as_path();
-        fs::create_dir(state.join("runs"))?;
+        fs::create_dir(state.join("attempts"))?;
         let outside = temp.path().join("outside");
         fs::create_dir(&outside)?;
         fs::write(outside.join("keep"), "outside")?;
-        std::os::unix::fs::symlink(&outside, state.join("runs/linked"))?;
+        std::os::unix::fs::symlink(&outside, state.join("attempts/linked"))?;
         let mut report = DiskReport::new(state.to_owned(), 0);
         store.disk_usage(&mut report)?;
         assert!(
             report
                 .errors
                 .iter()
-                .any(|error| error.path == state.join("runs/linked"))
+                .any(|error| error.path == state.join("attempts/linked"))
         );
         assert_eq!(fs::read_to_string(outside.join("keep"))?, "outside");
         Ok(())

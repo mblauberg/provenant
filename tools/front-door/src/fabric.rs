@@ -1,15 +1,17 @@
-//! Fabric process composition: MCP, fixed peer ingress and host observations.
+//! Fabric process composition: fixed peer ingress and host observations.
 mod graph_human;
 mod graph_inputs;
 mod graph_status;
+pub(crate) use graph_status::node_digests;
 mod interface;
 #[cfg(test)]
 mod lane_read_tests;
 mod refusal_detail;
 mod unified;
 pub(crate) use unified::{
-    GraphCommand, append_graph_status, read_lane_graph, read_status_rows, target_text,
-    unified_graph_command, unified_graph_output, unified_graph_steer, unified_graph_trace,
+    GraphCommand, check_targets, command_fail, graph_listing, read_lane_graph, read_status_rows,
+    status_line, unified_graph_command, unified_graph_output, unified_graph_steer,
+    unified_graph_trace, unsettled_graphs,
 };
 pub(crate) mod gc_cleanup;
 pub(crate) mod git_facts;
@@ -18,9 +20,11 @@ pub(crate) mod owner;
 mod peer;
 pub(crate) mod run_owner;
 pub(crate) mod settlement;
+mod steer;
 
 pub(crate) use git_facts::*;
 pub(crate) use owner::*;
+pub(crate) use provenant_fabric_runtime::graph::GraphBaseBinding;
 pub(crate) use run_owner::*;
 pub(crate) use settlement::*;
 
@@ -46,10 +50,7 @@ use provenant_cli::fabric::Context;
 
 use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::{CancelToken, Clock, WaitBudget};
-use provenant_fabric_mcp::{
-    stdio,
-    tools::{Service, ServiceError},
-};
+use provenant_fabric_runtime::relay::ServiceError;
 use provenant_fabric_runtime::runs::{AttemptPage, RunCapabilities, RunEventsPage, RunResult};
 use provenant_fabric_runtime::{
     coordination::{facade::*, *},
@@ -58,9 +59,8 @@ use provenant_fabric_runtime::{
 };
 use provenant_os::{clock::SystemClock, exec::SystemExecutor};
 use std::{
-    io::{self, Read},
+    io,
     path::{Path, PathBuf},
-    sync::mpsc,
     time::Instant,
 };
 
@@ -159,7 +159,6 @@ pub(crate) struct Factory {
     pub(crate) cwd: std::path::PathBuf,
     pub(crate) assets: PathBuf,
     pub(crate) host_launch: Option<provenant_run::HostLaunchContext>,
-    pub(crate) mcp_project: Option<PathBuf>,
     pub(crate) workers: &'static dyn WorkerObserver,
 }
 impl Factory {
@@ -233,7 +232,6 @@ impl Factory {
             cwd: directory.to_path_buf(),
             assets: self.assets.clone(),
             host_launch,
-            mcp_project: self.mcp_project.clone(),
             workers: self.workers,
         })
     }
@@ -253,6 +251,7 @@ impl Factory {
                 store,
                 ctx.identity.project,
                 ctx.identity.inbox.actor,
+                ctx.local_observation.clone(),
                 &self.clock,
                 &self.backoff,
             ));
@@ -261,6 +260,7 @@ impl Factory {
             &ctx.roots.state,
             &ctx.identity,
             &ctx.config,
+            ctx.local_observation.clone(),
             &self.home,
             &self.cwd,
             &self.executor,
@@ -275,299 +275,15 @@ fn fair_probe_micros(remaining_micros: u64, probes_remaining: usize) -> Option<u
     let share = remaining_micros.checked_div(probes_remaining)?;
     (share > 0).then_some(share)
 }
-impl stdio::Factory for Factory {
-    fn maintain_usage(&self) {
-        provenant_telemetry::usage::maintain_tools(&self.context.roots);
-    }
-    fn record_usage(&self, tool: &str, outcome: &str, duration_ms: u64) {
-        let project_id = self
-            .project_attribution
-            .then_some(self.context.identity.project);
-        provenant_telemetry::usage::record_tool(
-            &self.context.roots,
-            &self.clock,
-            tool,
-            outcome,
-            duration_ms,
-            project_id,
-        );
-    }
-    type Facade<'a> = BoundFacade<'a>;
-    fn preflight(&self, call: &provenant_fabric_mcp::tools::ToolCall) -> Result<(), ServiceError> {
-        if let provenant_fabric_mcp::tools::ToolCall::Inbox(input, _) = call {
-            let ctx = &self.context;
-            provenant_fabric_runtime::inbox::validate_request(
-                &ctx.identity,
-                &ctx.config,
-                ctx.in_lane,
-                input,
-            )?;
-        }
-        Ok(())
-    }
-    fn input_limits(&self) -> provenant_records::Limits {
-        provenant_records::Limits {
-            max_bytes: self.context.config.limits.input_frame_bytes,
-            max_depth: usize::try_from(self.context.config.limits.json_depth).unwrap_or(64),
-            max_members: 100_000,
-        }
-    }
-    fn open(&self) -> Result<Service<'_, Self::Facade<'_>>, ServiceError> {
-        let coordination = self.coordination().map_err(|error| {
-            let typed = FacadeError::from(&error);
-            if matches!(typed, FacadeError::Io { .. }) {
-                ServiceError::Facade(scope_io(typed, "open coordination store"))
-            } else {
-                ServiceError::Coordination(error)
-            }
-        })?;
-        Ok(
-            Service::new(coordination, BoundFacade { factory: self }, &self.clock)
-                .with_limits(self.context.config.limits.clone())
-                .with_lane_restrictions(self.context.in_lane)
-                .with_lane_relay(if self.context.in_lane {
-                    std::env::var("PROVENANT_PARENT_ATTEMPT_ID")
-                        .ok()
-                        .and_then(|id| provenant_core::AttemptId::parse(&id).ok())
-                        .map(provenant_providers::LaneRuntime::fabric_socket)
-                } else {
-                    None
-                })
-                .with_lane_relay_reads(self.context.in_lane && self.context.remote_home()),
-        )
-    }
-}
 pub struct BoundFacade<'a> {
     factory: &'a Factory,
 }
-impl provenant_fabric_mcp::tools::McpFacade for BoundFacade<'_> {
-    fn relay_document(
+impl BoundFacade<'_> {
+    /// Route an inbox operation to its owner host: this host answers locally,
+    /// a configured peer answers through the peer wire.
+    pub(crate) fn inbox_owner(
         &mut self,
-        input: &serde_json::Value,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<serde_json::Value, ServiceError> {
-        self.factory
-            .relay_document(input, budget, cancel)
-            .map_err(ServiceError::from)
-    }
-    fn compile_lane_run(
-        &self,
-        input: &serde_json::Value,
-    ) -> Result<provenant_fabric_runtime::graph::relay::RelayOp, ServiceError> {
-        self.factory
-            .child_request(input)
-            .map(provenant_fabric_runtime::graph::relay::RelayOp::Add)
-            .map_err(ServiceError::from)
-    }
-    fn graph_document(
-        &mut self,
-        input: serde_json::Value,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<serde_json::Value, ServiceError> {
-        self.factory
-            .graph_document(input, budget, cancel)
-            .map_err(ServiceError::from)
-    }
-    fn add_from_lane(
-        &mut self,
-        op: &provenant_fabric_runtime::graph::relay::RelayOp,
-        cancel: &CancelToken,
-        within: std::time::Duration,
-    ) -> Result<serde_json::Value, ServiceError> {
-        provenant_cli::fabric::graph_relay::from_lane(op, cancel, within)
-    }
-
-    fn wait_for_children(
-        &mut self,
-        cancel: &CancelToken,
-        within: std::time::Duration,
-    ) -> Result<serde_json::Value, ServiceError> {
-        provenant_cli::fabric::graph_relay::wait_for_children(cancel, within)
-    }
-
-    fn console(
-        &mut self,
-        input: provenant_fabric_mcp::tools::ConsoleInput,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<serde_json::Value, ServiceError> {
-        use provenant_fabric_mcp::tools::ConsoleInput;
-        let mut args = vec!["console".to_owned()];
-        match input {
-            ConsoleInput::Projects => args.push("projects".into()),
-            ConsoleInput::Overview => args.push("overview".into()),
-            ConsoleInput::Sessions {
-                session,
-                limit,
-                cursor,
-            } => {
-                args.push("sessions".into());
-                if let Some(session) = session {
-                    args.push(session);
-                }
-                args.extend(["--limit".into(), limit.to_string()]);
-                if let Some(cursor) = cursor {
-                    args.extend(["--cursor".into(), cursor]);
-                }
-            }
-            ConsoleInput::Board {
-                all,
-                limit,
-                cursor,
-                hosts,
-            } => {
-                args.push("board".into());
-                if all {
-                    args.push("--all".into());
-                }
-                args.extend(["--limit".into(), limit.to_string()]);
-                if let Some(cursor) = cursor {
-                    args.extend(["--cursor".into(), cursor]);
-                }
-                if let Some(hosts) = hosts {
-                    args.extend(["--hosts".into(), hosts]);
-                }
-            }
-            ConsoleInput::Detail { id } => {
-                args.extend(["detail".into(), id]);
-            }
-            ConsoleInput::Search {
-                query,
-                part,
-                session,
-                limit,
-                cursor,
-            } => {
-                args.extend([
-                    "search".into(),
-                    "--part".into(),
-                    part,
-                    "--limit".into(),
-                    limit.to_string(),
-                ]);
-                if let Some(session) = session {
-                    args.extend(["--session".into(), session]);
-                }
-                if let Some(cursor) = cursor {
-                    args.extend(["--cursor".into(), cursor]);
-                }
-                args.extend(["--".into(), query]);
-            }
-            ConsoleInput::Tree {
-                max_depth,
-                max_nodes,
-                detail,
-                hosts,
-            } => {
-                args.extend([
-                    "tree".into(),
-                    "--max-depth".into(),
-                    max_depth.to_string(),
-                    "--max-nodes".into(),
-                    max_nodes.to_string(),
-                ]);
-                if detail {
-                    args.push("--detail".into());
-                }
-                if let Some(hosts) = hosts {
-                    args.extend(["--hosts".into(), hosts]);
-                }
-            }
-        }
-        self.cli_service(args, None, budget, cancel)
-    }
-    fn chair(
-        &mut self,
-        input: provenant_fabric_mcp::tools::ChairInput,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<serde_json::Value, ServiceError> {
-        use provenant_fabric_mcp::tools::ChairInput;
-        let mut args = vec!["chair".to_owned()];
-        let mut body = None;
-        match input {
-            ChairInput::SummaryShow { session } => {
-                args.extend(["summary".into(), "show".into(), session])
-            }
-            ChairInput::SummaryDiff { session, from, to } => {
-                args.extend([
-                    "summary".into(),
-                    "diff".into(),
-                    session,
-                    "--from".into(),
-                    from.to_string(),
-                ]);
-                if let Some(to) = to {
-                    args.extend(["--to".into(), to.to_string()]);
-                }
-            }
-            ChairInput::SummaryUpdate {
-                session,
-                patch,
-                expect_revision,
-                operation_id,
-            } => {
-                args.extend([
-                    "summary".into(),
-                    "update".into(),
-                    session,
-                    "--file".into(),
-                    "-".into(),
-                    "--expect-revision".into(),
-                    expect_revision.to_string(),
-                ]);
-                if let Some(id) = operation_id {
-                    args.extend(["--operation-id".into(), id]);
-                }
-                body = Some(serde_json::to_vec(&patch)?);
-            }
-            ChairInput::LogList {
-                session,
-                after,
-                limit,
-            } => {
-                args.extend([
-                    "log".into(),
-                    "list".into(),
-                    "--session".into(),
-                    session,
-                    "--limit".into(),
-                    limit.to_string(),
-                ]);
-                if let Some(after) = after {
-                    args.extend(["--after".into(), after.to_string()]);
-                }
-            }
-            ChairInput::LogAppend {
-                session,
-                entry,
-                operation_id,
-                issued_at,
-            } => {
-                args.extend([
-                    "log".into(),
-                    "append".into(),
-                    "--session".into(),
-                    session,
-                    "--file".into(),
-                    "-".into(),
-                ]);
-                if let Some(id) = operation_id {
-                    args.extend(["--operation-id".into(), id]);
-                }
-                if let Some(time) = issued_at {
-                    args.extend(["--issued-at".into(), time.to_string()]);
-                }
-                body = Some(serde_json::to_vec(&entry)?);
-            }
-        }
-        self.cli_service(args, body, budget, cancel)
-    }
-    fn inbox_owner(
-        &mut self,
-        input: provenant_fabric_runtime::inbox::InboxInput,
+        mut input: provenant_fabric_runtime::inbox::InboxInput,
         host: Option<String>,
         budget: WaitBudget,
         cancel: &CancelToken,
@@ -604,11 +320,54 @@ impl provenant_fabric_mcp::tools::McpFacade for BoundFacade<'_> {
                 format!("inbox owner {host} is not configured"),
             )
         })?;
+        let mut peer_extra = Default::default();
+        if let InboxInput::Steer {
+            extra,
+            operation_id,
+            ..
+        } = &mut input
+            && extra.get("graph_steer") == Some(&serde_json::Value::Bool(true))
+        {
+            let required = [
+                "graph_steer",
+                "graph_launch_actor",
+                "graph_launch_operation",
+                "graph_origin_work_key",
+            ];
+            let valid = operation_id.is_some()
+                && extra.keys().all(|key| required.contains(&key.as_str()))
+                && extra
+                    .get("graph_launch_actor")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|actor| actor.parse::<provenant_core::ActorId>().ok())
+                    .is_some()
+                && extra
+                    .get("graph_launch_operation")
+                    .cloned()
+                    .and_then(|value| {
+                        serde_json::from_value::<provenant_core::OperationId>(value).ok()
+                    })
+                    .is_some()
+                && extra
+                    .get("graph_origin_work_key")
+                    .cloned()
+                    .and_then(|value| {
+                        serde_json::from_value::<provenant_records::WorkKey>(value).ok()
+                    })
+                    .is_some();
+            if !valid {
+                return Err(error(
+                    "steer_target_refused",
+                    "graph steer owner could not verify the accepted live attempt".into(),
+                ));
+            }
+            peer_extra = std::mem::take(extra);
+        }
         match remote.peer(
             &self.factory.clock,
             target,
             PeerAction::Inbox {
-                extra: Default::default(),
+                extra: peer_extra,
                 input,
             },
             budget,
@@ -640,92 +399,6 @@ impl provenant_fabric_mcp::tools::McpFacade for BoundFacade<'_> {
                 ))
             }
         }
-    }
-}
-impl BoundFacade<'_> {
-    // Reuse the process-edge composition so peer coverage and chair custody
-    // follow exactly the same path as the CLI, with fixed argv and bounded IO.
-    fn cli_service(
-        &self,
-        args: Vec<String>,
-        body: Option<Vec<u8>>,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<serde_json::Value, ServiceError> {
-        use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
-        let executable = std::env::current_exe().map_err(|_| FacadeError::OwnerUnavailable)?;
-        let mut argv = vec![
-            executable.into_os_string(),
-            "--json".into(),
-            "--state-dir".into(),
-            self.factory.context.roots.state.as_path().into(),
-        ];
-        if let Some(project) = &self.factory.mcp_project {
-            argv.extend(["--project".into(), project.as_os_str().into()]);
-        }
-        argv.extend(args.into_iter().map(Into::into));
-        let timeout = std::time::Duration::from_micros(
-            budget.remaining(self.factory.clock.mono_now()).as_micros(),
-        );
-        if timeout.is_zero() {
-            return Err(FacadeError::Timeout.into());
-        }
-        let mut options = ExecOptions::new(&argv, &self.factory.cwd, timeout);
-        options.stdin = body.as_deref();
-        options.cancel = Some(cancel);
-        options.process_group = true;
-        options.stdout = StreamPolicy::Capture { limit: 1024 * 1024 };
-        options.stderr = StreamPolicy::Capture { limit: 16 * 1024 };
-        let output = self
-            .factory
-            .executor
-            .execute(options)
-            .map_err(|_| FacadeError::OwnerUnavailable)?;
-        if output.timed_out {
-            return Err(FacadeError::Timeout.into());
-        }
-        if cancel.is_cancelled() {
-            return Err(FacadeError::Cancelled.into());
-        }
-        if output.termination != Termination::Exit(0) {
-            return Err(cli_failure(&output.stdout.bytes, &output.stderr.bytes));
-        }
-        if output.stdout.truncated {
-            return Err(ServiceError::ResultTooLarge);
-        }
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)
-            .map_err(|_| FacadeError::OwnerUnavailable)?;
-        Ok(value["data"].clone())
-    }
-}
-
-fn cli_failure(stdout: &[u8], stderr: &[u8]) -> ServiceError {
-    let parsed = serde_json::from_slice::<serde_json::Value>(stdout).ok();
-    if let Some(value) = parsed.as_ref()
-        && let (Some(code), Some(message)) = (
-            value["error"]["code"].as_str(),
-            value["error"]["message"].as_str(),
-        )
-    {
-        return ServiceError::Cli {
-            code: code.to_owned(),
-            message: message.to_owned(),
-            data: value
-                .get("data")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null),
-        };
-    }
-    let stderr = String::from_utf8_lossy(stderr);
-    ServiceError::Cli {
-        code: "CLI_FAILED".into(),
-        message: stderr
-            .lines()
-            .next()
-            .filter(|line| !line.is_empty())
-            .unwrap_or("CLI service failed without an error message")
-            .to_owned(),
-        data: serde_json::Value::Null,
     }
 }
 
@@ -943,7 +616,7 @@ impl F3Facade for BoundFacade<'_> {
                         health.reason = None;
                         health.host = value.host;
                         health.available = value.available;
-                        health.execution = value.execution;
+                        health.execution = Some(value.execution);
                     }
                     Err(PeerError::ProtocolMismatch { remote, .. }) => {
                         health.protocol = Some(remote);
@@ -993,107 +666,6 @@ fn scope_io(error: FacadeError, scope: &str) -> FacadeError {
     }
 }
 
-/// The OS reader owns stdin for this process. Its one-slot queue bounds memory;
-/// callers observe deadlines without changing inherited descriptor flags.
-struct Stdin {
-    receiver: mpsc::Receiver<io::Result<Vec<u8>>>,
-    pending: Vec<u8>,
-    eof: bool,
-}
-impl Stdin {
-    fn new() -> Self {
-        let (send, receiver) = mpsc::sync_channel(1);
-        std::thread::spawn(move || {
-            let mut input = io::stdin().lock();
-            loop {
-                let mut bytes = vec![0; 8192];
-                match input.read(&mut bytes) {
-                    Ok(n) => {
-                        bytes.truncate(n);
-                        if send.send(Ok(bytes)).is_err() || n == 0 {
-                            return;
-                        }
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(e) => {
-                        let _ = send.send(Err(e));
-                        return;
-                    }
-                }
-            }
-        });
-        Self {
-            receiver,
-            pending: Vec::new(),
-            eof: false,
-        }
-    }
-}
-impl stdio::Input for Stdin {
-    // The stdin bridge waits against the transport's real-time deadline.
-    #[allow(clippy::disallowed_methods)]
-    fn read(&mut self, bytes: &mut [u8], deadline: Instant) -> io::Result<usize> {
-        if self.eof {
-            return Ok(0);
-        }
-        if self.pending.is_empty() {
-            self.pending = match self
-                .receiver
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            {
-                Ok(value) => value?,
-                Err(mpsc::RecvTimeoutError::Timeout) => return Err(io::ErrorKind::TimedOut.into()),
-                Err(_) => return Err(io::ErrorKind::BrokenPipe.into()),
-            };
-            if self.pending.is_empty() {
-                self.eof = true;
-                return Ok(0);
-            }
-        }
-        let size = bytes.len().min(self.pending.len());
-        bytes[..size].copy_from_slice(&self.pending[..size]);
-        self.pending.drain(..size);
-        Ok(size)
-    }
-}
-struct Stdout;
-impl stdio::Output for Stdout {
-    fn write_frame(&mut self, bytes: &[u8], deadline: Instant) -> io::Result<()> {
-        provenant_os::sys::hook_io::write_stdout(bytes, deadline)
-    }
-}
-
-pub fn mcp(
-    client: Option<provenant_records::Harness>,
-    globals: &provenant_cli::Globals,
-    workers: &'static dyn WorkerObserver,
-) -> u8 {
-    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-        let mut factory = factory(globals, workers)?;
-        let context = &mut factory.context;
-        if let Some(client) = client {
-            context.config.client_label = serde_json::to_value(client)?
-                .as_str()
-                .ok_or(EdgeError::Invalid)?
-                .to_owned();
-            context.identity.client = context.config.client_label.clone();
-        }
-        context.identity.inbox = context.inbox_address(client)?;
-        stdio::serve(&mut Stdin::new(), &mut Stdout, factory)?;
-        Ok(())
-    })();
-    match result {
-        Ok(()) => 0,
-        Err(error) => {
-            let _ = std::io::Write::write_all(
-                &mut io::stderr().lock(),
-                format!("provenant: fabric mcp: {error}\n").as_bytes(),
-            );
-            3
-        }
-    }
-}
-
 pub(crate) fn factory(
     globals: &provenant_cli::Globals,
     workers: &'static dyn WorkerObserver,
@@ -1135,7 +707,6 @@ fn factory_mode(
         cwd: resolved.project.clone(),
         assets: resolved.assets,
         host_launch: None,
-        mcp_project: globals.project.as_ref().map(|_| resolved.project),
         workers,
     })
 }
@@ -1282,30 +853,30 @@ pub fn events(
                 }
             };
             unavailable.extend(coverage.unknown_hosts);
-            let result = if budget.remaining(factory.clock.mono_now()).as_micros() == 0 {
+            let remaining = budget.remaining(factory.clock.mono_now());
+            let no_budget = remaining.as_micros() == 0;
+            let remote = factory.context.in_lane && factory.context.remote_home();
+            let result = if no_budget && remote {
                 EventsResult::empty_timeout(page.after)
             } else {
                 let input = EventsInput::Read {
                     extra: Default::default(),
                     after: page.after,
                     limit: page.limit,
-                    wait_seconds: None,
+                    wait_seconds: no_budget.then_some(0),
                 };
-                let observation: Result<EventsResult, Box<dyn std::error::Error>> =
-                    if factory.context.in_lane && factory.context.remote_home() {
-                        provenant_fabric_mcp::tools::ToolCall::Events(input, None)
-                            .relay_within(
-                                &factory.context.lane_relay_socket()?,
-                                &cancel,
-                                std::time::Duration::from_micros(
-                                    budget.remaining(factory.clock.mono_now()).as_micros(),
-                                ),
-                            )
-                            .map_err(Into::into)
-                            .and_then(|value| serde_json::from_value(value).map_err(Into::into))
-                    } else {
-                        service.events(input, budget, &cancel).map_err(Into::into)
-                    };
+                let observation: Result<EventsResult, Box<dyn std::error::Error>> = if remote {
+                    provenant_fabric_runtime::relay::ToolCall::Events(input, None)
+                        .relay_within(
+                            &factory.context.lane_relay_socket()?,
+                            &cancel,
+                            std::time::Duration::from_micros(remaining.as_micros()),
+                        )
+                        .map_err(Into::into)
+                        .and_then(|value| serde_json::from_value(value).map_err(Into::into))
+                } else {
+                    service.events(input, budget, &cancel).map_err(Into::into)
+                };
                 match observation {
                     Ok(value) => value,
                     Err(_)

@@ -4,6 +4,7 @@ use super::*;
 fn every_alternative_validates_its_own_effort() -> Result<(), Box<dyn std::error::Error>> {
     let mut catalogue = Catalogue::bundled()?;
     catalogue.models.push(ModelEntry {
+        capability: Default::default(),
         free: false,
         model: ModelId::parse("codex/test")?,
         efforts: vec!["high".into()],
@@ -14,6 +15,7 @@ fn every_alternative_validates_its_own_effort() -> Result<(), Box<dyn std::error
         quota_pool: None,
     });
     catalogue.models.push(ModelEntry {
+        capability: Default::default(),
         free: false,
         model: ModelId::parse("codex/no-effort")?,
         efforts: vec![],
@@ -472,8 +474,8 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
     };
     let model = crate::ModelId::parse("codex/gpt-6.1-terra")?;
     for text in [
-        "schema_version=1\n[domains.routing.model_policy.defaults.lane]\nread_only=true\nmax_continuations=9\n",
-        "schema_version=1\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\n[domains.routing.model_policy.rules.policy.lane]\nread_only=true\nmax_continuations=9\n",
+        "schema_version=1\n[domains.routing.model_policy.defaults.lane]\nread_only=true\n[domains.routing.model_policy.defaults.cache]\nread_heavy_weight=11\n",
+        "schema_version=1\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\n[domains.routing.model_policy.rules.policy.lane]\nread_only=true\n[domains.routing.model_policy.rules.policy.cache]\nread_heavy_weight=11\n",
     ] {
         let config = provenant_config::load_with_domains(&roots, Some(text.as_bytes()), &sections)?;
         let policy = config
@@ -487,13 +489,13 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
             )
             .policy;
         assert_eq!(policy.lane.read_only, Some(true), "{text}");
-        assert_ne!(policy.lane.max_continuations, Some(9), "{text}");
+        assert_ne!(policy.cache.read_heavy_weight, Some(11), "{text}");
         assert!(!policy.permits(write), "{text}");
         assert_eq!(config.warnings.len(), 1, "{text}");
         assert!(
             config.warnings[0]
                 .message
-                .contains(".lane.max_continuations:"),
+                .contains(".cache.read_heavy_weight:"),
             "{}",
             config.warnings[0].message
         );
@@ -619,6 +621,7 @@ fn family_requires_provider_answer_evidence_at_the_same_revision()
     assert_eq!(wrong.record().family, None);
     let mut broker = catalogue.clone();
     broker.models.push(ModelEntry {
+        capability: Default::default(),
         free: false,
         model: ModelId::parse("codex/claude-haiku-4-5-20251001")?,
         efforts: vec![],
@@ -735,17 +738,37 @@ fn account_spend_and_expiring_override_ignore_reserve() -> Result<(), Box<dyn st
             true,
         ),
     ] {
-        let config: RoutingConfig = serde_json::from_value(
-            serde_json::json!({"pacing": {"accounts": {"opaque-account": {"policy":profile}}}, "pacing_overrides":overrides}),
+        let mut config: RoutingConfig = serde_json::from_value(
+            serde_json::json!({"pacing": {"accounts": {"codex/opaque-account": {"policy":profile}}}, "pacing_overrides":overrides}),
         )?;
+        config.launch_policy.overlay(
+            &std::collections::BTreeMap::from([
+                (
+                    "PACING_ADAPTER".into(),
+                    provenant_records::policy::Strength::Warn,
+                ),
+                (
+                    "PACING_ACCOUNT".into(),
+                    provenant_records::policy::Strength::Warn,
+                ),
+                (
+                    "PACING_FREE".into(),
+                    provenant_records::policy::Strength::Warn,
+                ),
+            ]),
+            provenant_records::policy::Source::Dispatch,
+        );
         let mut ctx = context(&catalogue, &config, now()?);
         ctx.registry = &registry;
         ctx.availability = &records;
         ctx.access = &access;
         ctx.quota = &observations;
         let route = resolve(&request("codex/test")?, &ctx)?;
+        assert!(reason(&route).is_none());
         assert_eq!(
-            reason(&route) == Some(&RouteExclusionReason::PacingReserve),
+            route.extra["account_load"]["warnings"]
+                .as_array()
+                .is_some_and(|warnings| !warnings.is_empty()),
             excluded,
             "profile={profile}, overrides={overrides}"
         );
@@ -759,12 +782,13 @@ fn rolling_window_limits_go_despite_monthly_headroom() -> Result<(), Box<dyn std
     let catalogue = Catalogue::bundled()?;
     let config: RoutingConfig = serde_json::from_value(serde_json::json!({
         "pools": {"trial": [{"model":"opencode/opencode-go/glm-5.3-flash", "weight":1, "efforts":[]}]},
-        "pacing": {"accounts": {"go": {"policy":"pace", "windows":["rolling", "seven_day", "monthly"], "reserve":{"rolling":0}}}}
+        "pacing": {"accounts": {"opencode/go": {"policy":"pace", "windows":["rolling", "seven_day", "monthly"], "reserve":{"rolling":0}}}}
     }))?;
     let model = "opencode/opencode-go/glm-5.3-flash";
     let mut record = availability();
     record.adapter = "opencode".into();
     record.account_key = Some("go".into());
+    record.plan = Some("go".into());
     let records = [record];
     let registry = [provenant_providers::opencode::REGISTRATION];
     let access = [AccessContext {
@@ -775,6 +799,7 @@ fn rolling_window_limits_go_despite_monthly_headroom() -> Result<(), Box<dyn std
     let mut observation = quota(model, "go", QuotaStatus::Available, 1, 80, 120)?;
     observation.snapshot.account.adapter = "opencode".into();
     observation.snapshot.details = Some(provenant_quota::QuotaDetails {
+        plan: Some("go".into()),
         source: Some("fixture-authoritative".into()),
         coverage: Some("complete".into()),
         ..provenant_quota::QuotaDetails::default()

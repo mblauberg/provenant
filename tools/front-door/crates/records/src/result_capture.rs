@@ -5,8 +5,8 @@ const HEAD_BYTES: usize = 4096;
 const TAIL_BYTES: usize = 16384;
 const VERDICT_BYTES: usize = 1024;
 
-/// A streaming accumulator. Storage is bounded by the windows, handoff limits
-/// and already validated required verdict, irrespective of artifact length.
+/// A streaming accumulator. Display windows and verdict proof are bounded;
+/// structured findings are transient parsing input from the sealed artifact.
 pub struct ResultCapture {
     hash: Sha256,
     head: Vec<u8>,
@@ -20,6 +20,7 @@ pub struct ResultCapture {
     utf8: Vec<u8>,
     verdict: VerdictCapture,
     dispositions: DispositionCapture,
+    findings: FindingsCapture,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,7 +30,7 @@ pub struct CapturedResult {
     pub handoff: Result<Option<crate::handoff::Handoff>, &'static str>,
     /// Exactly one well-formed verdict among the lines outside fenced blocks
     /// that start with `VERDICT:` (after emphasis or list markers; not
-    /// blockquotes), wherever it sits. Independent of the legacy required-line contract.
+    /// blockquotes), wherever it sits. Independent of the required-line contract.
     pub verdict: Option<Box<str>>,
     /// Declarations were seen but are not exactly one well-formed verdict.
     pub verdict_invalid: bool,
@@ -46,6 +47,9 @@ pub struct CapturedResult {
     pub matched_required: bool,
     /// Bounded stream proof for explicit per-finding disposition lines.
     pub disposition_proof: DispositionProof,
+    /// The last complete findings block. Transient parsing input only; graph
+    /// checkpoints keep a summary and the sealed result artifact reference.
+    pub findings: Option<String>,
 }
 
 impl ResultCapture {
@@ -65,12 +69,14 @@ impl ResultCapture {
             utf8: Vec::with_capacity(4),
             verdict: VerdictCapture::default(),
             dispositions: DispositionCapture::default(),
+            findings: FindingsCapture::default(),
         }
     }
 
     pub fn push(&mut self, chunk: &[u8]) {
         self.verdict.push(chunk);
         self.dispositions.push(chunk);
+        self.findings.push(chunk);
         self.hash.update(chunk);
         self.bytes = self.bytes.saturating_add(chunk.len() as u64);
         let take = HEAD_BYTES.saturating_sub(self.head.len()).min(chunk.len());
@@ -179,11 +185,61 @@ impl ResultCapture {
             excerpt,
             tail,
             truncated,
-            source_truncated: tail_truncated,
+            source_truncated: false,
             tail_truncated,
             matched_required: self.matched_required,
             disposition_proof: self.dispositions.finish(),
+            findings: self.findings.finish(),
         }
+    }
+}
+
+/// Preserve structured findings independently of the display windows. The
+/// artifact is the durable copy; this transient buffer lives only while its
+/// complete JSON is parsed, never in the graph's checkpoint envelope.
+#[derive(Default)]
+struct FindingsCapture {
+    line: Vec<u8>,
+    body: Option<Vec<u8>>,
+    complete: Option<String>,
+}
+
+impl FindingsCapture {
+    fn push(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            if byte == b'\n' {
+                self.end_line();
+            } else if self.body.is_some() || self.line.len() < 32 {
+                self.line.push(byte);
+            }
+        }
+    }
+
+    fn end_line(&mut self) {
+        let line = self.line.strip_suffix(b"\r").unwrap_or(&self.line);
+        if let Some(body) = &mut self.body {
+            if line.starts_with(b"```") && line[3..].iter().all(u8::is_ascii_whitespace) {
+                self.complete = self
+                    .body
+                    .take()
+                    .and_then(|bytes| String::from_utf8(bytes).ok());
+            } else {
+                body.extend_from_slice(&self.line);
+                body.push(b'\n');
+            }
+        } else if line == b"```findings" {
+            self.body = Some(Vec::new());
+            // A later incomplete block must not silently reuse an earlier one.
+            self.complete = None;
+        }
+        self.line.clear();
+    }
+
+    fn finish(mut self) -> Option<String> {
+        if !self.line.is_empty() {
+            self.end_line();
+        }
+        self.complete
     }
 }
 

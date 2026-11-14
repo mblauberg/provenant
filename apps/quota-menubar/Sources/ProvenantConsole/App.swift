@@ -65,6 +65,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return false
     }
 
+    /// Menu-bar links arrive here whether Launch Services starts the app or forwards a URL to an open process.
+    func application(_: NSApplication, open urls: [URL]) {
+        for url in urls {
+            guard let route = ConsoleDeepLink.parse(url) else { continue }
+            showWindow()
+            switch route {
+            case .request(let id): Task { await console.openRequest(id) }
+            case .attempt(let id): Task { await console.openAttempt(id) }
+            }
+        }
+    }
+
     /// The app coming to the front is the one automatic refresh besides the change watcher. It reads the screen in
     /// front once; the others are marked out of date and read when chosen.
     func applicationDidBecomeActive(_: Notification) {
@@ -124,9 +136,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func makeWindow() -> NSWindow {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1_180, height: 720),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        // The SwiftUI content starts below the native titlebar and toolbar. Keep the safe area and the
+        // scene-to-window bridge explicit so a toolbar update cannot leave content painted under the chrome.
+        window.titlebarAppearsTransparent = false
+        let hostingView = NSHostingView(rootView: ConsoleView(console: console))
+        hostingView.safeAreaRegions = .all
+        hostingView.sceneBridgingOptions = [.title, .toolbars]
         window.title = "Provenant Console"
         window.contentMinSize = NSSize(width: ConsoleView.windowMinimum, height: 560)
-        window.contentView = NSHostingView(rootView: ConsoleView(console: console))
+        window.contentView = hostingView
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
         window.delegate = self
@@ -231,5 +249,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         main.addItem(windowItem)
         NSApp.windowsMenu = windowMenu
         return main
+    }
+}
+
+enum ConsoleDeepLink: Equatable {
+    case request(String)
+    case attempt(String)
+
+    static func parse(_ url: URL) -> ConsoleDeepLink? {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme?.lowercased() == "provenant-console",
+              components.user == nil, components.password == nil, components.port == nil,
+              components.query == nil, components.fragment == nil,
+              let host = components.host?.lowercased() else { return nil }
+
+        let encodedPath = components.percentEncodedPath
+        guard encodedPath.first == "/" else { return nil }
+        let encodedID = String(encodedPath.dropFirst())
+        guard !encodedID.isEmpty, !encodedID.contains("/"),
+              let id = encodedID.removingPercentEncoding,
+              !id.isEmpty,
+              !id.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else { return nil }
+        switch host {
+        case "request": return .request(id)
+        case "attempt": return .attempt(id)
+        default: return nil
+        }
     }
 }

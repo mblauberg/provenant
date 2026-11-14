@@ -1,15 +1,16 @@
 //! Worst-case checkpoint size for a plan.
 //!
-//! A checkpoint holds the submitted document, its admitted expansions and
-//! extensions, its asks and one progress row per expanded node. Every runtime string a row can gain is cut
-//! to a fixed canonical-byte share when it is stored, and every list it can
-//! grow is either bounded by the plan or capped with an omitted count. The sum
-//! below is therefore an upper bound for every checkpoint the plan can
-//! produce, and a plan whose bound exceeds the envelope is refused before its
-//! first save rather than stopping later on an oversized checkpoint.
+//! A stored graph record holds the submitted document, its admitted expansions
+//! and extensions, its asks and one progress row per expanded node. Every runtime
+//! string a row can gain is cut to a fixed canonical-byte share when it is stored,
+//! and every list it can grow is either bounded by the plan or capped with an
+//! omitted count. The sum below is therefore an upper bound for every stored
+//! record the plan can produce, and a plan whose bound exceeds the envelope is
+//! refused before its first save rather than stopping later on an oversized
+//! record.
 use super::*;
 
-/// Envelope keys, digest and pinned integration base around the checkpoint.
+/// Envelope keys and digest around the checkpoint.
 const ENVELOPE_KEYS_BYTES: usize = 512;
 /// Host working directory, escaped in the worst case.
 const DIRECTORY_BYTES: usize = 6 * 4096;
@@ -51,27 +52,27 @@ pub(super) fn latest() -> provenant_core::WallTime {
         .unwrap_or_else(|_| unreachable!("the epoch is a valid wall time"))
 }
 
-/// Worst-case ask: its rendered text, deadline, answer and inbox error.
-fn ask_bound(mut ask: NodeAsk, variable: usize) -> usize {
-    ask.wake_at = Some(latest());
-    ask.answer = Some(AskAnswer {
+/// Worst-case link: the IDs, session and deadline of one ask. The question and
+/// its answer live in the inbox, so no text is counted.
+/// `.retry-` and the digits of a u64 generation.
+const RETRY_SUFFIX_BYTES: usize = 27;
+
+fn ask_bound(ask: &AskRequest) -> usize {
+    let link = AskLink {
         extra: Default::default(),
-        source: AnswerSource::Answered,
-        option: Some(String::new()),
-        text: Some(String::new()),
-        actor: Some(String::new()),
-        at: Some(latest()),
-        rejected: Some(String::new()),
-        rejection_code: Some("c".repeat(REFUSAL_CODE_BYTES)),
-    });
-    ask.inbox_error = Some(String::new());
-    canonical_len(&ask)
-        + variable
-        + asks::OPTION_BYTES
-        + asks::ANSWER_BYTES
-        + HOST_ID_BYTES
-        + 2 * MAX_ADVANCE_ERROR_BYTES
-        + 1
+        ask_id: ask.ask_id.clone(),
+        kind: ask.kind,
+        node: ask.node.clone(),
+        rounds: ask.rounds,
+        session: ask.session.clone(),
+        wake_at: Some(latest()),
+        timeout: Some(asks::DecideTimeout {
+            seconds: u64::MAX,
+            source: asks::DecideTimeoutSource::Configured,
+        }),
+        request: "f".repeat(asks::REQUEST_ID_BYTES),
+    };
+    canonical_len(&link) + 1
 }
 
 pub(super) fn checkpoint_bound(
@@ -80,9 +81,12 @@ pub(super) fn checkpoint_bound(
     extensions: &[String],
     plan: &PlannedGraph,
 ) -> usize {
+    let max_base = provenant_core::GitOid::parse(&"f".repeat(64))
+        .unwrap_or_else(|_| unreachable!("the fixed graph base is a valid object ID"));
+    let graph_bases = GraphBaseBinding::new(Some(max_base), Some(max_base))
+        .unwrap_or_else(|| unreachable!("nonempty graph bases produce a binding"));
     let skeleton = GraphCheckpoint {
-        bound_review_base: Some("f".repeat(64)),
-        bound_integration_base: Some("f".repeat(64)),
+        bases: None,
         extra: Default::default(),
         expansions: expansions.to_vec(),
         remaining: Some(RemainingBudgets {
@@ -102,8 +106,14 @@ pub(super) fn checkpoint_bound(
         integration_pin: Some(String::new()),
         cancelled: true,
         cancel_reason: Some(String::new()),
-        pause_reason: Some(String::new()),
-        pause_code: Some("c".repeat(REFUSAL_CODE_BYTES)),
+        pause: provenant_records::pause::Pause::new(
+            provenant_records::pause::PauseCause::Stop(
+                provenant_records::StopCause::CredentialHelperFailed,
+            ),
+            None,
+            "p",
+        )
+        .ok(),
         unknown_usage: Vec::new(),
         unknown_usage_omitted: usize::MAX,
         usage_events: Vec::new(),
@@ -131,6 +141,8 @@ pub(super) fn checkpoint_bound(
     };
     let fixed = [
         ENVELOPE_KEYS_BYTES,
+        // GraphExecution stores the configured graph-wide bases beside the checkpoint.
+        canonical_len(&serde_json::json!({"bases": graph_bases})),
         DIRECTORY_BYTES,
         prompt_store::compacted_len(document),
         prompt_store::compacted_len(&skeleton),
@@ -143,13 +155,15 @@ pub(super) fn checkpoint_bound(
             + 6 * MAX_CANCEL_REASON_BYTES,
         MAX_UNKNOWN_USAGE * (UNKNOWN_USAGE_TEXT_BYTES + longest_id + 1),
         MAX_USAGE_EVENTS * (canonical_len(&event) + 64 + NOTE_BYTES + 1),
-        // Pause asks: the kept history, one open and one awaiting its close.
+        // The pause ask: one open at a time.
         plan.decision_session.as_deref().map_or(0, |session| {
-            (asks::MAX_PAUSE_ASKS + 2)
-                * ask_bound(
-                    asks::pause_ask(&plan.graph_id, u64::MAX, session, "", Some("")),
-                    PAUSE_REASON_BYTES + MAX_ADVANCE_ERROR_BYTES,
-                )
+            ask_bound(&asks::pause_ask(
+                &plan.graph_id,
+                u64::MAX,
+                session,
+                "",
+                None,
+            ))
         }),
     ];
     let mut loop_rounds = std::collections::BTreeMap::<&str, usize>::new();
@@ -230,7 +244,10 @@ fn node_bound(
         review_base: node.extra.get("review_base").map(|_| "1".repeat(64)),
         review_base_pending: false,
         fragment: (plans::agent(node) && !admitted).then(String::new),
-        handoff: plans::writer(node).then(String::new),
+        handoff: None,
+        blocked: false,
+        decisions: Vec::new(),
+        review_settlement: None,
         expansion_pause: expands.then(String::new),
         expansion_cause: expands.then_some(NodeDecisionCause::PlanExpansionPaused {
             active: false,
@@ -310,6 +327,7 @@ fn node_bound(
                 extra: Default::default(),
                 verdict_error: Some(String::new()),
                 schema_version: 2,
+                decide_outcome: None,
                 result: Some(ResultOutput {
                     extra: Default::default(),
                     digest: String::new(),
@@ -376,6 +394,13 @@ fn node_bound(
         + 64 // source commit
         + MAX_ADVANCE_ERROR_BYTES // advance error
         + if correction { MAX_ADVANCE_ERROR_BYTES } else { 0 };
+    if template::review_node(node) {
+        bytes += canonical_len(&serde_json::json!({"review_settlement": {
+            "attempt_id": "1".repeat(32),
+            "head": "1".repeat(64), "base": "2".repeat(64),
+            "verdict": "approve_with_nits", "independent": false,
+        }}));
+    }
     if node
         .plan
         .as_ref()
@@ -396,7 +421,10 @@ fn node_bound(
         bytes += 256;
     }
     if plans::writer(node) {
-        bytes += plans::STORED_HANDOFF_BYTES;
+        bytes += plans::STORED_HANDOFF_BYTES + 16; // the record and its key
+    }
+    if template::review_node(node) {
+        bytes += plans::STORED_DECISION_BYTES + 16;
     }
     if repair::may_report_items(node, plan) || repair::is_repair(node) {
         bytes += FINDINGS_BYTES + 32;
@@ -415,11 +443,11 @@ fn node_bound(
         bytes += MAX_ADVANCE_ERROR_BYTES + LOOP_PAUSE_TEXT_BYTES + 3 * node.id.len();
         if let Some(session) = &spec.decision_session {
             let ask = asks::loop_ask(&plan.graph_id, &node.id, usize::MAX, session);
-            bytes += loop_rounds * ask_bound(ask, 0);
+            bytes += loop_rounds * (ask_bound(&ask) + RETRY_SUFFIX_BYTES);
         }
     }
     if let Some(spec) = &node.decide {
-        // One ask per decide node: a withdrawn ask is replaced, not kept.
+        // One ask per decide node: a rejected answer's request replaces it.
         let repair_scope =
             node.extra.get("repair_scope_gate") == Some(&serde_json::Value::Bool(true));
         let session = asks::decide_session(spec, plan.decision_session.as_deref())
@@ -433,25 +461,24 @@ fn node_bound(
             None,
             Some(""),
         );
-        bytes += ask_bound(
-            ask,
-            if repair_scope {
-                // The scope decision includes a principal report; `bounded`
-                // limits the whole dynamic body in canonical bytes.
-                provenant_records::inbox::REQUEST_BODY_BYTES + 27 // .retry- plus a u64 generation
-            } else {
-                MAX_ADVANCE_ERROR_BYTES
-            },
-        );
+        bytes += ask_bound(&ask)
+            // A retried node's ask ID adds `.retry-` and a u64 generation.
+            + RETRY_SUFFIX_BYTES;
     }
     if let Some(spec) = &node.land {
-        // branch, head, ask ID, actor and note; one ask, whose body names the
-        // branch and head twice.
+        // branch, head, ask ID, actor and note; and one ask link.
         bytes +=
             2 * OUTPUT_FIELD_BYTES + node.id.len() + 32 + HOST_ID_BYTES + MAX_ADVANCE_ERROR_BYTES;
         let session = land::session(spec, plan).unwrap_or("");
-        let ask = land::land_ask(&plan.graph_id, node, &land_skeleton(spec.tier), session);
-        bytes += ask_bound(ask, 4 * OUTPUT_FIELD_BYTES + MAX_ADVANCE_ERROR_BYTES);
+        let ask = land::land_ask(
+            &plan.graph_id,
+            node,
+            &land_skeleton(spec.tier),
+            session,
+            1,
+            u64::MAX,
+        );
+        bytes += ask_bound(&ask);
     }
     if gate {
         bytes += OUTPUT_FIELD_BYTES; // gate reason
@@ -489,7 +516,10 @@ fn node_bound(
         let excerpt = 256;
         // digest, excerpt, path, verdict, verdict error, findings, branch,
         // commit, warnings, remaining
-        bytes += 80
+        // An oversized findings block uses the existing text artifact store;
+        // reserve its fixed-width reference beside the bounded summary.
+        bytes += 256
+            + 80
             + excerpt
             + REMAINING_BYTES
             + 256
@@ -527,10 +557,13 @@ fn node_bound(
                 extra: Default::default(),
                 graph_id: plan.graph_id.clone(),
                 node_id: node.id.clone(),
+                attempt: u32::MAX,
                 route_index: u16::MAX,
             },
             route: route.clone(),
             state: AttemptState::Unresolved,
+            // The longest stop cause name.
+            stop: Some(provenant_records::StopCause::HostNativeUnconfigured),
             attempt_ref: Some(String::new()),
             outcome: Some(AttemptOutcome::AdapterUnavailable),
             launch_actor: String::new(),

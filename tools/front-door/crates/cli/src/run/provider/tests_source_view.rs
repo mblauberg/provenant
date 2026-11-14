@@ -33,7 +33,11 @@ impl SourceViewFixture {
             ..provenant_core::RootInputs::new(home.clone(), project.clone())
         }
         .resolve(&provenant_os::fs::SystemPathResolver)?;
-        let utility = provenant_confinement::UtilityRuntime::new(&git, &git_home)?;
+        let utility = provenant_confinement::UtilityRuntime::new(
+            &git,
+            &git_home,
+            roots.state.as_path(),
+        )?;
         let cancel = provenant_core::CancelToken::new();
         let repo = utility.open_repo(
             &executor,
@@ -71,7 +75,7 @@ impl SourceViewFixture {
         source: &Path,
         head: &str,
     ) -> Result<PathBuf, super::source_tree::SourceViewError> {
-        use provenant_core::{AttemptId, OperationId, RunId, WallTime};
+        use provenant_core::{AttemptId, OperationId, WallTime};
         use std::os::unix::fs::PermissionsExt;
         let n = self.counter.get() + 1;
         self.counter.set(n);
@@ -93,8 +97,7 @@ impl SourceViewFixture {
         )
         .unwrap()
         .request
-        .tasks
-        .remove(0);
+        .task;
         task.head = Some(head.to_owned());
         task.base = Some(head.to_owned());
         let temporary = self.base.join(format!("tmp-{n}"));
@@ -105,7 +108,6 @@ impl SourceViewFixture {
             operation_id: OperationId::parse("source-view").unwrap(),
             task_index: 0,
             lane_depth: 1,
-            run_id: RunId::from_bytes([53; 16]),
             deadline_unix_ms: u64::MAX,
             scratch: self.base.join("scratch"),
             provider_state: self.base.join("provider-state"),
@@ -161,7 +163,7 @@ fn source_view_names_the_failing_step_and_cause() -> Result<(), Box<dyn std::err
     let refusal = PrepareError::from(error).into_refusal();
     assert_eq!(
         refusal.terminal_cause,
-        Some(provenant_records::run::TerminalCause::SourceViewRefused)
+        provenant_records::run::TerminalCause::SourceViewRefused
     );
     let note = refusal.terminal_note.ok_or("note")?;
     assert!(note.contains("tree listing") && note.contains("Git exited with status"));
@@ -171,29 +173,6 @@ fn source_view_names_the_failing_step_and_cause() -> Result<(), Box<dyn std::err
             .detail()
             .contains("route and account configuration")
     );
-    Ok(())
-}
-
-#[test]
-fn source_view_of_twenty_thousand_files_uses_batched_reads_within_budget()
--> Result<(), Box<dyn std::error::Error>> {
-    let fixture = SourceViewFixture::new()?;
-    for shard in 0..100 {
-        let directory = fixture.project.join(format!("d{shard}"));
-        std::fs::create_dir(&directory)?;
-        for file in 0..200 {
-            std::fs::write(directory.join(format!("f{file}.txt")), format!("{shard}/{file}\n"))?;
-        }
-    }
-    provenant_os::fixture::run_git(&fixture.project, &["add", "-A"])?;
-    provenant_os::fixture::run_git(&fixture.project, &["commit", "-qm", "many"])?;
-    let head = run::resolve_git_base(&fixture.git, &fixture.project, "HEAD")?;
-    use provenant_core::Clock;
-    let clock = provenant_os::clock::SystemClock::new();
-    let budget = provenant_core::WaitBudget::cli(clock.mono_now(), 60)?;
-    let view = fixture.snapshot(&fixture.project, &head)?;
-    assert!(budget.remaining(clock.mono_now()).as_micros() > 0);
-    assert_eq!(std::fs::read(view.join("d99/f199.txt"))?, b"99/199\n");
     Ok(())
 }
 

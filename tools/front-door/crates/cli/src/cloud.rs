@@ -52,7 +52,7 @@ pub struct Launch {
 pub struct Collect {
     /// Launch key that `cloud launch` printed
     pub id: String,
-    /// Worktree path (default .worktrees/<branch> beside the main checkout)
+    /// Worktree path (default from the project worktree layout)
     #[arg(long)]
     pub path: Option<PathBuf>,
     /// Remote branch to collect when the session pushed a different name
@@ -252,11 +252,20 @@ pub fn parse_session(output: &str) -> Option<(String, Option<String>)> {
 
 /// The absolute worktree `collect` adds. An explicit path resolves against
 /// the project root, not the process directory, so every Git call agrees.
-/// The default sits under the main checkout's `.worktrees`.
-pub fn collect_path(project: &Path, main: &Path, path: Option<&Path>, branch: &str) -> PathBuf {
+/// The default follows the project's sourced worktree layout.
+pub fn collect_path(
+    project: &Path,
+    host_state: &Path,
+    main: &Path,
+    path: Option<&Path>,
+    branch: &str,
+) -> std::io::Result<PathBuf> {
     match path {
-        Some(path) => project.join(path),
-        None => main.join(".worktrees").join(branch.replace('/', "-")),
+        Some(path) => Ok(project.join(path)),
+        None => {
+            let ports = provenant_config::PortTable::read_for(Some(project), host_state)?;
+            Ok(main.join(ports.managed_writer_path(branch)?))
+        }
     }
 }
 
@@ -276,6 +285,32 @@ pub fn record_key(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collect_default_uses_the_sourced_worktree_layout() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join(".provenant");
+        std::fs::create_dir_all(&config).unwrap();
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.worktree_layout.roots = vec![PathBuf::from(".claude/worktrees")];
+        ports.worktree_layout.default = PathBuf::from(".claude/worktrees/<branch>");
+        std::fs::write(
+            config.join("ports.json"),
+            serde_json::to_vec(&ports).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            collect_path(
+                temp.path(),
+                temp.path(),
+                Path::new("/repo"),
+                None,
+                "cloud/abc"
+            )
+            .unwrap(),
+            Path::new("/repo/.claude/worktrees/cloud-abc")
+        );
+    }
 
     #[test]
     fn launch_arguments_assemble_without_a_network_call() {
@@ -343,15 +378,22 @@ mod tests {
         );
         let (project, main) = (Path::new("/repo/sub"), Path::new("/repo"));
         assert_eq!(
-            collect_path(project, main, Some(Path::new("wt")), "cloud/abc"),
+            collect_path(project, main, Some(Path::new("wt")), "cloud/abc").unwrap(),
             Path::new("/repo/sub/wt")
         );
         assert_eq!(
-            collect_path(project, main, Some(Path::new("/elsewhere/wt")), "x"),
+            collect_path(
+                project,
+                project,
+                main,
+                Some(Path::new("/elsewhere/wt")),
+                "x"
+            )
+            .unwrap(),
             Path::new("/elsewhere/wt")
         );
         assert_eq!(
-            collect_path(project, main, None, "cloud/abc"),
+            collect_path(project, project, main, None, "cloud/abc").unwrap(),
             Path::new("/repo/.worktrees/cloud-abc")
         );
     }

@@ -65,7 +65,7 @@ impl Fixture {
     }
 }
 fn config() -> crate::config::FabricConfig {
-    serde_json::from_value(serde_json::json!({"agent_label":"chair","client_label":"test","home_hosts":{},"peers":{},"limits":{"body_bytes":65536,"input_frame_bytes":1048576,"json_depth":64,"page_rows":100,"output_lines":500,"output_bytes":65536,"result_bytes":1048576,"lease_seconds":3600,"peer_seconds":30,"graph_timeout_seconds":14400}})).unwrap()
+    serde_json::from_value(serde_json::json!({"agent_label":"chair","client_label":"test","home_hosts":{},"peers":{},"limits":{"body_bytes":65536,"input_frame_bytes":1048576,"json_depth":64,"page_rows":100,"output_lines":500,"output_bytes":65536,"result_bytes":1048576,"peer_seconds":30,"graph_timeout_seconds":14400}})).unwrap()
 }
 fn op(text: &str) -> Option<OperationId> {
     Some(OperationId::parse(text).unwrap())
@@ -851,8 +851,8 @@ fn request_correlation_saves_exact_coverage_once_and_requires_host_lookup() {
     let mut input = ask(RequestKind::Question, "linked");
     let work = RequestWork {
         extra: Default::default(),
-        run_id: provenant_core::RunId::from_bytes([3; 16]),
-        task_id: Some(provenant_core::TaskId::from_bytes([4; 16])),
+        graph: "lane-graph".into(),
+        node: Some("node".into()),
         attempt_id: None,
         repository: None,
         head: None,
@@ -931,8 +931,8 @@ fn request_correlation_v2_survives_answer_close_and_acknowledgement() {
     let f = Fixture::new();
     let work = RequestWork {
         extra: Default::default(),
-        run_id: provenant_core::RunId::from_bytes([3; 16]),
-        task_id: Some(provenant_core::TaskId::from_bytes([4; 16])),
+        graph: "lane-graph".into(),
+        node: Some("node".into()),
         attempt_id: None,
         repository: None,
         head: None,
@@ -1023,8 +1023,8 @@ fn request_correlation_lookup_never_holds_fabric_write_lock() {
     if let InboxInput::Ask { request, .. } = &mut input {
         request.work = Some(RequestWork {
             extra: Default::default(),
-            run_id: provenant_core::RunId::from_bytes([3; 16]),
-            task_id: None,
+            graph: "lane-graph".into(),
+            node: None,
             attempt_id: None,
             repository: None,
             head: None,
@@ -1105,8 +1105,8 @@ fn request_correlation_repository_bound_counts_encoded_wire_bytes() {
         if let InboxInput::Ask { request, .. } = &mut input {
             request.work = Some(RequestWork {
                 extra: Default::default(),
-                run_id: provenant_core::RunId::from_bytes([3; 16]),
-                task_id: None,
+                graph: "lane-graph".into(),
+                node: None,
                 attempt_id: None,
                 repository: Some(provenant_records::AbsolutePath::new(&path).unwrap()),
                 head: None,
@@ -1146,8 +1146,8 @@ fn replacement_work_mismatch_leaves_original_open_and_unindexed_is_saved() {
     if let InboxInput::Ask { request, .. } = &mut input {
         request.work = Some(RequestWork {
             extra: Default::default(),
-            run_id: provenant_core::RunId::from_bytes([3; 16]),
-            task_id: None,
+            graph: "lane-graph".into(),
+            node: None,
             attempt_id: None,
             repository: None,
             head: None,
@@ -1544,6 +1544,7 @@ fn chair_mail_is_isolated_to_its_exact_session() {
         &f.root,
         f.identity.project,
         f.identity.inbox.actor,
+        crate::test_support::observation_settings(),
         &f.clock,
         &ThreadPause,
         &f.cancel,

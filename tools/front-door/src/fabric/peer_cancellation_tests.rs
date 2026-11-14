@@ -14,9 +14,7 @@ fn submission_cancellation_drains_only_attached_work() -> TestResult {
     let cancel = CancelToken::new();
     let actor = factory.context.identity.inbox.actor;
     let operation: provenant_core::OperationId = "detached-cancel".parse()?;
-    let digest =
-        provenant_records::CanonicalV1::record_digest("peer-subgraph", 1, &(actor, &operation))?;
-    let graph = format!("peer-{}", &provenant_core::hex(digest.as_bytes())[..48]);
+    let graph = crate::fabric::peer::peer_graph_name(actor, &operation)?;
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
     let mut checkpoint: graph::GraphCheckpoint = serde_json::from_value(json!({
         "schema_version":1, "graph_id":graph, "plan_digest":"digest", "cancelled":true,
@@ -48,8 +46,7 @@ fn submission_cancellation_drains_only_attached_work() -> TestResult {
             )?;
             journal.bind(graph::GraphExecution {
                 extra: Default::default(),
-                integration_base: None,
-                review_base: None,
+                bases: None,
                 directory: rig.project.clone(),
                 document: serde_json::from_value(json!({
                     "schema_version":1, "graph_id":graph,
@@ -86,6 +83,7 @@ fn lost_peer_reply_cancellation_survives_reconnect_and_stops_receiver_subtree() 
         graph_id: "origin-cancel".into(),
         node_id: "parent".into(),
         route_index: 0,
+        attempt: 1,
     };
     let operation = graph_operation("graph-attempt-operation", &key)?;
     let receipt = submit_parent(&receiver_factory, operation.as_str(), &cancel)?;
@@ -156,7 +154,6 @@ fn lost_peer_reply_cancellation_survives_reconnect_and_stops_receiver_subtree() 
             cwd: origin_rig.project.clone(),
             assets: origin_rig.project.clone(),
             host_launch: None,
-            mcp_project: None,
             workers: &FreeWorkers,
         })
     };
@@ -179,6 +176,7 @@ fn lost_peer_reply_cancellation_survives_reconnect_and_stops_receiver_subtree() 
         &mut execution.document,
         "origin-lost-reply",
         &origin.context.config.graph.limits,
+        origin.context.port_table.worktree_layout.clone(),
     )?;
     struct LostReplyOwner {
         actor: String,
@@ -186,6 +184,9 @@ fn lost_peer_reply_cancellation_survives_reconnect_and_stops_receiver_subtree() 
     }
     impl graph::AttemptOwner for LostReplyOwner {
         type Error = FacadeError;
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
         fn actor(&self) -> String {
             self.actor.clone()
         }

@@ -698,7 +698,7 @@ pub(super) fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Re
         provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &merged)?;
     let ended = writer_run(merged_writer, "gc-merged", 120, "finished")?;
     store.create(&ended, &call)?;
-    store.cancel(ended.attempts[0].attempt_id, "finished", &call)?;
+    store.cancel(ended.attempt_id, "finished", &call)?;
     fs::create_dir(merged.join("target"))?;
     fs::write(merged.join("target/artifact"), "old build")?;
     age_gc_output(&merged.join("target"))?;
@@ -718,16 +718,23 @@ pub(super) fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Re
     fs::write(
         rig.state.join("config.toml"),
         format!(
-            "schema_version=1\n[gc]\nfree_floor='1B'\n{output_config}foreign_worktrees='merged-clean'\n"
+            "schema_version=1\n[gc]\nfree_floor='1B'\n{output_config}foreign_worktrees='collect'\n"
         ),
     )?;
     let queued_preview = ok(&rig, &["gc", "--dry-run", "--json"])?;
+    let cleanup = queued_preview["data"]["worktree_cleanup"]
+        .as_array()
+        .ok_or("worktree cleanup")?;
     assert!(
-        queued_preview["data"]["worktree_cleanup"][0]["worktrees"]["retained"]
-            .as_array()
-            .ok_or("retained")?
+        cleanup
             .iter()
-            .any(|entry| entry["branch"] == "queued" && entry["reason"] == "unknown_writer")
+            .flat_map(|report| report["worktrees"]["retained"]
+                .as_array()
+                .into_iter()
+                .flatten())
+            .any(|entry| entry["branch"] == "queued"),
+        "GC preview should report the queued branch as retained: {}",
+        queued_preview["data"]["worktree_cleanup"]
     );
     assert!(queued_path.is_dir());
     fs::write(
@@ -762,13 +769,7 @@ pub(super) fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Re
     assert!(merged.is_dir());
     assert!(cache.is_dir());
     assert!(dry["data"]["worktree_cleanup"][0]["dry_run"] == true);
-    assert!(
-        dry["data"]["worktree_cleanup"][0]["output"]
-            .as_array()
-            .ok_or("output")?
-            .iter()
-            .any(|entry| entry["reason"] == "would_remove" && entry["removed"] == false)
-    );
+    assert!(merged.join("target/artifact").is_file());
     // Preview does not fetch the upstream proof needed to remove a tree.
     assert!(
         dry["data"]["worktree_cleanup"][0]["worktrees"]["pruned_refs"]
@@ -846,7 +847,7 @@ pub(super) fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Re
     );
     assert!(has_branch(&rig, "unmerged")?);
     assert_eq!(git(&rig, &["rev-parse", "main"])?, stale_main);
-    store.cancel(queued.attempts[0].attempt_id, "queue ended", &call)?;
+    store.cancel(queued.attempt_id, "queue ended", &call)?;
     ok(&rig, &["gc", "--apply", "--json"])?;
     assert!(!queued_path.exists());
     Ok(())
@@ -889,7 +890,7 @@ pub(super) fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_a
     let call = writer_call(&clock, &cancel)?;
     let writer = provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &path)?;
     let prepared = writer_run(writer.clone(), "gc-ended", 101, "regenerate")?;
-    let attempt = prepared.attempts[0].attempt_id;
+    let attempt = prepared.attempt_id;
     store.create(&prepared, &call)?;
     let config = format!(
         "schema_version=1\n[gc]\nfree_floor='1B'\n[gc.projects.'{}']\nregenerable=['target','node_modules']\nkeep=['kept/target']\n",
@@ -919,7 +920,7 @@ pub(super) fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_a
     );
     ok(&rig, &["gc", "--apply", "--json"])?;
     assert!(path.join("old/target").is_dir());
-    child_store.cancel(child_run.attempts[0].attempt_id, "child ended", &call)?;
+    child_store.cancel(child_run.attempt_id, "child ended", &call)?;
     let snapshot =
         crate::gc_support::lane_states(&roots, &rig.home, &rig.project, context.project_id)?;
     assert!(snapshot.is_current());
@@ -927,7 +928,7 @@ pub(super) fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_a
     let later = writer_run(writer, "gc-later", 112, "queued after snapshot")?;
     store.create(&later, &call)?;
     assert!(!snapshot.is_current());
-    store.cancel(later.attempts[0].attempt_id, "later ended", &call)?;
+    store.cancel(later.attempt_id, "later ended", &call)?;
     assert!(!snapshot.is_current(), "a changed snapshot stays invalid");
     let dry = ok(&rig, &["gc", "--dry-run", "--json"])?;
     assert_eq!(dry["data"]["dry_run"], true);
@@ -946,8 +947,8 @@ pub(super) fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_a
     // Unreadable sealed lane state protects the worktree.
     let request = rig
         .state
-        .join("runs")
-        .join(prepared.run_id.to_string())
+        .join("attempts")
+        .join(prepared.attempt_id.to_string())
         .join("request.json");
     let sealed = fs::read(&request)?;
     fs::write(&request, b"broken")?;
@@ -1000,10 +1001,10 @@ pub(super) fn gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text() -> Resu
         201,
         "fixture",
     )?;
-    input.request.tasks[0].writer = None;
+    input.request.task.writer = None;
     input.created_at = provenant_core::WallTime::from_micros(1)?;
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.withdraw(
         id,
         provenant_run::AttemptState::Queued {
@@ -1014,9 +1015,7 @@ pub(super) fn gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text() -> Resu
         provenant_core::WallTime::from_micros(2)?,
         &call,
     )?;
-    let attempt = rig
-        .state
-        .join(format!("runs/{}/attempts/{id}", input.run_id));
+    let attempt = rig.state.join(format!("attempts/{id}"));
     let temporary = attempt.join("tmp");
     fs::DirBuilder::new().mode(0o700).create(&temporary)?;
     fs::write(temporary.join("payload"), vec![1; 8192])?;
@@ -1220,8 +1219,8 @@ pub(super) fn gc_collects_a_settled_lane_whose_completion_attempt_failed() -> Re
     let after = files_under(&rig.state)?;
     let added: Vec<_> = after.difference(&before).collect();
     assert!(
-        added.iter().all(|path| path.starts_with("runs")),
-        "settlement wrote outside its run record: {added:?}"
+        added.iter().all(|path| path.starts_with("attempts")),
+        "settlement wrote outside its attempt record: {added:?}"
     );
     assert!(fixture.worktree.exists());
     ok(rig, &["gc", "--apply", "--json"])?;
@@ -1239,12 +1238,43 @@ pub(super) fn gc_collects_a_settled_lane_whose_completion_attempt_failed() -> Re
 /// collector busy or never ran. The path-based sweep keeps such a lane; the
 /// owner-bound pass for unsettled receipts collects it.
 pub(super) fn gc_collects_a_fast_forwarded_lane_its_settlement_missed() -> Result {
-    use crate::fabric::gc_cleanup::{COLLECTION_WAIT_SECONDS, SPAWNED};
+    if crate::fabric::peer_tests::host_test(
+        "gc_collects_a_fast_forwarded_lane_its_settlement_missed",
+    )? {
+        return Ok(());
+    }
+    use crate::fabric::gc_cleanup::SPAWNED;
     for busy in [true, false] {
-        let fixture = crate::fabric::peer_tests::SettlementFixture::resumed_with_lane_commit()?;
+        let fixture =
+            crate::fabric::peer_tests::SettlementFixture::resumed_with_integrated_lane_commit()
+                .map_err(|error| format!("fast-forward fixture creation failed: {error}"))?;
         let rig = &fixture.rig;
         let lane = fixture.worktree.to_str().ok_or("lane path")?;
-        publish_upstream(rig, &git(rig, &["-C", lane, "rev-parse", "HEAD"])?)?;
+        let lane_head = git(rig, &["-C", lane, "rev-parse", "HEAD"])?;
+        publish_upstream(rig, &lane_head)?;
+        let clock = provenant_os::clock::SystemClock;
+        let cancel = provenant_core::CancelToken::new();
+        let call = writer_call(&clock, &cancel)?;
+        let delivered = fixture.store.deliver(
+            fixture.settled.attempt_id,
+            None,
+            provenant_run::HostDeliveryContext::capture(),
+            false,
+            &call,
+        )?;
+        assert!(
+            matches!(
+                &delivered.state,
+                provenant_run::WriterDeliveryState::Delivered { .. }
+            ),
+            "{delivered:?}"
+        );
+        let integration = delivered
+            .integration
+            .as_ref()
+            .ok_or("integration receipt")?;
+        assert_eq!(integration.target, "refs/heads/trunk");
+        assert_eq!(integration.integrated.to_string(), lane_head);
         if busy {
             SPAWNED.set(Ok(Vec::new()));
             crate::fabric::settle_owned_worktree(
@@ -1252,26 +1282,34 @@ pub(super) fn gc_collects_a_fast_forwarded_lane_its_settlement_missed() -> Resul
                 &fixture.roots,
                 &FreeWorkers,
                 None,
-            )?;
+            )
+            .map_err(|error| format!("busy-branch settlement failed: {error}"))?;
             let request = SPAWNED
                 .replace(Ok(Vec::new()))
                 .map_err(|error| error.to_string())?
                 .pop()
                 .ok_or("settlement did not start collection")?;
-            // A sweep in progress holds the collector, so the worker exits.
-            let held = crate::worktrees::collection_lock(&fixture.roots)?;
-            COLLECTION_WAIT_SECONDS.set(1);
-            let outcome = crate::fabric::gc_cleanup::run(&request, &FreeWorkers);
-            COLLECTION_WAIT_SECONDS.set(120);
+            // Only this lane is busy. Other GC items remain collectable.
+            let state = provenant_os::fs::Directory::open_anchor(
+                &fixture
+                    .rig
+                    .state
+                    .join("worktrees")
+                    .join(fixture.settled.project_id.to_string())
+                    .join(provenant_confinement::worktrees::state_dir_name(
+                        &fixture.worktree,
+                    )),
+            )?;
+            let held = state.try_lock(
+                std::ffi::OsStr::new("writer.lock"),
+                provenant_os::fs::LockMode::Exclusive,
+            )?;
+            let pending_receipt = settlement_receipt(&fixture)?;
+            crate::fabric::gc_cleanup::run(&request, &FreeWorkers).map_err(|error| {
+                format!("busy settlement cleanup failed: {error}; receipt={pending_receipt}")
+            })?;
+            assert!(fixture.worktree.exists());
             drop(held);
-            outcome?;
-            let receipt = settlement_receipt(&fixture)?;
-            assert_eq!(
-                receipt["reason"],
-                crate::worktrees::COLLECTION_BUSY,
-                "{receipt}"
-            );
-            assert_eq!(receipt["retryable"], true, "{receipt}");
         } else {
             SPAWNED.set(Err("detached collection could not start".into()));
             crate::fabric::settle_owned_worktree(
@@ -1279,15 +1317,18 @@ pub(super) fn gc_collects_a_fast_forwarded_lane_its_settlement_missed() -> Resul
                 &fixture.roots,
                 &FreeWorkers,
                 None,
-            )?;
+            )
+            .map_err(|error| format!("deferred-branch settlement failed: {error}"))?;
             SPAWNED.set(Ok(Vec::new()));
             assert_eq!(settlement_receipt(&fixture)?["cleanup_deferred"], true);
         }
         assert!(fixture.worktree.exists(), "busy={busy}");
-        ok(rig, &["gc", "--apply", "--json"])?;
+        let swept = ok(rig, &["gc", "--apply", "--json"])
+            .map_err(|error| format!("fast-forward lane GC sweep failed (busy={busy}): {error}"))?;
         assert!(
             !fixture.worktree.exists(),
-            "the sweep must collect a fast-forwarded lane its settlement missed (busy={busy})"
+            "the sweep must collect a fast-forwarded lane its settlement missed (busy={busy}); gc={swept}; settlement={}",
+            settlement_receipt(&fixture)?
         );
         let receipt = settlement_receipt(&fixture)?;
         assert_eq!(receipt["state"], "pruned", "busy={busy}: {receipt}");

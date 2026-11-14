@@ -5,6 +5,7 @@ use crate::permissions::{
 };
 use provenant_core::{RelativePath, WorkScope};
 use provenant_os::home::{HomeError, HomeFiles, HomeRecipe};
+use provenant_records::policy::{Facts, Policy};
 pub use read_only::{ReadOnlyGrants, ReadOnlyPolicy};
 use std::path::PathBuf;
 use thiserror::Error;
@@ -153,6 +154,35 @@ impl PlanError {
     }
 }
 
+fn plan_boundary_error(code: &str, error: PlanError) -> PlanError {
+    let detail = error.to_string();
+    Policy::default().boundary_error(code, Facts::violation(detail), error)
+}
+
+fn plan_permission_error(error: PermissionError) -> PlanError {
+    use PermissionError as E;
+    let code = match &error {
+        E::CredentialRoot | E::CredentialRootAt { .. } | E::CredentialGrant { .. } => {
+            Some("PLAN_CONFINEDPLAN_NEW_CREDENTIALS")
+        }
+        E::InvalidPath(_) | E::BroadRoot | E::NonUtf8Path => {
+            Some("PLAN_CONFINEDPLAN_NEW_AUTHORITY_2")
+        }
+        _ => None,
+    };
+    match code {
+        Some(code) => {
+            let detail = error.to_string();
+            PlanError::Permission(Policy::default().boundary_error(
+                code,
+                Facts::violation(detail),
+                error,
+            ))
+        }
+        None => PlanError::Permission(error),
+    }
+}
+
 /// No deserialisation, environment values, prompt, credential bytes or mutable
 /// policy escape. This is policy, not proof of an enforcing backend: compile
 /// immediately before handoff, retaining verified anchors and writer exclusion.
@@ -169,63 +199,111 @@ impl ConfinedPlan {
         if matches!(p.mode, AccessMode::ReadOnly)
             && (input.codex != CodexPolicy::Clean || input.extensions != ExtensionPolicy::Deny)
         {
-            return Err(PlanError::UnconfinedExtensions);
+            return Err(plan_boundary_error(
+                "PLAN_CONFINEDPLAN_NEW_AUTHORITY",
+                PlanError::UnconfinedExtensions,
+            ));
         }
         if p.nested_confinement {
-            return Err(PermissionError::NestedConfinementUnsupported.into());
+            return Err(plan_boundary_error(
+                "PLAN_CONFINEDPLAN_NEW_AUTHORITY",
+                PermissionError::NestedConfinementUnsupported.into(),
+            ));
         }
         for grant in &p.write_roots {
             if let Some(policy) = &p.policy {
-                policy.mandatory().validate_extra_write(grant)?;
+                policy
+                    .mandatory()
+                    .validate_extra_write(grant)
+                    .map_err(|error| {
+                        let code = match &error {
+                            PermissionError::CredentialRoot
+                            | PermissionError::CredentialRootAt { .. }
+                            | PermissionError::CredentialGrant { .. } => {
+                                "PLAN_CONFINEDPLAN_NEW_CREDENTIALS"
+                            }
+                            PermissionError::InvalidPath(_)
+                            | PermissionError::BroadRoot
+                            | PermissionError::NonUtf8Path => "PLAN_CONFINEDPLAN_NEW_AUTHORITY_2",
+                            _ => "PLAN_CONFINEDPLAN_NEW_DATA_INTEGRITY",
+                        };
+                        plan_boundary_error(code, error.into())
+                    })?;
             }
-            crate::permissions::validate_noncredential_grant(grant)
-                .map_err(|error| error.with_credential_path(&grant.path, None))?;
+            crate::permissions::validate_noncredential_grant(grant).map_err(|error| {
+                plan_permission_error(error.with_credential_path(&grant.path, None))
+            })?;
+            if p.secret_roots.iter().any(|root| grant.overlaps(root)) {
+                return Err(plan_boundary_error(
+                    "PLAN_CONFINEDPLAN_NEW_CREDENTIALS",
+                    PlanError::InvalidRoots,
+                ));
+            }
             if p.protected_roots
                 .iter()
-                .chain(&p.secret_roots)
                 .chain(std::iter::once(&p.scratch))
                 .chain(&p.private_state)
-                .any(|g| grant.overlaps(g))
+                .any(|root| grant.overlaps(root))
             {
-                return Err(PlanError::InvalidRoots);
+                return Err(plan_boundary_error(
+                    "PLAN_CONFINEDPLAN_NEW_DATA_INTEGRITY",
+                    PlanError::InvalidRoots,
+                ));
             }
         }
         for grant in &p.read_roots {
-            crate::permissions::validate_read_exec_grant(grant)
-                .map_err(|error| error.with_credential_path(&grant.path, None))?;
+            crate::permissions::validate_read_exec_grant(grant).map_err(|error| {
+                plan_permission_error(error.with_credential_path(&grant.path, None))
+            })?;
         }
         for grant in &p.protected_roots {
-            crate::permissions::validate_noncredential_grant(grant)
-                .map_err(|error| error.with_credential_path(&grant.path, None))?;
+            crate::permissions::validate_noncredential_grant(grant).map_err(|error| {
+                plan_permission_error(error.with_credential_path(&grant.path, None))
+            })?;
         }
         for secret in &p.secret_roots {
-            secret.validate()?;
+            secret.validate().map_err(plan_permission_error)?;
             if p.read_roots
                 .iter()
                 .chain(&p.protected_roots)
                 .any(|g| g.overlaps(secret))
             {
-                return Err(PlanError::InvalidRoots);
+                return Err(plan_boundary_error(
+                    "PLAN_CONFINEDPLAN_NEW_CREDENTIALS",
+                    PlanError::InvalidRoots,
+                ));
             }
         }
         for private in std::iter::once(&p.scratch).chain(&p.private_state) {
-            crate::permissions::validate_noncredential_grant(private)
-                .map_err(|error| error.with_credential_path(&private.path, None))?;
+            crate::permissions::validate_noncredential_grant(private).map_err(|error| {
+                plan_permission_error(error.with_credential_path(&private.path, None))
+            })?;
             if private.scope != PathScope::Subtree
                 || p.read_roots
                     .iter()
                     .chain(&p.protected_roots)
-                    .chain(&p.secret_roots)
                     .any(|g| private.overlaps(g))
             {
-                return Err(PlanError::InvalidRoots);
+                return Err(plan_boundary_error(
+                    "PLAN_CONFINEDPLAN_NEW_DATA_INTEGRITY",
+                    PlanError::InvalidRoots,
+                ));
+            }
+            if p.secret_roots.iter().any(|secret| private.overlaps(secret)) {
+                return Err(plan_boundary_error(
+                    "PLAN_CONFINEDPLAN_NEW_CREDENTIALS",
+                    PlanError::InvalidRoots,
+                ));
             }
         }
         if p.private_state
             .as_ref()
             .is_some_and(|g| g.overlaps(&p.scratch))
         {
-            return Err(PlanError::InvalidRoots);
+            return Err(plan_boundary_error(
+                "PLAN_CONFINEDPLAN_NEW_DATA_INTEGRITY",
+                PlanError::InvalidRoots,
+            ));
         }
         let agy_home = input
             .agy_state
@@ -236,25 +314,54 @@ impl ConfinedPlan {
                 };
                 // Only allowlisted state files are read by the recipe, never
                 // a provider grant to the source credential-containing subtree.
-                selected.validate()?;
-                let private = p.private_state.as_ref().ok_or(PlanError::InvalidRoots)?;
-                if selected.overlaps(private)
-                    || selected.overlaps(&p.scratch)
-                    || p.secret_roots
-                        .iter()
-                        .chain(&p.protected_roots)
-                        .any(|g| selected.overlaps(g))
+                selected.validate().map_err(plan_permission_error)?;
+                let private = p.private_state.as_ref().ok_or_else(|| {
+                    plan_boundary_error(
+                        "PLAN_CONFINEDPLAN_NEW_AUTHORITY_2",
+                        PlanError::InvalidRoots,
+                    )
+                })?;
+                if selected.overlaps(private) || selected.overlaps(&p.scratch) {
+                    return Err(plan_boundary_error(
+                        "PLAN_CONFINEDPLAN_NEW_DATA_INTEGRITY",
+                        PlanError::InvalidRoots,
+                    ));
+                }
+                if p.secret_roots
+                    .iter()
+                    .any(|secret| selected.overlaps(secret))
                 {
-                    return Err(PlanError::InvalidRoots);
+                    return Err(plan_boundary_error(
+                        "PLAN_CONFINEDPLAN_NEW_CREDENTIALS_2",
+                        PlanError::InvalidRoots,
+                    ));
+                }
+                if p.protected_roots
+                    .iter()
+                    .any(|protected| selected.overlaps(protected))
+                {
+                    return Err(plan_boundary_error(
+                        "PLAN_CONFINEDPLAN_NEW_DATA_INTEGRITY",
+                        PlanError::InvalidRoots,
+                    ));
                 }
                 // Fixed allowlist only. No credential files, executable helpers,
                 // extensions, config or arbitrary home entries are mirrored.
                 Ok(HomeRecipe::new(
                     source,
                     private.path.clone(),
-                    RelativePath::parse("agy-home").map_err(|_| PlanError::InvalidRoots)?,
-                    RelativePath::parse(".gemini/antigravity-cli")
-                        .map_err(|_| PlanError::InvalidRoots)?,
+                    RelativePath::parse("agy-home").map_err(|_| {
+                        plan_boundary_error(
+                            "PLAN_CONFINEDPLAN_NEW_AUTHORITY_2",
+                            PlanError::InvalidRoots,
+                        )
+                    })?,
+                    RelativePath::parse(".gemini/antigravity-cli").map_err(|_| {
+                        plan_boundary_error(
+                            "PLAN_CONFINEDPLAN_NEW_AUTHORITY_2",
+                            PlanError::InvalidRoots,
+                        )
+                    })?,
                     HomeFiles {
                         copy: [
                             "history.jsonl",

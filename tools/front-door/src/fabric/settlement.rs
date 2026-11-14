@@ -15,7 +15,7 @@ pub(crate) fn advance_settled_graphs(
             state_root: settled.roots.state_root.clone(),
             project: settled.project_id,
             actor: settled.actor_id,
-            run: settled.run_id,
+            attempt: settled.attempt_id,
         },
         Some(settled),
         workers,
@@ -46,32 +46,6 @@ pub(crate) fn settlement_reactions(
     live: Option<provenant_run::HolderContext>,
     workers: &'static dyn WorkerObserver,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let launch = match live.as_ref().and_then(|live| live.launch.as_ref()) {
-        Some(launch) => launch.clone(),
-        None => recovery_launch(&subject.state_root, &subject.checkout)?,
-    };
-    let roots = crate::roots::child(
-        &subject.home,
-        &subject.checkout,
-        launch.configuration_root.clone(),
-    )?;
-    let execution_roots =
-        crate::roots::child(&subject.home, &subject.checkout, subject.state_root.clone())?;
-    provenant_cli::run::launch_successors(
-        provenant_run::ExecutionContext {
-            state_root: execution_roots.state,
-            project_id: subject.project,
-            actor_id: subject.actor,
-            read_prompts: true,
-        },
-        &roots,
-        &subject.home,
-        &subject.checkout,
-        &launch,
-        subject.run,
-        live.as_ref().and_then(|live| live.sealed.as_ref()),
-    )
-    .map_err(|error| error.message)?;
     crate::settlement::drain_run(subject, &mut |reaction| {
         let launch = match live.as_ref().and_then(|live| live.launch.as_ref()) {
             Some(launch) => launch.clone(),
@@ -86,7 +60,6 @@ pub(crate) fn settlement_reactions(
             },
             project_id: reaction.project,
             actor_id: subject.actor,
-            run_id: reaction.run,
             attempt_id: reaction.attempt,
             host_delivery: None,
             launch: Some(launch),
@@ -128,9 +101,27 @@ pub(crate) fn advance_graphs_after_settlement(
         read_prompts: true,
     };
     let store = provenant_run::RunStore::open(&context, &call)?;
+    let session = provenant_cli::run::Session { store, context };
+    let store = &session.store;
+    // The holder admitted this successor before releasing predecessor custody.
+    // Launch only now, through the ordinary host resume path. Replaying this
+    // durable settlement reaction reuses its operation and queued run.
+    if let Some(run) = store.prepare_budget_wrap_up(settled.attempt_id, &call)? {
+        let edge = provenant_cli::run::Edge {
+            roots: &roots,
+            home: &settled.roots.home,
+            assets: &settled.roots.checkout,
+            cwd: &host.cwd,
+        };
+        provenant_cli::run::launch_budget_wrap_up(&session, run, &edge, &call, host)
+            .map_err(|failure| std::io::Error::other(failure.message))?;
+    }
     let record = store.record(settled.attempt_id, &call)?;
-    if let Some(id) = matching_graph_hint(&roots.state, settled.project_id, &record) {
-        let result = advance_attempt_graph(settled, &roots, &record, &id, workers);
+    let operation = store
+        .attempt_operation(settled.attempt_id, &call)?
+        .operation_id;
+    if let Some(id) = matching_graph_hint(&roots.state, settled.project_id, &record, &operation) {
+        let result = advance_attempt_graph(settled, &roots, &record, &operation, &id, workers);
         // If the attempt store itself refused the retention receipt, retain
         // the error on the graph containing this lane, without affecting
         // the status or advancement of any other graph.
@@ -183,13 +174,17 @@ pub(crate) fn advance_live_graph(
     };
     let store = provenant_run::RunStore::open(&execution, &call)?;
     let record = store.record(holder.attempt_id, &call)?;
-    advance_attempt_graph(holder, &roots, &record, id, workers)
+    let operation = store
+        .attempt_operation(holder.attempt_id, &call)?
+        .operation_id;
+    advance_attempt_graph(holder, &roots, &record, &operation, id, workers)
 }
 
 fn advance_attempt_graph(
     settled: &provenant_run::HolderContext,
     roots: &provenant_core::Roots,
     record: &provenant_records::run::AttemptRecord,
+    operation: &provenant_core::OperationId,
     id: &str,
     workers: &'static dyn WorkerObserver,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -212,7 +207,7 @@ fn advance_attempt_graph(
     let Some(checkpoint) = journal.load(id)? else {
         return Ok(());
     };
-    if !checkpoint_matches_attempt(&checkpoint, record) {
+    if !checkpoint_matches_attempt(&checkpoint, record, operation) {
         return Ok(());
     }
     let Some(execution) = FileJournal::pending_execution(&roots.state, settled.project_id, id)?
@@ -236,7 +231,6 @@ fn advance_attempt_graph(
         cwd: execution.directory,
         assets: settled.roots.checkout.clone(),
         host_launch: Some(host),
-        mcp_project: None,
         workers,
     };
     let mut owner = BoundGraphOwner {
@@ -245,10 +239,7 @@ fn advance_attempt_graph(
         launch_warnings: Vec::new(),
         repo_facts: Default::default(),
         factory: &factory,
-        integration_base: Some(BoundGraphBases {
-            integration: execution.integration_base,
-            review: execution.review_base,
-        }),
+        integration_base: checkpoint.bases,
         integration_branch: execution.document.integration_branch.clone(),
         network: graph_network(&execution.document)?,
         capability_overrides: graph_capability_overrides(&execution.document)?,
@@ -259,19 +250,29 @@ fn advance_attempt_graph(
         tick: false,
     };
     let graph_config = &factory.context.config.graph;
-    advance_with_budget(
+    let advanced = advance_with_budget(
         &execution.document,
         &mut owner,
         &mut journal,
         &graph_config.limits,
         &graph_config.budget,
     )?;
+    if matches!(
+        advanced.status,
+        provenant_fabric_runtime::graph::GraphStatus::Complete
+            | provenant_fabric_runtime::graph::GraphStatus::Cancelled
+    ) {
+        crate::custody::settle_graph(roots, settled.project_id, id, settled.actor_id)?;
+    }
     Ok(())
 }
 
+/// `operation` is the record's submission, which matches an attempt whose
+/// reference was never written back.
 pub(crate) fn checkpoint_matches_attempt(
     checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
     record: &provenant_records::run::AttemptRecord,
+    operation: &provenant_core::OperationId,
 ) -> bool {
     checkpoint
         .nodes
@@ -283,8 +284,15 @@ pub(crate) fn checkpoint_matches_attempt(
                 .as_deref()
                 .and_then(|reference| reference.rsplit('/').next())
                 == Some(record.attempt_id.to_string().as_str())
+                || record.retry_of.is_some_and(|prior| {
+                    attempt
+                        .attempt_ref
+                        .as_deref()
+                        .and_then(|reference| reference.rsplit('/').next())
+                        == Some(prior.to_string().as_str())
+                })
                 || graph_operation("graph-attempt-operation", &attempt.key)
-                    .is_ok_and(|operation| operation == record.operation_id)
+                    .is_ok_and(|derived| &derived == operation)
         })
 }
 
@@ -292,12 +300,13 @@ pub(crate) fn matching_graph_hint(
     root: &provenant_core::StateRoot,
     project: provenant_core::ProjectId,
     record: &provenant_records::run::AttemptRecord,
+    operation: &provenant_core::OperationId,
 ) -> Option<String> {
     let id = record.context.as_ref()?.graph_id.as_deref()?;
     provenant_fabric_runtime::graph::FileJournal::read_checkpoint(root, project, id)
         .ok()
         .flatten()
-        .filter(|checkpoint| checkpoint_matches_attempt(checkpoint, record))?;
+        .filter(|checkpoint| checkpoint_matches_attempt(checkpoint, record, operation))?;
     Some(id.to_owned())
 }
 
@@ -327,12 +336,7 @@ pub(crate) fn settle_owned_worktree(
     {
         return Ok(());
     }
-    let task = store
-        .request(record.run_id, &call)?
-        .tasks
-        .into_iter()
-        .find(|task| task.task_id == record.task_id)
-        .ok_or("settled task missing")?;
+    let task = store.request(record.attempt_id, &call)?.task;
     let Some(writer) = task.writer else {
         return Ok(());
     };
@@ -341,9 +345,13 @@ pub(crate) fn settle_owned_worktree(
         && record.delivery.is_none()
         && store.delivered(record.attempt_id, &call)?.is_none()
     {
-        let graph_member = matching_graph_hint(&roots.state, settled.project_id, &record).is_some();
+        let operation = store
+            .attempt_operation(record.attempt_id, &call)?
+            .operation_id;
+        let graph_member =
+            matching_graph_hint(&roots.state, settled.project_id, &record, &operation).is_some();
         // An unmatched graph operation retains custody without scanning other graphs.
-        if graph_member || record.operation_id.as_str().starts_with("graph-") {
+        if graph_member || operation.as_str().starts_with("graph-") {
             let reason = if graph_member {
                 "graph writer worktree retained for continuation, later rounds and explicit delivery"
             } else {
@@ -550,7 +558,6 @@ pub(crate) fn settle_attempt(
         },
         project_id: record.project_id,
         actor_id: execution.actor_id,
-        run_id: record.run_id,
         attempt_id: id,
         host_delivery: None,
         launch: None,

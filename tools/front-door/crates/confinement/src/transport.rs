@@ -105,25 +105,41 @@ impl LaneRoots {
         Self(all)
     }
 
-    /// The lane areas of a project checkout: its worktrees and scratch.
-    pub fn project(root: &Path) -> Self {
-        Self::new([".worktrees", ".provenant", ".agent-run"].map(|name| root.join(name)))
+    /// The lane areas of a project checkout: its configured worktrees and scratch.
+    pub fn project(root: &Path, host_state: &Path) -> Result<Self, TransportError> {
+        let ports = provenant_config::PortTable::read_for(Some(root), host_state)
+            .map_err(|_| TransportError::Unreadable)?;
+        let mut roots = ports.worktree_roots_under(root);
+        roots.extend([".provenant", ".agent-run"].map(|name| root.join(name)));
+        Ok(Self::new(roots))
     }
 
     /// The lane areas for a repository whose private and common Git
     /// directories are known. A linked worktree is itself lane-writable, and
-    /// the project that owns the common directory contributes its lane areas.
-    pub fn for_repository(root: &Path, private: &Path, common: &Path, extra: &Self) -> Self {
+    /// the project that owns the common directory contributes its declared areas.
+    pub fn for_repository(
+        root: &Path,
+        private: &Path,
+        common: &Path,
+        extra: &Self,
+        host_state: &Path,
+    ) -> Result<Self, TransportError> {
         let mut roots = extra.0.clone();
         if private != common {
             roots.push(root.to_path_buf());
         }
-        if common.file_name().is_some_and(|name| name == ".git")
-            && let Some(project) = common.parent()
-        {
-            roots.extend(Self::project(project).0);
-        }
-        Self::new(roots)
+        let project = common
+            .file_name()
+            .is_some_and(|name| name == ".git")
+            .then(|| common.parent())
+            .flatten()
+            .unwrap_or(root);
+        roots.extend(Self::project(project, host_state)?.0);
+        Ok(Self::new(roots))
+    }
+
+    pub fn into_paths(self) -> Vec<PathBuf> {
+        self.0
     }
 
     pub fn is_empty(&self) -> bool {
@@ -518,6 +534,25 @@ mod tests {
             key: key.to_owned(),
             value: Some(value.to_owned()),
         }
+    }
+
+    #[test]
+    fn project_lane_roots_use_the_sourced_worktree_layout() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let config = root.join(".provenant");
+        std::fs::create_dir_all(&config)?;
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.worktree_layout.roots = vec![PathBuf::from(".claude/worktrees")];
+        ports.worktree_layout.default = PathBuf::from(".claude/worktrees/<branch>");
+        std::fs::write(config.join("ports.json"), serde_json::to_vec(&ports)?)?;
+
+        let roots = LaneRoots::project(&root, &root)?;
+        assert!(roots.contains(&root.join(".claude/worktrees/topic/helper")));
+        assert!(roots.contains(&root.join(".provenant/state")));
+        assert!(roots.contains(&root.join(".agent-run/state")));
+        assert!(!roots.contains(&root.join(".worktrees/topic/helper")));
+        Ok(())
     }
 
     #[test]

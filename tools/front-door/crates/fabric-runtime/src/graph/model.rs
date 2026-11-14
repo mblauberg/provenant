@@ -81,7 +81,7 @@ pub struct GraphDocument {
 
 /// Selects `model`, then `name`, then `alias`. A named model-less entry
 /// requires `adapter`, as does a model route.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphRoute {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
@@ -98,6 +98,9 @@ pub struct GraphRoute {
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// Tier retained across a concrete ladder handoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
 }
 
 /// The selector used when launching a graph route.
@@ -120,15 +123,57 @@ impl GraphRoute {
 /// Host-only inputs retained for advancement after the submitting process exits.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphExecution {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub review_base: Option<provenant_core::GitOid>,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
-    /// Integration head pinned before the graph's first node is admitted.
+    /// One stored authority for graph-wide bases; checkpoint and output
+    /// fields are projections derived from this binding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub integration_base: Option<provenant_core::GitOid>,
+    pub bases: Option<GraphBaseBinding>,
     pub directory: std::path::PathBuf,
     pub document: GraphDocument,
+}
+
+/// Typed graph-wide bases pinned at admission. Checkpoint and its consumers
+/// share this one durable binding; strings in manifests and land records are
+/// projections of these object IDs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphBaseBinding {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<provenant_core::GitOid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration: Option<provenant_core::GitOid>,
+}
+
+impl GraphBaseBinding {
+    /// The sole representation of an execution without configured bases is `None`.
+    pub fn new(
+        review: Option<provenant_core::GitOid>,
+        integration: Option<provenant_core::GitOid>,
+    ) -> Option<Self> {
+        (review.is_some() || integration.is_some()).then_some(Self {
+            review,
+            integration,
+        })
+    }
+}
+
+impl GraphExecution {
+    pub(super) fn valid_bases(&self) -> bool {
+        let (review, integration) = self
+            .bases
+            .map_or((None, None), |bases| (bases.review, bases.integration));
+        self.bases == GraphBaseBinding::new(review, integration)
+            && self
+                .document
+                .review_base
+                .as_deref()
+                .is_none_or(|reference| reference.is_empty() || review.is_some())
+            && self
+                .document
+                .integration_branch
+                .as_deref()
+                .is_none_or(|reference| reference.is_empty() || integration.is_some())
+    }
 }
 
 /// `route` remains the one-route form. A node may instead provide ordered
@@ -207,6 +252,18 @@ pub struct AttemptSpec {
     /// Require a confidential-safe route.
     #[serde(default, skip_serializing_if = "is_false")]
     pub confidential: bool,
+    /// Sources retained when run controls are merged onto template defaults.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub budget_sources: std::collections::BTreeMap<String, provenant_records::LimitSource>,
+    /// Fresh-token target; zero disables it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<u64>,
+    /// Action at the target: wrap_up (default), warn or stop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_budget: Option<provenant_records::BudgetAction>,
+    /// Fractional allowance above the target for one wrap-up continuation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_grace: Option<provenant_records::BudgetGrace>,
     /// Provider execution timeout in seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_timeout: Option<u64>,
@@ -219,19 +276,24 @@ pub struct AttemptSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
     /// Explicit capabilities granted to this attempt.
-    #[serde(default, alias = "capability", skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
     /// Use build-heavy scheduling priority.
-    #[serde(default, alias = "build_weight", skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub build_heavy: bool,
     /// Explicit write roots outside the worktree.
-    #[serde(default, alias = "write_root", skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub write_roots: Vec<String>,
     /// Cargo commands this node's lane may run locally: `all`, `check` or
     /// `none`. Sets the `lanes.local_cargo` knob for this node alone; omitted
     /// inherits the run's and the host's setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_cargo: Option<String>,
+    /// What CI this node's writer runs or waits for: `none`, `targeted` or
+    /// `full`. Sets the `lanes.ci_scope` knob for this node alone; omitted
+    /// inherits the run's and the host's setting. Advisory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_scope: Option<String>,
     /// Bundled lane preset applied to this node: `light`. Fills the settings
     /// below that the node leaves unset; an explicit setting always wins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -247,23 +309,33 @@ pub struct AttemptSpec {
     /// `delivery` (default) keeps the delivery receipt; `none` withholds it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipts: Option<String>,
-    /// `on` sandboxes this node's lane, `off` runs unsandboxed (overriding route,
-    /// network and parent floors), and `auto` (default) runs unsandboxed for every
+    /// `on` sandboxes this node's lane, `off` runs unsandboxed unless the user
+    /// selected a strict parent admission floor, and `auto` (default) runs unsandboxed for every
     /// lane kind. Sets the `lanes.sandbox` knob for this node alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<String>,
-    /// The node whose lane or plan added or replaced this one, set by patch
-    /// admission. When that lane was sandboxed by distrust (its route, its
-    /// parent or the knob), the graph owner sandboxes this node too. Admission
-    /// overwrites any value an author supplies, and a value can only add a
-    /// sandbox.
+    /// The node whose lane or plan admitted this launch. The host reads its
+    /// sealed sandbox evidence; authors cannot replace the admission identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admitted_by: Option<String>,
-    /// Set by the graph owner from `admitted_by` before launch, and carried to
-    /// a peer. It only narrows: the lane is then sandboxed whatever `sandbox`
-    /// says.
+    /// Host-sealed evidence carried to peers and recovery. The shared floor
+    /// policy warns by default; strict retains a user-enabled parent sandbox.
     #[serde(default, skip_serializing_if = "is_false")]
     pub parent_sandboxed: bool,
+    /// Effective host classification, retained across peer launch and replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_policy: Option<provenant_records::run::LaunchPolicy>,
+    /// Declared file inputs, including the original brief file, for host
+    /// confidentiality classification before any provider is selected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policy_inputs: Vec<std::path::PathBuf>,
+    /// Host-only seal marker; graph authors and peer payloads cannot set it.
+    #[serde(skip)]
+    pub policy_sealed: bool,
+    /// Accepted profile restored by the host, including effective knobs and
+    /// their sources. Replays must not rebuild it from current host defaults.
+    #[serde(skip)]
+    pub sealed_profile: Option<provenant_records::run::HarnessProfile>,
 }
 
 /// The `light` preset: no private source view, minimal supervision and no
@@ -311,6 +383,20 @@ impl AttemptSpec {
     /// from its preset.
     pub fn lane_knobs(&self) -> Vec<String> {
         let mut knobs = Vec::new();
+        if let Some(budget) = self.token_budget {
+            knobs.push(format!("lanes.token_budget={budget}"));
+        }
+        if let Some(action) = self.on_budget {
+            let name = match action {
+                provenant_records::BudgetAction::WrapUp => "wrap_up",
+                provenant_records::BudgetAction::Warn => "warn",
+                provenant_records::BudgetAction::Stop => "stop",
+            };
+            knobs.push(format!("lanes.budget_action={name}"));
+        }
+        if let Some(grace) = self.budget_grace {
+            knobs.push(format!("lanes.budget_grace={}", grace.as_fraction()));
+        }
         if self.effective_isolation() != "private" {
             knobs.push(format!("lanes.isolation={}", self.effective_isolation()));
         }
@@ -325,6 +411,9 @@ impl AttemptSpec {
         }
         if let Some(sandbox) = &self.sandbox {
             knobs.push(format!("lanes.sandbox={sandbox}"));
+        }
+        if let Some(scope) = &self.ci_scope {
+            knobs.push(format!("lanes.ci_scope={scope}"));
         }
         knobs
     }
@@ -342,12 +431,17 @@ impl AttemptSpec {
             && self.directory.is_none()
             && !self.confidential
             && self.provider_timeout.is_none()
+            && self.budget_sources.is_empty()
+            && self.token_budget.is_none()
+            && self.on_budget.is_none()
+            && self.budget_grace.is_none()
             && self.new_worktree.is_none()
             && self.account.is_none()
             && self.capabilities.is_empty()
             && !self.build_heavy
             && self.write_roots.is_empty()
             && self.local_cargo.is_none()
+            && self.ci_scope.is_none()
             && self.preset.is_none()
             && self.isolation.is_none()
             && self.supervision.is_none()
@@ -355,23 +449,40 @@ impl AttemptSpec {
             && self.sandbox.is_none()
             && self.admitted_by.is_none()
             && !self.parent_sandboxed
+            && self.launch_policy.is_none()
+            && self.policy_inputs.is_empty()
     }
+}
+
+fn graph_node_extra<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<provenant_records::ExtraFields, D::Error> {
+    let extra = provenant_records::ExtraFields::deserialize(deserializer)?;
+    if extra.contains_key("auto_continue_no_work") {
+        return Err(serde::de::Error::custom(
+            "auto_continue_no_work was removed; use on_stop",
+        ));
+    }
+    Ok(extra)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphNode {
-    /// Continue once automatically when this writer stops without a new commit.
-    /// Omission enables continuation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_continue_no_work: Option<bool>,
+    /// The step to take after a stop with a given cause instead of the stop
+    /// table's default (`docs/specs/run.md#what-follows-a-stop`).
+    #[serde(default, skip_serializing_if = "provenant_records::OnStop::is_empty")]
+    pub on_stop: provenant_records::OnStop,
     /// Attempt specification carrying placement, new worktree, account, capability, build weight and write roots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<AttemptSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub family_group: Option<String>,
+    /// Launch conditions resolved at submission; the node is skipped unless every term holds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub when: Vec<WhenTerm>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<provenant_records::run::WorkContext>,
-    #[serde(flatten)]
+    #[serde(flatten, deserialize_with = "graph_node_extra")]
     pub extra: provenant_records::ExtraFields,
     #[serde(skip)]
     pub(super) composite_members: Vec<String>,
@@ -440,7 +551,7 @@ pub struct GraphNode {
     /// Wall-clock limit for this node's lane, in seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_seconds: Option<u64>,
-    #[serde(default, alias = "goal", alias = "brief")]
+    #[serde(default, alias = "brief")]
     pub prompt: String,
     #[serde(default)]
     pub depends_on: Vec<String>,
@@ -601,7 +712,21 @@ pub enum AdmissionError {
     },
 }
 
+/// The `GraphDocument::extra` key holding a submission's replay digest.
+pub const REPLAY_DIGEST_FIELD: &str = "replay_digest";
+
 impl GraphDocument {
+    /// The host digest of the input that created this graph. A named `run` whose
+    /// input has the same digest finds this graph instead of starting another.
+    pub fn replay_digest(&self) -> Option<&str> {
+        self.extra.get(REPLAY_DIGEST_FIELD)?.as_str()
+    }
+
+    pub fn set_replay_digest(&mut self, digest: &str) {
+        self.extra
+            .insert(REPLAY_DIGEST_FIELD.into(), serde_json::json!(digest));
+    }
+
     /// Check nested composite structure with the same expansion safety bounds
     /// used by graph admission, without starting a graph.
     pub fn check_composites(&self, limits: &crate::config::GraphLimits) -> Result<(), String> {
@@ -902,11 +1027,13 @@ pub struct NodeOutputs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdict_error: Option<String>,
     pub schema_version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decide_outcome: Option<DecideOutcome>,
     pub result: Option<ResultOutput>,
     pub verdict: Option<String>,
     pub findings: Vec<Finding>,
-    /// Whether the full findings selection was observed and parsed. Missing
-    /// evidence in older checkpoints remains unknown on replay.
+    /// Whether the full findings selection was observed and parsed; absent
+    /// when no findings selection applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub findings_available: Option<bool>,
     pub branch: Option<String>,
@@ -920,6 +1047,38 @@ pub struct NodeOutputs {
     /// when no handoff was declared or it lists no items.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remaining: Option<Vec<String>>,
+}
+
+/// Durable result of a decide request. `Unanswered` structurally carries no option.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DecideOutcome {
+    Answered { option: String, actor: String },
+    AnsweredByDefault { option: String },
+    AnsweredByPolicy { option: String, rule: String },
+    Unanswered,
+}
+
+impl DecideOutcome {
+    pub fn option(&self) -> Option<&str> {
+        match self {
+            Self::Answered { option, .. }
+            | Self::AnsweredByDefault { option }
+            | Self::AnsweredByPolicy { option, .. } => Some(option),
+            Self::Unanswered => None,
+        }
+    }
+}
+
+/// Typed review evidence retained when a read-only review lane settles.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewSettlement {
+    pub attempt_id: provenant_core::AttemptId,
+    pub head: provenant_core::GitOid,
+    pub base: Option<provenant_core::GitOid>,
+    pub verdict: provenant_records::workflow::ReviewVerdict,
+    /// The reviewer is a separate read-only lane, not a writer continuation.
+    pub independent: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1068,11 +1227,10 @@ pub struct GraphCheckpoint {
     pub delivered: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request: Option<String>,
-    /// Graph-wide review and integration bases fixed at admission.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bound_review_base: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bound_integration_base: Option<String>,
+    /// Runtime projection of the execution binding. It is hydrated from
+    /// GraphExecution and never stored in the checkpoint.
+    #[serde(skip)]
+    pub bases: Option<GraphBaseBinding>,
     /// Integration head pinned when the first integration source was resolved.
     /// Synthesis and writers that start from that commit stop if it moves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1082,11 +1240,9 @@ pub struct GraphCheckpoint {
     pub cancelled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancel_reason: Option<String>,
+    /// Why the graph waits for the chair, with the cause typed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pause_reason: Option<String>,
-    /// Stable cause of the pause, independent of its displayed explanation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pause_code: Option<String>,
+    pub pause: Option<provenant_records::pause::Pause>,
     /// Usage fields unavailable for settled attempts, including partial
     /// telemetry. Only the newest lines are kept.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1104,9 +1260,10 @@ pub struct GraphCheckpoint {
     pub settlements: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions: Vec<String>,
-    /// Inbox decisions raised by loops, decide nodes and pauses, by ask ID.
+    /// Links to the inbox requests raised by loops, decide nodes, lands and
+    /// pauses, by ask ID. The inbox holds the question and the answer.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub asks: Vec<NodeAsk>,
+    pub asks: Vec<AskLink>,
     /// Actor every ask is raised under, recorded before the first ask.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask_actor: Option<String>,
@@ -1191,11 +1348,11 @@ pub enum NodeDecisionCause {
 }
 
 impl NodeDecisionCause {
-    pub(super) fn from_loop_code(code: &str) -> Option<Self> {
-        match code {
-            "loop_paused" => Some(Self::LoopPaused),
-            "loop_ask_closed" => Some(Self::LoopAskClosed),
-            "invalid_loop_decision" => Some(Self::InvalidLoopDecision),
+    pub(super) fn from_pause(cause: PauseCause) -> Option<Self> {
+        match cause {
+            PauseCause::LoopPaused => Some(Self::LoopPaused),
+            PauseCause::LoopAskClosed => Some(Self::LoopAskClosed),
+            PauseCause::InvalidLoopDecision => Some(Self::InvalidLoopDecision),
             _ => None,
         }
     }
@@ -1232,8 +1389,17 @@ pub struct NodeProgress {
     /// Bounded planner JSON retained until admission succeeds, including across resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fragment: Option<String>,
+    /// The writer's unfinished handoff, kept for its continuation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub handoff: Option<String>,
+    pub handoff: Option<provenant_records::handoff::Handoff>,
+    /// The stopped writer's handoff says `blocked`, read once at settlement.
+    #[serde(default, skip_serializing_if = "not_delivered")]
+    pub blocked: bool,
+    /// The decisions a review node made on its findings, each bound to the
+    /// head and base it reviewed. A decision without a base carries no
+    /// approval over, but is stored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<provenant_records::FindingDecision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expansion_pause: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1287,10 +1453,13 @@ pub struct NodeProgress {
     pub last_launch_retry: Option<LaunchRetry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outputs: Option<NodeOutputs>,
-    /// Immutable evidence from earlier node redos, included in budget accounting.
+    /// Machine-readable review verdict and the exact subject reviewed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_settlement: Option<ReviewSettlement>,
+    /// Immutable evidence from redos and continuations, included in budgets.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub previous_attempts: Vec<GraphAttempt>,
-    /// One durable row per route actually tried, in route order.
+    /// Current attempt on each route actually tried, in route order.
     pub attempts: Vec<GraphAttempt>,
 }
 
@@ -1332,6 +1501,9 @@ pub struct GraphAttempt {
     /// When the attempt settled, as a graph-wide order from 1; zero while it runs.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub settled: u64,
+    /// The stop cause the run sealed for this attempt, read at settlement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<provenant_records::StopCause>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1430,8 +1602,20 @@ pub struct AttemptKey {
     pub extra: provenant_records::ExtraFields,
     pub graph_id: String,
     pub node_id: String,
+    /// One-based WorkKey attempt identity in the journal's project namespace.
+    /// A continuation advances this number without consuming another route.
+    pub attempt: u32,
     /// Zero-based position in that node's ordered route list.
     pub route_index: u16,
+}
+
+impl AttemptKey {
+    pub fn work_key(
+        &self,
+        project: provenant_core::ProjectId,
+    ) -> Result<provenant_records::WorkKey, provenant_records::work_key::WorkKeyError> {
+        provenant_records::WorkKey::new(project, &self.graph_id, &self.node_id, self.attempt)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1452,6 +1636,29 @@ impl NodeState {
 }
 
 impl GraphCheckpoint {
+    /// Pause the graph for the chair. The reason is cut to its bound.
+    pub fn set_pause(&mut self, cause: provenant_records::pause::PauseCause, reason: &str) {
+        let reason = bounded(reason, provenant_records::pause::PAUSE_REASON_BYTES);
+        let reason = if reason.trim().is_empty() {
+            "paused".into()
+        } else {
+            reason
+        };
+        self.pause = provenant_records::pause::Pause::new(cause, None, reason).ok();
+    }
+
+    pub fn pause_cause(&self) -> Option<provenant_records::pause::PauseCause> {
+        self.pause
+            .as_ref()
+            .map(provenant_records::pause::Pause::cause)
+    }
+
+    pub fn pause_reason(&self) -> Option<&str> {
+        self.pause
+            .as_ref()
+            .map(provenant_records::pause::Pause::reason)
+    }
+
     pub(super) fn deactivate_expansion_pauses(&mut self) {
         for node in &mut self.nodes {
             if let Some(NodeDecisionCause::PlanExpansionPaused { active, .. }) =
@@ -1548,9 +1755,15 @@ impl GraphCheckpoint {
 }
 
 impl NodeProgress {
-    /// All attempt evidence in launch order, including previous redos.
+    /// All attempt evidence in WorkKey order, including redos and continuations.
     pub fn recorded_attempts(&self) -> impl DoubleEndedIterator<Item = &GraphAttempt> {
-        self.previous_attempts.iter().chain(&self.attempts)
+        let mut attempts: Vec<_> = self
+            .previous_attempts
+            .iter()
+            .chain(&self.attempts)
+            .collect();
+        attempts.sort_by_key(|attempt| attempt.key.attempt);
+        attempts.into_iter()
     }
 
     pub(super) fn truncation(&self) -> Option<(&[usize], usize)> {
@@ -1671,12 +1884,41 @@ impl Serialize for GraphRun {
         if let Some(outcome) = &self.outcome {
             state.serialize_field("outcome", outcome)?;
         }
-        state.serialize_field("checkpoint", &self.checkpoint)?;
+        state.serialize_field(
+            "checkpoint",
+            &GraphCheckpointProjection::from(&self.checkpoint),
+        )?;
         if let Some(error) = &self.advance_error {
             state.serialize_field("advance_error", error)?;
         }
         state.serialize_field("waits", &super::graph_waits(&self.checkpoint))?;
         state.end()
+    }
+}
+
+#[derive(Serialize)]
+struct GraphCheckpointProjection<'a> {
+    #[serde(flatten)]
+    checkpoint: &'a GraphCheckpoint,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bound_review_base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bound_integration_base: Option<String>,
+}
+
+impl<'a> From<&'a GraphCheckpoint> for GraphCheckpointProjection<'a> {
+    fn from(checkpoint: &'a GraphCheckpoint) -> Self {
+        Self {
+            checkpoint,
+            bound_review_base: checkpoint
+                .bases
+                .and_then(|bases| bases.review)
+                .map(|base| base.to_string()),
+            bound_integration_base: checkpoint
+                .bases
+                .and_then(|bases| bases.integration)
+                .map(|base| base.to_string()),
+        }
     }
 }
 
@@ -1738,6 +1980,8 @@ pub struct NodeInput<'a> {
 pub struct InputRequest {
     pub label: String,
     pub attempt_ref: Option<String>,
+    /// Origin identity of the attempt that produced this input.
+    pub attempt_key: Option<AttemptKey>,
     /// Findings from a non-attempt member, such as a CI gate with no result file.
     pub inline_findings: Option<Vec<Finding>>,
     /// Composite qualification to apply to IDs in the source result.

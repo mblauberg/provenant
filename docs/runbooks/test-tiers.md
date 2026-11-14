@@ -9,22 +9,21 @@ on the package it changed), pushes, and leaves T0 to T3 to CI. Set
 `--set 'attempt.local_cargo="check"'` for a run, or `attempt.local_cargo` on a
 graph node, and the lane's `cargo` shim refuses anything heavier.
 
-`scripts/verify-tier` runs T0 (format, check and unit tests for touched crates);
-`--tier 1` adds mapped integration binaries, `--tier 2` the unpartitioned CI
-nextest suite with the same quarantine exclusions, and `--tier 3` repeats it with
-the advisory mutation script. It prints the selected crates, targets and paths,
-comparing committed and working-tree changes against `origin/main`. Base,
-workspace, commands, integration mappings, `package_paths` (non-Rust paths that
-affect a crate's unit tests), `test_threads` and runner hosts are set in
-`.provenant/verify.json`. Heavy tiers warn locally and continue, so run them on
-a host with spare capacity.
+`scripts/verify-tier` runs the built-in `0` tier (format, check and unit tests
+for touched crates), `1` adds mapped integration binaries, `2` runs the
+unpartitioned CI nextest suite with quarantine exclusions, and `3` repeats it
+with the advisory mutation script. It prints the selected crates, targets and
+paths, comparing committed and working-tree changes against `origin/main`.
+Base, workspace, commands, integration mappings, `package_paths` (non-Rust
+paths that affect a crate's unit tests), `test_threads` and runner hosts are set
+in the `verify` port in `config/ports.json` (also exposed through the optional `.provenant/ports.json` link). Tier names are free-form strings;
+each tier declares its commands, package/integration/all selection, and whether
+to warn under host load. Host-load warnings continue locally.
 
-CI differs from T2 in that it narrows a pull request to the affected set, runs
-the example test only when affected, and reruns quarantined tests in an advisory
-step. `scripts/verify-tier --tier 2 --host ci` dispatches `verify-tiers.yml`
-with `gh` against the pushed branch tip and waits; the workflow must already be
-on the remote's default branch, and the credential must permit dispatch and
-reading runs.
+See [CI](ci.md#pipeline) for pull request selection. A configured host can
+run `scripts/verify-tier --tier 2 --host ci` against a pushed branch; the
+workflow must exist on the remote default branch and the credential must permit
+dispatch and reading runs.
 
 A configured runner is an argument array with `{commit}`, `{tier}` and optional
 `{remote}` fields, such as `["scripts/verify-peer-runner", "peer-name",

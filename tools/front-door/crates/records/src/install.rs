@@ -90,7 +90,7 @@ pub struct ResolvedHarnessTarget {
     pub extra: crate::ExtraFields,
     pub harness: Harness,
     pub skills_dir: AbsolutePath,
-    pub mcp_file: AbsolutePath,
+    pub config_file: AbsolutePath,
     pub hook_file: Option<AbsolutePath>,
     pub instruction: Option<AbsolutePath>,
     /// The account removed every managed hook on purpose, so a later install
@@ -99,7 +99,7 @@ pub struct ResolvedHarnessTarget {
     pub hooks_relinquished: bool,
 }
 pub const BASELINE_STATE_FORMAT_VERSION: u64 = 1;
-pub const STATE_FORMAT_VERSION: u64 = BASELINE_STATE_FORMAT_VERSION;
+pub const STATE_FORMAT_VERSION: u64 = 2;
 
 fn default_state_format_version() -> u64 {
     BASELINE_STATE_FORMAT_VERSION

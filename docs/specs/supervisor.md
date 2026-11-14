@@ -42,6 +42,11 @@ there is no native child registry, a present host holder must affirm that no gra
 child remains. Spared and protected owners and their possible descendants stay excluded.
 A census listing or cwd observation alone never grants signal authority, and
 recovery signals only a PID whose recorded identity matches.
+
+A launch is named by its attempt's `WorkKey`: the guardian's launch summary
+records the key, and a stop request is identified by attempt and generation.
+A supervisor restart finds a live writer by the key through the attempt row,
+then reads that attempt's custody records.
 - Why: signalling a recycled PID or a sibling's group kills unrelated work.
 - Test: `crates/supervisor/tests/process.rs::inherited_wait_policy_preserves_pid_reservation`;
   `crates/supervisor/tests/custody.rs::stale_complete_census_does_not_signal_a_late_shared_group_owner`;
@@ -59,7 +64,7 @@ launch again.
 - Why: losing the caller must not lose custody or double-launch a writer.
 - Test: `crates/supervisor/tests/custody.rs::owner_death_keeps_guardian_and_writer_live`;
   `crates/os/src/exec/tests.rs::secret_input_arrives_by_descriptor_with_eof_and_no_token_environment`.
-  The unknown-launch rule has no test (gap).
+
 - Owner: `crates/supervisor/src/guardian/`
 
 ### Quiescence before release
@@ -88,6 +93,7 @@ open writer-lock paths, with a reconcile action. An open path is not proof of
 flock ownership and grants no signal authority. Unknown or unreadable holders
 remain explicit uncertainty. The guardian continues retaining unresolved
 custody; a timeout alone never authorises settlement or an unrelated signal.
+- Why: detached services must not hold a lease or cause unsafe release.
 - Test: `crates/supervisor/src/process_os/provider.rs::lane_descriptors_are_cloexec`;
   `::orphaned_provider_descendant_does_not_retain_writer_flock`;
   `crates/supervisor/tests/custody.rs::unsandboxed_detached_service_does_not_block_settlement`;
@@ -137,9 +143,7 @@ fabricated terminal event.
 ## Permission policy
 
 Lane profiles start open and deny the boundaries
-([ADR 0040](../adr/0040-open-lane-policy-with-explicit-boundaries.md)); rendered
-profiles are pinned by
-`crates/providers/src/seatbelt_snapshots.rs::seatbelt_profiles_match_snapshots`.
+([ADR 0040](../adr/0040-open-lane-policy-with-explicit-boundaries.md)).
 
 ### Plans refuse unsafe roots
 
@@ -168,21 +172,24 @@ compare-and-swap.
 
 Unsandboxed lanes inherit the host environment, PATH, tool caches and
 credentials in place. Provider account selectors still choose the registered
-account; agy uses that account's HOME when its keychain requires it. Environment
+account and its required credentials. Credential
 values stay in the live launch, never in prompts or receipts. Native launches
 skip skill copies, tool dependency discovery, credential symlink inventory and
-the private Cargo home, target directory and build-slot shim.
+the build-slot shim. Every lane still binds the host Cargo home and private
+target/build directories before seed validation.
 
 Sandboxed lanes use the minimal environment and staged skills, discover tool
 dependencies and credential aliases, and report inventory omissions in one
-actionable warning. They cannot write the Cargo registry, Git, pnpm, npm or
-Node caches the host later runs unconfined; writers get a private per-worktree
-cache.
+actionable warning. Cargo registry and Git sources are read-only unless
+`domains.fabric.lanes.cargo_source_writes` is enabled. Cargo lock and cache-use
+tracking files have exact write grants; Cargo credentials are always denied.
+The pnpm, npm and Node caches the host later runs unconfined stay read-only;
+build output and tool configuration use private lane caches.
 - Why: native lanes use ordinary tools and login state; sandboxed lanes keep
-  packages they can change out of the host's later builds.
+  source sharing explicit while keeping credentials and build output isolated.
 - Test: `crates/providers/src/tests_launch_access.rs::native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation`;
   `crates/confinement/src/permissions/policy/host.rs::credential_alias_inventory_runs_only_for_sandboxed_lanes`;
-  `crates/providers/src/tests_lane_toolchains.rs::no_lane_can_write_shared_toolchain_stores`;
+  `crates/providers/src/tests_lane_toolchains.rs::node_tool_stores_are_read_only`;
   `crates/confinement/src/permissions/tests/grants.rs::writer_cache_is_private_and_bound_to_repository_and_worktree_identity`
 
 ### Network, IPC and process information
@@ -199,11 +206,15 @@ separate OS user or VM.
 
 ### Lane process-tree memory interface
 
-`provenant process-tree --root PID --json` reads a host-sampled snapshot of the
-lane's own descendants; the lane gets one exact read grant and no process-listing
-authority. A missing, stale, incomplete or unsupported sample is exit 4
-`PROCESS_TREE_UNAVAILABLE` with null data, never a partial tree or zero memory.
+The process-tree interface reads a host-sampled snapshot of the lane's own
+descendants without process-listing authority. A missing, stale, incomplete or
+unsupported sample is unavailable, never a partial tree or zero memory.
 The sample is periodic observation, not an atomic census or a memory limit.
+`domains.run.resource_sample_interval_ms` controls CPU and process-tree sampling
+(1..=60000 ms, compiled default 5000 ms). Each private snapshot records a
+freshness allowance derived from that interval plus the bounded sample budget;
+the CLI output and public sample schema do not change. The setting source is
+available from `provenant config show`.
 - Why: a memory guard that reads lost observation as zero would approve a
   runaway build.
 - Test: `crates/confinement/src/permissions/tests/process_tree.rs::lane_process_tree_sample_is_private_under_production_profiles`;
@@ -231,8 +242,9 @@ refuses credential-bearing URLs.
 
 Git's own inventory is the worktree registry. One writer holds each linked
 worktree, and custody outlives the requesting call. `worktree remove` refuses
-the primary, a dirty tree, a live writer or observed process, and has no force;
-it deletes a branch only when merged or named by `--discard`.
+the primary, a live writer or observed process, and has no force. Dirty work
+requires explicit discard, with its recoverable archive captured before removal;
+it deletes a branch only with current landing evidence or explicit discard.
 - Why: removing a tree under a live writer destroys its work.
 - Test: `src/worktree_tests/writer_cases.rs::second_writer_is_refused_while_first_holds_the_worktree`;
   `crates/confinement/src/worktrees/lifecycle_tests/gc_safety.rs::detached_removal_keeps_dirty_unmerged_and_live_work`
@@ -256,10 +268,14 @@ Landing and collection require `Free`; the census grants no signal authority.
 
 ### Pruning and GC need proof
 
-Merged pruning proves a merge by ancestry or a recorded merged PR at the tip,
-never prunes the integration branch, and deletes refs against their expected
-old OID. GC keeps anything in doubt: a held writer lock keeps a cache, and a
-worktree goes only clean, registered and with terminal lanes.
+Pruning proves subsumption or landing from declared retained-ref, tree-equivalent,
+integration or forge evidence and revalidates it at mutation. Reference deletion
+requires landed evidence and the expected old OID; worktree-only retirement
+preserves the branch. GC keeps anything in doubt: a held writer lock keeps a
+cache, and foreign, detached or idle worktree collection requires the declared
+retention policy and complete current custody, run and process evidence.
+Shallow history, conflicted comparisons, moved tips and unavailable evidence
+keep the candidate.
 - Why: GC runs unattended; pruning on a guess deletes the user's work.
 - Test: `crates/confinement/src/worktrees/lifecycle_tests/worktree_operations.rs::merged_pruning_is_branch_scoped_and_keeps_unselected_refs`;
   `crates/confinement/src/cache.rs::gc_idle_refuses_writers_that_became_held_or_unobservable`

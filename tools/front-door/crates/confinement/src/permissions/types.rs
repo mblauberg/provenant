@@ -14,11 +14,15 @@ pub enum BackendKind {
     MacOsSbpl,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 pub enum AvailabilityReason {
+    #[error("this platform has no sandbox backend")]
     UnsupportedPlatform,
+    #[error("the sandbox executable is missing")]
     SandboxExecutableMissing,
+    #[error("the sandbox executable is not trusted")]
     SandboxExecutableUntrusted,
+    #[error("the sandbox capability probe failed")]
     ProbeFailed,
 }
 
@@ -308,7 +312,7 @@ pub struct ProviderProfileSpec {
     pub runtime_reads: Vec<PathGrant>,
     /// Exact attempt-bound host Fabric mutation endpoint.
     pub fabric_socket: Option<PathGrant>,
-    /// State files the lane's Fabric MCP server reads. Mutations use the socket.
+    /// State files the lane's nested Provenant commands read. Mutations use the socket.
     pub fabric_state_reads: Vec<PathGrant>,
     /// Literal directory discovery; never the contents of provider config.
     pub discovery_reads: Vec<PathGrant>,
@@ -347,15 +351,14 @@ pub struct WorktreeWriteAuthority {
     pub git_grants_digest: [u8; 32],
     pub(super) cargo_cache: PathGrant,
     pub(super) publishing: bool,
-    /// Older records remain readable, but cannot launch without a verified binding.
-    #[serde(default)]
-    pub(super) common_git_dir: Option<PathBuf>,
+    /// Common Git directory from the verified repository binding.
+    pub(super) common_git_dir: PathBuf,
 }
 
 impl WorktreeWriteAuthority {
     /// Repository selected by the host, for the lane-private object alternate.
-    pub fn common_git_dir(&self) -> Option<&Path> {
-        self.common_git_dir.as_deref()
+    pub fn common_git_dir(&self) -> &Path {
+        &self.common_git_dir
     }
 
     pub fn set_publishing(&mut self, enabled: bool) {
@@ -380,7 +383,7 @@ impl WorktreeWriteAuthority {
             git_grants_digest: grants.digest(&cargo_cache),
             cargo_cache,
             publishing: true,
-            common_git_dir: Some(worktree.repo().common_git_dir().to_path_buf()),
+            common_git_dir: worktree.repo().common_git_dir().to_path_buf(),
         })
     }
 }

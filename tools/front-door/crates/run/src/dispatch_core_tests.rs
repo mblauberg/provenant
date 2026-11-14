@@ -7,13 +7,13 @@ fn cancellation_keeps_a_genuine_launch_preparation_failure() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.create(&run, &call)?;
     let started = store.start(
-        run.run_id,
+        run.attempt_id,
         &Ready,
         &|record, _| {
-            let attempt = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+            let attempt = store.attempt_dir(record.attempt_id, false)?;
             artifacts::seal(
                 &attempt,
                 "cancel.json",
@@ -49,7 +49,7 @@ fn publication_legacy_result_orphan_retains_manifest_failure() -> TestResult {
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let input = input();
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.mark_starting(
         &store.record(id, &call)?,
         &route(),
@@ -59,7 +59,7 @@ fn publication_legacy_result_orphan_retains_manifest_failure() -> TestResult {
         &call,
     )?;
     let record = store.claim(id, &clock, &call)?.ok_or("claim")?;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     artifacts::seal(&attempt, "stdout.log", b"answer", CAPTURE_LIMIT)?;
     artifacts::seal(&attempt, "result.md", b"legacy result", RESULT_LIMIT)?;
     let archive = artifacts::subdir(&attempt, std::ffi::OsStr::new("quarantine"), true)?;
@@ -100,7 +100,7 @@ fn terminal_dependency_waits_for_custody_release() -> TestResult {
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let input = input();
     store.create(&input, &call)?;
-    let mut record = store.record(input.attempts[0].attempt_id, &call)?;
+    let mut record = store.record(input.attempt_id, &call)?;
     record.generation = 1;
     record.state = AttemptState::Terminal {
         extra: Default::default(),
@@ -115,7 +115,7 @@ fn terminal_dependency_waits_for_custody_release() -> TestResult {
         "a preflight refusal needs no custody lock"
     );
     record.provider_launched = Some(true);
-    let directory = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+    let directory = store.attempt_dir(record.attempt_id, false)?;
     assert!(
         store.custody_released(&record, &call).is_err(),
         "missing custody is not release evidence"
@@ -161,6 +161,104 @@ fn terminal_dependency_waits_for_custody_release() -> TestResult {
     assert!(!store.custody_released(&record, &call)?);
     Ok(())
 }
+// Medium: filesystem/SQLite boundary, no provider process or timer.
+#[test]
+fn work_key_restart_uses_the_retained_attempts_settlement() -> TestResult {
+    use provenant_supervisor::custody::{self, ImportFence, Scope};
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut input = input();
+    let worktree = temp.path().join("lane");
+    input.request.task.writer = Some(WriterRequest {
+        extra: crate::tests::writer_extra(),
+        project: temp.path().to_path_buf(),
+        worktree: worktree.clone(),
+    });
+    store.create(&input, &call)?;
+    store.start(
+        input.attempt_id,
+        &Ready,
+        &|_, _| Err(RunError::Validation("preflight")),
+        &call,
+    )?;
+    let key = store.record(input.attempt_id, &call)?.key;
+    let record = store.attempt_by_key(&key, &call)?;
+    assert_eq!(record.attempt_id, input.attempt_id);
+    let scope = RunStore::scope(&record);
+    let run = store.attempt_dir(record.attempt_id, false)?;
+    let slot_path = store
+        .writer_registry
+        .join("worktrees")
+        .join(record.project_id.to_string())
+        .join(provenant_confinement::worktrees::state_dir_name(&worktree));
+    std::fs::create_dir_all(&slot_path)?;
+    let slot = provenant_os::fs::Directory::open_anchor(&slot_path)?;
+    let lease = provenant_supervisor::fixture::acquire_writer(
+        slot.try_clone()?,
+        scope,
+        call.lock_budget(),
+        call.cancel,
+        call.clock,
+    )?;
+    let evidence_path = slot_path.join(scope.attempt.to_string());
+    let reservation_path = evidence_path.join("reservation.json");
+    let mut reservation: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&reservation_path)?)?;
+    let metadata = run.metadata()?;
+    reservation["launch_state"] = serde_json::json!("never_spawned");
+    reservation["attempt_device"] = serde_json::json!(metadata.device);
+    reservation["attempt_inode"] = serde_json::json!(metadata.inode);
+    reservation["unresolved_cleanup"] = serde_json::json!(false);
+    reservation["census_incomplete"] = serde_json::json!(false);
+    std::fs::write(&reservation_path, serde_json::to_vec(&reservation)?)?;
+    std::fs::write(
+        evidence_path.join("import-retained.json"),
+        crate::db::bytes(&ImportFence {
+            schema_version: 1,
+            scope,
+            lane: key,
+            run_attempt: run.current_path()?,
+        })?,
+    )?;
+    drop(lease);
+    assert!(!store.custody_released(&record, &call)?);
+    let quarantine_path = run.current_path()?.join("quarantine");
+    std::fs::create_dir_all(&quarantine_path)?;
+    std::fs::write(
+        quarantine_path.join("manifest.json"),
+        crate::db::bytes(&serde_json::json!({
+            "schema_version":1, "scope":scope, "kind":"quarantine_manifest"
+        }))?,
+    )?;
+    custody::publish_release(&run, scope)?;
+    for journal_scope in [
+        Scope {
+            generation: scope.generation + 1,
+            ..scope
+        },
+        scope,
+    ] {
+        std::fs::write(
+            evidence_path.join("settlement.json"),
+            crate::db::bytes(&serde_json::json!({
+                "schema_version":1, "scope":journal_scope
+            }))?,
+        )?;
+        assert_eq!(
+            store.custody_released(&record, &call)?,
+            journal_scope == scope
+        );
+    }
+    assert!(
+        reservation_path.exists(),
+        "restart eligibility must not mutate retained custody"
+    );
+    assert!(quarantine_path.join("manifest.json").exists());
+    Ok(())
+}
+
 #[test]
 fn unreadable_reservation_in_the_writers_directory_holds_custody() -> TestResult {
     let temp = tempfile::tempdir()?;
@@ -169,13 +267,13 @@ fn unreadable_reservation_in_the_writers_directory_holds_custody() -> TestResult
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let mut input = input();
     let worktree = temp.path().join("lane");
-    input.request.tasks[0].writer = Some(WriterRequest {
-        extra: Default::default(),
+    input.request.task.writer = Some(WriterRequest {
+        extra: crate::tests::writer_extra(),
         project: temp.path().to_path_buf(),
         worktree: worktree.clone(),
     });
     store.create(&input, &call)?;
-    let mut record = store.record(input.attempts[0].attempt_id, &call)?;
+    let mut record = store.record(input.attempt_id, &call)?;
     record.generation = 1;
     record.state = AttemptState::Terminal {
         extra: Default::default(),
@@ -266,7 +364,7 @@ fn lane_continuation_respects_sealed_parent_or_open_fallback() -> TestResult {
                 proposal.request.parent = Some(AttemptId::from_bytes([37; 16]));
                 proposal.request.parent_attempt = Some(AttemptId::from_bytes([38; 16]));
             }
-            let task = &proposal.request.tasks[0];
+            let task = &proposal.request.task;
             assert_eq!(
                 store
                     .effective_launch_task(&proposal.request, task)
@@ -295,12 +393,13 @@ fn lane_continuation_respects_sealed_parent_or_open_fallback() -> TestResult {
         let prior = input();
         store.create(&prior, &call)?;
         let mut proposal = input();
-        proposal.run_id = RunId::from_bytes([35; 16]);
+        proposal.attempt_id = AttemptId::from_bytes([35; 16]);
         proposal.operation_id = "lane-continuation".parse()?;
-        proposal.attempts[0].attempt_id = AttemptId::from_bytes([36; 16]);
-        proposal.request.parent = Some(prior.attempts[0].attempt_id);
-        proposal.request.tasks[0].access.network = Some(NetworkAccess::Provider);
-        let mut narrower = proposal.request.tasks[0].clone();
+        proposal.attempt_id = AttemptId::from_bytes([36; 16]);
+        crate::tests::rekey(&mut proposal);
+        proposal.request.parent = Some(prior.attempt_id);
+        proposal.request.task.access.network = Some(NetworkAccess::Provider);
+        let mut narrower = proposal.request.task.clone();
         narrower.access.network = Some(NetworkAccess::Provider);
         narrower.access.database_ipc = true;
         assert!(
@@ -320,16 +419,16 @@ fn lane_continuation_respects_sealed_parent_or_open_fallback() -> TestResult {
         proposal.request.parent_attempt = None;
         let run = store.create(&proposal, &call)?;
         let expected_request = proposal.request.clone();
-        proposal.request.tasks[0].access.network = Some(NetworkAccess::Open);
+        proposal.request.task.access.network = Some(NetworkAccess::Open);
         proposal.request.parent = None;
-        rewrite_child_request(&store, run.run_id, &proposal.request, &call)?;
+        rewrite_child_request(&store, run.attempt_id, &proposal.request, &call)?;
         let fake = Fake {
             refuse: true,
             ..Default::default()
         };
         assert!(matches!(
             store.start_checked(
-                run.run_id,
+                run.attempt_id,
                 &expected_request,
                 &fake,
                 &|_, _| unreachable!(),
@@ -340,66 +439,53 @@ fn lane_continuation_respects_sealed_parent_or_open_fallback() -> TestResult {
             ))
         ));
         assert_eq!(fake.prepared.get(), 0);
-        store.start(run.run_id, &fake, &|_, _| unreachable!(), &call)?;
+        store.start(run.attempt_id, &fake, &|_, _| unreachable!(), &call)?;
         assert_eq!(fake.network.get(), Some(expected));
     }
     Ok(())
 }
 #[test]
-fn priority_selection_failure_uses_compiled_default_and_starts_siblings() -> TestResult {
+fn priority_selection_failure_uses_compiled_default() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
-    let mut prepared = two_tasks(2);
-    prepared.request.tasks[0].build_heavy = true;
+    let mut prepared = input();
+    prepared.request.task.build_heavy = true;
     store.create(&prepared, &call)?;
-    let first = prepared.attempts[0].attempt_id;
-    let sibling = prepared.attempts[1].attempt_id;
+    let id = prepared.attempt_id;
     let held = RefCell::new(Vec::new());
     let holder = |record: &AttemptRecord, _| {
         held.borrow_mut()
             .push((record.attempt_id, record.requested_priority));
         Err(RunError::Validation("fixture holder"))
     };
-    let started = store.start(
-        prepared.run_id,
-        &FirstPriorityFailure(prepared.attempts[0].task_id),
-        &holder,
-        &call,
-    )?;
+    let started = store.start(prepared.attempt_id, &PriorityFailure, &holder, &call)?;
     assert!(matches!(started.as_slice(), [
         Started::Refused { attempt, kind: RefusalKind::Handoff, .. },
-        Started::Refused { attempt: second, kind: RefusalKind::Handoff, .. },
-    ] if *attempt == first && *second == sibling));
+    ] if *attempt == id));
     assert_eq!(
         *held.borrow(),
-        [
-            (
-                first,
-                Some(provenant_records::run::DEFAULT_BUILD_HEAVY_PRIORITY)
-            ),
-            (sibling, Some(5))
-        ]
+        [(
+            id,
+            Some(provenant_records::run::DEFAULT_BUILD_HEAVY_PRIORITY)
+        )]
     );
-    let index = WorkIndex::open(store.writer_registry(), &call)?;
-    let selector = |attempt| WorkSelector {
+    let key = store.record(id, &call)?.key;
+    let selector = WorkSelector {
         project: store.context.project_id,
-        run: prepared.run_id,
-        task: None,
-        attempt: Some(attempt),
+        graph: key.graph().to_owned(),
+        node: Some(key.node().to_owned()),
+        attempt: Some(id),
         repository: None,
         head: None,
     };
+    let host = store.context.state_root.clone();
     assert_eq!(
-        index.validate(&selector(first), &call)?,
+        validate_work(&host, &selector, &call)?,
         WorkCoverage::Verified
     );
-    assert_eq!(
-        index.validate(&selector(sibling), &call)?,
-        WorkCoverage::Verified
-    );
-    assert_eq!(terminal(&store, first, &call)?, Outcome::Rejected);
+    assert_eq!(terminal(&store, id, &call)?, Outcome::Rejected);
     Ok(())
 }
 #[test]
@@ -413,21 +499,28 @@ fn launch_records_plan_write_grants_and_git_digest() -> TestResult {
         let store = RunStore::open(&context, &call)?;
         let prepared = input();
         store.create(&prepared, &call)?;
-        let id = prepared.attempts[0].attempt_id;
+        let id = prepared.attempt_id;
         assert!(matches!(
             store.start(
-                prepared.run_id,
+                prepared.attempt_id,
                 &Confined { writer, tool_writes: vec![] },
                 &|_, _| Err(RunError::Validation("fixture holder")),
                 &call,
             )?.as_slice(),
-            [Started::Refused { attempt, kind: RefusalKind::Handoff, .. }]
+            [Started::Refused { attempt, .. }]
                 if *attempt == id
         ));
         drop(store);
         let store = RunStore::open(&context, &call)?;
         let record = store.record(id, &call)?;
-        let mut expected = vec![
+        // A writer plan without writer authority is refused before applied grants
+        // are recorded. A valid reader plan retains its grants even if handoff fails.
+        if writer {
+            assert!(record.write_grants.is_empty());
+            assert!(record.git_grants_digest.is_none());
+            continue;
+        }
+        let expected = vec![
             (
                 WriteSource::StateWrite,
                 "/fixture/state/session",
@@ -445,9 +538,6 @@ fn launch_records_plan_write_grants_and_git_digest() -> TestResult {
                 PathScope::Subtree,
             ),
         ];
-        if writer {
-            expected.push((WriteSource::LaneCache, "/fixture/cache", PathScope::Subtree));
-        }
         let expected = expected
             .into_iter()
             .map(|(source, path, scope)| {
@@ -468,47 +558,36 @@ fn launch_records_plan_write_grants_and_git_digest() -> TestResult {
     Ok(())
 }
 #[test]
-fn oversized_write_grants_reach_handoff_without_stalling_sibling() -> TestResult {
+fn oversized_write_grants_reach_handoff() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let context = context(temp.path())?;
     let store = RunStore::open(&context, &call)?;
-    let prepared = two_tasks(2);
+    let prepared = input();
     store.create(&prepared, &call)?;
-    let id = prepared.attempts[0].attempt_id;
-    let sibling = prepared.attempts[1].attempt_id;
-    let provider = FirstOversized {
-        first: prepared.attempts[0].task_id,
-        oversized: Confined {
-            writer: false,
-            tool_writes: (0..128)
-                .map(|i| PathGrant {
-                    path: format!("/fixture/tools/{i}/{}", "x".repeat(3000)).into(),
-                    scope: PathScope::Subtree,
-                })
-                .collect(),
-        },
-        ordinary: Confined {
-            writer: false,
-            tool_writes: vec![],
-        },
+    let id = prepared.attempt_id;
+    let provider = Confined {
+        writer: false,
+        tool_writes: (0..128)
+            .map(|i| PathGrant {
+                path: format!("/fixture/tools/{i}/{}", "x".repeat(3000)).into(),
+                scope: PathScope::Subtree,
+            })
+            .collect(),
     };
     let held = RefCell::new(Vec::new());
     let holder = |record: &AttemptRecord, _| {
         held.borrow_mut().push(record.attempt_id);
         Err(RunError::Validation("fixture holder"))
     };
-    let started = store.start(prepared.run_id, &provider, &holder, &call)?;
+    let started = store.start(prepared.attempt_id, &provider, &holder, &call)?;
     assert!(matches!(
         started.as_slice(),
-        [
-            Started::Refused { attempt: first, kind: RefusalKind::Handoff, .. },
-            Started::Refused { attempt: second, kind: RefusalKind::Handoff, .. },
-        ] if *first == id && *second == sibling
+        [Started::Refused { attempt: first, kind: RefusalKind::Handoff, .. }] if *first == id
     ));
-    // Both attempts reached the fixture handoff.
-    assert_eq!(*held.borrow(), [id, sibling]);
+    // The attempt reached the fixture handoff.
+    assert_eq!(*held.borrow(), [id]);
     drop(store);
     let store = RunStore::open(&context, &call)?;
     let record = store.record(id, &call)?;
@@ -527,7 +606,12 @@ fn oversized_write_grants_reach_handoff_without_stalling_sibling() -> TestResult
     );
     assert!(
         store
-            .start(prepared.run_id, &provider, &|_, _| unreachable!(), &call)?
+            .start(
+                prepared.attempt_id,
+                &provider,
+                &|_, _| unreachable!(),
+                &call
+            )?
             .is_empty()
     );
     Ok(())
@@ -540,10 +624,10 @@ fn host_launch_uses_the_recorded_requester() -> TestResult {
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let prepared = input();
     let record = store.create(&prepared, &call)?;
-    let requester = store.run(record.run_id, &call)?.actor_id;
+    let requester = store.attempt_operation(record.attempt_id, &call)?.actor_id;
     let seen = Cell::new(None);
     let started = store.start(
-        record.run_id,
+        record.attempt_id,
         &Ready,
         &|_, actor| {
             seen.set(Some(actor));
@@ -553,163 +637,6 @@ fn host_launch_uses_the_recorded_requester() -> TestResult {
     )?;
     assert!(matches!(started.as_slice(), [Started::Refused { .. }]));
     assert_eq!(seen.get(), Some(requester));
-    Ok(())
-}
-#[test]
-fn memory_pressure_threshold_controls_admission_and_waits() -> TestResult {
-    use provenant_os::sys::resources::MemoryPressure;
-    struct Pressured(MemoryPressure);
-    impl Resources for Pressured {
-        fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
-            crate::tests::HostFacts::new(100).guardian_identity()
-        }
-        fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
-            crate::tests::HostFacts::new(100).observe_process(pid)
-        }
-        fn memory(&self) -> std::io::Result<MemorySample> {
-            HostFacts::new(100).memory()
-        }
-        fn pressure(
-            &self,
-        ) -> std::io::Result<Option<provenant_os::sys::resources::MemoryPressure>> {
-            Ok(Some(self.0))
-        }
-        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
-            Ok(u64::MAX)
-        }
-    }
-    for (threshold, level, writer, defers) in [
-        (None, MemoryPressure::Warning, true, false),
-        (None, MemoryPressure::Critical, false, true),
-        (None, MemoryPressure::Normal, true, false),
-        (Some("warning"), MemoryPressure::Warning, false, true),
-        (Some("warning"), MemoryPressure::Critical, true, true),
-        (Some("warning"), MemoryPressure::Normal, false, false),
-        (Some("never"), MemoryPressure::Critical, true, false),
-    ] {
-        let temp = tempfile::tempdir()?;
-        let (clock, cancel) = (clock(), CancelToken::new());
-        let call = call(&clock, &cancel);
-        let mut store = RunStore::open(&context(temp.path())?, &call)?;
-        if let Some(threshold) = threshold {
-            std::fs::create_dir_all(&store.writer_registry)?;
-            std::fs::write(
-                store.writer_registry.join("config.toml"),
-                format!(
-                    "schema_version = 1\n[domains.fabric.lanes]\nmemory_pressure_threshold = '{threshold}'\n"
-                ),
-            )?;
-        }
-        store.set_admission_policy(AdmissionPolicy {
-            admission_seconds: 1,
-            ..AdmissionPolicy::default()
-        });
-        let run = lane(54, writer);
-        let id = starting(&store, &run, &call)?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
-        let waits =
-            store.lane_waits_with_resources(&[store.record(id, &call)?], &call, &Pressured(level));
-        assert_eq!(
-            waits[0]
-                .waiting_for
-                .contains(&format!("memory pressure {level:?}")),
-            defers
-        );
-        let result = store.admit(id, &attempt, &Pressured(level), &clock, &cancel);
-        if !defers {
-            assert_eq!(
-                result?.state,
-                AttemptState::Running {
-                    extra: Default::default()
-                }
-            );
-        } else {
-            let Err(RunError::Admission(AdmissionError::MemoryPressure {
-                level: actual,
-                threshold: selected,
-                origin,
-            })) = result
-            else {
-                return Err("memory pressure was not refused".into());
-            };
-            assert_eq!(format!("{actual:?}"), format!("{level:?}"));
-            assert_eq!(
-                origin,
-                if threshold.is_some() {
-                    provenant_records::diagnostic::SettingSource::Configuration
-                } else {
-                    provenant_records::diagnostic::SettingSource::ShippedDefault
-                }
-            );
-            assert_eq!(
-                selected,
-                if threshold == Some("warning") {
-                    provenant_records::diagnostic::PressureThreshold::Warning
-                } else {
-                    provenant_records::diagnostic::PressureThreshold::Critical
-                }
-            );
-        }
-    }
-    Ok(())
-}
-#[test]
-fn admission_refuses_near_the_user_process_limit() -> TestResult {
-    use provenant_os::sys::resources::ProcessBudget;
-    struct Processes(ProcessBudget);
-    impl Resources for Processes {
-        fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
-            crate::tests::HostFacts::new(100).guardian_identity()
-        }
-        fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
-            crate::tests::HostFacts::new(100).observe_process(pid)
-        }
-        fn memory(&self) -> std::io::Result<MemorySample> {
-            HostFacts::new(100).memory()
-        }
-        fn process_budget(&self) -> std::io::Result<ProcessBudget> {
-            Ok(self.0)
-        }
-        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
-            Ok(u64::MAX)
-        }
-    }
-    for (used, limit, full) in [(2601, 2666, true), (2666, 2666, true), (100, 2666, false)] {
-        let temp = tempfile::tempdir()?;
-        let (clock, cancel) = (clock(), CancelToken::new());
-        let call = call(&clock, &cancel);
-        let mut store = RunStore::open(&context(temp.path())?, &call)?;
-        store.set_admission_policy(AdmissionPolicy {
-            admission_seconds: 1,
-            ..AdmissionPolicy::default()
-        });
-        let run = lane(55, true);
-        let id = starting(&store, &run, &call)?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
-        let resources = Processes(ProcessBudget { used, limit });
-        let waits = store.lane_waits_with_resources(&[store.record(id, &call)?], &call, &resources);
-        assert_eq!(
-            waits[0]
-                .waiting_for
-                .contains(&format!("user process count {used} of {limit}")),
-            full
-        );
-        let result = store.admit(id, &attempt, &resources, &clock, &cancel);
-        if full {
-            assert!(matches!(
-                result,
-                Err(RunError::Admission(AdmissionError::Processes { used: u, limit: l }))
-                    if u == used && l == limit
-            ));
-        } else {
-            assert_eq!(
-                result?.state,
-                AttemptState::Running {
-                    extra: Default::default()
-                }
-            );
-        }
-    }
     Ok(())
 }
 #[test]
@@ -767,7 +694,7 @@ fn pressure_errors_and_low_advisory_memory_do_not_refuse() -> TestResult {
         });
         let run = lane(58, true);
         let id = starting(&store, &run, &call)?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let result = store.admit(
             id,
             &attempt,
@@ -803,7 +730,7 @@ fn out_of_range_build_settings_do_not_block_admission() -> TestResult {
         }
         let run = lane(69, true);
         let id = starting(&store, &run, &call)?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         std::fs::write(
             store.writer_registry.join("config.toml"),
             format!("schema_version=1\n[domains.fabric.lanes]\n{assignment}\n"),
@@ -823,7 +750,7 @@ fn out_of_range_build_settings_do_not_block_admission() -> TestResult {
     Ok(())
 }
 #[test]
-fn guardian_identity_unknown_retries_and_names_expiry() -> TestResult {
+fn guardian_identity_unknown_refuses_without_waiting() -> TestResult {
     struct Observation {
         remaining: Cell<u32>,
     }
@@ -847,7 +774,7 @@ fn guardian_identity_unknown_retries_and_names_expiry() -> TestResult {
             }
         }
     }
-    for (failures, admitted) in [(2, true), (100, false)] {
+    for (failures, admitted) in [(0, true), (1, false)] {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
@@ -859,7 +786,7 @@ fn guardian_identity_unknown_retries_and_names_expiry() -> TestResult {
         });
         let run = lane(70, true);
         let id = starting(&store, &run, &call)?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let result = store.admit(
             id,
             &attempt,
@@ -904,7 +831,7 @@ fn idle_writers_are_admitted_beyond_the_build_limit() -> TestResult {
         for seed in 1..=70 {
             let run = lane(seed, true);
             let id = starting(&store, &run, &call)?;
-            let dir = store.attempt_dir(run.run_id, id, false)?;
+            let dir = store.attempt_dir(id, false)?;
             assert_eq!(
                 store
                     .admit(id, &dir, &HostFacts::new(100), &clock, &cancel)?
@@ -922,15 +849,14 @@ fn idle_writers_are_admitted_beyond_the_build_limit() -> TestResult {
 fn the_writer_cap_refuses_at_its_limit_and_names_it() -> TestResult {
     for (config, scope) in [
         ("max_writer_lanes = 3\nmax_project_writer_lanes = 3", "host"),
-        (
-            "max_writer_lanes = 8\nmax_project_writer_lanes = 3",
-            "project",
-        ),
+        ("max_project_writer_lanes = 3", "project"),
     ] {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
-        let mut store = RunStore::open(&context(temp.path())?, &call)?;
+        let execution_context = context(temp.path())?;
+        let project = execution_context.project_id.to_string();
+        let mut store = RunStore::open(&execution_context, &call)?;
         store.set_admission_policy(AdmissionPolicy {
             startup_spacing_ms: 0,
             admission_seconds: 1,
@@ -938,14 +864,58 @@ fn the_writer_cap_refuses_at_its_limit_and_names_it() -> TestResult {
         });
         std::fs::write(
             store.writer_registry.join("config.toml"),
-            format!("schema_version=1\n[domains.fabric.lanes]\n{config}\n"),
+            format!(
+                "schema_version=1\n[knobs]\n'policy.ADMISSION_WRITERS'='refuse'\n'policy.ADMISSION_PROJECT_WRITERS'='refuse'\n[domains.fabric.lanes]\n{config}\n"
+            ),
         )?;
         let facts = super::tests::HostFacts::new(100);
         let mut last = None;
         for seed in 80..84 {
+            if scope == "project" && seed == 82 {
+                let ledger = crate::ledger::open(&store.writer_registry, &call)?;
+                let boot = clock.boot_identity()?;
+                let guardian = serde_json::to_string(
+                    &facts
+                        .guardian_identity()
+                        .ok_or("fixture guardian identity unavailable")?,
+                )?;
+                // An unavailable foreign store with a live guardian stays
+                // counted, but cannot hide a later boot-dead project lease.
+                let unavailable = temp.path().join("unavailable-store");
+                let foreign = provenant_core::ProjectId::from_bytes([222; 16]).to_string();
+                for index in 0..256_u128 {
+                    let attempt = AttemptId::from_bytes((10_000 + index).to_be_bytes());
+                    ledger.execute(
+                        "INSERT INTO leases (attempt,project,store,class,boot,guardian,owner_id,yielded) VALUES (?1,?2,?3,'writer',?4,?5,'0:0',0)",
+                        rusqlite::params![attempt.to_string(), &foreign, unavailable.as_os_str().as_encoded_bytes(), &boot, &guardian],
+                    )?;
+                }
+                ledger.execute(
+                    "INSERT INTO leases (attempt,project,store,class,boot,guardian,owner_id,yielded) VALUES (?1,?2,?3,'writer','old-boot',?4,'0:0',0)",
+                    rusqlite::params![AttemptId::from_bytes([99; 16]).to_string(), project, unavailable.as_os_str().as_encoded_bytes(), &guardian],
+                )?;
+            }
             let run = lane(seed, true);
             let id = starting(&store, &run, &call)?;
-            let dir = store.attempt_dir(run.run_id, id, false)?;
+            let dir = store.attempt_dir(id, false)?;
+            if scope == "host" && seed == 82 {
+                // A storage failure can occur after the independent host
+                // ledger commits. Retrying must reuse that lease at the cap.
+                store.db.execute_batch("CREATE TEMP TRIGGER fail_claim BEFORE UPDATE OF active ON admission WHEN NEW.active=1 BEGIN SELECT RAISE(ABORT, 'fixture claim failure'); END")?;
+                assert!(store.admit(id, &dir, &facts, &clock, &cancel).is_err());
+                store.db.execute_batch("DROP TRIGGER fail_claim")?;
+                assert!(matches!(
+                    store.record(id, &call)?.state,
+                    AttemptState::Starting { .. }
+                ));
+                let ledger = crate::ledger::open(&store.writer_registry, &call)?;
+                let held: bool = ledger.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM leases WHERE attempt=?1 AND yielded=0)",
+                    [id.to_string()],
+                    |row| row.get(0),
+                )?;
+                assert!(held);
+            }
             last = Some(store.admit(id, &dir, &facts, &clock, &cancel));
             if seed < 83 {
                 assert_eq!(
@@ -997,78 +967,30 @@ fn the_writer_cap_refuses_at_its_limit_and_names_it() -> TestResult {
     Ok(())
 }
 #[test]
-fn policy_refusal_skips_provider_preparation_and_preserves_sibling_progress() -> TestResult {
+fn policy_refusal_skips_provider_preparation() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
-    let batch = two_tasks(2);
-    store.create(&batch, &call)?;
+    let prepared = input();
+    store.create(&prepared, &call)?;
     let providers = Fake {
-        refuse: true,
-        policy_task: Some(batch.request.tasks[0].task_id),
+        refuse_policy: true,
         ..Default::default()
     };
-    let started = store.start(batch.run_id, &providers, &|_, _| unreachable!(), &call)?;
-    assert_eq!(providers.prepared.get(), 1);
+    let started = store.start(
+        prepared.attempt_id,
+        &providers,
+        &|_, _| unreachable!(),
+        &call,
+    )?;
+    assert_eq!(providers.prepared.get(), 0);
     assert!(matches!(started.as_slice(), [
-        Started::Refused { attempt: first, kind: RefusalKind::Policy, .. },
-        Started::Refused { attempt: second, kind: RefusalKind::Preparation, .. },
-    ] if *first == batch.attempts[0].attempt_id && *second == batch.attempts[1].attempt_id));
-    for attempt in &batch.attempts {
-        assert_eq!(
-            terminal(&store, attempt.attempt_id, &call)?,
-            Outcome::Rejected
-        );
-    }
-    Ok(())
-}
-#[test]
-fn policy_resource_refusal_retains_fact_and_skips_preparation() -> TestResult {
-    use provenant_records::diagnostic::{ResourceFact, SettingSource};
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
-    let request = input();
-    store.create(&request, &call)?;
-    let fact = ResourceFact::Disk {
-        free: 1,
-        floor: 2,
-        origin: SettingSource::Configuration,
-    };
-    let provider = Fake {
-        policy_task: Some(request.request.tasks[0].task_id),
-        policy_resource: Some(fact),
-        ..Default::default()
-    };
-    let started = store.start(request.run_id, &provider, &|_, _| unreachable!(), &call)?;
-    assert!(
-        matches!(started.as_slice(), [Started::Refused { kind: RefusalKind::PolicyResource(actual), .. }] if *actual == fact)
-    );
-    assert_eq!(provider.prepared.get(), 0);
-    let diagnostic = RefusalKind::PolicyResource(fact).diagnostic().unwrap();
-    assert_eq!(diagnostic.code, "DISK_FLOOR");
-    let detail = diagnostic.detail.unwrap();
-    assert!(detail.contains("gc.free_floor"));
-    assert!(detail.contains("host configuration"));
-    let inventory =
-        include_str!("../assets/launch-guards.toml").parse::<toml_edit::DocumentMut>()?;
-    assert!(
-        inventory["guard"]
-            .as_array_of_tables()
-            .unwrap()
-            .iter()
-            .any(|row| {
-                row.get("site").and_then(|v| v.as_str())
-                    == Some("run/src/launch.rs#Providers::check_policy")
-                    && row.get("code").and_then(|v| v.as_str()) == Some(diagnostic.code.as_str())
-                    && row.get("boundary").and_then(|v| v.as_str()) == Some("configurable_default")
-                    && row
-                        .get("setting")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|setting| detail.contains(setting))
-            })
+        Started::Refused { attempt, kind: RefusalKind::Policy, .. },
+    ] if *attempt == prepared.attempt_id));
+    assert_eq!(
+        terminal(&store, prepared.attempt_id, &call)?,
+        Outcome::Rejected
     );
     Ok(())
 }
@@ -1080,7 +1002,7 @@ fn a_stop_at_the_runtime_deadline_settles_as_a_typed_timeout() -> TestResult {
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
     store.create(&run, &call)?;
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.mark_starting(
         &store.record(id, &call)?,
         &route(),
@@ -1090,7 +1012,7 @@ fn a_stop_at_the_runtime_deadline_settles_as_a_typed_timeout() -> TestResult {
         &call,
     )?;
     store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-    let dir = store.attempt_dir(run.run_id, id, false)?;
+    let dir = store.attempt_dir(id, false)?;
     // A hung provider's partial output, then the guardian's stop and kill.
     artifacts::seal(&dir, "stdout.log", b"half an answer", CAPTURE_LIMIT)?;
     let mut observed = exit();
@@ -1239,7 +1161,6 @@ fn ledger_observes_without_locking_and_reclaims_without_a_new_guardian() -> Test
             &ledger,
             store.context.state_root.as_path(),
             &ticket,
-            caps,
             &clock,
             &call,
             &owner,
@@ -1264,52 +1185,6 @@ fn ledger_observes_without_locking_and_reclaims_without_a_new_guardian() -> Test
     Ok(())
 }
 
-#[test]
-fn missing_prior_record_does_not_prevent_codex_finish() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
-    let run = input();
-    let id = run.attempts[0].attempt_id;
-    store.create(&run, &call)?;
-    let mut codex = route();
-    codex.provider = Some("codex".into());
-    store.mark_starting(
-        &store.record(id, &call)?,
-        &codex,
-        &[],
-        &Default::default(),
-        None,
-        &call,
-    )?;
-    let mut record = store.claim(id, &clock, &call)?.ok_or("claim")?;
-    record.continuation = Some("automatic".into());
-    record.retry_of = Some(AttemptId::from_bytes([99; 16]));
-    store.db.execute(
-        "UPDATE attempts SET record=?1 WHERE id=?2",
-        rusqlite::params![crate::db::attempt_bytes(&record)?, id.to_string()],
-    )?;
-    let dir = store.attempt_dir(run.run_id, id, false)?;
-    artifacts::seal(&dir, "stdout.log", b"answer", CAPTURE_LIMIT)?;
-    let observed = ExitObservation {
-        scope: RunStore::scope(&record),
-        ..exit()
-    };
-    seal_exit(&store, &observed)?;
-    let fake = Fake {
-        codex_usage: Some(UsageRecord {
-            uncached_input: Some(42),
-            ..Default::default()
-        }),
-        ..Fake::default()
-    };
-    let finished = store.finish(id, &dir, &observed, &fake, &call)?;
-    assert!(matches!(finished.state, AttemptState::Terminal { .. }));
-    assert_eq!(finished.usage.uncached_input, None);
-    assert_eq!(finished.usage.extra["session_total"]["uncached_input"], 42);
-    Ok(())
-}
 /// Listing must touch directories for the rows it shows, not for the retained
 /// history of the host. The count is of directory enumerations, not time.
 #[test]
@@ -1322,7 +1197,7 @@ fn listing_scans_are_bounded_by_the_page_not_by_retained_history() -> TestResult
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let input = input();
         store.create(&input, &call)?;
-        let mut record = store.record(input.attempts[0].attempt_id, &call)?;
+        let mut record = store.record(input.attempt_id, &call)?;
         record.state = AttemptState::Terminal {
             extra: Default::default(),
             outcome: Outcome::Succeeded,
@@ -1339,10 +1214,7 @@ fn listing_scans_are_bounded_by_the_page_not_by_retained_history() -> TestResult
             .join(record.project_id.to_string());
         for index in 0..retained {
             let attempt = format!("{index:032x}");
-            std::fs::create_dir_all(
-                temp.path()
-                    .join(format!("runs/{attempt}/attempts/{attempt}")),
-            )?;
+            std::fs::create_dir_all(temp.path().join(format!("attempts/{attempt}")))?;
             let slot = worktrees.join(format!("slot-{index}")).join(&attempt);
             std::fs::create_dir_all(&slot)?;
             std::fs::write(slot.join("reservation.json"), "{")?;
@@ -1362,7 +1234,7 @@ fn listing_scans_are_bounded_by_the_page_not_by_retained_history() -> TestResult
         )?;
         assert_eq!(page.lanes.len(), 1);
         assert!(store.custody_released(&record, &call)?);
-        let attempt = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let attempt = store.attempt_dir(record.attempt_id, false)?;
         let _ = store.supervisor_stalled(&attempt, RunStore::scope(&record), &call);
         scans.push(provenant_os::fs::directory_scans() - before);
     }

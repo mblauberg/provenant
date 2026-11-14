@@ -2,9 +2,9 @@ use super::*;
 use crate::{
     BillingKind, ConfiguredModel, ConfiguredPrices, Rates, Window, stats, validate_prices,
 };
-use provenant_core::{AttemptId, OperationId, TaskId};
+use provenant_core::{AttemptId, ProjectId};
 use provenant_os::clock::SystemClock;
-use provenant_records::{AttemptOutcome, RouteFact, Usage};
+use provenant_records::{AttemptOutcome, RouteFact, Usage, WorkKey};
 use std::path::PathBuf;
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -53,11 +53,18 @@ fn fact(number: u64, day: i64, model: &str, input: Option<u64>) -> Result<Attemp
     Ok(AttemptFact {
         context: None,
         attempt_id: AttemptId::from_bytes(u128::from(number).to_be_bytes()),
-        task_id: TaskId::from_bytes([1; 16]),
+        key: WorkKey::new(
+            ProjectId::from_bytes([2; 16]),
+            "g",
+            "n",
+            u32::try_from(number)?,
+        )?,
         attempt_number: number,
-        operation_id: OperationId::parse("ledger-operation")?,
         project_id: ProjectId::from_bytes([2; 16]),
         terminal_state: AttemptOutcome::Succeeded,
+        cause_source: provenant_records::run::CauseSource::Unavailable,
+        settlement_reason: None,
+        account_identity: provenant_records::AccountIdentity::unknown(),
         exit_code: Some(0),
         queued_at: finished,
         started_at: Some(finished),
@@ -68,6 +75,7 @@ fn fact(number: u64, day: i64, model: &str, input: Option<u64>) -> Result<Attemp
             model: Some(model.into()),
             effort: Some("high".into()),
             account_label: Some("account".into()),
+            account_key: None,
         }),
         usage: Usage {
             uncached_input: input,
@@ -97,6 +105,15 @@ fn fact(number: u64, day: i64, model: &str, input: Option<u64>) -> Result<Attemp
     })
 }
 
+fn key(number: u64) -> Result<WorkKey> {
+    Ok(WorkKey::new(
+        ProjectId::from_bytes([2; 16]),
+        "ledger-graph",
+        format!("node-{number}"),
+        1,
+    )?)
+}
+
 fn settle(state: &Path, row: &Row) -> Result<Appended> {
     Ok(append(
         state,
@@ -111,32 +128,71 @@ fn a_settled_attempt_appends_one_row_even_when_settlement_is_retried() -> Result
     let (_temp, state) = state()?;
     let prices = prices()?;
     let fact = fact(1, 20_000, "m", Some(12_345))?;
-    let row = row(
-        &fact,
-        Some(RunId::from_bytes([3; 16])),
-        Source::Settlement,
-        Some(&prices),
-    )?;
+    let row = row(&fact, &key(1)?, Some(&prices))?;
     assert_eq!(settle(&state, &row)?.added, 1);
-    // A retried settlement, and a backfill of the same attempt, add nothing.
+    // A retried settlement adds nothing.
     let retried = settle(&state, &row)?;
     assert_eq!((retried.added, retried.present), (0, 1));
-    let backfilled = super::row(&fact, None, Source::Backfill, Some(&prices))?;
-    assert_eq!(settle(&state, &backfilled)?.added, 0);
     let ledger = read(&state)?;
     assert!(ledger.unrecognised.is_empty(), "{:?}", ledger.unrecognised);
     assert_eq!(ledger.rows, [row]);
     let stored = &ledger.rows[0];
     assert_eq!(stored.attempt, fact.attempt_id.to_string());
-    assert_eq!(stored.labels.run.as_deref(), Some(&*"03".repeat(16)));
-    assert_eq!(stored.labels.task.as_deref(), Some(&*"01".repeat(16)));
+    assert_eq!(stored.graph.as_str(), "ledger-graph");
+    assert_eq!(stored.node.as_str(), "node-1");
     assert_eq!(stored.outcome, "succeeded");
     assert_eq!(stored.tokens.reasoning, Some(9));
     Ok(())
 }
 
 #[test]
-fn backfilled_cost_for_a_past_window_equals_the_run_store_report() -> Result {
+fn settled_attempt_row_preserves_partial_provider_identity() -> Result {
+    let fact = {
+        let mut fact = fact(1, 20_000, "m", Some(1))?;
+        fact.account_identity =
+            provenant_records::AccountIdentity::provider_observation("claude", "verified-key");
+        fact
+    };
+    let expected = fact.account_identity.clone();
+    let row = row(&fact, &key(1)?, None)?;
+    assert_eq!(row.identity, expected);
+    Ok(())
+}
+
+#[test]
+fn concurrent_retries_count_an_attempt_once() -> Result {
+    let (_temp, state) = state()?;
+    let prices = prices()?;
+    let row = row(&fact(1, 20_000, "m", Some(1))?, &key(1)?, Some(&prices))?;
+    std::thread::scope(|scope| {
+        let mut threads = Vec::new();
+        for _ in 0..8 {
+            threads.push(scope.spawn(|| settle(&state, &row).map_err(|error| error.to_string())));
+        }
+        for thread in threads {
+            thread.join().unwrap().unwrap();
+        }
+    });
+    let ledger = read(&state)?;
+    assert!(ledger.unrecognised.is_empty());
+    assert_eq!(ledger.rows, std::slice::from_ref(&row));
+    assert_eq!(spend(&ledger.rows, None, None, None)?.attempts, 1);
+    let directory = Directory::open_anchor(&state.join(DIRECTORY))?;
+    let mut conflicting = row.clone();
+    conflicting.outcome = "different".into();
+    let segment = conflicting.segment();
+    let mut line = serde_json::to_vec(&conflicting)?;
+    line.push(b'\n');
+    JsonLedger::new(&directory, OsStr::new(&segment)).append(&line)?;
+    let ledger = read(&state)?;
+    assert_eq!(ledger.rows, [row]);
+    assert_eq!(ledger.unrecognised.len(), 1);
+    assert!(ledger.unrecognised[0].line.is_some());
+    Ok(())
+}
+
+#[test]
+fn settled_cost_for_a_past_window_equals_the_telemetry_report() -> Result {
     let (_temp, state) = state()?;
     let prices = prices()?;
     let mut facts = Vec::new();
@@ -155,15 +211,11 @@ fn backfilled_cost_for_a_past_window_equals_the_run_store_report() -> Result {
     facts.push(fact(42, 20_003, "m", None)?);
     let rows = facts
         .iter()
-        .map(|fact| {
-            row(
-                fact,
-                Some(RunId::from_bytes([4; 16])),
-                Source::Backfill,
-                Some(&prices),
-            )
+        .enumerate()
+        .map(|(index, fact)| -> Result<_> {
+            Ok(row(fact, &key(index as u64 + 1)?, Some(&prices))?)
         })
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>>>()?;
     let first = append(&state, &rows, &SystemClock::new(), &CancelToken::new())?;
     assert_eq!(first.added, 42);
     let second = append(&state, &rows, &SystemClock::new(), &CancelToken::new())?;
@@ -200,19 +252,14 @@ fn backfilled_cost_for_a_past_window_equals_the_run_store_report() -> Result {
 fn an_unrecognised_line_is_reported_by_segment_and_line() -> Result {
     let (_temp, state) = state()?;
     let prices = prices()?;
-    let first = row(
-        &fact(1, 20_000, "m", Some(1))?,
-        None,
-        Source::Backfill,
-        Some(&prices),
-    )?;
+    let first = row(&fact(1, 20_000, "m", Some(1))?, &key(1)?, Some(&prices))?;
     settle(&state, &first)?;
     let segment = first.segment();
     let path = state.join(DIRECTORY).join(&segment);
     let mut text = std::fs::read_to_string(&path)?;
     text.push_str("not json\n");
-    text.push_str("{\"format\":\"provenant.usage-ledger.v9\"}\n");
-    text.push_str("{\"format\":\"provenant.usage-ledger.v1\",\"attempt\":\"x\"}\n");
+    text.push_str("{\"format\":\"provenant.usage-ledger.v3\"}\n");
+    text.push_str("{\"format\":\"provenant.usage-ledger.v3\",\"attempt\":\"x\"}\n");
     text.push_str("{\"torn");
     std::fs::write(&path, text)?;
     std::fs::write(state.join(DIRECTORY).join("notes.txt"), "stray")?;
@@ -233,36 +280,15 @@ fn an_unrecognised_line_is_reported_by_segment_and_line() -> Result {
             (segment.as_str(), Some(5)),
         ]
     );
-    assert!(ledger.unrecognised[2].reason.contains("v9"));
+    assert!(ledger.unrecognised[2].reason.contains("v3"));
     // Appending reports them too, and a torn line does not swallow the new row.
-    let second = row(
-        &fact(2, 20_000, "m", Some(2))?,
-        None,
-        Source::Backfill,
-        Some(&prices),
-    )?;
+    let second = row(&fact(2, 20_000, "m", Some(2))?, &key(2)?, Some(&prices))?;
     let appended = settle(&state, &second)?;
     assert_eq!(appended.added, 1);
     assert_eq!(appended.unrecognised.len(), 4);
     let ledger = read(&state)?;
     assert_eq!(ledger.rows, [first, second]);
     assert_eq!(ledger.unrecognised.len(), 5);
-    Ok(())
-}
-
-#[test]
-fn the_ledger_survives_deleting_the_run_store() -> Result {
-    let (_temp, state) = state()?;
-    std::fs::write(state.join("run.sqlite3"), b"format-1 store")?;
-    let row = row(
-        &fact(1, 20_000, "m", Some(1))?,
-        None,
-        Source::Backfill,
-        Some(&prices()?),
-    )?;
-    settle(&state, &row)?;
-    std::fs::remove_file(state.join("run.sqlite3"))?;
-    assert_eq!(read(&state)?.rows, [row]);
     Ok(())
 }
 

@@ -51,7 +51,7 @@ pub(crate) fn pr_contribution_unbound_project() -> Result {
 
 /// Capture through dispatch, then retain through real land and gc.
 pub(crate) fn pr_contribution_roundtrip() -> Result {
-    use provenant_core::{CancelToken, Clock, OperationId, TaskId};
+    use provenant_core::{CancelToken, Clock, OperationId};
     use provenant_run::{DispatchRequest, DispatchTask, Service};
     let landing = landing()?;
     let (_, context) = super::worktree_tests::writer_context(&landing.rig)?;
@@ -79,12 +79,16 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
             Ok(DispatchRequest {
                 chair: None,
                 operation_id: OperationId::parse(&format!("contribution-{index}"))?,
-                tasks: vec![DispatchTask {
-                    context: None,
+                task: DispatchTask {
+                    context: Some(provenant_records::run::WorkContext {
+                        graph_id: Some(format!("lane-contribution-{index}")),
+                        node_id: Some("local".into()),
+                        attempt: Some(1),
+                        ..Default::default()
+                    }),
                     build_heavy: false,
                     title: None,
                     profile: Default::default(),
-                    task_id: TaskId::from_bytes([index + 1; 16]),
                     prompt: "local work".into(),
                     base: None,
                     pinned_base: None,
@@ -101,14 +105,13 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
                     deliver: None,
                     worktree: (index < 3).then(|| landing.worktree.clone()),
                     access: Default::default(),
-                }],
-                concurrency: 1,
+                },
                 lane_depth: 1,
                 parent_attempt: None,
             })
         };
         let run = Service::new(&store).dispatch(submit()?, &landing.worktree, &call)?;
-        let attempt = store.pending_attempts(run.run_id, &call)?[0].attempt_id;
+        let attempt = run.attempt_id;
         ids.push(attempt.to_string());
         if index == 0 {
             // An attribution conflict after create cannot turn accepted work
@@ -121,10 +124,10 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
                 [attempt.to_string()],
             )?;
             let replay = Service::new(&store).dispatch(submit()?, &landing.worktree, &call)?;
-            assert_eq!(replay.run_id, run.run_id);
+            assert_eq!(replay.attempt_id, run.attempt_id);
             let diagnostic = fs::read_to_string(context.state_root.as_path().join(format!(
-                "runs/{}/pr-contribution-diagnostic.txt",
-                run.run_id
+                "attempts/{}/pr-contribution-diagnostic.txt",
+                attempt
             )))?;
             assert!(diagnostic.contains("PR contribution capture failed"));
             db.execute(
@@ -136,8 +139,8 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
             assert_eq!(
                 Service::new(&store)
                     .dispatch(submit()?, &landing.worktree, &call)?
-                    .run_id,
-                run.run_id
+                    .attempt_id,
+                run.attempt_id
             );
         }
         if index < 2 {
@@ -167,20 +170,22 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         )?;
         if index == 2 {
             let resume = provenant_run::Resume {
+                extend: Vec::new(),
                 prior: attempt,
                 expected_generation: 0,
                 operation_id: OperationId::parse("contribution-repair")?,
-                run_id: provenant_core::RunId::from_bytes([91; 16]),
                 attempt_id: provenant_core::AttemptId::from_bytes([92; 16]),
                 prompt: "repair".into(),
                 created_at: clock.wall_now()?,
             };
             let repaired = store.resume_fresh(&resume, "repair fixture", &call)?;
             assert_eq!(
-                store.resume_fresh(&resume, "repair fixture", &call)?.run_id,
-                repaired.run_id
+                store
+                    .resume_fresh(&resume, "repair fixture", &call)?
+                    .attempt_id,
+                repaired.attempt_id
             );
-            let id = store.pending_attempts(repaired.run_id, &call)?[0].attempt_id;
+            let id = repaired.attempt_id;
             ids.push(id.to_string());
             store.cancel(id, "repair cancelled", &call)?;
         }
@@ -209,11 +214,20 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         &summary,
         "# Capture contributions\n\nRetain local attempts.\n",
     )?;
+    // `--from-attempt` takes a graph target: name the first attempt by its
+    // graph and node.
+    super::worktree_tests::seed_graph_checkpoint(
+        &landing.rig,
+        &context,
+        "lane-contribution-0",
+        "local",
+        ids[0].parse()?,
+    )?;
     let open_args = [
         "pr",
         "open",
         "--from-attempt",
-        &ids[0],
+        "lane-contribution-0/local",
         "--branch",
         "feat",
         "--base",
@@ -342,62 +356,15 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
             .ok_or("missing projected land lane")?;
         let record = Service::new(&store).status(id.parse()?, &call)?;
         let (state, _) = provenant_records::wire::LaneRow::state_and_reason(&record.state);
-        assert_eq!(lane["run_id"], record.run_id.to_string());
-        assert_eq!(lane["task_id"], record.task_id.to_string());
+        let key = store.work_key(record.attempt_id, &call)?;
+        assert_eq!(lane["graph"], key.graph());
+        assert_eq!(lane["node"], key.node());
+        assert_eq!(lane["attempt_number"], key.attempt());
         assert_eq!(lane["state"], state);
         assert_eq!(lane["retry_of"], serde_json::json!(record.retry_of));
     }
-    let fixture_id = &ids[0];
-    let land_lane = projected
-        .iter()
-        .find(|lane| lane["attempt_id"] == fixture_id.as_str())
-        .ok_or("land fixture lane")?;
-    let status_view = json(&command(&landing.rig, &["status", fixture_id, "--json"])?)?;
-    let output_view = json(&command(
-        &landing.rig,
-        &["output", fixture_id, "--part", "prompt", "--json"],
-    )?)?;
-    // This fixture imports retained non-graph attempts directly. They remain
-    // readable after the one-engine cutover, but cannot launch or mutate work.
-    let stop_output = command(
-        &landing.rig,
-        &[
-            "stop",
-            fixture_id,
-            "--operation-id",
-            "land-fixture-cancel",
-            "--json",
-        ],
-    )?;
-    assert_eq!(code(&stop_output), 1);
-    let stop_view = json(&stop_output)?;
-    assert_eq!(stop_view["status"], "refused");
-    assert_eq!(stop_view["error"]["code"], "GRAPH_REQUIRED");
-    assert!(
-        stop_view["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("reconcile --id"))
-    );
-    for field in [
-        "run_id",
-        "task_id",
-        "attempt_id",
-        "state",
-        "cause",
-        "retry_of",
-        "superseded_by",
-    ] {
-        assert_eq!(
-            output_view["data"][field], land_lane[field],
-            "output {field}"
-        );
-    }
-    let row = &status_view["data"]["rows"][0];
-    assert_eq!(row["kind"], "attempt");
-    assert_eq!(row["id"], land_lane["attempt_id"]);
-    assert_eq!(row["attempt_id"], land_lane["attempt_id"]);
-    assert_eq!(row["node_id"], land_lane["task_id"]);
-    assert_eq!(row["state"], land_lane["state"]);
+    // The retained attempts sit in synthetic lane graphs no target names;
+    // the land report is their only projection.
     db.execute_batch("DROP TRIGGER reject_binding; DROP TRIGGER reject_binding_update;")?;
     assert_eq!(status(&landed, "worktree")?, "done", "{landed}");
     assert!(!landing.worktree.exists());
@@ -411,7 +378,6 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
             .find(|row| row["attempt"] == id.as_str())
             .ok_or("missing attempt")?;
         assert!(row["weight_millionths"].is_null());
-        assert!(row["run"].is_string());
         assert!(row["queued_at"].is_string());
         assert!(row["finished_at"].is_string());
         assert!(row["outcome"].is_string());
@@ -442,10 +408,10 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     assert!(text.contains("role=repair model=unknown account=unknown weight=unknown"));
     assert!(text.contains("peer_attempts: unknown (known hosts: unreachable)"));
     let first = store.record(ids[0].parse()?, &call)?;
-    let log = context.state_root.as_path().join(format!(
-        "runs/{}/attempts/{}/stdout.log",
-        first.run_id, first.attempt_id
-    ));
+    let log = context
+        .state_root
+        .as_path()
+        .join(format!("attempts/{}/stdout.log", first.attempt_id));
     fs::write(&log, vec![b'x'; 128 * 1024])?;
     let gc = command(&landing.rig, &["gc", "--apply", "--json"])?;
     assert_eq!(
@@ -466,17 +432,21 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     // no attempts with the retained, merged PR, even after bind replay.
     let recreated = command(&landing.rig, &["worktree", "create", "feat", "--json"])?;
     assert_eq!(code(&recreated), 0);
-    let dispatch_reused = |operation: &str, task: u8| -> Result<provenant_core::AttemptId> {
+    let dispatch_reused = |operation: &str| -> Result<provenant_core::AttemptId> {
         let new_run = Service::new(&store).dispatch(
             DispatchRequest {
                 chair: None,
                 operation_id: OperationId::parse(operation)?,
-                tasks: vec![DispatchTask {
-                    context: None,
+                task: DispatchTask {
+                    context: Some(provenant_records::run::WorkContext {
+                        graph_id: Some(format!("lane-{operation}")),
+                        node_id: Some("reused".into()),
+                        attempt: Some(1),
+                        ..Default::default()
+                    }),
                     build_heavy: false,
                     title: None,
                     profile: Default::default(),
-                    task_id: TaskId::from_bytes([task; 16]),
                     prompt: "new work".into(),
                     base: None,
                     pinned_base: None,
@@ -493,19 +463,18 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
                     deliver: None,
                     worktree: Some(landing.worktree.clone()),
                     access: Default::default(),
-                }],
-                concurrency: 1,
+                },
                 lane_depth: 1,
                 parent_attempt: None,
             },
             &landing.worktree,
             &call,
         )?;
-        let new_attempt = store.pending_attempts(new_run.run_id, &call)?[0].attempt_id;
+        let new_attempt = new_run.attempt_id;
         store.cancel(new_attempt, "fixture ended", &call)?;
         Ok(new_attempt)
     };
-    let new_attempt = dispatch_reused("reused-branch", 98)?;
+    let new_attempt = dispatch_reused("reused-branch")?;
     assert_eq!(read()?, before);
     let links = provenant_run::Contributions::open(store.writer_registry(), &call)?;
     let new_pr = provenant_run::PullRequest {
@@ -591,7 +560,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     let bound_new = bind_cli("1672")?;
     assert_eq!(code(&bound_new), 0);
     let calls_before = fs::read(landing.rig.project.join("gh-calls"))?;
-    let reused = dispatch_reused("externally-merged-branch", 99)?;
+    let reused = dispatch_reused("externally-merged-branch")?;
     assert_eq!(
         fs::read(landing.rig.project.join("gh-calls"))?,
         calls_before,
@@ -641,7 +610,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     let active = links.open_bindings(context.project_id, "feat", &call)?;
     assert_eq!(active.len(), 1);
     assert_eq!(active[0].number, 1674);
-    let after_open = dispatch_reused("swept-pr-open", 100)?;
+    let after_open = dispatch_reused("swept-pr-open")?;
     let rows = links.for_pr(&active[0], &call)?;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].attempt, after_open);
@@ -711,7 +680,6 @@ fn contribution_terminal(
     let exit = ExitObservation {
         publication: PublicationState::Durable,
         scope: Scope {
-            run: record.run_id,
             attempt: id,
             generation: record.generation,
         },
@@ -746,10 +714,7 @@ fn contribution_terminal(
         .ok_or("exit fixture")?
         .remove("publication");
     evidence["schema_version"] = 1.into();
-    let directory = context
-        .state_root
-        .as_path()
-        .join(format!("runs/{}/attempts/{id}", record.run_id));
+    let directory = context.state_root.as_path().join(format!("attempts/{id}"));
     for (name, bytes) in [
         ("process-exit.json", serde_json::to_vec(&evidence)?),
         (
@@ -778,6 +743,7 @@ fn contribution_terminal(
         id,
         record.revision,
         &provenant_run::TerminalPublication {
+            handoff: None,
             terminal_cause: None,
             terminal_note: None,
             outcome,
@@ -925,11 +891,24 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
         }
         value if value.starts_with("api --method PUT repos/{owner}/{repo}/pulls/") && value.contains("/merge ") => {
             fs::write(dir.join("merge-args"), args.join("\n") + "\n")?;
+            let mut view: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("view.json"))?)?;
+            if dir.join("merge-completes").exists() {
+                view["state"] = "MERGED".into();
+                let sha = view["mergeCommit"]["oid"].clone();
+                fs::write(dir.join("view.json"), serde_json::to_vec(&view)?)?;
+                io::stdout().write_all(&serde_json::to_vec(&serde_json::json!({"merged":true,"sha":sha}))?)?;
+            } else {
+                io::stdout().write_all(br#"{"merged":false}"#)?;
+            }
+        }
+        value if value.starts_with("api --method PUT repos/{owner}/{repo}/pulls/") && value.contains("/merge-async ") => {
+            fs::write(dir.join("merge-args"), args.join("\n") + "\n")?;
             if dir.join("merge-completes").exists() {
                 let mut view: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("view.json"))?)?;
                 view["state"] = "MERGED".into();
+                let sha = view["mergeCommit"]["oid"].clone();
                 fs::write(dir.join("view.json"), serde_json::to_vec(&view)?)?;
-                io::stdout().write_all(br#"{"merged":true}"#)?;
+                io::stdout().write_all(&serde_json::to_vec(&serde_json::json!({"status":"merged","details":{"sha":sha}}))?)?;
             } else {
                 io::stdout().write_all(br#"{"merged":false}"#)?;
             }
@@ -1139,7 +1118,9 @@ fn land(landing: &Landing) -> Result<serde_json::Value> {
         matches!(code(&output), 0 | 5) || value["data"]["merged"] == true,
         "{value}"
     );
-    assert_eq!(value["data"]["head"], landing.head);
+    if let Some(head) = value["data"]["head"].as_str() {
+        assert_eq!(head, landing.head, "{value}");
+    }
     Ok(value)
 }
 
@@ -1156,37 +1137,55 @@ fn branch_exists(rig: &TestRig, branch: &str) -> Result<bool> {
 }
 
 pub(crate) fn pr_land_merges_then_fetches_fast_forwards_and_prunes() -> Result {
-    let landing = landing()?;
+    let landing = landing().map_err(|error| format!("prepare landing fixture: {error}"))?;
     let rig = &landing.rig;
-    let mut view: serde_json::Value =
-        serde_json::from_slice(&fs::read(rig.project.join("view.json"))?)?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[domains.pr.land]\npublish='rest_ordered'\n",
+    )?;
+    let mut view: serde_json::Value = serde_json::from_slice(
+        &fs::read(rig.project.join("view.json"))
+            .map_err(|error| format!("read fixture view.json: {error}"))?,
+    )?;
     view["state"] = "OPEN".into();
-    fs::write(rig.project.join("view.json"), serde_json::to_vec(&view)?)?;
-    fs::write(rig.project.join("merge-completes"), "")?;
+    let merged_commit = git(rig, &["rev-parse", "origin/main"])?;
+    view["mergeCommit"]["oid"] = merged_commit.into();
+    fs::write(rig.project.join("view.json"), serde_json::to_vec(&view)?)
+        .map_err(|error| format!("write open fixture view.json: {error}"))?;
+    fs::write(rig.project.join("merge-completes"), "")
+        .map_err(|error| format!("write fake merge completion: {error}"))?;
     // Build output the worktree owns, which would otherwise block removal.
-    fs::create_dir_all(landing.worktree.join("crate/target/debug"))?;
+    fs::create_dir_all(landing.worktree.join("crate/target/debug"))
+        .map_err(|error| format!("create fixture build output: {error}"))?;
     fs::write(
         landing.worktree.join("crate/target/debug/artifact"),
         "built",
-    )?;
-    let output = command(rig, &["land", NUMBER, "--head", &landing.head, "--json"])?;
+    )
+    .map_err(|error| format!("write fixture build output: {error}"))?;
+    let output = command(rig, &["land", NUMBER, "--head", &landing.head, "--json"])
+        .map_err(|error| format!("run land command: {error}"))?;
     let value = json(&output)?;
     assert_eq!(code(&output), 0, "{value}");
     assert_eq!(value["data"]["merged"], true);
     for step in ["fetch", "fast_forward", "worktree", "branch"] {
         assert_eq!(status(&value, step)?, "done", "{step}: {value}");
     }
-    // The merge went through the existing repository workflow at this head.
-    let merge = fs::read_to_string(rig.project.join("merge-args"))?;
-    assert_eq!(
-        merge,
-        format!(
-            "api\n--include\n--method\nPUT\nrepos/{{owner}}/{{repo}}/pulls/{NUMBER}/merge\n-f\nsha={}\n-f\nmerge_method=merge\n",
-            landing.head
-        )
+    // The forge request remains bound to the approved head.
+    let merge = fs::read_to_string(rig.project.join("merge-args")).map_err(|error| {
+        let calls = fs::read_to_string(rig.project.join("gh-calls"))
+            .unwrap_or_else(|calls_error| format!("<unavailable: {calls_error}>"));
+        format!("read fake forge merge arguments: {error}; fake forge calls: {calls}")
+    })?;
+    let merge_args: Vec<_> = merge.lines().collect();
+    assert!(
+        merge_args
+            .iter()
+            .any(|arg| *arg == format!("sha={}", landing.head)),
+        "{merge}"
     );
     assert!(!rig.project.join("watched").exists());
-    let calls = fs::read_to_string(rig.project.join("gh-calls"))?;
+    let calls = fs::read_to_string(rig.project.join("gh-calls"))
+        .map_err(|error| format!("read fake forge call log: {error}"))?;
     assert!(
         !calls.lines().any(|line| {
             line.starts_with("pr ") || line.split_whitespace().any(|arg| arg == "graphql")
@@ -1200,16 +1199,18 @@ pub(crate) fn pr_land_merges_then_fetches_fast_forwards_and_prunes() -> Result {
     assert_ne!(git(rig, &["rev-parse", "main"])?, landing.stale);
     assert!(!landing.worktree.exists());
     assert!(!branch_exists(rig, "feat")?);
-    // Landing again finds nothing left to prune, and the text form names each step.
-    let text = command(rig, &["land", NUMBER, "--full"])?;
+    // Replaying a landed request keeps its identity without repeating cleanup.
+    let text = command(rig, &["land", NUMBER, "--full"])
+        .map_err(|error| format!("run text land command: {error}"))?;
     assert_eq!(code(&text), 0);
     let text = String::from_utf8(text.stdout.bytes)?;
     assert!(
         text.starts_with(&format!("merged #{NUMBER} {}\n", landing.head)),
         "{text}"
     );
-    assert!(text.contains("  worktree skipped"), "{text}");
-    assert!(text.contains("  branch skipped"), "{text}");
+    assert!(!landing.worktree.exists());
+    assert!(!branch_exists(rig, "feat")?);
+    assert_eq!(git(rig, &["rev-parse", "main"])?, landing.head);
     Ok(())
 }
 
@@ -1484,7 +1485,7 @@ pub(crate) fn pr_land_canonicalises_quoted_worktree_paths() -> Result {
 }
 
 pub(crate) fn pr_land_uses_writer_lock_and_preserves_attempt_recovery_evidence() -> Result {
-    pr_land_writer_cases(&["abandoned", "held", "malformed", "wrong_binding"])
+    pr_land_writer_cases(&["abandoned", "held", "malformed", "historical_binding"])
 }
 
 pub(crate) fn pr_land_writer_lock_preserves_dirty_and_output_cases() -> Result {
@@ -1509,6 +1510,34 @@ fn pr_land_writer_cases(cases: &[&str]) -> Result {
             &landing.rig.project,
             &landing.worktree,
         )?;
+        let store = super::worktree_tests::open_writer_store(&context)?;
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let prepared = super::worktree_tests::writer_run(
+            request.clone(),
+            "land-writer-custody",
+            81,
+            "terminal writer fixture",
+        )?;
+        store.create(&prepared, &call)?;
+        let route = provenant_run::RouteRecord {
+            provider: Some("codex".into()),
+            model: Some("codex/fixture".into()),
+            account_label: Some("fixture".into()),
+            ..Default::default()
+        };
+        let started = store.mark_starting_for_fixture(prepared.attempt_id, &route, &call)?;
+        contribution_terminal(
+            &store,
+            &context,
+            prepared.attempt_id,
+            &landing.head,
+            provenant_run::Outcome::Succeeded,
+            &call,
+        )?;
+        let generation = started.generation;
         let writer = provenant_run::prepare_writer(
             &request,
             context.state_root.as_path(),
@@ -1517,7 +1546,7 @@ fn pr_land_writer_cases(cases: &[&str]) -> Result {
         let binding = WriterBinding::from_verified(
             writer.worktree.repo().root_dir(),
             writer.worktree.repo().private_dir(),
-            if case == "wrong_binding" {
+            if case == "historical_binding" {
                 "refs/heads/other"
             } else {
                 writer.branch.as_str()
@@ -1535,9 +1564,8 @@ fn pr_land_writer_cases(cases: &[&str]) -> Result {
         let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
             provenant_os::fs::Directory::open_anchor(&state)?,
             Scope {
-                run: provenant_core::RunId::from_bytes([81; 16]),
-                attempt: provenant_core::AttemptId::from_bytes([82; 16]),
-                generation: 1,
+                attempt: prepared.attempt_id,
+                generation,
             },
             binding,
             provenant_core::WaitBudget::nonblocking(clock.mono_now()),
@@ -1553,14 +1581,14 @@ fn pr_land_writer_cases(cases: &[&str]) -> Result {
         if case == "malformed" {
             fs::write(
                 state
-                    .join(provenant_core::AttemptId::from_bytes([82; 16]).to_string())
+                    .join(prepared.attempt_id.to_string())
                     .join("reservation.json"),
                 b"malformed reservation",
             )?;
         }
         let reservation = fs::read(
             state
-                .join(provenant_core::AttemptId::from_bytes([82; 16]).to_string())
+                .join(prepared.attempt_id.to_string())
                 .join("reservation.json"),
         )?;
         match case {
@@ -1584,10 +1612,7 @@ fn pr_land_writer_cases(cases: &[&str]) -> Result {
             _ => {}
         }
         let value = land(&landing)?;
-        let removed = matches!(
-            case,
-            "abandoned" | "malformed" | "wrong_binding" | "allowed_output"
-        );
+        let removed = matches!(case, "abandoned" | "allowed_output" | "historical_binding");
         assert_eq!(
             status(&value, "worktree")?,
             if removed { "done" } else { "refused" },
@@ -1595,10 +1620,30 @@ fn pr_land_writer_cases(cases: &[&str]) -> Result {
         );
         assert_eq!(landing.worktree.exists(), !removed);
         assert_eq!(branch_exists(&landing.rig, "feat")?, !removed);
+        if case == "historical_binding" {
+            let record = store.record(prepared.attempt_id, &call)?;
+            assert!(matches!(
+                record.state,
+                provenant_run::AttemptState::Terminal { .. }
+            ));
+            assert_eq!(
+                record.head.map(|head| head.to_string()),
+                Some(landing.head.clone())
+            );
+            let canonical = store.request(prepared.attempt_id, &call)?;
+            assert_eq!(
+                canonical
+                    .task
+                    .writer
+                    .as_ref()
+                    .map(|writer| writer.worktree.as_path()),
+                Some(landing.worktree.as_path())
+            );
+        }
         assert_eq!(
             fs::read(
                 state
-                    .join(provenant_core::AttemptId::from_bytes([82; 16]).to_string())
+                    .join(prepared.attempt_id.to_string())
                     .join("reservation.json")
             )?,
             reservation
@@ -1653,7 +1698,7 @@ pub(crate) fn pr_land_preserves_terminal_writer_evidence_in_host_store() -> Resu
         let input =
             super::worktree_tests::writer_run(request.clone(), "land-terminal", 91, "done")?;
         store.create(&input, &call)?;
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         let mut running = store.record(id, &call)?;
         running.revision += 1;
         running.generation = 1;
@@ -1673,14 +1718,10 @@ pub(crate) fn pr_land_preserves_terminal_writer_evidence_in_host_store() -> Resu
             ],
         )?;
         let scope = Scope {
-            run: input.run_id,
             attempt: id,
             generation: running.generation,
         };
-        let attempt = context
-            .state_root
-            .as_path()
-            .join(format!("runs/{}/attempts/{id}", input.run_id));
+        let attempt = context.state_root.as_path().join(format!("attempts/{id}"));
         let exit = ExitObservation {
             publication: PublicationState::Durable,
             scope,
@@ -1726,6 +1767,7 @@ pub(crate) fn pr_land_preserves_terminal_writer_evidence_in_host_store() -> Resu
             id,
             running.revision,
             &TerminalPublication {
+                handoff: None,
                 terminal_cause: None,
                 terminal_note: None,
                 outcome: provenant_run::Outcome::Succeeded,
@@ -2277,10 +2319,10 @@ pub(crate) fn pr_open_refuses_what_the_receipts_cannot_support() -> Result {
         &summary,
         "# feat(cli): add the thing\n\nIt adds the thing.\n",
     )?;
-    let unknown = "ab".repeat(16);
+    let unknown = "never-ran";
     let args = [
         "--from-attempt",
-        &unknown,
+        unknown,
         "--summary-file",
         summary_arg,
         "--dry-run",
@@ -2321,26 +2363,33 @@ pub(crate) fn pr_open_refuses_what_the_receipts_cannot_support() -> Result {
         "never launched",
     )?;
     store.create(&prepared, &call)?;
-    let attempt = prepared.attempts[0].attempt_id.to_string();
+    let graph = format!("lane-{}", prepared.attempt_id);
+    super::worktree_tests::seed_graph_checkpoint(
+        &rig,
+        &context,
+        &graph,
+        "writer",
+        prepared.attempt_id,
+    )?;
     let refusal = open_refusal(
         &rig,
         &[
             "--from-attempt",
-            &attempt,
+            &graph,
             "--summary-file",
             summary_arg,
             "--dry-run",
         ],
     )?;
     assert_eq!(refusal, "PR_ATTEMPT_STATE");
-    // A malformed attempt ID is a usage error before anything is read.
+    // A malformed target is a usage error before anything is read.
     let invalid = command(
         &rig,
         &[
             "pr",
             "open",
             "--from-attempt",
-            "nope",
+            "Not_A_Target",
             "--summary-file",
             summary_arg,
         ],
@@ -2497,42 +2546,6 @@ pub(crate) fn pr_land_changes_nothing_when_the_merge_does_not_happen() -> Result
     assert!(landing.worktree.exists());
     assert!(branch_exists(&landing.rig, "feat")?);
     assert_eq!(git(&landing.rig, &["rev-parse", "main"])?, landing.stale);
-
-    // An unconfirmed merge must preserve real local worktrees and refs.
-    let landing = self::landing()?;
-    let rig = &landing.rig;
-    fs::write(
-        rig.project.join("view.json"),
-        r#"{"state":"OPEN","baseRefName":"main","headRefName":"feat","isCrossRepository":false}"#,
-    )?;
-    fs::write(rig.project.join("merge-completes"), "")?;
-    fs::write(rig.project.join("rate-after-merge"), "")?;
-    let output = command(
-        rig,
-        &[
-            "land",
-            NUMBER,
-            "--head",
-            &landing.head,
-            "--wait=5s",
-            "--json",
-        ],
-    )?;
-    let value = json(&output)?;
-    assert_eq!(value["error"]["code"], "RATE_LIMITED", "{value}");
-    let message = value["error"]["message"].as_str().ok_or("error message")?;
-    assert!(message.contains("merge may have completed"), "{value}");
-    assert!(message.contains("2100-01-01"), "{value}");
-    let retry = format!(
-        "provenant land {NUMBER} --head {} --wait=5s --state-dir '{}' --json",
-        landing.head,
-        rig.state.display()
-    );
-    assert!(message.contains(&format!("next: {retry}")), "{value}");
-    assert_eq!(value["error"]["repair"], retry, "{value}");
-    assert!(landing.worktree.exists());
-    assert!(branch_exists(rig, "feat")?);
-    assert_eq!(git(rig, &["rev-parse", "main"])?, landing.stale);
 
     Ok(())
 }

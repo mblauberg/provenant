@@ -8,27 +8,19 @@ use std::path::{Path, PathBuf};
 struct Sample {
     name: &'static str,
     free: u64,
-    total: u64,
 }
 
-fn warning(
-    settings: &provenant_config::GcSettings,
-    samples: &[Sample],
-) -> io::Result<Option<String>> {
-    let Some(state) = samples.first() else {
-        return Ok(None);
-    };
-    let floor = settings.free_floor_for_total(state.total)?;
+fn warning(limits: &provenant_config::DiskLimits, samples: &[Sample]) -> Option<String> {
     for sample in samples {
-        let threshold = floor.saturating_mul(2).min(sample.total / 2);
-        if sample.free < threshold {
-            return Ok(Some(format!(
-                "Disk pressure: {} bytes free on {}, warning below {} bytes; run `provenant disk report` or `provenant gc`.",
-                sample.free, sample.name, threshold
-            )));
+        if limits.level(sample.free) != provenant_config::DiskLevel::Ready {
+            return Some(format!(
+                "Disk pressure on {}: {}.",
+                sample.name,
+                limits.detail(sample.free)
+            ));
         }
     }
-    Ok(None)
+    None
 }
 
 fn existing(path: &Path) -> io::Result<(PathBuf, u64)> {
@@ -54,6 +46,7 @@ pub(crate) fn session_warning(state: &Path, home: &Path, cwd: &Path) -> Option<S
             Err(error) => return Err(error),
         };
         let settings = provenant_config::GcSettings::read(&config_state)?;
+        let limits = settings.disk_limits(&config_state)?;
         let cache = home.join("Library/Caches/provenant-lane-cargo");
         let mut devices = Vec::new();
         let mut samples = Vec::new();
@@ -66,11 +59,11 @@ pub(crate) fn session_warning(state: &Path, home: &Path, cwd: &Path) -> Option<S
             if devices.contains(&device) {
                 continue;
             }
-            let (free, total) = provenant_os::fs::filesystem_bytes_at(&path)?;
+            let (free, _) = provenant_os::fs::filesystem_bytes_at(&path)?;
             devices.push(device);
-            samples.push(Sample { name, free, total });
+            samples.push(Sample { name, free });
         }
-        warning(&settings, &samples)
+        Ok(warning(&limits, &samples))
     }
     observe(state, home, cwd).ok().flatten()
 }
@@ -84,10 +77,25 @@ impl DiskPressure for LaneDisk {
         let (state, cwd) = context.disk_roots();
         // Live policy: changes take effect on the next admission, guardian or
         // settlement observation, including percentage floor recalculation.
-        let floor = provenant_config::GcSettings::read(state)?.free_floor_bytes(state)?;
+        let limits = provenant_config::GcSettings::read(state)?.disk_limits(state)?;
         let free =
             provenant_confinement::disk::lane_available_bytes(state, &context.roots.home, cwd)?;
-        Ok(free < floor)
+        // The guardian only warns; running builds always continue.
+        let policy = provenant_config::policy::read(
+            state,
+            &context.project_id.to_string(),
+            &Default::default(),
+        );
+        Ok(!matches!(
+            policy.check(
+                "GUARDIAN_DISK",
+                provenant_records::policy::Facts {
+                    violated: limits.level(free) != provenant_config::DiskLevel::Ready,
+                    detail: limits.detail(free),
+                },
+            ),
+            provenant_records::policy::Effect::Proceed
+        ))
     }
 }
 
@@ -97,47 +105,53 @@ mod tests {
     use super::*;
     #[test]
     fn session_threshold_and_distinct_volumes() -> Result<(), Box<dyn std::error::Error>> {
-        let settings = provenant_config::GcSettings {
-            free_floor: Some("100B".into()),
-            ..Default::default()
+        let limits = provenant_config::DiskLimits {
+            free_floor: 100,
+            free_floor_source: provenant_records::diagnostic::SettingSource::Configuration,
+            critical_free: 50,
+            critical_free_source: provenant_records::diagnostic::SettingSource::ShippedDefault,
         };
         let state = Sample {
             name: "state",
-            free: 150,
-            total: 1000,
+            free: 101,
         };
         let checkout = Sample {
             name: "checkout",
-            free: 900,
-            total: 1000,
+            free: 101,
         };
-        assert!(warning(&settings, &[state, checkout])?.is_some());
-        assert!(warning(&settings, &[Sample { free: 200, ..state }, checkout])?.is_none());
-        let small = Sample {
-            free: 60,
-            total: 100,
-            ..state
-        };
-        assert!(warning(&settings, &[small])?.is_none());
-        assert!(warning(&settings, &[Sample { free: 49, ..small }])?.is_some());
+        assert!(warning(&limits, &[state, checkout]).is_none());
+        for (free, expected_level) in [
+            (100, provenant_config::DiskLevel::Ready),
+            (99, provenant_config::DiskLevel::Warning),
+            (50, provenant_config::DiskLevel::Warning),
+            (49, provenant_config::DiskLevel::Critical),
+        ] {
+            let sample = Sample {
+                name: "checkout",
+                free,
+            };
+            assert_eq!(limits.level(free), expected_level);
+            assert_eq!(
+                warning(&limits, &[sample]).is_some(),
+                expected_level != provenant_config::DiskLevel::Ready
+            );
+        }
         let text = warning(
-            &settings,
-            &[
-                Sample { free: 900, ..state },
-                Sample {
-                    free: 100,
-                    ..checkout
-                },
-            ],
-        )?
+            &limits,
+            &[Sample {
+                name: "checkout",
+                free: 49,
+            }],
+        )
         .ok_or("missing warning")?;
         assert!(text.contains("checkout"));
-        assert!(text.len() <= 160);
+        assert!(text.contains("gc.critical_free"));
         let invalid = provenant_config::GcSettings {
             free_floor: Some("bad".into()),
             ..Default::default()
         };
-        assert!(warning(&invalid, &[state]).is_err());
+        let temp = tempfile::tempdir()?;
+        assert!(invalid.disk_limits(temp.path()).is_err());
         Ok(())
     }
 
@@ -168,7 +182,6 @@ mod tests {
             },
             project_id: provenant_core::ProjectId::from_bytes([1; 16]),
             actor_id: provenant_core::ActorId::from_bytes([2; 16]),
-            run_id: provenant_core::RunId::from_bytes([3; 16]),
             attempt_id: provenant_core::AttemptId::from_bytes([4; 16]),
             host_delivery: None,
             launch: None,
@@ -177,14 +190,20 @@ mod tests {
         let raw = context.encode()?;
         let disk = LaneDisk::default();
         let config = temp.path().join("config.toml");
-        std::fs::write(&config, "schema_version=1\n[gc]\nfree_floor='1B'\n")?;
+        std::fs::write(
+            &config,
+            "schema_version=1\n[gc]\nfree_floor='1B'\ncritical_free='0B'\n",
+        )?;
         assert!(!disk.below_floor(&raw)?);
         std::fs::write(
             &config,
-            "schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\n",
+            "schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\ncritical_free='0B'\n",
         )?;
         assert!(disk.below_floor(&raw)?);
-        std::fs::write(&config, "schema_version=1\n[gc]\nfree_floor='1B'\n")?;
+        std::fs::write(
+            &config,
+            "schema_version=1\n[gc]\nfree_floor='1B'\ncritical_free='0B'\n",
+        )?;
         assert!(!disk.below_floor(&raw)?);
         Ok(())
     }

@@ -5,9 +5,12 @@ mod support;
 mod terminal_run;
 use serde_json::{Value, json};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
-use support::{Result, TestRig, code, register_account};
+use support::{
+    Result, TestRig, code, install_fake_claude_auth, register_account, set_claude_config_dir,
+    write_fake_claude_identity,
+};
 
 fn message(id: &str, output: u64) -> String {
     let at = SystemTime::now()
@@ -19,6 +22,24 @@ fn message(id: &str, output: u64) -> String {
         jiff::Timestamp::from_second(at as i64)
             .map(|time| time.to_string())
             .unwrap_or_default()
+    )
+}
+
+fn start_chair_session(rig: &TestRig, session: &str) -> Result<provenant_os::exec::ExecOutcome> {
+    let input = serde_json::to_vec(&json!({
+        "hook_event_name":"SessionStart", "session_id":session, "cwd":rig.project,
+        "transcript_path":rig.root.join("transcript.jsonl"), "source":"startup"
+    }))?;
+    rig.execute(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &[
+            "--state-dir",
+            rig.state.to_str().ok_or("state")?,
+            "hook",
+            "claude",
+            "chair-start",
+        ],
+        Some(&input),
     )
 }
 
@@ -85,25 +106,14 @@ fn stored(rig: &TestRig) -> std::result::Result<String, Box<dyn std::error::Erro
 
 #[test]
 fn chair_session_start_ingests_the_session_as_chair() -> Result {
-    let rig = TestRig::new()?;
-    let config = rig.root.join("claude");
-    register_account(&rig, "claude", "current", "current", &config)?;
+    let mut rig = TestRig::new()?;
+    install_fake_claude_auth(&mut rig)?;
+    let config = rig.home.join(".claude-current");
+    set_claude_config_dir(&mut rig, &config);
+    let identity_key = write_fake_claude_identity(&config, "current@example.test")?;
+    register_account(&rig, "claude", "current", &identity_key, &config)?;
     write_session(&config, "chair-session", "m1", 45)?;
-    let input = serde_json::to_vec(&json!({
-        "hook_event_name":"SessionStart", "session_id":"chair-session", "cwd":rig.project,
-        "transcript_path":rig.root.join("transcript.jsonl"), "source":"startup"
-    }))?;
-    let output = rig.execute(
-        Path::new(env!("CARGO_BIN_EXE_provenant")),
-        &[
-            "--state-dir",
-            rig.state.to_str().ok_or("state")?,
-            "hook",
-            "claude",
-            "chair-start",
-        ],
-        Some(&input),
-    )?;
+    let output = start_chair_session(&rig, "chair-session")?;
     assert_eq!(code(&output), 0);
     let store = stored(&rig)?;
     let rows: Vec<Value> = store
@@ -113,10 +123,54 @@ fn chair_session_start_ingests_the_session_as_chair() -> Result {
     let row = rows
         .first()
         .ok_or("the chair SessionStart did not ingest its session")?;
-    assert_eq!(row["account"], "current");
+    assert_eq!(row["identity"]["identity"]["state"], "known");
+    assert_eq!(row["identity"]["identity"]["provider"], "claude");
+    assert_eq!(row["identity"]["identity"]["account_key"], identity_key);
+    assert_eq!(row["identity"]["epoch"]["state"], "unknown");
+    assert_eq!(row["identity"]["evidence_source"], "provider");
+    assert!(row.get("account").is_none());
     assert_eq!(row["source"], "chair");
     assert_eq!(row["session"], "chair-session");
     assert_eq!(row["output"], 45);
+    Ok(())
+}
+
+#[test]
+fn provider_identity_rotation_is_preserved_per_chair_session_in_ingest() -> Result {
+    let mut rig = TestRig::new()?;
+    install_fake_claude_auth(&mut rig)?;
+    let config = rig.home.join(".claude-rotating");
+    set_claude_config_dir(&mut rig, &config);
+
+    let first = write_fake_claude_identity(&config, "first@example.test")?;
+    let second = provenant_providers::identity::fingerprint("second@example.test")
+        .ok_or("invalid second identity")?;
+    register_account(&rig, "claude", "rotating", &first, &config)?;
+    write_session(&config, "session-a", "message-a", 3)?;
+    assert_eq!(code(&start_chair_session(&rig, "session-a")?), 0);
+
+    assert_eq!(
+        write_fake_claude_identity(&config, "second@example.test")?,
+        second
+    );
+    write_session(&config, "session-b", "message-b", 9)?;
+    assert_eq!(code(&start_chair_session(&rig, "session-b")?), 0);
+
+    let rows: Vec<Value> = stored(&rig)?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()?;
+    assert_eq!(rows.len(), 2);
+    let row_for = |session: &str| rows.iter().find(|row| row["session"] == session).unwrap();
+    for (session, key) in [("session-a", &first), ("session-b", &second)] {
+        let identity = &row_for(session)["identity"];
+        assert_eq!(identity["identity"]["state"], "known");
+        assert_eq!(identity["identity"]["provider"], "claude");
+        assert_eq!(identity["identity"]["account_key"], key.as_str());
+        assert_eq!(identity["epoch"]["state"], "unknown");
+        assert_eq!(identity["evidence_source"], "provider");
+    }
+    assert_ne!(first, second);
     Ok(())
 }
 
@@ -179,37 +233,18 @@ fn rig() -> Result<TestRig> {
     Ok(rig)
 }
 
-fn assert_group(rig: &TestRig, by: &str, value: &str, graph: Option<&str>) -> Result {
-    let output = rig.command(&["telemetry", "stats", "--by", by, "--json"])?;
+fn assert_graph_quality(rig: &TestRig, graph: &str) -> Result {
+    let output = rig.command(&["telemetry", "stats", "--json"])?;
     assert_eq!(code(&output), 0, "{output:?}");
     let report: Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_eq!(report["data"]["totals"]["attempts"], 1, "{report}");
-    let groups = &report["data"]["context_groups"];
-    assert_eq!(groups.as_array().ok_or("groups")?.len(), 1);
-    assert_eq!(groups[0]["value"], value, "{report}");
-    assert_eq!(groups[0]["totals"]["attempts"], 1);
-    if let Some(graph) = graph {
-        assert_eq!(report["data"]["graph_quality"][0]["graph_id"], graph);
-        assert_eq!(report["data"]["graph_quality"][0]["checkpoint"], "read");
-    }
+    assert_eq!(report["data"]["graph_quality"][0]["graph_id"], graph);
+    assert_eq!(report["data"]["graph_quality"][0]["checkpoint"], "read");
     Ok(())
 }
 
 #[test]
-fn settled_attempt_retains_optional_work_context() -> Result {
-    let rig = rig()?;
-    terminal_run::seed(
-        &rig,
-        "manifest-context",
-        &[json!({"graph_id":"manifest-graph", "node_id":"review", "pattern":"council"})],
-    )?;
-    assert_group(&rig, "node", "review", None)?;
-    assert_group(&rig, "pattern", "council", None)?;
-    Ok(())
-}
-
-#[test]
-fn submitted_graph_node_is_grouped_by_node_and_pattern() -> Result {
+fn submitted_graph_reports_its_checkpoint_quality() -> Result {
     let rig = rig()?;
     let document = rig.project.join("graph.json");
     std::fs::write(
@@ -235,59 +270,8 @@ fn submitted_graph_node_is_grouped_by_node_and_pattern() -> Result {
         value["data"]["checkpoint"]["graph_id"], "attributed-graph",
         "{value}"
     );
-    assert_group(&rig, "node", "inspect", Some("attributed-graph"))?;
-    assert_group(&rig, "pattern", "council", Some("attributed-graph"))?;
-    assert_group(&rig, "preset", "example", Some("attributed-graph"))?;
+    assert_graph_quality(&rig, "attributed-graph")?;
     Ok(())
-}
-
-fn route_stats_golden(actual: &str) -> Result {
-    let rest = actual
-        .strip_prefix("scope: project ")
-        .ok_or("scope prefix")?;
-    let (project, rest) = rest.split_once(',').ok_or("scope project delimiter")?;
-    assert!(
-        !project.is_empty() && !project.contains('\n'),
-        "invalid scope project"
-    );
-    let actual = format!("scope: project <project-id>,{rest}");
-    let actual = format!("{}\n", actual.trim_end());
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/telemetry-stats-by-route.txt");
-    if std::env::var_os("UPDATE_GOLDEN").is_some() {
-        fs::write(&path, &actual)?;
-    }
-    let expected = fs::read_to_string(&path).unwrap_or_default();
-    assert_eq!(actual, expected, "rerun with UPDATE_GOLDEN=1 to refresh");
-    Ok(())
-}
-
-#[test]
-fn route_stats_human_output_matches_golden() -> Result {
-    let rig = rig()?;
-    terminal_run::seed(&rig, "route-golden", &[Value::Null])?;
-    // Seed a settled receipt into the locally rejected attempt, without launching a provider.
-    let db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
-    db.execute_batch("DROP TRIGGER immutable_terminal_update")?;
-    let bytes: Vec<u8> = db.query_row("SELECT record FROM attempts", [], |row| row.get(0))?;
-    let mut record: Value = serde_json::from_slice(&bytes)?;
-    record["resolved_route"] =
-        json!({"provider":"codex", "model":"codex/gpt-6-luna", "effort":"low"});
-    record["usage"]["uncached_input"] = json!(1000);
-    record["usage"]["output_excluding_reasoning"] = json!(200);
-    assert_eq!(
-        db.execute(
-            "UPDATE attempts SET record=?1",
-            [serde_json::to_vec(&record)?]
-        )?,
-        1
-    );
-    drop(db);
-    let output = rig.command(&["telemetry", "stats", "--by", "route"])?;
-    assert_eq!(code(&output), 0, "{output:?}");
-    let human = String::from_utf8(output.stdout.bytes)?;
-    assert!(human.contains("codex/gpt-6-luna@low"), "{human}");
-    route_stats_golden(&human)
 }
 
 #[test]
@@ -342,7 +326,7 @@ fn telemetry_stats_reports_context_coverage_reasoning_and_acceptance_denominator
 }
 
 #[test]
-fn native_attempt_is_visible_in_status_and_linked_usage() -> Result {
+fn native_attempt_is_linked_in_usage() -> Result {
     let rig = rig()?;
     let config = rig.root.join("claude");
     register_account(&rig, "claude", "current", "current", &config)?;
@@ -381,42 +365,18 @@ fn native_attempt_is_visible_in_status_and_linked_usage() -> Result {
         "--json",
     ])?;
     assert_eq!(code(&end), 0, "{end:?}");
-    let status = rig.command(&["status", "--json"])?;
-    assert_eq!(code(&status), 0, "{status:?}");
-    let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
-    let rows = status["data"]["rows"].as_array().ok_or("status rows")?;
-    let row = rows
-        .iter()
-        .find(|row| row["id"] == "tool-1")
-        .ok_or("native status row")?;
-    assert_eq!(row["kind"], "attempt");
-    assert_eq!(row["attempt_id"], "tool-1");
-    assert_eq!(row["state"], "settled");
-    let stats = rig.command(&["telemetry", "stats", "--json", "--detail"])?;
+    let stats = rig.command(&["telemetry", "stats", "--json"])?;
     assert_eq!(code(&stats), 0, "{stats:?}");
     let stats: Value = serde_json::from_slice(&stats.stdout.bytes)?;
-    assert_eq!(
-        stats["data"]["native_subagents"]["attempts"][0]["attempt"]["alias"],
-        "reviewer"
-    );
-    assert_eq!(
-        stats["data"]["native_subagents"]["attempts"][0]["attempt"]["model"],
-        "claude-opus-5-5"
-    );
-    assert_eq!(
-        stats["data"]["native_subagents"]["attempts"][0]["buckets"][4],
-        45
-    );
-    assert_eq!(
-        stats["data"]["native_subagents"]["unlinked"][0]["buckets"][4],
-        30
-    );
+    let native = &stats["data"]["native_subagents"];
+    assert_eq!(native["attempts_omitted"], 1, "{native}");
+    assert_eq!(native["unlinked"][0]["buckets"][4], 30, "{native}");
     assert!(!fs::read_to_string(rig.state.join("native-attempts.json"))?.contains("PRIVATE"));
     Ok(())
 }
 
 #[test]
-fn stats_json_is_bounded_by_default_and_detail_carries_the_rows() -> Result {
+fn stats_json_counts_per_attempt_rows_instead_of_carrying_them() -> Result {
     let rig = rig()?;
     // The size limit itself is tested at the renderer with a low injected bound
     // (`unpublished_result_tests` in src/lib.rs); settling attempts is slow, so
@@ -424,7 +384,7 @@ fn stats_json_is_bounded_by_default_and_detail_carries_the_rows() -> Result {
     let attempts = 6usize;
     let contexts: Vec<Value> = (0..attempts)
         .map(|index| {
-            json!({"graph_id": format!("graph-{}", "g".repeat(100)),
+            json!({"graph_id": "bounded-stats-graph",
                 "node_id": format!("node-{index}-{}", "n".repeat(100))})
         })
         .collect();
@@ -438,16 +398,6 @@ fn stats_json_is_bounded_by_default_and_detail_carries_the_rows() -> Result {
         attempts
     );
     assert!(value["data"]["attempt_context"].get("attempts").is_none());
-    // --detail carries the per-attempt rows and publishes nothing.
-    let output = rig.command(&["telemetry", "stats", "--json", "--detail"])?;
-    assert_eq!(code(&output), 0, "{output:?}");
-    let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert_eq!(
-        value["data"]["attempt_context"]["attempts"]
-            .as_array()
-            .map(Vec::len),
-        Some(attempts)
-    );
     assert!(value["data"].get("artifact").is_none_or(Value::is_null));
     let left = fs::read_dir(rig.state.join("tmp/results")).map_or(0, Iterator::count);
     assert_eq!(left, 0);

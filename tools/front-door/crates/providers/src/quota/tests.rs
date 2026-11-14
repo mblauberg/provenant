@@ -27,19 +27,16 @@ fn decode_fixture(adapter: &str, fixture: &str) -> QuotaSnapshot {
     decode_json(&plan, fixture)
 }
 
+fn source(adapter: &str) -> &'static dyn crate::QuotaSource {
+    crate::REGISTRY
+        .iter()
+        .filter_map(|registration| registration.quota_source)
+        .find(|source| source.adapter_id() == adapter)
+        .expect("provider source is registered")
+}
+
 fn effect_plan(adapter: &str) -> QuotaProbePlan {
-    let kind = match adapter {
-        "claude" | "cursor" => QuotaEffectKind::HttpGet,
-        "codex" | "agy" => QuotaEffectKind::Command,
-        "opencode" => QuotaEffectKind::LocalLedger,
-        "command" => unreachable!("command adapter has no quota probe"),
-        other => panic!("unlisted adapter {other}"),
-    };
-    QuotaProbePlan {
-        kind,
-        account: scope(adapter),
-        input: input(),
-    }
+    source(adapter).probe(&scope(adapter), &input()).unwrap()
 }
 
 fn decode_json(plan: &QuotaProbePlan, fixture: &str) -> QuotaSnapshot {
@@ -49,7 +46,9 @@ fn decode_json(plan: &QuotaProbePlan, fixture: &str) -> QuotaSnapshot {
         exit_code: Some(0),
         overflowed: false,
     };
-    decode(plan, &capture).expect("redacted provider fixture decodes")
+    source(&plan.account.adapter)
+        .decode(plan, &capture)
+        .expect("redacted provider fixture decodes")
 }
 
 fn window<'a>(snapshot: &'a QuotaSnapshot, pool: &str) -> &'a QuotaWindow {
@@ -102,7 +101,9 @@ fn claude_model_scoped_exhaustion_does_not_mark_the_account_exhausted() {
         exit_code: Some(0),
         overflowed: false,
     };
-    let snapshot = decode(&effect_plan("claude"), &capture).unwrap();
+    let snapshot = source("claude")
+        .decode(&effect_plan("claude"), &capture)
+        .unwrap();
 
     assert_eq!(snapshot.status, QuotaStatus::Available);
     assert_eq!(
@@ -253,7 +254,7 @@ fn cursor_uses_usage_summary_and_fills_missing_plan_from_membership() {
 fn opencode_infers_compound_and_second_pool_windows() {
     let snapshot = decode_fixture(
         "opencode",
-        r#"{"payload":{"windows":[{"pool":"1h30m","used_percent":10},{"pool":"30s","used_percent":10}]}}"#,
+        r#"{"payload":{"windows":[{"pool":"1h30m","used_percent":10},{"pool":"30s","used_percent":10}]},"details":{"plan":"go"}}"#,
     );
     assert_eq!(window(&snapshot, "1h30m").window_seconds, Some(5_400));
     assert_eq!(window(&snapshot, "30s").window_seconds, Some(30));
@@ -316,22 +317,18 @@ fn no_reported_windows_remain_unknown() {
 #[test]
 fn quota_effects_follow_specs_and_require_successful_commands() {
     for spec in provenant_records::ADAPTER_SPECS {
-        // Host-native delegates; the fixture supplies its own quota source.
-        if spec.id == provenant_records::Harness::HostNative || spec.name == "fixture-provider" {
-            continue;
-        }
-        let expected = match spec.name {
-            "claude" | "cursor" => QuotaEffectKind::HttpGet,
-            "codex" | "agy" => QuotaEffectKind::Command,
-            "opencode" => QuotaEffectKind::LocalLedger,
-            "command" => {
+        use provenant_records::QuotaProbeKind;
+        let expected = match spec.quota_probe {
+            QuotaProbeKind::HttpGet => QuotaEffectKind::HttpGet,
+            QuotaProbeKind::Command => QuotaEffectKind::Command,
+            QuotaProbeKind::LocalLedger => QuotaEffectKind::LocalLedger,
+            QuotaProbeKind::None => {
                 assert!(matches!(
                     super::plan(spec.name, &scope(spec.name), &input()),
                     Err(QuotaError::Disabled)
                 ));
                 continue;
             }
-            other => panic!("unlisted adapter {other}"),
         };
         let plan = super::plan(spec.name, &scope(spec.name), &input()).unwrap();
         assert_eq!(plan.kind, expected);
@@ -341,7 +338,7 @@ fn quota_effects_follow_specs_and_require_successful_commands() {
             exit_code: None,
             overflowed: false,
         };
-        let result = super::decode(&plan, &capture);
+        let result = source(spec.name).decode(&plan, &capture);
         if expected == QuotaEffectKind::Command {
             assert!(matches!(
                 result,

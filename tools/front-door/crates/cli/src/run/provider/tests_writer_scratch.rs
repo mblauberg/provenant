@@ -13,9 +13,7 @@ fn provider_fence_preparation_reports_causes_and_selects_available_candidate()
 
 fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::{UtilityBudget, UtilityRuntime, worktrees};
-    use provenant_core::{
-        AttemptId, CancelToken, Clock, Digest, OperationId, RunId, TaskId, WaitBudget,
-    };
+    use provenant_core::{AttemptId, CancelToken, Clock, Digest, OperationId, WaitBudget};
     use provenant_os::clock::SystemClock;
     use provenant_os::exec::ExecOptions;
     use provenant_os::exec::Executor;
@@ -72,6 +70,15 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         std::fs::create_dir(&config)?;
         std::os::unix::fs::symlink(config, home.join(".config"))?;
     }
+    // Resolve host authority after establishing credential-parent aliases.
+    #[cfg(target_os = "macos")]
+    if !fence_only {
+        let skill_root = home.join(".gemini/skills");
+        std::fs::create_dir_all(&skill_root)?;
+        std::os::unix::fs::symlink(&skill_root, skill_root.join("bin"))?;
+        std::os::unix::fs::symlink(&skill_root, home.join(".cargo"))?;
+        std::fs::create_dir_all(home.join(".rustup/toolchains"))?;
+    }
     let executor = SystemExecutor::new(1)?;
     let git = init_fixture_repository(&executor, &project, &git_home)?;
     let roots = provenant_core::RootInputs {
@@ -79,7 +86,11 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         ..provenant_core::RootInputs::new(home.clone(), project.clone())
     }
     .resolve(&provenant_os::fs::SystemPathResolver)?;
-    let utility = UtilityRuntime::new(&git, &git_home)?;
+    let utility = UtilityRuntime::new(
+        &git,
+        &git_home,
+        roots.state.as_path(),
+    )?;
     let cancel = CancelToken::new();
     let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
     let repo = utility.open_repo(&executor, &project, budget, &cancel)?;
@@ -121,17 +132,21 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
     // inside the fixture assets, independent of host packages and PATH.
     let executable = assets.join("cursor/bin/agent");
     std::fs::create_dir_all(executable.parent().ok_or("provider bin")?)?;
-    std::fs::write(&executable, b"#!/bin/sh\nif [ \"$1\" = status ]; then printf 'Logged in successfully\\n'; else printf 'fixture-cursor 1.0\\n'; fi\n")?;
+    std::fs::write(
+        &executable,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = status ]; then printf '%s' '{}'; else printf 'fixture-cursor 1.0\\n'; fi\n",
+            include_str!("../../../../../tests/fixtures/providers/cursor/status.stdout")
+        ),
+    )?;
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
-    let run_id = RunId::from_bytes([2; 16]);
     let attempt_id = AttemptId::from_bytes([1; 16]);
-    let attempt = state.join(format!("runs/{run_id}/attempts/{attempt_id}"));
+    let attempt = state.join(format!("attempts/{attempt_id}"));
     let paths = run::LaunchPaths {
         attempt_id,
         operation_id: OperationId::parse("writer-temporary")?,
         task_index: 0,
         lane_depth: 1,
-        run_id,
         deadline_unix_ms: u64::MAX,
         scratch: attempt.join("scratch"),
         provider_state: attempt.join("provider-state"),
@@ -155,7 +170,6 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         head: Some(review_oid.clone()),
         source_head: None,
         base_ref: None,
-        task_id: TaskId::from_bytes([3; 16]),
         profile: provenant_records::run::HarnessProfile {
             knobs: [("lanes.publish".into(), serde_json::json!(false))].into(),
             ..Default::default()
@@ -170,7 +184,11 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         account: None,
         authority_digest: Digest::from_bytes([4; 32]),
         writer: Some(run::WriterRequest {
-            extra: Default::default(),
+            extra: [(
+                "custody_project".into(),
+                serde_json::json!(binding.project_id()),
+            )]
+            .into(),
             project: project.clone(),
             worktree: project.join(".worktrees/writer"),
         }),
@@ -262,7 +280,6 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
             operation_id: paths.operation_id.clone(),
             task_index: paths.task_index,
             lane_depth: paths.lane_depth,
-            run_id: paths.run_id,
             deadline_unix_ms: paths.deadline_unix_ms,
             temporary_alias: None,
         };
@@ -358,7 +375,6 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
                 operation_id: paths.operation_id.clone(),
                 task_index: paths.task_index,
                 lane_depth: paths.lane_depth,
-                run_id: paths.run_id,
                 deadline_unix_ms: paths.deadline_unix_ms,
             };
             for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
@@ -465,7 +481,10 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
             assert!(skipped.cause.is_some(), "{skipped:?}");
             if skipped.route.starts_with("cursor/") {
                 assert_eq!(skipped.kind, SkipKind::Setup, "{skipped:?}");
-                assert_eq!(skipped.cause, Some(provenant_records::RouteExclusionReason::SetupFailed));
+                assert_eq!(
+                    skipped.cause,
+                    Some(provenant_records::RouteExclusionReason::SetupFailed)
+                );
             } else {
                 assert!(skipped.cause.is_some(), "{skipped:?}");
             }
@@ -591,7 +610,6 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         operation_id: paths.operation_id.clone(),
         task_index: paths.task_index,
         lane_depth: paths.lane_depth,
-        run_id: paths.run_id,
         deadline_unix_ms: paths.deadline_unix_ms,
         temporary_alias: None,
     };
@@ -659,25 +677,27 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
     )?;
     store.create(
         &run::PreparedRun {
-            run_id,
+            attempt_id,
             operation_id: paths.operation_id.clone(),
             request: run::CanonicalRequest {
                 extra: Default::default(),
-                child_attempt_id_version: None,
                 chair: None,
                 fresh_continuation: None,
                 schema_version: 1,
-                tasks: vec![task.clone()],
-                concurrency: 1,
+                task: run::TaskRequest {
+                    context: Some(provenant_records::run::WorkContext {
+                        graph_id: Some(format!("lane-{attempt_id}")),
+                        node_id: Some("node".into()),
+                        attempt: Some(1),
+                        ..Default::default()
+                    }),
+                    ..task.clone()
+                },
                 parent: None,
                 lane_depth: Some(1),
                 parent_attempt: None,
             },
-            attempts: vec![run::NewAttempt {
-                task_id: task.task_id,
-                attempt_id,
-                prompt: prompt.clone(),
-            }],
+            prompt: prompt.clone(),
             created_at: provenant_core::WallTime::from_micros(100)?,
         },
         &call,
@@ -690,12 +710,6 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
             required_anchors, system_backend,
         };
         let skill_root = home.join(".gemini/skills");
-        std::fs::create_dir_all(&skill_root)?;
-        // Skill discovery and Rust discovery omit the same canonical root.
-        // Repeated read/exec grants for that root collapse within Toolchain.
-        std::os::unix::fs::symlink(&skill_root, skill_root.join("bin"))?;
-        std::os::unix::fs::symlink(&skill_root, home.join(".cargo"))?;
-        std::fs::create_dir_all(home.join(".rustup/toolchains"))?;
         let login = home.join("Library/Keychains/login.keychain-db");
         std::fs::create_dir_all(login.parent().unwrap())?;
         std::fs::write(&login, b"fixture")?;
@@ -742,13 +756,12 @@ printf 'agy 1.0.0\n'
                 request.writer = None;
             }
             let attempt_id = AttemptId::from_bytes([n; 16]);
-            let attempt = state.join(format!("runs/{run_id}/attempts/{attempt_id}"));
+            let attempt = state.join(format!("attempts/{attempt_id}"));
             let paths = run::LaunchPaths {
                 attempt_id,
                 operation_id: OperationId::parse(&format!("agy-fixture-{n}"))?,
                 task_index: 0,
                 lane_depth: 1,
-                run_id,
                 deadline_unix_ms: u64::MAX,
                 scratch: attempt.join("scratch"),
                 provider_state: attempt.join("provider-state"),
@@ -773,28 +786,6 @@ printf 'agy 1.0.0\n'
                 |_| Ok(fake_agy.clone()),
                 None,
             )?;
-            let skills = &prepared.route.extra["user_skills"];
-            assert_eq!(skills["exposed"], true);
-            assert!(
-                skills["warnings"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|warning| warning["code"] == "user_skill_skipped"
-                        && warning["reason"] == "cycle")
-            );
-            let warnings = prepared.route.extra["discovery_warnings"]
-                .as_array()
-                .unwrap();
-            if write {
-                assert!(warnings.iter().any(|warning| {
-                    warning
-                        .as_str()
-                        .is_some_and(|text| text.contains("~/.gemini/skills"))
-                }));
-            } else {
-                assert!(warnings.is_empty());
-            }
             let confinement = prepared.confinement.as_ref().ok_or("missing confinement")?;
             assert!(
                 !confinement
@@ -840,11 +831,13 @@ printf 'agy 1.0.0\n'
                     &["rev-parse", "--absolute-git-dir"],
                 )?)?;
                 let admin = std::fs::canonicalize(admin.trim())?;
+                // The host materialises the shim's private Git store before launch.
                 let private = paths.temporary.join("candidate-0/git-common");
-                std::fs::create_dir_all(private.join("objects"))?;
-                std::fs::create_dir_all(private.join("refs"))?;
-                std::fs::write(private.join("HEAD"), b"ref: refs/heads/writer\n")?;
+                std::fs::create_dir_all(&private)?;
+                provenant_os::fixture::run_git(&private, &["init", "--bare"])?;
                 std::fs::copy(project.join(".git/config"), private.join("config"))?;
+                std::fs::write(private.join("HEAD"), b"ref: refs/heads/writer\n")?;
+                std::fs::create_dir_all(paths.temporary.join("candidate-0/git-objects"))?;
                 environment.push(("IDENTITY_PROBE".into(), "writer".into()));
                 environment.push(("EXPECTED_ADMIN".into(), admin.into_os_string()));
                 environment.push(("EXPECTED_PRIVATE".into(), private.into_os_string()));
@@ -979,10 +972,14 @@ printf 'agy 1.0.0\n'
             );
         }
         let receipt = &prepared.route.extra["user_skills"];
-        // The linked target is an empty, safe directory: discovery stages
-        // an empty tree without granting its original location.
-        assert_eq!(receipt["exposed"], expected, "{settings}");
-        assert_eq!(receipt["staged_file_count"], 0);
+        // Policy selection is independent of whether the platform stages skills.
+        // Unsandboxed launches use the user's own skill tree without staging it.
+        assert_eq!(receipt["mode"], if expected { "discover" } else { "off" });
+        assert_eq!(
+            receipt["exposed"],
+            expected && confinement.sandbox.effective,
+            "{settings}"
+        );
         assert!(receipt["warnings"].as_array().unwrap().is_empty());
         if source == "route" {
             assert!(receipt["source"]["route_policy"].is_array());
@@ -1028,7 +1025,12 @@ printf 'agy 1.0.0\n'
         };
         assert!(permissions.write_roots.contains(&lock_grant));
         let mandatory = permissions.policy.as_ref().ok_or("policy")?.mandatory();
-        assert!(mandatory.protected().iter().any(|root| root.path == project));
+        assert!(
+            mandatory
+                .protected()
+                .iter()
+                .any(|root| root.path == project)
+        );
         assert!(mandatory.host_writes().contains(&lock_grant));
         host_writer_roots_inside_other_checkouts(
             binding.project_id(),
@@ -1100,12 +1102,14 @@ printf 'agy 1.0.0\n'
         home.join(".codex"),
     )?;
     let codex_prompt = provenant_providers::Prompt::new("grants".into());
+    let launch_policy = provenant_records::policy::Policy::default();
     let images = vec![PathBuf::from("/outside/shot.png")];
     let codex_runtime = assets.join("provenant");
     let mut codex = provenant_providers::Adapter::prepare(
         &provenant_providers::codex::Codex,
         provenant_providers::PrepareInput {
             images: &images,
+            policy: &launch_policy,
             command: None,
             route: &codex_route,
             confined: &confinement.plan,
@@ -1130,7 +1134,6 @@ printf 'agy 1.0.0\n'
                 depth: 1,
                 attempt: attempt_id,
                 assets: &assets,
-                fabric_mcp: true,
             },
         },
     )?;
@@ -1152,7 +1155,8 @@ printf 'agy 1.0.0\n'
         &codex_runtime,
         &state,
         &std::collections::BTreeMap::new(),
-    );
+    )
+    .expect("sandboxed lanes receive their optional build-slot shim");
     assert!(
         coordination_reads
             .iter()
@@ -1163,11 +1167,11 @@ printf 'agy 1.0.0\n'
             .iter()
             .any(|root| root.path.ends_with("slot-0.lock"))
     );
-    // An unrepresentable shim input warns and leaves the prepared lane intact.
+    // An unrepresentable shim input warns and leaves preparation intact without new grants.
     let env_before = codex.env.clone();
     let profile_before = codex.profile.spec.clone();
     let setup_count = codex.setup.len();
-    let refused_coordination_reads = configure_build_slots(
+    let skipped_coordination_reads = configure_build_slots(
         &mut codex,
         &provenant_config::LaneBuildSettings::default(),
         &home,
@@ -1175,8 +1179,9 @@ printf 'agy 1.0.0\n'
         Path::new("relative-runtime"),
         &state,
         &std::collections::BTreeMap::new(),
-    );
-    assert!(refused_coordination_reads.is_empty());
+    )
+    .expect("an unrepresentable shim leaves launch preparation intact");
+    assert!(skipped_coordination_reads.is_empty());
     assert_eq!(codex.env, env_before);
     assert_eq!(codex.profile.spec, profile_before);
     assert_eq!(codex.setup.len(), setup_count);
@@ -1193,37 +1198,6 @@ printf 'agy 1.0.0\n'
     let grants =
         provenant_confinement::write_grants(confinement.plan.permissions(), &codex.profile);
     assert!(!grants.is_empty(), "the profile lists its write grants");
-    // The shim's wait marker must be writable by the lane, or a sandboxed
-    // wait is never shown.
-    let shim = codex
-        .setup
-        .iter()
-        .find_map(|step| match step {
-            provenant_providers::SetupStep::WriteExecutable { path, bytes }
-                if path.ends_with("bin/cargo") =>
-            {
-                String::from_utf8(bytes.clone()).ok()
-            }
-            _ => None,
-        })
-        .ok_or("cargo shim")?;
-    let marker = confinement
-        .plan
-        .permissions()
-        .scratch
-        .path
-        .join(provenant_os::build_slots::WAIT_MARKER);
-    assert!(
-        shim.contains(&marker.to_string_lossy().into_owned()),
-        "{shim}"
-    );
-    assert!(
-        grants
-            .iter()
-            .any(|grant| grant.scope == PathScope::Subtree && marker.starts_with(&grant.path)),
-        "no write grant covers the wait marker {}",
-        marker.display()
-    );
     for grant in &grants {
         let reaches = match grant.scope {
             PathScope::Exact => grant.path == slots,
@@ -1275,7 +1249,6 @@ printf 'agy 1.0.0\n'
         operation_id: paths.operation_id.clone(),
         task_index: paths.task_index,
         lane_depth: paths.lane_depth,
-        run_id: paths.run_id,
         deadline_unix_ms: paths.deadline_unix_ms,
         scratch: attempt.join("publishing-scratch"),
         provider_state: attempt.join("publishing-provider-state"),
@@ -1316,6 +1289,13 @@ printf 'agy 1.0.0\n'
             .any(|(key, value)| key == "GH_TOKEN" && value == "fixture-host-token")
     );
     assert!(!launch.environment.iter().any(|(key, _)| key == "GH_TOKEN"));
+    // One credential decision per lane, recorded with its source.
+    let credential = &publishing.route.extra["github_credential"];
+    assert_eq!(credential["identity"], "user");
+    assert_eq!(credential["source"], "default");
+    assert_eq!(credential["delivery"], "injected");
+    assert_eq!(credential["mediation"], "gh wrapper (advisory)");
+    assert!(!credential.to_string().contains("fixture-host-token"));
     let gh_config = publishing_paths.temporary.join("candidate-0/gh-config");
     assert!(gh_config.is_dir());
     assert!(
@@ -1327,6 +1307,7 @@ printf 'agy 1.0.0\n'
     assert_eq!(std::fs::read_dir(&gh_config)?.count(), 0);
     let gh_shim = std::fs::read_to_string(publishing_paths.temporary.join("candidate-0/bin/gh"))?;
     assert!(gh_shim.contains(gh_config.to_str().ok_or("gh config path")?));
+    assert!(gh_shim.contains(provenant_config::GH_INVOCATIONS_FILE));
     assert!(
         !gh_shim.contains(
             home.join(".config/gh")
@@ -1615,7 +1596,6 @@ printf 'agy 1.0.0\n'
         operation_id: paths.operation_id.clone(),
         task_index: paths.task_index,
         lane_depth: paths.lane_depth,
-        run_id: paths.run_id,
         deadline_unix_ms: paths.deadline_unix_ms,
     };
     for path in [
@@ -1673,7 +1653,6 @@ printf 'agy 1.0.0\n'
         operation_id: paths.operation_id.clone(),
         task_index: paths.task_index,
         lane_depth: paths.lane_depth,
-        run_id: paths.run_id,
         deadline_unix_ms: paths.deadline_unix_ms,
     };
     for path in [
@@ -1830,7 +1809,6 @@ printf 'agy 1.0.0\n'
         operation_id: OperationId::parse("different-resume-seed")?,
         task_index: paths.task_index,
         lane_depth: paths.lane_depth,
-        run_id: paths.run_id,
         deadline_unix_ms: paths.deadline_unix_ms,
         scratch: attempt.join("continued-scratch"),
         provider_state: attempt.join("continued-provider-state"),
@@ -1927,7 +1905,7 @@ printf 'agy 1.0.0\n'
     // The default config enables the cargo seed, and prepare hands that to the
     // lane's launch confinement, where `seed_target` reads it.
     assert!(
-        confinement.cargo_registry_seed,
+        confinement.cargo_target_seed,
         "the default FabricConfig must reach the writer launch with the seed enabled"
     );
     assert!(!confinement.plan.permissions().writer_publishing());
@@ -2049,7 +2027,12 @@ fn host_writer_roots_inside_other_checkouts(
         .as_ref()
         .ok_or("policy")?
         .mandatory();
-    assert!(mandatory.protected().iter().any(|root| root.path == primary));
+    assert!(
+        mandatory
+            .protected()
+            .iter()
+            .any(|root| root.path == primary)
+    );
     assert!(mandatory.host_writes().contains(&lock_grant));
     provenant_confinement::ConfinedPlan::new(launched)?;
     // A read-only lane receives no writer roots and no exception.
@@ -2079,7 +2062,11 @@ fn host_writer_roots_inside_other_checkouts(
     ] {
         assert!(
             matches!(
-                request(Some(writer), &run::LaneAccess::default(), &config(vec![path.clone()])),
+                request(
+                    Some(writer),
+                    &run::LaneAccess::default(),
+                    &config(vec![path.clone()])
+                ),
                 Err(PermissionError::ProtectedOverlap)
             ),
             "{}",

@@ -1,454 +1,181 @@
-# Build, package and install
+# Install, upgrade, verify and remove
 Owner: provenant-config
 Anchor: [`managed.rs`](../../tools/front-door/crates/config/src/managed.rs); [`shared_settings.rs`](../../tools/front-door/crates/config/src/shared_settings.rs)
 
-The `provenant-config` crate owns release stamping, packaging and managed-file
-installation. See the [state design](../specs/state.md) for
-the full contract. A staged release contains a verified manifest and immutable
-assets. Installation publishes its receipt last, and exact desired bytes and
-links are no-ops, including after a crash before receipt publication.
+Invariants are in the [state spec](../specs/state.md). Flags are in
+`provenant help --all`. Install writes its receipt last; rerunning `install`
+recovers any partial or crashed install.
 
 ## Bootstrap and upgrade
 
-`./install.sh` downloads the release matching an exact checkout tag, or the
-latest release otherwise. `--tag vX.Y.Z` selects a release explicitly. Packages
-are named `provenant-<target>.tar.gz` with a matching `.tar.gz.sha256` file;
-the script verifies SHA-256 before unpacking and running the packaged binary.
-The release workflow publishes only `aarch64-apple-darwin`; other hosts fail
-before downloading. Build a checkout with `./install.sh --source --yes`
-(`--from-source` is also accepted).
+`./install.sh` installs the release for the checkout's exact tag, else the latest.
+`--tag vX.Y.Z` selects one; `--source [DIR]` builds a checkout with its pinned
+toolchain (`--yes` accepts a missing-toolchain install). Releases are
+`aarch64-apple-darwin` only; other hosts must use `--source`. The script
+verifies the package SHA-256 before running anything from it. State defaults to
+`~/.local/share/provenant/v2` and the binary to `~/.local/bin`; override with
+`--state-dir`, `PROVENANT_STATE_DIR` and `--bin-dir` (absolute paths).
 
-`--from-source [DIR]` uses that checkout's pinned Rust toolchain and asks before
-installing a missing toolchain through rustup. `--yes` authorises this step
-without a prompt. Cargo's target and build directories live in a temporary
-directory that is removed on completion or failure. Manual builds are described
-below.
+A first install on a terminal prompts for providers, instruction files (replace,
+append or skip), Claude hooks and Claude accounts. `--yes` and any rerun with a
+receipt skip the prompts. A bare `provenant install --source "$RELEASE"` targets
+every detected client CLI and `~/.claude-*` directory; with a receipt it reuses
+the recorded targets and binary directory.
 
-The defaults are `~/.local/share/provenant/v1` for state and `~/.local/bin`
-for the binary. `PROVENANT_STATE_DIR`, `--state-dir` and `--bin-dir` support
-other paths. Existing install configuration still applies.
-
-On a terminal, a first install without `--yes` offers provider selection,
-pre-selecting detected CLIs and Claude account directories. It asks whether to
-replace, append to or skip each instruction file, enable Claude hooks and
-register the discovered Claude accounts. Append copies the release's instruction
-text into the existing file; later upgrades preserve that user-owned text.
-Skip preserves existing text or creates an empty user-owned file. Replace lets
-the installer create its managed link. Prompts read the controlling terminal,
-including when the script is piped into `sh`; `--yes` and receipt reruns skip
-guided setup. A truncated script runs nothing, and child commands cannot consume
-the shell's input. After the first successful install, a later account failure
-preserves the published instruction links and receipt.
-
-A bare `provenant install --source "$RELEASE"` detects executable `claude`,
-`codex`, `cursor-agent`, `agy` and `opencode` commands on PATH and every
-`~/.claude-*` directory. It reports each target, emits findings only when
-present, and inspects the installed release at the end. `--dry-run` previews
-without writing; `--json` keeps one result envelope. Explicit `--harness`
-selects particular clients. Without it, an existing receipt determines the
-exact targets and binary directory, ignoring newly detected clients and
-environment overrides. Hook ownership is retained when `--hooks` is omitted.
-Every registered account directory is also a target, whatever the selection
-(see [account sync](#account-sync)).
+### Upgrade
 
 ```sh
 provenant upgrade
-provenant upgrade --from-source /absolute/path/to/provenant --hosts all
+provenant upgrade --from-source /absolute/path/to/provenant
 ```
 
-Before upgrading, check each host for running work. A release that breaks state
-readability requires pending graphs to be finished or stopped and active writers
-to settle before upgrading. Graph nodes have been observed launching on the new
-binary after a swap; a lane process running across a swap has not been shown end
-to end. Preserve and report unreadable records; never drop them. Check
-`provenant status`, collect `provenant output TARGET` and inspect
-`provenant output TARGET --trace` before using `retry` for unfinished work.
+Upgrade needs a receipt. It upgrades this host and every registered Fabric
+peer one after another, over Fabric's SSH settings. Source upgrades need build
+tools on every host and a stable checkout. A failure on one host leaves hosts on
+different versions: fix the reported cause and rerun; there is no distributed
+rollback.
 
-The staged release checks each host for pending graphs, live lanes, unreadable
-records and user presets before installation. If a release breaks state
-readability between the installed and target versions, or if unreadable records,
-legacy pending graphs or live lanes, or legacy presets are present, the preflight
-blocks and reports the findings;
-resolve them and rerun the upgrade, or pass `--yes` to `provenant upgrade` or
-`install.sh --upgrade` to proceed despite them. On routine releases without
-state format breaks, other in-flight work is reported as a warning and the upgrade
-proceeds without `--yes`. A failure to inspect the state stops the upgrade.
+Drain first: no lane should run across a binary swap. Check
+`provenant status`, collect `provenant output TARGET`, and only then `retry`
+unfinished work.
 
-Upgrade requires a receipt. It downloads one release tag for this host and all
-registered Fabric peers, or builds the selected source checkout on every host.
-It uses Fabric's SSH executable, destination and connection timeout, and each
-host's own receipt settings. Release upgrades verify each host's package checksum
-before running its bundled `scripts/install.sh`. Source transfers contain tracked
-working files; peers build a temporary indexed checkout. Keep source changes stable during
-the upgrade. Every host needs build tools for a source upgrade. Peer receipts
-must be in their default state directory or selected by the peer's login
-environment. Results identify each host; any failure makes the command fail.
-Hosts are upgraded sequentially, so a failure can leave different versions.
-Fix the reported failure and rerun; there is no distributed rollback.
+If installation fails after stopping agents, the output names the stopped
+agents and those that may still be running, prints the quoted state directory
+and asks you to rerun your original install command with its original options
+(`--source`, `--state-dir`, `--bin-dir`). Agents restart after a successful
+install.
 
-Bootstrap exits 2 for invalid arguments or interrupted prompts, 3 when a
-missing toolchain needs consent, 4 for a failed download or checksum, and 5
-for a failed build or package. Installation errors retain the CLI's exit code.
-
-App upgrades exchange the staged and installed bundles atomically with macOS
-`renamex_np(RENAME_SWAP)`. The staged console executable exposes an installer-only
-`--swap-path OLD NEW` mode before AppKit starts; a temporary copy remains available
-for rollback. The old bundle stays in the staging directory until the menu agent
-has restarted successfully. If restoring the app or its LaunchAgent plist fails,
-the installer retains that directory and reports its location for recovery.
-If the old app backup cannot be removed after a successful upgrade, installation
-succeeds with a warning identifying the retained directory; remove it manually.
-
-`provenant hosts doctor` includes the tick agent's launchd state and last exit reason
-from `launchctl print gui/<uid>/dev.provenant.tick`. An idle tick with exit code
-zero is normal. Abnormal exits or terminating signals are flagged with
-`provenant upgrade` as the repair; SIGKILL can indicate a launch-constraint kill
-but does not by itself prove that cause.
-Installation bounces a loaded tick agent. After an upgrade, check
-`launchctl print gui/$UID/dev.provenant.tick`, then run
-`launchctl kickstart -k gui/$UID/dev.provenant.tick` and confirm it launches,
-since CI cannot exercise launchd.
-
-Tags matching `v*` trigger `.github/workflows/release.yml`. The tag commit must
-be reachable from `origin/main`. A job with read access builds and ad-hoc signs
-the arm64 binary, runs `package-release`, and checksums the archive. A separate
-publish job verifies the transferred bytes and publishes the archive and checksum;
-only its publish step receives `GITHUB_TOKEN`. Before tagging, commit
-`docs/release-notes/<tag>.md`; that file becomes the GitHub Release body.
+`provenant upgrade` preflights every configured host before installing any
+host and never prompts while capturing installer output. Keep the fleet
+quiescent for the whole operation; preflight cannot make a multi-host install
+atomic.
 
 ### Test a candidate binary
 
-Run an uninstalled candidate only on its own `--state-dir`, never on the real
-state directory. A candidate with a newer run schema migrates `run.sqlite3` on
-first use, and installed binaries then fail with an IO error for every session on
-the host. `install --source DIR --upgrade-preflight` is read-only and safe on real
-state. An uninstalled binary also needs `PROVENANT_ROOT` set to its checkout.
+Run an uninstalled candidate only with its own `--state-dir`, with
+`PROVENANT_ROOT` set to its checkout. A candidate can change persisted state;
+never point it at the state of an installed binary. `install --source DIR --upgrade-preflight`
+is read-only and safe on real state.
 
 ## Build a staged release
 
-On the host, outside a Fabric lane, build the binary and run the release packaging binary.
-Choose a fresh absolute output directory outside every repository checkout. The
-output's parent directory must already exist. The packager copies the exact asset
-inventory digested by `build.rs`, reads the binary's `--version --json` identity,
-and runs the install path's bounded version and help smoke before publishing
-`release.json` last. It refuses existing output directories and asset drift.
-Release archives include only the `provenant` executable.
+Only for `--source` installs and candidate releases. Build outside a Fabric
+lane, with a fresh absolute output directory outside every checkout (its parent
+must exist). Never use a lane cache for a host build.
 
 ```sh
 cd tools/front-door
-export PATH="$HOME/.cargo/bin:$PATH"
-CARGO_PARENT="$(mktemp -d)"
-export CARGO_TARGET_DIR="$CARGO_PARENT/cargo-target"
-export RUSTC_WRAPPER=".cargo/rustc-wrapper.sh"
-RELEASE_PARENT="$(mktemp -d)"
-RELEASE="$RELEASE_PARENT/release"
+export CARGO_TARGET_DIR="$(mktemp -d)/cargo-target"
+export RUSTC_WRAPPER=.cargo/rustc-wrapper.sh    # reproducible path remapping
+RELEASE="$(mktemp -d)/release"
 cargo build --release --locked --bin provenant
 cargo run --locked --bin package-release -- --out "$RELEASE"
-rm -rf -- "$CARGO_PARENT"
-unset CARGO_TARGET_DIR CARGO_PARENT RUSTC_WRAPPER
+unset CARGO_TARGET_DIR RUSTC_WRAPPER
 ```
 
-Host builds use a fresh target directory. Confined writers use the separate
-`$HOME/Library/Caches/provenant-lane-cargo/<sha256>` namespace, derived from
-verified worktree and repository identities. It also holds the lane's private
-Cargo home, npm and pnpm caches and Corepack home; the host's `~/.cargo/registry`,
-`~/.npm`, `~/Library/pnpm` and similar stores are read-only to lanes. Lanes run the
-installed pnpm whatever version a project pins (`manage-package-manager-versions`
-and `package-manager-strict` are off), because a downloaded `@pnpm/exe` launcher
-needs a hard link that lanes cannot create. Never use
-a lane cache for a host build. `provenant worktree remove` deletes only the
-removed worktree's own cache while holding its writer lock; [GC](gc.md)
-collects other idle and orphaned lane caches.
-
-The packager defaults to `$CARGO_TARGET_DIR/release/provenant`, or the
-workspace's `target/release/provenant` without that variable. Pass
-`--binary PATH` to package another release build, for example one built with an
-explicit target triple. Run `cargo build --release --locked --bin provenant`
-after source changes and before packaging. The packager refuses a binary whose
-embedded source digest does not match the current build's source digest.
+The packager refuses an existing output directory, asset drift, or a binary
+whose embedded source digest differs from the current source: rebuild after any
+source change. `--binary PATH` packages another build.
 
 ## Install
 
-Bootstrap from the binary in the staged release. An explicit state root must
-be absolute; the default is `~/.local/share/provenant/v1`. Quit
-Claude Code before installing, because it rewrites `~/.claude.json` while
-running. Close the other selected harness clients and config editors before the
-preview, and keep them closed through the install and `check install`. The
-example selects Claude; repeat `--harness` for each client (`claude`, `codex`,
-`cursor`, `agy` or `opencode`).
-
-Claude accounts must use exactly `~/.claude-$LABEL`, where `LABEL` is the
-registration label. Choose a label and sign in to that directory before
-registering it. `~/.claude` is the sign-in source only, not a registered account.
+Quit Claude Code and any other selected client or config editor before the
+preview, and keep them closed through `check install`; Claude rewrites
+`~/.claude.json` while running. Claude accounts live in exactly
+`~/.claude-$LABEL`; sign in there before registering. `~/.claude` is a sign-in
+source, never an account.
 
 ```sh
 PROVENANT="$RELEASE/bin/provenant"
-STATE="$HOME/.local/share/provenant/v1"
-"$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude --bin-dir "$HOME/.local/bin" --dry-run
-"$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude --bin-dir "$HOME/.local/bin"
+STATE="$HOME/.local/share/provenant/v2"
+"$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude --dry-run
+"$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude
 "$PROVENANT" --state-dir "$STATE" check install --source "$RELEASE"
 LABEL=work
-ACCOUNT_DIR="$HOME/.claude-$LABEL"
-CLAUDE_CONFIG_DIR=~/.claude-$LABEL claude
-"$PROVENANT" --state-dir "$STATE" accounts register "$LABEL" --adapter claude --directory "$ACCOUNT_DIR"
+CLAUDE_CONFIG_DIR=~/.claude-$LABEL claude    # sign in, then exit
+"$PROVENANT" --state-dir "$STATE" accounts register "$LABEL" --adapter claude --directory "$HOME/.claude-$LABEL"
 "$PROVENANT" --state-dir "$STATE" quota tick
 ```
 
-Repeat the account registration for each account, with a unique label and
-`--adapter codex` for Codex accounts. Dispatch needs registered accounts; run
-`quota tick` afterwards to initialise quota state. Registering an account also
-installs the managed skills, MCP entry and hooks into its directory when an
-install exists (see [account sync](#account-sync)).
+Repeat `--harness` per client (`claude`, `codex`, `cursor`, `agy`, `opencode`)
+and `accounts register` per account (`--adapter codex` for Codex). Dispatch
+needs registered accounts, and `quota tick` initialises quota state.
 
-Review every planned change before applying it; a failed preview prevents
-writes. `--dry-run` creates no state root, lock or receipt. A first install
-leaves hooks disabled unless requested. Re-install without `--hooks` keeps
-ownership of previously installed hooks and refreshes unchanged entries for the
-new installation. Edited hooks stay in place, leave the receipt and produce
-findings. Missing hooks also leave the receipt. Hooks are one choice for every
-target of a harness: a target that owns no hooks yet, such as a newly registered
-account, takes the full set while another target of the harness owns them.
-`--hooks off` removes unchanged owned hooks from every selected target and
-relinquishes modified ones, reporting them. Explicit
-`--hooks on` refuses an edited Claude hook; use `--hooks off` to relinquish its
-ownership before reinstalling.
-`--hooks on` registers hooks for each selected harness that has a
-fixture-backed hook specification (Claude today). The Claude set includes the
-session and worktree hooks described in the
-[Claude hooks runbook](claude-hooks.md); rerun with `--hooks on` after an
-upgrade to register new handlers. At least one selected
-harness must have a specification. Unmanaged paths are preserved, and
-conflicts are refused unless
-`--adopt-existing` is given for files that match exactly.
-
-To install into a Claude config directory that is not a registered account,
-rerun `install --harness claude` with `CLAUDE_CONFIG_DIR` set; its MCP entry
-then goes to that directory's `.claude.json`. Each directory is a separate
-target in the one receipt, so runs accumulate. The same applies to Codex with
-`CODEX_HOME`. Registered accounts need no such run.
-
-`check install` compares the installed binary, assets, receipt and owned
-selectors of every recorded target, without repair, and reports account drift
-(see [account sync](#account-sync)). Reapply `install` after resolving a
-partial-write error.
+- Read the dry-run: a failed preview prevents writes.
+- Hooks stay off on a first install. `--hooks on` registers them (Claude
+  today; rerun after an upgrade to pick up new handlers, see
+  [Claude hooks](claude-hooks.md)). Omitting `--hooks` keeps owned hooks and
+  refreshes unchanged ones. `--hooks off` removes unchanged ones and releases
+  edited ones. `--hooks on` refuses an edited Claude hook: run `--hooks off`
+  first.
+- Occupied or foreign entries are refused. If the preview shows an exact match
+  you accept, rerun with `--adopt-existing`.
+- A directory that is not a registered account needs `install --harness claude`
+  with `CLAUDE_CONFIG_DIR` set (`CODEX_HOME` for Codex); each directory is a
+  separate target in the one receipt.
+- `check install` compares binary, assets, receipt and owned entries for every
+  target without repairing. After a partial-write error, rerun `install`.
 
 ## Account sync
 
-Every registered account directory holds the same managed content. Four things
-are synced:
-
-- the managed skill links;
-- the Fabric MCP entry (in `.claude.json` for Claude, `config.toml` for Codex);
-- the managed hooks, when any target of the harness owns them;
-- the allow-listed shared Claude settings (below).
-
-`provenant install` (including each upgrade), `provenant accounts register` and
-`provenant accounts sync` all apply it, so a new or upgraded install leaves the
-accounts identical. An account directory is `~/.claude-<label>` for Claude and
-the `--directory` given at registration for Codex, the adapters whose accounts
-are separate configuration directories. Registered directories are resolved to
-their canonical path (symlinks, relative and `..` spellings) and two
-registrations of one directory count once. Cursor, Agy and OpenCode accounts
-are local logins of one client directory, so their registrations add no target.
-`~/.claude` is a target when installed, but never a registered account.
-
-Never synced: credentials and sign-in state (`.credentials*`, `auth.json`),
-identity fields in `.claude.json` such as `oauthAccount`, any `settings.json`
-key outside the allow-list, user-owned hooks and MCP entries, and the keys the
-deny rule below refuses. Other bytes in `settings.json` and `.claude.json` are
-preserved.
-
-### Hooks
+Every registered account directory holds the same managed skill links,
+managed hooks and allow-listed shared Claude settings. `install`,
+`accounts register` and `accounts sync` apply it. Credentials, identity fields
+and user-owned entries are never synced.
 
 An edited managed hook is left in place and reported as
-`relinquished_modified_entry`. An account that removes every managed hook has
-relinquished them: the removal persists across syncs and is not drift, and
-only `--hooks on` brings them back. A target that never had hooks, such as a
-new account, takes the hooks its siblings own.
+`relinquished_modified_entry`; an account with no managed hooks has
+relinquished them until `--hooks on`.
 
 ### Shared settings
 
-```toml
-[domains.accounts.shared_settings]
-source = "/Users/me/.claude/settings.json"   # default: ~/.claude/settings.json when it exists
-keys = ["permissions", "env", "statusLine", "enabledPlugins",
-        "outputStyle", "includeCoAuthoredBy", "cleanupPeriodDays"]   # the default allow-list
-
-[domains.accounts.entries.claude-work.settings]   # wins over the source for this account
-outputStyle = "verbose"
-```
-
-With no source file and no per-account `settings`, nothing is synced. Only keys
-in `keys` are synced, and a per-account key must be in `keys`. The deny rule
-refuses, even when listed, identity and credential keys (`apiKeyHelper`,
-`awsAuthRefresh`, `awsCredentialExport`, `forceLoginMethod`,
-`forceLoginOrgUUID`, `otelHeadersHelper`), `hooks`, and any key or `env`
-variable name containing an `auth`, `credential`, `token`, `oauth`, `secret` or
-`password` word, an `api key`, `access key` or `private key` pair, or, after
-lower-casing and dropping separators and digits, any of `token`, `secret`,
-`password`, `passwd`, `credential`, `oauth`, `apikey`, `authtoken`,
-`privatekey`, `session`, `cookie` or `bearer`. The rule catches glued names such
-as `ANTHROPICAUTHTOKEN` and accepts some false positives; the one exemption is
-the default key `includeCoAuthoredBy`. The message names the key and the rule
-that matched. A refused configuration stops install, upgrade and sync, never
-uninstall.
-
-Each synced key is recorded in the receipt (`setting:<key>`) with the value
-last written. On the next sync:
-
-- an unedited account follows the source, including a key the source dropped;
-- an account that edited the value, or held a different one before the first
-  sync, is a `settings_conflict` naming the account and key, and is not
-  overwritten;
-- `provenant accounts sync --adopt <account>` copies that account's edited
-  allow-listed values into the source file, then syncs every account;
-- `provenant accounts sync --force-settings` overwrites the edits with the
-  source's values;
-- a key the account deleted stays deleted (`--force-settings` restores it).
-
-Sync never rewrites the source file or the account that holds it; `--adopt`
-is the one explicit exception. It resolves a symlinked source and writes the
-target, so the link survives, stages the new file exclusively beside it, and
-re-reads the source just before the swap: if the bytes changed since the plan
-read them, nothing is written and you rerun the command. Applying settings to
-an account likewise compares the planned snapshot before its atomic rename, so
-an edit saved by a running Claude session in between is reported as drift
-rather than lost. Settings drift is
-reported as `settings_drift` or `settings_conflict` by `check install`,
-`accounts list` and `hosts doctor`.
+Configure shared settings under `[domains.accounts.shared_settings]`; inspect
+available keys with `provenant config schema`. Credentials and identity are not
+synced. If `provenant check install` reports a settings conflict, use
+`provenant accounts sync --adopt ACCOUNT` to make that account the source, or
+`provenant accounts sync --force-settings` to replace its values from the source.
+Preview with `provenant accounts sync --dry-run` first.
 
 ### Repair and drift
 
-`provenant accounts sync [--dry-run] [--adopt <account>] [--force-settings]
-[--prune-orphans]` is the repair command. It reapplies the installed release to
-every registered account directory and recorded target, and needs an install
-receipt. A conflict in any target (an unmanaged file where a managed link
-belongs, or a foreign `fabric` MCP entry) refuses the whole command before any
-write; fix or adopt it (`install --adopt-existing`), then rerun. A failed
-write part way through is reported as a partial install listing exactly the
-actions completed and remaining; rerun the same command. Registration is never
-undone by a failed sync: `accounts register` reports `ACCOUNT_SYNC` and the
-same repair. A configuration defect stops install, upgrade and sync but never
-`uninstall`, which ignores the configuration and says so.
+Run `provenant check install` and follow the reported repair. For account drift,
+preview `provenant accounts sync --dry-run`, resolve any unmanaged conflicts,
+then run `provenant accounts sync`. After a partial write, rerun the command.
 
-When accounts of a harness are registered, a recorded target whose account was
-unregistered is reported as `orphaned_account` and not synced.
-`--prune-orphans` removes its managed content.
+## Background agents
 
-Drift appears in three places, each per account:
+On macOS, the default-state install manages peer and tick LaunchAgents. Run
+`provenant hosts doctor` to check them. If a modified plist blocks install, move
+it aside, boot out the affected agent with `launchctl`, and rerun install. Check
+the tick output and result if it reports an error. See [Fabric hosts](fabric-hosts.md#macos-peers-and-the-login-keychain)
+for peer setup and [GC](gc.md) for scheduled collection.
 
-- `provenant check install` adds `unsynced_account` (registered, never
-  installed), `missing_account_directory`, `unusable_account_directory`,
-  `account_missing_entry` (the account lacks a skill, MCP entry or hook that a
-  sibling account of the harness owns), `settings_drift` and `settings_conflict`
-  to its `owned_entry_drift` findings. Each message names the account and the
-  repair.
-- `provenant accounts list` adds a `state` per account: `synced`, `drift`,
-  `unsynced`, `missing_directory` or `not_installed`, with the findings in
-  `data.sync`.
-- `provenant hosts doctor` reports the same `managed` rows beside the sign-in
-  rows, locally and for a peer; with no install receipt it lists none.
+On Linux, the default-state install enables a user timer. If it must run while
+logged out, enable lingering for the user with `loginctl enable-linger $USER`.
 
-The shared global instructions file `~/.agents/AGENTS.md` belongs to the
-installed release like the harness instruction links: install creates or
-refreshes its link into the release's `instructions` assets. A plain file in
-the way is user content, so install refuses it before writing anything;
-rerun with `--adopt-existing` to replace it, or move it aside yourself.
-`check install` reports `stale_shared_instructions` (a link into another
-release; run `provenant install`) and `unmanaged_shared_instructions`
-(anything else; run `provenant install --adopt-existing` or move the file
-aside), each naming the repair.
+## Uninstall
 
-An account whose directory is gone is skipped and reported (also by
-`accounts register`), never recreated.
+```sh
+provenant --state-dir "$STATE" uninstall --harness claude
+```
 
-On macOS, an install into this account's default state root also manages
-`~/Library/LaunchAgents/dev.provenant.peer.plist`. The dry-run and install
-report name its action, and the receipt records its exact contents and mode.
-Symlinked plist paths or parents are refused. The agent's PATH contains the
-fixed system directories, the install bin directory and existing absolute
-directories holding resolved Claude, Codex and Git executables, when known.
-It does not inherit the shell's other PATH entries.
-Modified or unknown plists are preserved and block install. To recover, move the named plist
-aside, run `launchctl bootout gui/$UID/dev.provenant.peer`, then rerun install.
+This removes only entries that still match the receipt, never recursively, and
+keeps state and release assets. With `CLAUDE_CONFIG_DIR` or `CODEX_HOME` set it
+removes that directory's target only. Removing the last target also stops the
+LaunchAgents or timer; a modified plist or unit is kept and reported, and a
+failed bootout keeps the plist for a retry.
 
-The same macOS default-state install also manages
-`~/Library/LaunchAgents/dev.provenant.tick.plist`, with `RunAtLoad = true` and
-`StartInterval = 60`. It runs `provenant tick` to advance graphs with due persisted
-wake deadlines and collect registered projects daily, protecting live writers
-and reservations. Its stdout and stderr go to `<state>/tick/`. The tick uses a
-fixed PATH plus the install bin directory and resolved provider, Git and GitHub
-CLI locations outside project worktrees. `provenant tick` can also run directly.
-
-On Linux, a default-state install writes
-`systemd/user/provenant-tick.service` under an absolute `XDG_CONFIG_HOME`, else `~/.config`, (a one-shot running
-`provenant tick` with the same PATH, state directory and `<state>/tick/` logs)
-and `provenant-tick.timer` (first tick on activation, then every 60 seconds
-after the previous one), then runs `systemctl --user enable --now` on the
-timer. Reinstall is idempotent: unchanged units are left running, changed units
-trigger a `daemon-reload` and timer restart. Uninstall disables and stops the
-timer and removes both unchanged units; modified units are kept and reported.
-The user manager needs a login session (`XDG_RUNTIME_DIR` set). To keep the
-timer running while logged out, run `loginctl enable-linger $USER`. The peer
-agent stays macOS-only.
-
-The tick also runs daily [GC](gc.md) in a detached worker, recording its result
-in `<state>/tick/gc-result.json`; `provenant tick --json` reports a failed
-sweep. `[gc] schedule = false` stops scheduled collection without stopping
-graph deadlines.
-
-To remove an installation, run
-`provenant --state-dir "$STATE" uninstall --harness claude`. It removes only
-unchanged owned entries and keeps the state and release assets. It never
-recursively deletes a checkout, state root or release. With `CLAUDE_CONFIG_DIR`
-or `CODEX_HOME` set, uninstall removes only that directory's target; without
-it, every recorded target of the harness.
-Removing the last recorded target also boots out the peer and tick
-LaunchAgents (or disables the Linux tick timer) and removes their unchanged
-plists and units.
-A modified plist is kept and reported; its
-service is left running. A failed bootout keeps the plist for a retry.
-A missing recorded plist is stopped by its service label.
-
-If your home directory or state root has moved since install, uninstall reports
-one `relocated_stale_entry` per entry it will not touch, plus `state_root_moved`
-if the state root moved, then forgets the removed targets. This also applies
-with a custom `PROVENANT_STATE_DIR` or state outside the home. It never acts on
-the old paths. Human output also says `Home moved; old paths left untouched`
-when the state root stayed in place. To finish,
-run `launchctl bootout gui/$UID/dev.provenant.peer`, move
-`~/Library/LaunchAgents/dev.provenant.peer.plist` aside, and delete links under
-`~/.local/bin` and the harness skills directories, plus harness instruction
-links such as `AGENTS.md`, that point into the old state root.
-Then rerun install with `--adopt-existing` to replace managed MCP entries that
-still name the old binary and state. Stopping the agent and removing these
-links remain manual steps.
-
-`build.rs` stamps the source and asset digests, and the packaging binary
-produces the typed `release.json`. The CLI grammar is described in
-[cli.md](../specs/cli.md); `help --json` describes the command
-surface without resolving roots or creating state.
+If the home or state root moved since install, uninstall reports
+`relocated_stale_entry` (and `state_root_moved`) and never touches the old
+paths. Finish by hand: `launchctl bootout gui/$UID/dev.provenant.peer`, move the
+old peer plist aside, delete links under `~/.local/bin`, the harness skills
+directories and instruction links that point into the old state root, then
+rerun `install --adopt-existing`.
 
 ## Receipt recovery
 
-A receipt that fails to decode reports a reinstall error. For an invalid receipt, move `<state>/install/receipt.json`
-aside, then preview and reapply `install` with the desired release and
-harnesses. Existing exact desired files and links
-remain no-ops. Links into an older release conflict; remove those binary, skill
-and instruction links manually before reapplying install. Use `--adopt-existing`
-for occupied managed MCP selectors or a stable regular executable that must be
-replaced, and inspect the preview before applying it. Install, uninstall and
-`check install` do not clean up or audit pre-1.0 entries or Git launchers;
-remove those manually.
-
-## Fabric MCP registration
-
-`provenant fabric mcp [--client NAME]` is the explicit stdio transport. The
-`--client` flag is optional; supported values are `claude`, `codex`, `cursor`,
-`agy` and `opencode`. `--json`
-is refused before stdin. A bare `provenant` prints usage and exits 2, so a
-client registration must name `fabric mcp`.
-
-Installation registers the transport for each selected harness and preserves
-unrelated client configuration; there is no separate registry editor. See the
-[Fabric design](../specs/fabric.md).
+A receipt that fails to decode reports a reinstall error. Move
+`<state>/install/receipt.json` aside, preview, and reapply `install`; exact
+existing files and links are no-ops. Links into an older release conflict:
+remove those binary, skill and instruction links first. Use `--adopt-existing`
+for a regular executable that must be replaced.

@@ -81,7 +81,7 @@ final class ChangeWatcherTests: XCTestCase {
     func testStateDirectoryFollowsTheEnvironment() {
         XCTAssertEqual(StateDirectory.resolve(environment: ["PROVENANT_STATE_DIR": "/tmp/state"]).path, "/tmp/state")
         XCTAssertEqual(StateDirectory.resolve(environment: ["PROVENANT_STATE_DIR": "relative"], home: URL(fileURLWithPath: "/home/me")).path,
-                       "/home/me/.local/share/provenant/v1")
+                       "/home/me/.local/share/provenant/v2")
         XCTAssertEqual(StateDirectory.signalFile(in: URL(fileURLWithPath: "/s")).path, "/s/changes.json")
     }
 }

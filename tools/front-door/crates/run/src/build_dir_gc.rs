@@ -15,12 +15,11 @@
 //! probe covers that case. A write dated more than a few minutes in the future
 //! is clock skew, not recent activity, and does not earn the grace.
 //!
-//! Sizes are allocated bytes (`st_blocks * 512`) throughout. A settlement does
-//! not walk every lane cache: see `reclaim`.
+//! Sizes are allocated bytes (`st_blocks * 512`) throughout. Explicit GC owns
+//! collection; ordinary admission records pressure and follows policy.
 use provenant_confinement::cache::is_cache_digest;
 use provenant_os::fs::{
-    Directory, FileKind, ForeignLock, LockGuard, LockMode, Metadata, PayloadTree, PublishMode,
-    effective_uid,
+    Directory, FileKind, ForeignLock, LockGuard, LockMode, Metadata, PayloadTree, effective_uid,
 };
 use std::{
     ffi::{OsStr, OsString},
@@ -38,11 +37,6 @@ const MAX_ENTRIES: usize = 1_000_000;
 /// How far ahead of now a modification time may be and still count as a
 /// recent write.
 const FUTURE_SKEW_NS: i128 = 5 * 60 * 1_000_000_000;
-/// A cached total within this fraction of the cap (nine tenths) forces a walk.
-const NEAR_CAP_NUM: u128 = 9;
-const NEAR_CAP_DEN: u128 = 10;
-const SURVEY_STATE: &str = "build-dir-gc-survey";
-const SURVEY_LOCK: &str = "build-dir-gc.lock";
 
 /// Size cap on all profile directories, the free-space floor to restore, and
 /// the seconds after its newest write that a directory is spared.
@@ -141,106 +135,6 @@ pub fn collect(
             Ok(prune(survey, limits, false, wall_ns()?, &mut free))
         },
     )?
-}
-
-/// Collect for an event (admission below the floor, a settled lane) using the
-/// host's configured cap, floor and grace. Best effort: a busy ledger,
-/// unreadable settings or a failed sweep leave the caches as they were.
-///
-/// Cheap signals come first. The walk runs only when free space is below the
-/// floor, when the last walk is older than `build_dir_survey_interval_seconds`,
-/// or when it found the total within a tenth of the cap. The last walk's time
-/// and total live in the state root. While the floor stays breached every
-/// settlement walks, because reclaiming is the point. A try-lock keeps concurrent events from
-/// walking twice: the loser skips and returns `None`.
-pub fn reclaim(host: &Path, home: &Path) -> Option<Report> {
-    let settings = provenant_config::LaneBuildSettings::read(host).ok()?;
-    let floor = provenant_config::GcSettings::read(host)
-        .and_then(|gc| gc.free_floor_bytes(host))
-        .ok()?;
-    let limits = Limits {
-        max_bytes: settings.build_dir_cap(),
-        free_floor: floor,
-        grace_seconds: settings.build_dir_grace_seconds(),
-    };
-    let interval = settings.build_dir_survey_interval_seconds();
-    let mut free = || free_bytes(home);
-    reclaim_with(host, home, limits, interval, &mut free, wall_ns().ok()?)
-}
-
-fn reclaim_with(
-    host: &Path,
-    home: &Path,
-    limits: Limits,
-    interval_seconds: u64,
-    free: &mut dyn FnMut() -> io::Result<u64>,
-    now_ns: i128,
-) -> Option<Report> {
-    reclaim_gated(
-        host,
-        home,
-        limits,
-        interval_seconds,
-        free,
-        now_ns,
-        &mut || {},
-    )
-}
-
-/// `between` runs after the cheap check and before the walk lock is taken: the
-/// window in which a concurrent settlement can finish a walk.
-fn reclaim_gated(
-    host: &Path,
-    home: &Path,
-    limits: Limits,
-    interval_seconds: u64,
-    free: &mut dyn FnMut() -> io::Result<u64>,
-    now_ns: i128,
-    between: &mut dyn FnMut(),
-) -> Option<Report> {
-    let anchor = Directory::open_anchor(host).ok()?;
-    // An unreadable disk is not evidence of room: walk.
-    let breached = free().map_or(true, |bytes| bytes < limits.free_floor);
-    if !breached && !survey_due(&anchor, limits, interval_seconds, now_ns) {
-        return None;
-    }
-    between();
-    let _walking = anchor
-        .try_lock(OsStr::new(SURVEY_LOCK), LockMode::Exclusive)
-        .ok()?;
-    // Another event may have walked while this one waited on the lock.
-    if !breached && !survey_due(&anchor, limits, interval_seconds, now_ns) {
-        return None;
-    }
-    let report = collect(host, home, limits, false).ok()?;
-    let record = format!("{now_ns} {}\n", report.cache_bytes);
-    // The cache only saves walks; failing to write it costs one extra walk.
-    let _ = anchor.atomic_write(
-        OsStr::new(SURVEY_STATE),
-        ".build-dir-gc-survey",
-        record.as_bytes(),
-        PublishMode::Replace,
-    );
-    Some(report)
-}
-
-/// Whether the last walk is missing, stale, dated in the future, or found the
-/// total near the cap.
-fn survey_due(anchor: &Directory, limits: Limits, interval_seconds: u64, now_ns: i128) -> bool {
-    let Ok(bytes) = anchor.read_bounded(OsStr::new(SURVEY_STATE), 256) else {
-        return true;
-    };
-    let Some((at, total)) = std::str::from_utf8(&bytes).ok().and_then(|text| {
-        let (at, total) = text.trim().split_once(' ')?;
-        Some((at.parse::<i128>().ok()?, total.parse::<u64>().ok()?))
-    }) else {
-        return true;
-    };
-    let age = now_ns.saturating_sub(at);
-    let interval = i128::from(interval_seconds).saturating_mul(1_000_000_000);
-    age < 0
-        || age >= interval
-        || u128::from(total) * NEAR_CAP_DEN >= u128::from(limits.max_bytes) * NEAR_CAP_NUM
 }
 
 fn free_bytes(home: &Path) -> io::Result<u64> {
@@ -487,8 +381,9 @@ fn measure(directory: &PayloadTree, depth: usize) -> io::Result<(u64, i128)> {
     if depth >= MAX_DEPTH {
         return Err(io::Error::other("directory nesting too deep"));
     }
-    let mut bytes = 0_u64;
-    let mut newest = directory.metadata().map_err(io::Error::other)?.modified_ns;
+    let metadata = directory.metadata().map_err(io::Error::other)?;
+    let mut bytes = if depth == 0 { metadata.allocated } else { 0 };
+    let mut newest = metadata.modified_ns;
     for name in directory_names(directory)? {
         let metadata = directory.metadata_at(&name).map_err(io::Error::other)?;
         bytes = bytes.saturating_add(metadata.allocated);
@@ -601,7 +496,7 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            let home = tempfile::tempdir().unwrap();
+            let home = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
             fs::create_dir_all(cache_root(home.path())).unwrap();
             Self { home }
         }
@@ -844,7 +739,7 @@ mod tests {
         fs::create_dir_all(&lint).unwrap();
         fs::write(lint.join(CARGO_LOCK), b"").unwrap();
         fs::write(lint.join("payload"), vec![1; 4096]).unwrap();
-        let stray = fixture.cache('a').join("cargo-home");
+        let stray = fixture.cache('a').join("private-config");
         fs::create_dir_all(&stray).unwrap();
         fs::write(stray.join(CARGO_LOCK), b"").unwrap();
         let report = sweep(fixture.home.path(), limits(0, 0), false, now(), &mut plenty);
@@ -887,71 +782,9 @@ mod tests {
     }
 
     #[test]
-    fn events_use_the_configured_cap_and_floor() {
-        let state = tempfile::tempdir().unwrap();
-        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let fixture = Fixture::new();
-        let old = fixture.profile('a', "debug", 8192, 2000);
-        let new = fixture.profile('b', "debug", 8192, 1000);
-        let size = sweep(
-            fixture.home.path(),
-            limits(u64::MAX, 0),
-            true,
-            now(),
-            &mut plenty,
-        )
-        .cache_bytes
-            / 2;
-        let config = state.path().join("config.toml");
-        // Under the cap and with a floor any disk meets: nothing to do.
-        fs::write(
-            &config,
-            format!(
-                "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric.lanes]\nbuild_dir_max_bytes={}\n",
-                size * 2
-            ),
-        )
-        .unwrap();
-        let report = reclaim(state.path(), fixture.home.path()).unwrap();
-        assert!(report.removed.is_empty() && old.exists() && new.exists());
-        assert_eq!(report.cache_bytes, size * 2);
-        // Over the cap by one byte: the least recently used goes.
-        fs::write(
-            &config,
-            format!(
-                "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric.lanes]\nbuild_dir_max_bytes={}\n",
-                size * 2 - 1
-            ),
-        )
-        .unwrap();
-        let report = reclaim(state.path(), fixture.home.path()).unwrap();
-        assert_eq!(report.removed, vec![old.clone()]);
-        assert!(!old.exists() && new.exists());
-        // A floor no volume can meet empties every idle directory, but the
-        // default 15 minute grace spares one written a minute ago.
-        let recent = fixture.profile('c', "debug", 8192, 60);
-        fs::write(
-            &config,
-            "schema_version=1\n[gc]\nfree_floor='900000000000000B'\n",
-        )
-        .unwrap();
-        let report = reclaim(state.path(), fixture.home.path()).unwrap();
-        assert_eq!(report.removed, vec![new.clone()]);
-        assert_eq!(report.recent, vec![recent.clone()]);
-        // The configured grace applies.
-        fs::write(
-            &config,
-            "schema_version=1\n[gc]\nfree_floor='900000000000000B'\n[domains.fabric.lanes]\nbuild_dir_grace_seconds=0\n",
-        )
-        .unwrap();
-        let report = reclaim(state.path(), fixture.home.path()).unwrap();
-        assert_eq!(report.removed, vec![recent.clone()]);
-    }
-
-    #[test]
     fn collection_waits_for_the_admission_lock_and_blocks_claims() {
         provenant_sqlite::with_busy_timeout(std::time::Duration::from_millis(50), || {
-            let state = tempfile::tempdir().unwrap();
+            let state = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
             fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
             let fixture = Fixture::new();
             let debug = fixture.profile('a', "debug", 4096, 100);
@@ -1086,7 +919,7 @@ mod tests {
 
     #[test]
     fn a_sweep_with_nothing_to_do_does_not_take_the_admission_lock() {
-        let state = tempfile::tempdir().unwrap();
+        let state = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
         fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let fixture = Fixture::new();
         let debug = fixture.profile('a', "debug", 4096, 1000);
@@ -1140,237 +973,5 @@ mod tests {
             &mut plenty,
         );
         assert!(report.cache_bytes < (1 << 24), "{}", report.cache_bytes);
-    }
-
-    fn state_root() -> tempfile::TempDir {
-        let state = tempfile::tempdir().unwrap();
-        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        state
-    }
-
-    #[test]
-    fn settlements_within_the_interval_walk_at_most_once() {
-        let state = state_root();
-        let fixture = Fixture::new();
-        fixture.profile('a', "debug", 4096, 2000);
-        let limit = limits(u64::MAX / 2, 1);
-        let mut plenty_free = plenty;
-        let at = now();
-        let first = reclaim_with(
-            state.path(),
-            fixture.home.path(),
-            limit,
-            300,
-            &mut plenty_free,
-            at,
-        );
-        assert!(first.is_some(), "no earlier walk: survey");
-        let again = reclaim_with(
-            state.path(),
-            fixture.home.path(),
-            limit,
-            300,
-            &mut plenty_free,
-            at + 60_000_000_000,
-        );
-        assert!(again.is_none(), "within the interval: no second walk");
-        // Past the interval, or with the clock moved back, it walks again.
-        let later = reclaim_with(
-            state.path(),
-            fixture.home.path(),
-            limit,
-            300,
-            &mut plenty_free,
-            at + 301_000_000_000,
-        );
-        assert!(later.is_some());
-        let skewed = reclaim_with(
-            state.path(),
-            fixture.home.path(),
-            limit,
-            300,
-            &mut plenty_free,
-            at,
-        );
-        assert!(skewed.is_some(), "a record from the future is stale");
-    }
-
-    #[test]
-    fn a_breached_floor_or_a_near_cap_total_forces_a_walk() {
-        let state = state_root();
-        let fixture = Fixture::new();
-        fixture.profile('a', "debug", 4096, 2000);
-        let at = now();
-        let roomy = limits(u64::MAX / 2, 1);
-        let mut plenty_free = plenty;
-        assert!(
-            reclaim_with(
-                state.path(),
-                fixture.home.path(),
-                roomy,
-                300,
-                &mut plenty_free,
-                at
-            )
-            .is_some()
-        );
-        assert!(
-            reclaim_with(
-                state.path(),
-                fixture.home.path(),
-                roomy,
-                300,
-                &mut plenty_free,
-                at + 1
-            )
-            .is_none()
-        );
-        let mut none_free = || Ok(0_u64);
-        assert!(
-            reclaim_with(
-                state.path(),
-                fixture.home.path(),
-                roomy,
-                300,
-                &mut none_free,
-                at + 2
-            )
-            .is_some(),
-            "floor breached"
-        );
-        let mut unreadable = || Err(io::Error::other("statvfs"));
-        assert!(
-            reclaim_with(
-                state.path(),
-                fixture.home.path(),
-                roomy,
-                300,
-                &mut unreadable,
-                at + 3
-            )
-            .is_some()
-        );
-        // The last total is within a tenth of a tiny cap.
-        let tight = limits(1, 1);
-        assert!(
-            reclaim_with(
-                state.path(),
-                fixture.home.path(),
-                tight,
-                300,
-                &mut plenty_free,
-                at + 4
-            )
-            .is_some()
-        );
-    }
-
-    #[test]
-    fn a_concurrent_walk_makes_a_settlement_skip() {
-        let state = state_root();
-        let fixture = Fixture::new();
-        fixture.profile('a', "debug", 4096, 2000);
-        let anchor = Directory::open_anchor(state.path()).unwrap();
-        let _walking = anchor
-            .try_lock(OsStr::new(SURVEY_LOCK), LockMode::Exclusive)
-            .unwrap();
-        let mut none_free = || Ok(0_u64);
-        let skipped = reclaim_with(
-            state.path(),
-            fixture.home.path(),
-            limits(u64::MAX / 2, 1),
-            300,
-            &mut none_free,
-            now(),
-        );
-        assert!(skipped.is_none());
-    }
-
-    #[test]
-    fn an_unreadable_or_malformed_survey_record_forces_a_walk() {
-        let state = state_root();
-        let fixture = Fixture::new();
-        fixture.profile('a', "debug", 4096, 2000);
-        let roomy = limits(u64::MAX / 2, 1);
-        let mut plenty_free = plenty;
-        let at = now();
-        let record = state.path().join(SURVEY_STATE);
-        for bad in [
-            "".as_bytes(),
-            b"not a record\n",
-            b"123\n",
-            b"abc 5\n",
-            b"123 -5\n",
-            b"\xff\xfe",
-        ] {
-            fs::write(&record, bad).unwrap();
-            let report = reclaim_with(
-                state.path(),
-                fixture.home.path(),
-                roomy,
-                300,
-                &mut plenty_free,
-                at,
-            );
-            assert!(report.is_some(), "{bad:?} must force a walk");
-            // The walk replaces the bad record, so the next settlement skips.
-            let next = reclaim_with(
-                state.path(),
-                fixture.home.path(),
-                roomy,
-                300,
-                &mut plenty_free,
-                at + 1,
-            );
-            assert!(next.is_none());
-        }
-        // A record that is a directory cannot be read: walk and carry on.
-        fs::remove_file(&record).unwrap();
-        fs::create_dir(&record).unwrap();
-        let report = reclaim_with(
-            state.path(),
-            fixture.home.path(),
-            roomy,
-            300,
-            &mut plenty_free,
-            at,
-        );
-        assert!(report.is_some());
-    }
-
-    #[test]
-    fn a_settlement_that_wins_the_lock_after_a_fresh_record_skips_the_walk() {
-        let state = state_root();
-        let fixture = Fixture::new();
-        fixture.profile('a', "debug", 4096, 2000);
-        let roomy = limits(u64::MAX / 2, 1);
-        let at = now();
-        let record = state.path().join(SURVEY_STATE);
-        let mut plenty_free = plenty;
-        // No record: the cheap check says walk. Meanwhile another settlement
-        // finishes its walk and records it, so the re-read under the lock skips.
-        let mut other_settlement = || fs::write(&record, format!("{at} 4096\n")).unwrap();
-        let report = reclaim_gated(
-            state.path(),
-            fixture.home.path(),
-            roomy,
-            300,
-            &mut plenty_free,
-            at,
-            &mut other_settlement,
-        );
-        assert!(report.is_none(), "the record is fresh once the lock is won");
-        // With a breached floor the record is not consulted: walk regardless.
-        let mut none_free = || Ok(0_u64);
-        let report = reclaim_gated(
-            state.path(),
-            fixture.home.path(),
-            roomy,
-            300,
-            &mut none_free,
-            at,
-            &mut || {},
-        );
-        assert!(report.is_some());
     }
 }

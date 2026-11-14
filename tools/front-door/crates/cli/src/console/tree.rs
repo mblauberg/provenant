@@ -44,8 +44,8 @@ pub(super) fn read_inner(
     let mut seen: BTreeMap<
         (ProjectId, AttemptId),
         (
-            (provenant_core::RunId, provenant_core::TaskId),
-            (Option<AttemptId>, Option<AttemptId>, Option<AttemptId>),
+            provenant_records::WorkKey,
+            (Option<Value>, Option<AttemptId>),
             String,
         ),
     > = BTreeMap::new();
@@ -133,19 +133,24 @@ pub(super) fn read_inner(
                 examined += 1;
                 let attempt = &lane.attempt;
                 let key = (attempt.project_id, attempt.attempt_id);
-                let identity = (attempt.run_id, attempt.task_id);
-                let parents = (lane.run.parent_attempt, lane.run.parent, attempt.retry_of);
+                let work_key = attempt.key.clone();
+                // A dispatch parent is sealed on the admitting operation; a
+                // continuation is the only source of `retry_of`.
+                let parents = (
+                    lane.operation.extra.get("parent_attempt").cloned(),
+                    attempt.retry_of,
+                );
                 if let Some((existing, existing_parents, existing_store)) = seen.get(&key) {
                     duplicate_count += 1;
-                    if *existing != identity {
-                        conflicts.push(json!({"project_id":attempt.project_id,"attempt_id":attempt.attempt_id,"reason":"conflicting_identity","values":{"stored":{"run_id":existing.0,"task_id":existing.1},"observed":{"run_id":identity.0,"task_id":identity.1}},"store":{"stored":existing_store,"observed":store_path.clone()}}));
+                    if *existing != work_key {
+                        conflicts.push(json!({"project_id":attempt.project_id,"attempt_id":attempt.attempt_id,"reason":"conflicting_work_key","values":{"stored":existing,"observed":work_key},"store":{"stored":existing_store,"observed":store_path.clone()}}));
                     }
                     if *existing_parents != parents {
-                        conflicts.push(json!({"project_id":attempt.project_id,"attempt_id":attempt.attempt_id,"reason":"conflicting_parents","values":{"stored":{"dispatch":existing_parents.0,"continuation":existing_parents.1,"retry":existing_parents.2},"observed":{"dispatch":parents.0,"continuation":parents.1,"retry":parents.2}},"store":{"stored":existing_store,"observed":store_path.clone()}}));
+                        conflicts.push(json!({"project_id":attempt.project_id,"attempt_id":attempt.attempt_id,"reason":"conflicting_parents","values":{"stored":{"dispatch":existing_parents.0,"continuation":existing_parents.1},"observed":{"dispatch":parents.0,"continuation":parents.1}},"store":{"stored":existing_store,"observed":store_path.clone()}}));
                     }
                     continue;
                 }
-                seen.insert(key, (identity, parents, store_path.clone()));
+                seen.insert(key, (work_key.clone(), parents.clone(), store_path.clone()));
                 let usage =
                     serde_json::to_value(attempt.effective_usage()).map_err(|_| Error::Encode)?;
                 for (name, (sum, missing)) in &mut totals {
@@ -162,7 +167,7 @@ pub(super) fn read_inner(
                     clock.wall_now().ok(),
                     false,
                 );
-                nodes.push(json!({"lane_id":{"host":host,"project_id":attempt.project_id,"run_id":projected.run_id,"task_id":projected.task_id,"attempt_id":projected.attempt_id},"depth":depth,"store_parent_attempt":owner_attempt,"store_path":store_path,"usage":usage,"metadata":{"run":lane.run,"attempt":projected}}));
+                nodes.push(json!({"lane_id":{"host":host,"project_id":attempt.project_id,"key":work_key,"attempt_id":projected.attempt_id},"depth":depth,"store_parent_attempt":owner_attempt,"store_path":store_path,"usage":usage,"parents":{"dispatch":parents.0,"continuation":parents.1},"metadata":{"operation":lane.operation,"attempt":projected}}));
             }
             match page.next {
                 Some(next) => after = next,
@@ -181,14 +186,10 @@ pub(super) fn read_inner(
         .collect();
     let mut edges = Vec::new();
     for node in &nodes {
-        let run = &node["metadata"]["run"];
-        for (field, kind) in [("parent_attempt", "dispatch"), ("parent", "continuation")] {
-            if let Some(parent) = run[field].as_str() {
+        for kind in ["dispatch", "continuation"] {
+            if let Some(parent) = node["parents"][kind].as_str() {
                 edges.push(json!({"project_id":node["lane_id"]["project_id"],"kind":kind,"parent_attempt":parent,"child_attempt":node["lane_id"]["attempt_id"],"parent_status":if ids.contains(&(node["lane_id"]["project_id"].as_str().unwrap_or(""), parent)) { "present" } else { "missing" }}));
             }
-        }
-        if let Some(parent) = node["metadata"]["attempt"]["retry_of"].as_str() {
-            edges.push(json!({"project_id":node["lane_id"]["project_id"],"kind":"retry","parent_attempt":parent,"child_attempt":node["lane_id"]["attempt_id"],"parent_status":if ids.contains(&(node["lane_id"]["project_id"].as_str().unwrap_or(""), parent)) { "present" } else { "missing" }}));
         }
     }
     let partial = truncated
@@ -213,7 +214,6 @@ pub(super) fn read_inner(
         node["children"] = json!(children);
         node["status"] = metadata["attempt"]["state"].clone();
         node["title"] = metadata["attempt"]["title"].clone();
-        node["parents"] = json!({"dispatch":metadata["run"]["parent_attempt"],"continuation":metadata["run"]["parent"],"retry":metadata["attempt"]["retry_of"]});
         if !detail {
             node.as_object_mut()
                 .ok_or(Error::Encode)?
@@ -232,9 +232,9 @@ pub(super) fn read_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_core::{Digest, OperationId, RootInputs, RunId, TaskId};
+    use provenant_core::{Digest, OperationId, RootInputs};
     use provenant_records::CanonicalV1;
-    use provenant_run::{CanonicalRequest, NewAttempt, PreparedRun};
+    use provenant_run::{CanonicalRequest, PreparedRun};
 
     #[test]
     fn old_child_stores_are_not_read() -> Result<(), Box<dyn std::error::Error>> {
@@ -284,32 +284,33 @@ mod tests {
             read_prompts: false,
         };
         let store = RunStore::open(&context, &call)?;
-        let task = TaskId::from_bytes([3; 16]);
         let mut request: CanonicalRequest = serde_json::from_value(
-            json!({"schema_version":1,"tasks":[{"task_id":task,"prompt_digest":CanonicalV1::file_digest(b"body"),"route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":"high"},"authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null}],"concurrency":1,"parent":null,"lane_depth":1}),
+            json!({"schema_version":1,"task":{"prompt_digest":CanonicalV1::file_digest(b"body"),"route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":"high"},"authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null},"parent":null,"lane_depth":1}),
         )?;
-        let prepared = |run: u8,
-                        attempt: u8,
-                        request: CanonicalRequest|
+        // A launch names its own work key; a continuation takes its parent's.
+        let prepared = |attempt: u8,
+                        mut request: CanonicalRequest|
          -> Result<PreparedRun, Box<dyn std::error::Error>> {
+            request.task.context = Some(provenant_records::run::WorkContext {
+                graph_id: Some(format!("lane-{attempt}")),
+                node_id: Some("node".into()),
+                attempt: Some(1),
+                ..Default::default()
+            });
             Ok(PreparedRun {
-                run_id: RunId::from_bytes([run; 16]),
-                operation_id: OperationId::parse(&format!("tree-{run}-{attempt}"))?,
+                attempt_id: AttemptId::from_bytes([attempt; 16]),
+                operation_id: OperationId::parse(&format!("tree-{attempt}"))?,
                 created_at: clock.wall_now()?,
                 request,
-                attempts: vec![NewAttempt {
-                    task_id: task,
-                    attempt_id: AttemptId::from_bytes([attempt; 16]),
-                    prompt: "body".into(),
-                }],
+                prompt: "body".into(),
             })
         };
-        store.create(&prepared(1, 1, request.clone())?, &call)?;
+        store.create(&prepared(1, request.clone())?, &call)?;
         request.parent_attempt = Some(AttemptId::from_bytes([1; 16]));
-        store.create(&prepared(2, 2, request.clone())?, &call)?;
+        store.create(&prepared(2, request.clone())?, &call)?;
         request.parent = Some(AttemptId::from_bytes([2; 16]));
         request.parent_attempt = Some(AttemptId::from_bytes([9; 16]));
-        store.create(&prepared(3, 3, request.clone())?, &call)?;
+        store.create(&prepared(3, request.clone())?, &call)?;
         let other_project = ProjectId::from_bytes([7; 16]);
         let other_store = RunStore::open(
             &ExecutionContext {
@@ -320,20 +321,26 @@ mod tests {
         )?;
         request.parent = None;
         request.parent_attempt = None;
-        other_store.create(&prepared(4, 4, request)?, &call)?;
-        // Simulate a pre-fix Codex row containing only a running session total.
-        let mut legacy = store.record(AttemptId::from_bytes([1; 16]), &call)?;
-        legacy.applied_route = Some(provenant_records::run::RouteRecord {
+        other_store.create(&prepared(4, request)?, &call)?;
+        // Historical provider data is stored in the current record shape.
+        let mut observed = store.record(AttemptId::from_bytes([1; 16]), &call)?;
+        observed.applied_route = Some(provenant_records::run::RouteRecord {
             provider: Some("codex".into()),
             ..Default::default()
         });
-        legacy.usage.uncached_input = Some(42);
+        observed.usage.uncached_input = Some(42);
         let db = rusqlite::Connection::open(roots.state.as_path().join("run.sqlite3"))?;
         db.execute(
             "UPDATE attempts SET record=?1 WHERE id=?2",
-            rusqlite::params![serde_json::to_vec(&legacy)?, legacy.attempt_id.to_string()],
+            rusqlite::params![
+                serde_json::to_vec(&observed)?,
+                observed.attempt_id.to_string()
+            ],
         )?;
         let tree = read(&roots, None, 3, 100, false)?;
+        assert!(tree["nodes"][0]["lane_id"]["key"].is_object());
+        assert!(tree["nodes"][0]["lane_id"].get("run_id").is_none());
+        assert!(tree["nodes"][0]["lane_id"].get("task_id").is_none());
         assert_eq!(tree["totals"]["usage"]["uncached_input"]["missing"], 4);
         assert_eq!(tree["totals"]["attempts"], 4);
         assert_eq!(tree["totals"]["usage"]["reasoning"]["missing"], 4);
@@ -345,7 +352,6 @@ mod tests {
             ("dispatch", "present"),
             ("dispatch", "missing"),
             ("continuation", "present"),
-            ("retry", "present"),
         ] {
             assert!(
                 edges
@@ -369,7 +375,7 @@ mod tests {
                 .any(|n| n["children"].as_array().is_some_and(|c| !c.is_empty()))
         );
         let detailed = read(&roots, None, 3, 100, true)?;
-        assert!(detailed["nodes"][0]["metadata"]["run"].is_object());
+        assert!(detailed["nodes"][0]["metadata"]["operation"].is_object());
         assert!(serde_json::to_vec(&tree)?.len() < serde_json::to_vec(&detailed)?.len());
         let detail =
             super::super::detail::read(&roots, &AttemptId::from_bytes([2; 16]).to_string())?;

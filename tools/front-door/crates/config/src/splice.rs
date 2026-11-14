@@ -1018,10 +1018,10 @@ mod tests {
 
     #[test]
     fn reads_nested_jsonc_values_and_array_indices() {
-        let source = br#"{"mcpServers":{"fabric":{"args":["fabric", "mcp",],}},}"#;
+        let source = br#"{"outer":{"inner":{"args":["first", "second",],}},}"#;
         assert_eq!(
-            get(source, &["mcpServers", "fabric", "args", "1"]).expect("valid JSONC"),
-            Some(json!("mcp"))
+            get(source, &["outer", "inner", "args", "1"]).expect("valid JSONC"),
+            Some(json!("second"))
         );
     }
 
@@ -1046,7 +1046,7 @@ mod tests {
         let source = b"{\n  // foreign comment\n  \"foreign\": 1,\n}\n";
         let edited = set(
             source,
-            &["mcpServers", "fabric", "command"],
+            &["outer", "inner", "command"],
             Some(&json!("/stable/bin/provenant")),
         )
         .expect("nested object insertion should succeed");
@@ -1054,8 +1054,7 @@ mod tests {
         assert!(text.contains("// foreign comment"));
         assert!(text.contains("\"foreign\": 1"));
         assert_eq!(
-            get(&edited, &["mcpServers", "fabric", "command"])
-                .expect("edited document remains valid"),
+            get(&edited, &["outer", "inner", "command"]).expect("edited document remains valid"),
             Some(json!("/stable/bin/provenant"))
         );
     }

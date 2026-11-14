@@ -1,8 +1,10 @@
 //! Isolated process fixtures; no ambient config, credentials, or product state.
 #![allow(dead_code)]
 use provenant_os::exec::{ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs,
     path::{Path, PathBuf},
     sync::Mutex,
@@ -11,10 +13,69 @@ use std::{
 
 pub type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+/// Parse every JSON record in a command stream and return its final envelope.
+/// Event-producing commands retain their summary as the last record.
+pub fn last_json_record(bytes: &[u8]) -> Result<serde_json::Value> {
+    bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+        .map(serde_json::from_slice::<serde_json::Value>)
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .pop()
+        .ok_or_else(|| "command emitted no JSON records".into())
+}
+
 pub const FIXTURE_STDOUT_LIMIT: usize = 2 * 1024 * 1024;
 pub const FIXTURE_STDERR_LIMIT: usize = 64 * 1024;
 
 static PROCESS_SPAWN_LOCK: Mutex<()> = Mutex::new(());
+
+/// Install a fake Claude auth-status executable for identity-probe fixtures.
+pub fn install_fake_claude_auth(rig: &mut TestRig) -> Result {
+    let bin = rig.root.join("fixture-bin");
+    fs::create_dir_all(&bin)?;
+    let executable = bin.join("claude");
+    rig.with_process_spawn_lock(|| {
+        fs::write(
+            &executable,
+            "#!/bin/sh\nif [ -f \"$CLAUDE_CONFIG_DIR/.fixture-email\" ]; then\n  printf '{\"loggedIn\":true,\"email\":\"%s\"}\n' \"$(cat \"$CLAUDE_CONFIG_DIR/.fixture-email\")\"\nelse\n  printf '{\"loggedIn\":false}\n'\nfi\n",
+        )?;
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))?;
+        Ok(())
+    })?;
+    set_rig_env(
+        rig,
+        "PATH",
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    );
+    set_rig_env(rig, "USER", "fixture-user".into());
+    Ok(())
+}
+
+/// Set the path used by the hook as the current Claude config directory.
+pub fn set_claude_config_dir(rig: &mut TestRig, directory: &Path) {
+    set_rig_env(rig, "CLAUDE_CONFIG_DIR", directory.as_os_str().to_owned());
+}
+
+/// Configure the fake provider's verified account identity and return its key.
+pub fn write_fake_claude_identity(directory: &Path, email: &str) -> Result<String> {
+    fs::create_dir_all(directory)?;
+    fs::write(directory.join(".fixture-email"), email)?;
+    provenant_providers::identity::fingerprint(email)
+        .ok_or_else(|| "invalid fixture identity".into())
+}
+
+fn set_rig_env(rig: &mut TestRig, name: &str, value: OsString) {
+    if let Some((_, current)) = rig
+        .env
+        .iter_mut()
+        .find(|(key, _)| key.as_os_str() == OsStr::new(name))
+    {
+        *current = value;
+    } else {
+        rig.env.push((name.into(), value));
+    }
+}
 
 pub fn tempdir() -> std::io::Result<tempfile::TempDir> {
     provenant_os::fixture::tempdir(|root| tempfile::Builder::new().prefix(".tmp").tempdir_in(root))
@@ -291,6 +352,61 @@ impl TestRig {
         }
         Ok(result)
     }
+    /// `run ARGS --json`: the launch's exit code and envelope. `run` returns
+    /// once work is launched or refused; it never waits for it to settle.
+    pub fn launch(&self, args: &[&str]) -> Result<(ExecOutcome, serde_json::Value)> {
+        let mut argv = vec!["run"];
+        argv.extend_from_slice(args);
+        argv.push("--json");
+        let out = self.command(&argv)?;
+        let value = serde_json::from_slice(&out.stdout.bytes)
+            .map_err(|error| format!("launch output: {error}: {out:?}"))?;
+        Ok((out, value))
+    }
+
+    /// `run ARGS` then `wait NAME --timeout SPAN`, the way a caller waits for
+    /// the graph its launch named. The result keeps the launch envelope, the
+    /// wait's own outcome and the graph's checkpoint as the wait left it.
+    pub fn run_and_wait(&self, args: &[&str], timeout: &str) -> Result<Settled> {
+        let (launch, launch_value) = self.launch(args)?;
+        let graph = launch_value["data"]["checkpoint"]["graph_id"]
+            .as_str()
+            .ok_or_else(|| format!("launch named no graph: {launch_value}"))?
+            .to_owned();
+        let wait = self.command(&["wait", &graph, "--timeout", timeout, "--json"])?;
+        let wait_value = last_json_record(&wait.stdout.bytes)
+            .map_err(|error| format!("wait output: {error}: {wait:?}"))?;
+        let checkpoint = self.checkpoint(&graph)?;
+        Ok(Settled {
+            launch,
+            launch_value,
+            wait,
+            wait_value,
+            graph,
+            checkpoint,
+        })
+    }
+
+    /// A graph's checkpoint as JSON, read from its journal without a lock.
+    pub fn checkpoint(&self, graph: &str) -> Result<serde_json::Value> {
+        let identity = self.command(&["fabric", "identity", "--json"])?;
+        let identity: serde_json::Value = serde_json::from_slice(&identity.stdout.bytes)?;
+        let project = identity["data"]["project"]
+            .as_str()
+            .ok_or("project id")?
+            .parse()?;
+        let mut inputs = provenant_core::RootInputs::new(self.home.clone(), self.project.clone());
+        inputs.state_dir = Some(self.state.clone());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let checkpoint = provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
+            &roots.state,
+            project,
+            graph,
+        )?
+        .ok_or_else(|| format!("no checkpoint for {graph}"))?;
+        Ok(serde_json::to_value(checkpoint)?)
+    }
+
     pub fn assert_legacy_unchanged(&self) -> Result {
         for tail in [
             ".agents/sentinel",
@@ -312,4 +428,24 @@ pub fn code(output: &ExecOutcome) -> i64 {
     }
 }
 
-pub mod mcp;
+/// A launched graph after `wait` returned: what the launch said, how the wait
+/// ended and where the graph stands.
+pub struct Settled {
+    pub launch: ExecOutcome,
+    pub launch_value: serde_json::Value,
+    pub wait: ExecOutcome,
+    pub wait_value: serde_json::Value,
+    pub graph: String,
+    pub checkpoint: serde_json::Value,
+}
+impl Settled {
+    /// The wait's exit code: 0 settled successfully, 1 unsuccessfully, 5 needs
+    /// input, 124 the budget expired.
+    pub fn exit(&self) -> i64 {
+        code(&self.wait)
+    }
+    /// Whether the wait ran out of time with the work unsettled.
+    pub fn timed_out(&self) -> bool {
+        self.wait_value["data"]["timed_out"] == true
+    }
+}

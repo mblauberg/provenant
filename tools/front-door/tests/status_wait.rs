@@ -1,500 +1,465 @@
-//! Mixed-target waits exercise real Run store reads and isolated GitHub snapshots.
-#![allow(clippy::disallowed_methods)]
+//! `wait` at the binary boundary: targets resolve before any wait, a settled
+//! graph ends the wait with its verdict, and no work means nothing to wait for.
 mod support;
-use provenant_core::{
-    ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, RootInputs, RunId, TaskId,
-};
-use provenant_os::clock::SystemClock;
-use provenant_run::{
-    CanonicalRequest, ExecutionContext, NewAttempt, PreparedRun, Request, RunStore,
-};
 use serde_json::{Value, json};
 use std::{
-    fs,
-    io::{BufRead, BufReader, Read},
-    os::unix::fs::PermissionsExt,
-    process::{Child, Command, Stdio},
+    io::{BufRead, Read},
+    process::{Command, Output, Stdio},
     time::{Duration, Instant},
 };
-use support::{Result, TestRig};
+use support::{Result, TestRig, code};
 
-fn seed(rig: &TestRig) -> Result<(RunStore, AttemptId)> {
-    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
-    inputs.state_dir = Some(rig.state.clone());
-    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    let project = provenant_config::bind_project(
-        &roots,
-        provenant_config::ProjectLocation::new(rig.project.join(".git"))?,
-    )?
-    .project_id();
-    let context = ExecutionContext {
-        state_root: roots.state,
-        project_id: project,
-        actor_id: ActorId::from_bytes([2; 16]),
-        read_prompts: false,
-    };
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let call = Request {
-        clock: &clock,
-        cancel: &cancel,
-    };
-    let task = TaskId::from_bytes([3; 16]);
-    let request: CanonicalRequest = serde_json::from_value(json!({"schema_version":1,"tasks":[{
-        "task_id":task,"prompt_digest":provenant_records::CanonicalV1::file_digest(b"fake lane"),
-        "route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":null},
-        "authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null}],"concurrency":1,"parent":null}))?;
-    let store = RunStore::open(&context, &call)?;
-    let attempt = AttemptId::from_bytes([4; 16]);
-    store.create(
-        &PreparedRun {
-            run_id: RunId::from_bytes([6; 16]),
-            operation_id: OperationId::parse("status-wait")?,
-            created_at: clock.wall_now()?,
-            request,
-            attempts: vec![NewAttempt {
-                task_id: task,
-                attempt_id: attempt,
-                prompt: "fake lane".into(),
-            }],
-        },
-        &call,
-    )?;
-    Ok((store, attempt))
+fn json_lines(bytes: &[u8]) -> Result<Vec<Value>> {
+    bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+        .map(serde_json::from_slice::<Value>)
+        .collect::<std::result::Result<_, _>>()
+        .map_err(Into::into)
 }
-fn graph(rig: &TestRig, delivered: bool) -> Result {
-    use provenant_fabric_runtime::graph::{
-        FileJournal, GraphCheckpoint, GraphExecution, GraphJournal,
-    };
-    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+
+fn records(output: &provenant_os::exec::ExecOutcome) -> Result<Vec<Value>> {
+    json_lines(&output.stdout.bytes)
+}
+
+fn envelope(output: &provenant_os::exec::ExecOutcome) -> Result<Value> {
+    records(output)?
+        .pop()
+        .ok_or_else(|| "command emitted no JSON records".into())
+}
+
+fn assert_digest_fields(digest: &Value) {
+    for field in [
+        "key",
+        "outcome",
+        "cause",
+        "branch",
+        "pr",
+        "ci",
+        "result_path",
+        "provider_error",
+        "line",
+        "handoff_status",
+        "open_asks",
+        "settled",
+    ] {
+        assert!(digest.get(field).is_some(), "missing {field}: {digest}");
+    }
+    assert!(digest["key"]["project"].is_string(), "{digest}");
+    assert!(digest["key"]["graph"].is_string(), "{digest}");
+    assert!(digest["key"]["node"].is_string(), "{digest}");
+    for field in ["pr", "ci"] {
+        assert!(
+            matches!(digest[field]["state"].as_str(), Some("unknown" | "stale")),
+            "{field} state is unlabelled: {digest}"
+        );
+    }
+}
+
+#[allow(
+    clippy::disallowed_methods,
+    reason = "CLI boundary fixture owns child process I/O"
+)]
+fn fixture_cli(rig: &TestRig, args: &[&str]) -> Result<Output> {
+    let binary = option_env!("CARGO_BIN_EXE_provenant")
+        .ok_or("production binary path is only available to integration targets")?;
+    let state = rig.state.to_str().ok_or("state path is not UTF-8")?;
+    Ok(Command::new(binary)
+        .arg("--state-dir")
+        .arg(state)
+        .args(args)
+        .current_dir(&rig.project)
+        .envs(rig.env.iter().cloned())
+        .output()?)
+}
+
+fn graph_identity(rig: &TestRig) -> Result<(provenant_core::StateRoot, provenant_core::ProjectId)> {
+    let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.state_dir = Some(rig.state.clone());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    // Graph status resolves through the host Fabric identity, as real graph
-    // submission does. A raw Run store alone does not initialise that identity.
-    provenant_cli::fabric::Context::open(roots.clone(), &rig.home, &rig.project)?;
-    let project = provenant_config::bind_project(
-        &roots,
-        provenant_config::ProjectLocation::new(rig.project.join(".git"))?,
-    )?
-    .project_id();
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let mut journal = FileJournal::open(
-        &roots.state,
-        project,
-        "fixture",
-        provenant_core::WaitBudget::nonblocking(clock.mono_now()),
-        &cancel,
-        &clock,
-    )?;
-    let execution: GraphExecution = serde_json::from_value(
-        json!({"directory":rig.project,"document":{"schema_version":1,"graph_id":"fixture","nodes":[]}}),
-    )?;
-    journal.bind(execution)?;
-    let checkpoint: GraphCheckpoint = serde_json::from_value(
-        json!({"schema_version":1,"graph_id":"fixture","plan_digest":"fixture","nodes":[],"delivery_required":true,"delivered":delivered}),
-    )?;
+    let identity = rig.command(&["fabric", "identity", "--json"])?;
+    let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
+    let project_id = identity["data"]["project"]
+        .as_str()
+        .ok_or("project identity")?;
+    let project = provenant_core::ProjectId::parse(project_id)?;
+    Ok((roots.state, project))
+}
+
+fn graph_journal(
+    graph: &str,
+    state: &provenant_core::StateRoot,
+    project: provenant_core::ProjectId,
+    clock: &provenant_os::clock::SystemClock,
+    cancel: &provenant_core::CancelToken,
+) -> Result<provenant_fabric_runtime::graph::FileJournal> {
+    use provenant_core::Clock;
+    let budget = provenant_core::WaitBudget::cli(clock.mono_now(), 30)?;
+    Ok(provenant_fabric_runtime::graph::FileJournal::open(
+        state, project, graph, budget, cancel, clock,
+    )?)
+}
+
+fn seed_graph(rig: &TestRig, graph: &str) -> Result<()> {
+    use provenant_fabric_runtime::graph::{GraphDocument, GraphExecution, GraphJournal};
+    let (state, project) = graph_identity(rig)?;
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1,"graph_id":graph,"nodes":[
+            {"id":"fast","kind":"gate","access":"read_only","condition":{"type":"budget"}},
+            {"id":"slow","kind":"gate","access":"read_only","condition":{"type":"budget"}},
+            {"id":"blocked","prompt":"blocked writer","access":"worktree_write","write_scope":["."]},
+            {"id":"skipped","kind":"gate","access":"read_only","condition":{"type":"budget"}}
+        ]
+    }))?;
+    let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+        serde_json::from_value(json!({
+            "schema_version":1,"graph_id":graph,"plan_digest":format!("sha256:{}", "f".repeat(64)),
+            "nodes":[
+                {"id":"fast","state":"pending","attempts":[]},
+                {"id":"slow","state":"pending","attempts":[]},
+                {"id":"blocked","state":"pending","attempts":[]},
+                {"id":"skipped","state":"pending","attempts":[]}
+            ]
+        }))?;
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = provenant_core::CancelToken::new();
+    let mut journal = graph_journal(graph, &state, project, &clock, &cancel)?;
+    journal.bind(GraphExecution {
+        extra: Default::default(),
+        bases: None,
+        directory: rig.project.clone(),
+        document,
+    })?;
     journal.save(&checkpoint)?;
     Ok(())
 }
-fn finish(store: &RunStore, attempt: AttemptId) -> Result {
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    store.cancel(
-        attempt,
-        "fixture finished",
-        &Request {
-            clock: &clock,
-            cancel: &cancel,
-        },
-    )?;
+
+fn set_node_states(rig: &TestRig, graph: &str, changes: &[(&str, &str)]) -> Result<()> {
+    use provenant_fabric_runtime::graph::GraphJournal;
+    let (state, project) = graph_identity(rig)?;
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = provenant_core::CancelToken::new();
+    let mut journal = graph_journal(graph, &state, project, &clock, &cancel)?;
+    let mut checkpoint = journal.load(graph)?.ok_or("graph checkpoint")?;
+    for (id, state) in changes {
+        let node = checkpoint
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == *id)
+            .ok_or("graph node")?;
+        node.state = serde_json::from_value(json!(state))?;
+        if *state == "blocked" {
+            node.blocked = true;
+            node.handoff = Some(serde_json::from_value(json!({
+                "schema_version":2,"status":"blocked","note":"Waiting for an owner decision.",
+                "remaining":["Owner decision"],"decisions":[],"verify":[]
+            }))?);
+        }
+    }
+    journal.save(&checkpoint)?;
     Ok(())
-}
-const HEAD: &str = "abcabcabcabcabcabcabcabcabcabcabcabcabca";
-const PUSHED: &str = "defdefdefdefdefdefdefdefdefdefdefdefdefd";
-/// The pull request view; CI is read separately, for its exact head.
-fn view(state: &str, head: &str) -> String {
-    json!({"state":state,"headRefOid":head,"url":"https://github.com/owner/repo/pull/1"})
-        .to_string()
-}
-fn runs(head: &str, status: &str, conclusion: Option<&str>) -> String {
-    json!({"total_count":1,"check_runs":[{"name":"test","head_sha":head,"status":status,"conclusion":conclusion}]}).to_string()
-}
-/// Serve check runs and statuses with the headers `gh api --include` prints.
-fn serve(rig: &TestRig) -> String {
-    format!(
-        "case \"$*\" in\n  *check-runs*) printf 'HTTP/2.0 200 OK\\r\\n\\r\\n'; cat '{}' ;;\n  *statuses*) printf 'HTTP/2.0 200 OK\\r\\n\\r\\n[]' ;;\n  *) cat '{}' ;;\nesac\n",
-        rig.root.join("runs.json").display(),
-        rig.root.join("pr.json").display()
-    )
-}
-fn fake_gh(rig: &mut TestRig, blocking: bool) -> Result {
-    let bin = rig.root.join("bin");
-    fs::create_dir_all(&bin)?;
-    let script = if blocking {
-        let fifo = rig.root.join("gh-release");
-        assert!(Command::new("mkfifo").arg(&fifo).status()?.success());
-        format!(
-            "#!/bin/sh\ntouch '{}'\nexec /bin/cat '{}'\n",
-            rig.root.join("gh-started").display(),
-            fifo.display()
-        )
-    } else {
-        format!(
-            "#!/bin/sh\nif [ ! -e '{}' ]; then touch '{}'; echo 'HTTP 503 Service Unavailable' >&2; exit 1; fi\n{}",
-            rig.root.join("gh-started").display(),
-            rig.root.join("gh-started").display(),
-            serve(rig)
-        )
-    };
-    fs::write(bin.join("gh"), script)?;
-    fs::set_permissions(bin.join("gh"), fs::Permissions::from_mode(0o755))?;
-    rig.env.retain(|(key, _)| key != "PATH");
-    rig.env.push((
-        "PATH".into(),
-        format!("{}:/usr/bin:/bin", bin.display()).into(),
-    ));
-    fs::write(rig.root.join("pr.json"), view("OPEN", HEAD))?;
-    fs::write(rig.root.join("runs.json"), runs(HEAD, "in_progress", None))?;
-    fs::write(
-        rig.state.join("config.toml"),
-        "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.wait]\ntimeout_seconds=1\nlocal_interval_ms=10\npr_interval_ms=10\n",
-    )?;
-    Ok(())
-}
-fn fake_gh_dynamic(rig: &mut TestRig) -> Result {
-    let bin = rig.root.join("bin");
-    fs::create_dir_all(&bin)?;
-    fs::write(
-        bin.join("gh"),
-        format!(
-            "#!/bin/sh\n{}touch '{}'\n",
-            serve(rig),
-            rig.root.join("gh-started").display()
-        ),
-    )?;
-    fs::set_permissions(bin.join("gh"), fs::Permissions::from_mode(0o755))?;
-    rig.env.retain(|(key, _)| key != "PATH");
-    rig.env.push((
-        "PATH".into(),
-        format!("{}:/usr/bin:/bin", bin.display()).into(),
-    ));
-    fs::write(rig.root.join("pr.json"), view("OPEN", HEAD))?;
-    fs::write(rig.root.join("runs.json"), runs(HEAD, "in_progress", None))?;
-    fs::write(
-        rig.state.join("config.toml"),
-        "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.wait]\ntimeout_seconds=2\nlocal_interval_ms=10\npr_interval_ms=10\n",
-    )?;
-    Ok(())
-}
-fn spawn(rig: &TestRig, args: &[&str]) -> Result<Child> {
-    Ok(Command::new(env!("CARGO_BIN_EXE_provenant"))
-        .args(args)
-        .env_clear()
-        .envs(rig.env.iter().cloned())
-        .current_dir(&rig.project)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?)
-}
-fn events(bytes: &[u8]) -> Result<Vec<Value>> {
-    bytes
-        .split(|b| *b == b'\n')
-        .filter(|s| !s.is_empty())
-        .map(|line| serde_json::from_slice(line).map_err(Into::into))
-        .collect()
 }
 
 #[test]
-fn refused_operation_wait_returns_immediately_with_nonzero_status() -> Result {
+#[allow(clippy::disallowed_methods)] // Asserts the real wait deadline is not consumed.
+fn an_unknown_target_fails_before_waiting() -> Result {
     let rig = TestRig::new()?;
-    let identity = rig.command(&["fabric", "identity", "--json"])?;
-    let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
-    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
-    inputs.state_dir = Some(rig.state.clone());
-    let context = ExecutionContext {
-        state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
-        project_id: identity["data"]["project"]
-            .as_str()
-            .ok_or("project")?
-            .parse()?,
-        actor_id: identity["data"]["inbox"]["actor"]
-            .as_str()
-            .ok_or("actor")?
-            .parse()?,
-        read_prompts: false,
-    };
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let call = Request {
-        clock: &clock,
-        cancel: &cancel,
-    };
-    let task = TaskId::from_bytes([3; 16]);
-    let request: CanonicalRequest = serde_json::from_value(
-        json!({"schema_version":1,"chair": {"host":identity["data"]["inbox"]["host"],"actor":identity["data"]["inbox"]["actor"]},"tasks":[{
-        "task_id":task,"prompt_digest":provenant_records::CanonicalV1::file_digest(b"refused fixture"),
-        "route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":null},
-        "fallback":[],"authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null}],"concurrency":1,"parent":null}),
-    )?;
-    let store = RunStore::open(&context, &call)?;
-    store.record_refusal(
-        &PreparedRun {
-            run_id: RunId::from_bytes([6; 16]),
-            operation_id: OperationId::parse("refused-fixture")?,
-            created_at: clock.wall_now()?,
-            request,
-            attempts: vec![NewAttempt {
-                task_id: task,
-                attempt_id: AttemptId::from_bytes([4; 16]),
-                prompt: "refused fixture".into(),
-            }],
-        },
-        provenant_records::diagnostic::Diagnostic::new("UNSUPPORTED").category("refused"),
-        None,
-        &call,
-    )?;
+    // A budget far beyond any process start-up: returning well inside it shows
+    // the target was refused before the wait began, however slow the host.
+    let budget = Duration::from_secs(3600);
     let started = Instant::now();
-    let output = rig.command(&[
-        "status",
-        "operation:refused-fixture",
-        "--wait=30s",
+    let out = rig.command(&["wait", "no-such-graph", "--timeout", "1h", "--json"])?;
+    assert_eq!(code(&out), 2, "{out:?}");
+    assert_eq!(envelope(&out)?["error"]["code"], "NOT_FOUND");
+    assert!(started.elapsed() < budget / 4, "{:?}", started.elapsed());
+    Ok(())
+}
+
+#[test]
+fn a_settled_graph_ends_the_wait_and_no_work_is_nothing_to_wait_for() -> Result {
+    let rig = TestRig::new()?;
+    let idle = rig.command(&["wait", "--timeout", "30s", "--json"])?;
+    assert_eq!(code(&idle), 0, "{idle:?}");
+    assert_eq!(envelope(&idle)?["data"]["targets"], json!([]));
+    let document = rig.root.join("graph.json");
+    std::fs::write(
+        &document,
+        serde_json::to_vec(&json!({
+            "schema_version":1,"graph_id":"settles-now","nodes":[{
+                "id":"accept","kind":"gate","access":"read_only","condition":{"type":"budget"}
+            }]
+        }))?,
+    )?;
+    let run = rig.command(&[
+        "run",
+        "--file",
+        document.to_str().ok_or("document path")?,
         "--json",
     ])?;
-    assert_eq!(output.termination, provenant_os::exec::Termination::Exit(1));
-    assert!(started.elapsed() < Duration::from_secs(10));
-    let result: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert_eq!(
-        result["data"]["operation"]["refusal"]["code"], "UNSUPPORTED",
-        "{result}"
-    );
-    assert_eq!(result["data"]["condition_met"], true);
-    assert_eq!(result["data"]["timed_out"], false);
-    let output = rig.command(&[
-        "status",
-        "--wait=30s",
-        "--target",
-        "operation:refused-fixture",
-        "--json",
-    ])?;
-    assert_eq!(output.termination, provenant_os::exec::Termination::Exit(1));
-    let lines = events(&output.stdout.bytes)?;
-    assert_eq!(
-        lines[0]["data"]["operation"]["refusal"]["code"],
-        "UNSUPPORTED"
-    );
-    assert_eq!(lines.last().ok_or("end")?["condition_met"], true);
-    // Without --wait a target reports its current status once.
-    let output = rig.command(&["status", "--target", "operation:refused-fixture", "--json"])?;
-    assert_eq!(output.termination, provenant_os::exec::Termination::Exit(1));
-    let lines = events(&output.stdout.bytes)?;
-    assert_eq!(lines.len(), 1, "{lines:?}");
-    assert_eq!(lines[0]["event"], "snapshot");
-    assert_eq!(
-        lines[0]["data"]["operation"]["refusal"]["code"],
-        "UNSUPPORTED"
-    );
-    // Simulate a crash after recording the refusal but before its notice.
-    // Reconciliation retries it, and a second pass must not duplicate mail.
-    assert_eq!(store.pending_refusal_notices(10, &call)?.len(), 1);
-    for _ in 0..2 {
-        let output = rig.command(&["reconcile", "--json"])?;
-        assert_eq!(
-            output.termination,
-            provenant_os::exec::Termination::Exit(0),
-            "{}",
-            String::from_utf8_lossy(&output.stderr.bytes)
-        );
+    assert_eq!(code(&run), 0, "{run:?}");
+    let out = rig.command(&["wait", "settles-now", "--timeout", "30s", "--json"])?;
+    let value = envelope(&out)?;
+    assert_eq!(code(&out), 0, "{value}");
+    assert_eq!(value["data"]["timed_out"], false, "{value}");
+    assert_eq!(value["data"]["targets"][0]["target"], "settles-now");
+    assert_eq!(value["data"]["targets"][0]["settle"], "succeeded");
+    let digests = value["data"]["targets"][0]["data"]["digests"]
+        .as_array()
+        .ok_or("wait node digests")?;
+    assert!(!digests.is_empty(), "{value}");
+    for digest in digests {
+        assert_digest_fields(digest);
     }
-    assert!(store.pending_refusal_notices(10, &call)?.is_empty());
-    let mail_call = provenant_fabric_store::Request {
-        clock: &clock,
-        cancel: &cancel,
-    };
-    let mail = provenant_fabric_store::Store::open(&context.state_root, &mail_call)?;
-    let page = mail.read_mail(
-        context.project_id,
-        context.actor_id,
-        Some(0),
-        50,
-        &mail_call,
-    )?;
-    let notices: Vec<_> = page
-        .items
-        .iter()
-        .filter(|item| item.message.body.contains("refused-fixture"))
-        .collect();
-    assert_eq!(notices.len(), 1);
-    graph(&rig, true)?;
-    let output = rig.command(&[
-        "status",
-        "--wait=30s",
-        "--until",
-        "all",
-        "--target",
-        "operation:refused-fixture",
-        "--target",
-        "graph:fixture",
-        "--json",
-    ])?;
-    assert_eq!(output.termination, provenant_os::exec::Termination::Exit(1));
-    let lines = events(&output.stdout.bytes)?;
+    let events = records(&out)?;
     assert!(
-        lines
+        events[..events.len() - 1]
             .iter()
-            .any(|line| line["target"] == "operation:refused-fixture")
+            .any(|record| record["event"] == "settled" && record["target"] == "settles-now")
     );
-    assert!(lines.iter().any(|line| line["target"] == "graph:fixture"));
-    assert_eq!(lines.last().ok_or("end")?["condition_met"], true);
+
+    let status = rig.command(&["status", "settles-now", "--json"])?;
+    assert_eq!(code(&status), 0, "{status:?}");
+    let status_value = envelope(&status)?;
+    let digests = status_value["data"]["digests"]
+        .as_array()
+        .ok_or("status node digests")?;
+    assert!(!digests.is_empty(), "{status_value}");
+    for digest in digests {
+        assert_digest_fields(digest);
+    }
     Ok(())
 }
+
 #[test]
-fn mixed_status_wait_returns_on_fake_lane_while_pr_read_is_blocked() -> Result {
-    let mut rig = TestRig::new()?;
-    let (store, attempt) = seed(&rig)?;
-    fake_gh(&mut rig, true)?;
-    let target = format!("lane:{attempt}");
-    let child = spawn(
-        &rig,
-        &[
-            "status",
-            "--wait=10s",
-            "--until",
-            "any",
-            "--target",
-            &target,
-            "--target",
-            "pr:1",
-            "--json",
-        ],
-    )?;
-    provenant_test_support::wait_for(
-        "PR fixture readiness",
-        Duration::from_secs(5),
-        || rig.root.join("gh-started").exists(),
-        |ready| *ready,
-    )?;
-    let started = Instant::now();
-    finish(&store, attempt)?;
-    let output = child.wait_with_output()?;
-    assert!(output.status.success(), "{output:?}");
-    assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "slow PR delayed the lane event"
+fn status_omissions_are_counted_per_state_and_paged() -> Result {
+    let rig = TestRig::new()?;
+    for (graph, terminal_state) in [
+        ("first-page", "succeeded"),
+        ("failed-page", "failed"),
+        ("third-page", "succeeded"),
+    ] {
+        seed_graph(&rig, graph)?;
+        let changes = [
+            ("fast", terminal_state),
+            ("slow", terminal_state),
+            ("blocked", terminal_state),
+            ("skipped", terminal_state),
+        ];
+        set_node_states(&rig, graph, &changes)?;
+    }
+
+    let first = rig.command(&["status", "--all", "--limit", "1", "--json"])?;
+    assert_eq!(code(&first), 0, "{first:?}");
+    let first = envelope(&first)?;
+    assert_eq!(first["data"]["graphs"].as_array().map(Vec::len), Some(1));
+    let shown = first["data"]["graphs"][0]["state"]
+        .as_str()
+        .ok_or("shown graph state")?;
+    let omitted = &first["data"]["omitted"];
+    let expected_succeeded = 2 - usize::from(shown == "succeeded");
+    let expected_failed = 1 - usize::from(shown == "failed");
+    assert_eq!(
+        omitted["succeeded"].as_u64().unwrap_or(0),
+        expected_succeeded as u64,
+        "{first}"
     );
-    let lines = events(&output.stdout)?;
-    assert_eq!(lines[0]["target"], target);
-    assert_eq!(lines[0]["terminal"], true);
-    assert_eq!(lines.last().ok_or("end")?["condition_met"], true);
+    assert_eq!(
+        omitted["failed"].as_u64().unwrap_or(0),
+        expected_failed as u64,
+        "{first}"
+    );
+    assert_eq!(first["data"]["next_cursor"], 1, "{first}");
+
+    let second = rig.command(&["status", "--all", "--limit", "1", "--cursor", "1", "--json"])?;
+    assert_eq!(code(&second), 0, "{second:?}");
+    let second = envelope(&second)?;
+    assert_eq!(second["data"]["graphs"].as_array().map(Vec::len), Some(1));
+    assert_ne!(
+        second["data"]["graphs"][0]["name"],
+        first["data"]["graphs"][0]["name"]
+    );
+    assert_eq!(second["data"]["next_cursor"], 2, "{second}");
     Ok(())
 }
+
 #[test]
-fn default_single_target_wait_ignores_nonterminal_transition() -> Result {
-    let mut rig = TestRig::new()?;
-    fake_gh_dynamic(&mut rig)?;
-    let mut child = spawn(&rig, &["status", "--wait=2s", "--target", "pr:1", "--json"])?;
-    provenant_test_support::wait_for(
-        "initial PR snapshot",
-        Duration::from_secs(5),
-        || rig.root.join("gh-started").exists(),
-        |ready| *ready,
-    )?;
-    // A push: the new head's CI has passed.
-    fs::write(
-        rig.root.join("runs.json"),
-        runs(PUSHED, "completed", Some("success")),
-    )?;
-    fs::write(rig.root.join("pr.json"), view("OPEN", PUSHED))?;
-    let mut stdout = BufReader::new(child.stdout.take().ok_or("stdout")?);
-    let mut output = Vec::new();
-    stdout.read_to_end(&mut output)?;
-    let status = child.wait()?;
-    assert_eq!(status.code(), Some(124));
-    let lines = events(&output)?;
-    assert!(
-        lines
-            .iter()
-            .any(|line| line["event"] == "transition" && line["terminal"] == false),
-        "expected a non-terminal transition: {lines:?}"
-    );
-    assert_eq!(lines.last().ok_or("end")?["timed_out"], true);
-    Ok(())
-}
-#[test]
-fn mixed_status_follow_streams_once_per_transition_until_all_terminal() -> Result {
-    let mut rig = TestRig::new()?;
-    let (store, attempt) = seed(&rig)?;
-    fake_gh(&mut rig, false)?;
-    graph(&rig, false)?;
-    let target = format!("lane:{attempt}");
-    let mut child = spawn(
-        &rig,
-        &[
-            "status",
-            "--wait=10s",
+#[allow(clippy::disallowed_methods)] // Bound asynchronous CLI state transitions.
+fn wait_any_wakes_on_node_settlement_and_wait_reports_early_events() -> Result {
+    let rig = TestRig::new()?;
+    let graph = "wait-transition";
+    seed_graph(&rig, graph)?;
+    let binary = option_env!("CARGO_BIN_EXE_provenant")
+        .ok_or("production binary path is only available to integration targets")?;
+    let mut wait_any = Command::new(binary)
+        .arg("--state-dir")
+        .arg(&rig.state)
+        .args([
+            "wait",
+            graph,
+            "--any",
             "--follow",
-            "--target",
-            "graph:fixture",
-            "--target",
-            &target,
-            "--target",
-            "pr:1",
+            "--timeout",
+            "30s",
             "--json",
+        ])
+        .current_dir(&rig.project)
+        .envs(rig.env.iter().cloned())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+
+    // The first follow record is an acknowledgement of the initial snapshot,
+    // so journal changes cannot race a slow process start on a loaded host.
+    let mut any_stdout = std::io::BufReader::new(wait_any.stdout.take().ok_or("any wait stdout")?);
+    let mut initial = String::new();
+    assert!(
+        any_stdout.read_line(&mut initial)? > 0,
+        "missing initial snapshot"
+    );
+    let initial: Value = serde_json::from_str(&initial)?;
+    assert_eq!(initial["event"], "transition", "{initial}");
+    set_node_states(&rig, graph, &[("slow", "running")])?;
+    let mut running = String::new();
+    assert!(
+        any_stdout.read_line(&mut running)? > 0,
+        "missing running snapshot"
+    );
+    let running: Value = serde_json::from_str(&running)?;
+    assert_eq!(
+        running["event"], "transition",
+        "progress did not settle: {running}"
+    );
+    assert!(
+        running["digests"]
+            .as_array()
+            .ok_or("running digests")?
+            .iter()
+            .any(|digest| digest["key"]["node"] == "slow" && digest["state"] == "running"),
+        "{running}"
+    );
+    assert!(wait_any.try_wait()?.is_none(), "running is not settled");
+    set_node_states(&rig, graph, &[("fast", "succeeded")])?;
+    let mut settled_records = String::new();
+    any_stdout.read_to_string(&mut settled_records)?;
+    let any_status = wait_any.wait()?;
+    assert_eq!(any_status.code(), Some(0), "{settled_records}");
+    let any_records = json_lines(settled_records.as_bytes())?;
+    assert!(
+        any_records[..any_records.len() - 1]
+            .iter()
+            .any(|record| record["event"] == "node_settled" && record["target"] == graph)
+    );
+    let any_result = any_records.last().ok_or("final any wait record")?;
+    assert_eq!(any_result["data"]["timed_out"], false, "{any_result}");
+    let graph_status = fixture_cli(&rig, &["status", graph, "--json"])?;
+    let graph_status: Value = serde_json::from_slice(&graph_status.stdout)?;
+    assert_eq!(
+        graph_status["data"]["rows"][0]["state"], "pending",
+        "{graph_status}"
+    );
+
+    let fast = format!("{graph}/fast");
+    let slow = format!("{graph}/slow");
+    let mut wait_all = Command::new(binary)
+        .arg("--state-dir")
+        .arg(&rig.state)
+        .args(["wait", &fast, &slow, "--timeout", "30s", "--json"])
+        .current_dir(&rig.project)
+        .envs(rig.env.iter().cloned())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let wait_stdout = wait_all.stdout.take().ok_or("wait stdout")?;
+    let mut wait_lines = std::io::BufReader::new(wait_stdout);
+    let mut event_line = String::new();
+    assert!(
+        wait_lines.read_line(&mut event_line)? > 0,
+        "missing early event"
+    );
+    let early: Value = serde_json::from_str(&event_line)?;
+    assert_eq!(early["event"], "settled", "{early}");
+    assert_eq!(early["target"], fast, "{early}");
+    for field in ["settle", "line", "digests"] {
+        assert!(early.get(field).is_some(), "missing {field}: {early}");
+    }
+    let early_digests = early["digests"].as_array().ok_or("early event digests")?;
+    assert!(!early_digests.is_empty(), "{early}");
+    for digest in early_digests {
+        assert_digest_fields(digest);
+    }
+    assert!(
+        wait_all.try_wait()?.is_none(),
+        "wait ended while {slow} was pending"
+    );
+
+    set_node_states(
+        &rig,
+        graph,
+        &[
+            ("slow", "failed"),
+            ("blocked", "blocked"),
+            ("skipped", "skipped"),
         ],
     )?;
-    let mut stdout = BufReader::new(child.stdout.take().ok_or("stdout")?);
-    let read = |stdout: &mut BufReader<std::process::ChildStdout>| -> Result<Value> {
-        let mut line = String::new();
-        stdout.read_line(&mut line)?;
-        Ok(serde_json::from_str(&line)?)
-    };
-    let first = read(&mut stdout)?;
-    let second = read(&mut stdout)?;
-    let third = read(&mut stdout)?;
-    assert_eq!(third["event"], "snapshot");
-    assert_eq!(first["event"], "snapshot");
-    assert_eq!(second["event"], "snapshot");
-    finish(&store, attempt)?;
-    let settled = read(&mut stdout)?;
-    assert_eq!(settled["target"], target);
-    assert_eq!(settled["event"], "transition");
+    let mut rest = String::new();
+    wait_lines.read_to_string(&mut rest)?;
+    let wait_status = wait_all.wait()?;
+    assert_eq!(wait_status.code(), Some(1), "{rest}");
+    let mut wait_records = vec![early];
+    wait_records.extend(json_lines(rest.as_bytes())?);
     assert!(
-        child.try_wait()?.is_none(),
-        "follow exited before PR terminal"
+        wait_records
+            .iter()
+            .any(|record| record["event"] == "settled" && record["target"] == slow)
     );
-    fs::write(rig.root.join("pr.json"), view("MERGED", HEAD))?;
-    let merged = read(&mut stdout)?;
-    assert_eq!(merged["target"], "pr:1");
-    assert_eq!(merged["terminal"], true);
-    assert!(
-        child.try_wait()?.is_none(),
-        "follow exited before graph terminal"
+    let wait_result = wait_records.last().ok_or("final wait record")?;
+    assert_eq!(
+        wait_result["data"]["targets"].as_array().map(Vec::len),
+        Some(2)
     );
-    graph(&rig, true)?;
-    let completed = read(&mut stdout)?;
-    assert_eq!(completed["target"], "graph:fixture");
-    assert_eq!(completed["terminal"], true);
-    assert_eq!(read(&mut stdout)?["event"], "end");
-    assert!(child.wait()?.success());
-    Ok(())
-}
-#[test]
-fn mixed_status_wait_uses_configured_timeout_and_per_call_override() -> Result {
-    let mut rig = TestRig::new()?;
-    let (_store, attempt) = seed(&rig)?;
-    fake_gh(&mut rig, false)?;
-    let target = format!("lane:{attempt}");
-    for (wait, seconds) in [("--wait", 1), ("--wait=2s", 2)] {
-        let started = Instant::now();
-        let output =
-            spawn(&rig, &["status", wait, "--target", &target, "--json"])?.wait_with_output()?;
-        assert_eq!(output.status.code(), Some(124), "{output:?}");
-        assert!(started.elapsed() >= Duration::from_secs(seconds));
-        assert!(started.elapsed() < Duration::from_secs(seconds + 30));
-        assert_eq!(
-            events(&output.stdout)?.last().ok_or("end")?["timed_out"],
-            true
-        );
+    for target in wait_result["data"]["targets"].as_array().ok_or("targets")? {
+        let digests = target["data"]["digests"].as_array().ok_or("wait digests")?;
+        assert!(!digests.is_empty(), "{wait_result}");
+        for digest in digests {
+            assert_digest_fields(digest);
+        }
+    }
+
+    for (node, state) in [
+        ("fast", "succeeded"),
+        ("slow", "failed"),
+        ("blocked", "blocked"),
+        ("skipped", "skipped"),
+    ] {
+        let target = format!("{graph}/{node}");
+        let status = fixture_cli(&rig, &["status", &target, "--json"])?;
+        assert!(status.status.success(), "{status:?}");
+        let status = json_lines(&status.stdout)?.pop().ok_or("status envelope")?;
+        assert_eq!(status["data"]["rows"][0]["state"], state, "{status}");
+        let digests = status["data"]["digests"]
+            .as_array()
+            .ok_or("status digests")?;
+        assert!(!digests.is_empty(), "{status}");
+        for digest in digests {
+            assert_digest_fields(digest);
+        }
+        if node == "blocked" {
+            assert!(
+                digests
+                    .iter()
+                    .any(|digest| digest["handoff_status"] == "blocked")
+            );
+        }
+
+        let waiting = fixture_cli(&rig, &["wait", &target, "--any", "--json"])?;
+        let waiting = json_lines(&waiting.stdout)?.pop().ok_or("wait envelope")?;
+        let digests = waiting["data"]["targets"][0]["data"]["digests"]
+            .as_array()
+            .ok_or("wait digests")?;
+        assert!(!digests.is_empty(), "{waiting}");
+        for digest in digests {
+            assert_digest_fields(digest);
+        }
     }
     Ok(())
 }

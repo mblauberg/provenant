@@ -231,6 +231,17 @@ pub enum GitObjectKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitRead {
+    DirtyPatch,
+    IndexPatch,
+    Untracked,
+    MergeTree {
+        target: GitOid,
+        head: GitOid,
+    },
+    IsShallow,
+    CommitTime {
+        tip: GitOid,
+    },
     PushPatch {
         base: Option<GitOid>,
         head: GitOid,
@@ -349,6 +360,17 @@ pub enum GitRead {
 /// narrower policy services that own each operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum GitMutation {
+    BundleCreate {
+        output: PathBuf,
+        reference: GitRefName,
+    },
+    CreateArchiveRef {
+        reference: GitRefName,
+        tip: GitOid,
+    },
+    DiscardWorktree {
+        path: PathBuf,
+    },
     FastForward {
         head: GitOid,
     },
@@ -380,12 +402,14 @@ pub struct UtilityRuntime {
     /// Lane-writable locations beyond those derived from the repository, such
     /// as the run state directory that holds lane scratch.
     lane_roots: LaneRoots,
+    /// Explicit host config root for effective project and host port declarations.
+    host_state: PathBuf,
 }
 
 /// Where a run's lane scratch and provider state live below the state
 /// directory: lanes write there, and the user's config never should.
 pub fn lane_state_roots(state: &Path) -> Vec<PathBuf> {
-    vec![state.join("runs"), state.join("children")]
+    vec![state.join("attempts"), state.join("children")]
 }
 
 /// Canonical project location and its verified Git origin, when present.
@@ -397,7 +421,11 @@ pub struct DiscoveredProject {
 impl UtilityRuntime {
     /// Closed Git reads with HOME/TMPDIR pointing at a non-directory. This
     /// requires no state or temporary-directory creation and grants no mutation.
-    pub fn read_only(git: impl AsRef<Path>) -> Result<Self, UtilityError> {
+    /// The explicit host state is read only when repository lane roots are derived.
+    pub fn read_only(
+        git: impl AsRef<Path>,
+        host_state: impl AsRef<Path>,
+    ) -> Result<Self, UtilityError> {
         Ok(Self {
             git: ExecutablePin::new(git.as_ref(), "git")?,
             home: PrivateHome {
@@ -405,13 +433,20 @@ impl UtilityRuntime {
                 identity: None,
             },
             lane_roots: LaneRoots::default(),
+            host_state: host_state.as_ref().to_owned(),
         })
     }
-    pub fn new(git: impl AsRef<Path>, home: impl AsRef<Path>) -> Result<Self, UtilityError> {
+    /// Open a Git utility using the supplied host state for port declarations.
+    pub fn new(
+        git: impl AsRef<Path>,
+        home: impl AsRef<Path>,
+        host_state: impl AsRef<Path>,
+    ) -> Result<Self, UtilityError> {
         Ok(Self {
             git: ExecutablePin::new(git.as_ref(), "git")?,
             home: PrivateHome::new(home.as_ref())?,
             lane_roots: LaneRoots::default(),
+            host_state: host_state.as_ref().to_owned(),
         })
     }
 
@@ -430,13 +465,14 @@ impl UtilityRuntime {
 
     /// Everything a lane can write that matters to `repo`: its own linked
     /// worktree, the project's worktree and scratch areas, and any extra roots.
-    pub(crate) fn lane_roots(&self, repo: &VerifiedRepo) -> LaneRoots {
-        LaneRoots::for_repository(
+    pub(crate) fn lane_roots(&self, repo: &VerifiedRepo) -> Result<LaneRoots, UtilityError> {
+        Ok(LaneRoots::for_repository(
             repo.root_path(),
             repo.private_git_dir(),
             repo.common_git_dir(),
             &self.lane_roots,
-        )
+            &self.host_state,
+        )?)
     }
 
     pub fn open_repo(
@@ -782,7 +818,7 @@ impl<'a> HostGit<'a> {
             budget,
             cancel,
         };
-        let roots = runtime.lane_roots(repo);
+        let roots = runtime.lane_roots(repo)?;
         transport::check_environment(&host.env, repo.root_path(), &roots)?;
         let listing = host.run(
             &transport::LISTING_ARGS
@@ -1248,6 +1284,43 @@ fn git_args(
     args.extend(GIT_COMMON.iter().map(OsString::from));
     args.push(format!("--attr-source={attribute_source}").into());
     let tail = match operation {
+        GitRead::DirtyPatch => vec![
+            "diff".into(),
+            "--binary".into(),
+            "--no-ext-diff".into(),
+            "--no-textconv".into(),
+            "HEAD".into(),
+            "--".into(),
+        ],
+        GitRead::IndexPatch => vec![
+            "diff".into(),
+            "--cached".into(),
+            "--binary".into(),
+            "--no-ext-diff".into(),
+            "--no-textconv".into(),
+            "HEAD".into(),
+            "--".into(),
+        ],
+        GitRead::Untracked => vec![
+            "ls-files".into(),
+            "--others".into(),
+            "-z".into(),
+            "--".into(),
+        ],
+        GitRead::MergeTree { target, head } => vec![
+            "merge-tree".into(),
+            "--write-tree".into(),
+            target.to_string().into(),
+            head.to_string().into(),
+        ],
+        GitRead::CommitTime { tip } => vec![
+            "show".into(),
+            "-s".into(),
+            "--format=%ct".into(),
+            tip.to_string().into(),
+            "--".into(),
+        ],
+        GitRead::IsShallow => vec!["rev-parse".into(), "--is-shallow-repository".into()],
         GitRead::Status => vec![
             "status".into(),
             "--porcelain=v2".into(),
@@ -1833,7 +1906,7 @@ fn scan_configuration(
         .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
     let base = repo.root_path();
     let home = runtime.home.path.as_path();
-    let roots = runtime.lane_roots(repo);
+    let roots = runtime.lane_roots(repo)?;
     let own: Vec<PathBuf> = [repo.private_git_dir(), repo.common_git_dir()]
         .iter()
         .flat_map(|dir| ["config", "config.worktree"].map(|name| dir.join(name)))
@@ -1999,7 +2072,7 @@ pub(crate) fn lane_configuration_files(
 ) -> Result<BTreeSet<PathBuf>, UtilityError> {
     let scan = scan_configuration(executor, repo, runtime, budget, cancel)?;
     let mut files = scan.lane_files;
-    let roots = runtime.lane_roots(repo);
+    let roots = runtime.lane_roots(repo)?;
     // An include may be named inside a lane even when Git reports the
     // resolved target as its origin. Seed the graph with the declared path.
     for entry in &scan.entries {
@@ -2232,6 +2305,36 @@ fn run_git_probe(
 fn mutation_args(mutation: GitMutation) -> Result<(Vec<OsString>, Option<Vec<u8>>), UtilityError> {
     let mut args = GIT_COMMON.iter().map(OsString::from).collect::<Vec<_>>();
     let input = match mutation {
+        GitMutation::CreateArchiveRef { reference, tip } => {
+            args.extend([
+                "update-ref".into(),
+                reference.as_str().into(),
+                tip.to_string().into(),
+                "0".repeat(tip.to_string().len()).into(),
+            ]);
+            None
+        }
+        GitMutation::BundleCreate { output, reference } => {
+            let output = validate_absolute_mutation_path(&output)?;
+            args.extend([
+                "bundle".into(),
+                "create".into(),
+                output.into_os_string(),
+                reference.as_str().into(),
+            ]);
+            None
+        }
+        GitMutation::DiscardWorktree { path } => {
+            let path = validate_absolute_mutation_path(&path)?;
+            args.extend([
+                "worktree".into(),
+                "remove".into(),
+                "--force".into(),
+                "--".into(),
+                path.into_os_string(),
+            ]);
+            None
+        }
         GitMutation::FastForward { head } => {
             args.extend([
                 "merge".into(),
@@ -2353,11 +2456,12 @@ pub(crate) mod tests {
     fn executable_pin_keeps_the_locator_and_follows_a_swapped_target() -> Result<(), Box<dyn Error>>
     {
         let temp = tempfile::tempdir()?;
-        let (first, second) = (temp.path().join("v1/git"), temp.path().join("v2/git"));
+        let root = temp.path().canonicalize()?;
+        let (first, second) = (root.join("v1/git"), root.join("v2/git"));
         executable(&first, 0o755)?;
         executable(&second, 0o755)?;
-        let link = temp.path().join("bin/git");
-        fs::create_dir(temp.path().join("bin"))?;
+        let link = root.join("bin/git");
+        fs::create_dir(root.join("bin"))?;
         std::os::unix::fs::symlink(&first, &link)?;
 
         // The locator is what runs; it is never replaced by the canonical path.
@@ -2367,15 +2471,12 @@ pub(crate) mod tests {
         // `brew upgrade`: the link moves to a new version and the old one is
         // removed. The pin follows without the old target existing.
         relink(&link, &second)?;
-        fs::remove_dir_all(temp.path().join("v1"))?;
+        fs::remove_dir_all(root.join("v1"))?;
         assert_eq!(pin.program()?, link);
         let pinned = pin.state.lock().map_err(|_| "pin poisoned")?.target;
-        assert!(
-            pinned.same_identity(
-                &Directory::open_anchor(&temp.path().join("v2"))?
-                    .metadata_at(OsStr::new("git"), false)?
-            )
-        );
+        assert!(pinned.same_identity(
+            &Directory::open_anchor(&root.join("v2"))?.metadata_at(OsStr::new("git"), false)?
+        ));
 
         // Removing the target leaves nothing to run.
         fs::remove_file(&second)?;
@@ -2389,15 +2490,16 @@ pub(crate) mod tests {
     #[test]
     fn executable_pin_revalidates_a_replaced_or_loosened_target() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
-        let target = temp.path().join("target/git");
+        let root = temp.path().canonicalize()?;
+        let target = root.join("target/git");
         executable(&target, 0o755)?;
-        let link = temp.path().join("git");
+        let link = root.join("git");
         std::os::unix::fs::symlink(&target, &link)?;
         let pin = ExecutablePin::new(&link, "git")?;
         pin.program()?;
 
         // A sound replacement is accepted.
-        let replacement = temp.path().join("target/replacement");
+        let replacement = root.join("target/replacement");
         executable(&replacement, 0o755)?;
         fs::rename(&replacement, &target)?;
         pin.program()?;
@@ -2447,13 +2549,14 @@ pub(crate) mod tests {
             }
         }
         let temp = tempfile::tempdir()?;
-        let target = temp.path().join("target/git");
+        let root = temp.path().canonicalize()?;
+        let target = root.join("target/git");
         executable(&target, 0o755)?;
-        let link = temp.path().join("git");
+        let link = root.join("git");
         std::os::unix::fs::symlink(&target, &link)?;
         let pin = ExecutablePin::new(&link, "git")?;
         let argv = [link.as_os_str().to_owned()];
-        let options = || ExecOptions::new(&argv, temp.path(), Duration::from_secs(1));
+        let options = || ExecOptions::new(&argv, &root, Duration::from_secs(1));
 
         let executor = VanishesOnce(Default::default());
         pin.execute(&executor, options)?;
@@ -2502,10 +2605,11 @@ pub(crate) mod tests {
     #[test]
     fn executable_pin_refuses_a_writable_file_and_a_loose_ancestor() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
-        let target_dir = temp.path().join("target");
+        let root = temp.path().canonicalize()?;
+        let target_dir = root.join("target");
         let target = target_dir.join("git");
         executable(&target, 0o755)?;
-        let link = temp.path().join("git");
+        let link = root.join("git");
         std::os::unix::fs::symlink(&target, &link)?;
         let pin = |file: u32, directory: u32| -> Result<ExecutablePin, UtilityError> {
             fs::set_permissions(&target, fs::Permissions::from_mode(file))
@@ -2538,7 +2642,7 @@ pub(crate) mod tests {
         // The rule covers every ancestor, not only the parent.
         let nested = target_dir.join("nested/git");
         executable(&nested, 0o755)?;
-        let nested_link = temp.path().join("nested-git");
+        let nested_link = root.join("nested-git");
         std::os::unix::fs::symlink(&nested, &nested_link)?;
         fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o777))?;
         assert!(matches!(

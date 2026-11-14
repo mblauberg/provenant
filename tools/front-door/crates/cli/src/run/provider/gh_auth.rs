@@ -1,7 +1,120 @@
-//! Host-only GitHub login lookup. Credential bytes never enter setup files,
-//! prompts, receipts or diagnostic output.
+//! Lane GitHub credential selection, and the host-only login lookup behind
+//! it. This module is the one place that decides which GitHub credential a
+//! lane holds; the launch receipt records the selection and its source.
+//! Credential bytes never enter setup files, prompts, receipts or
+//! diagnostic output.
+//!
+//! Today the only source is the user's own login: a writer keeps it for
+//! reads and for pushing its own branch, and the lane's `gh` wrapper
+//! mediates gh mutations (counts them, advises on label-triggered CI and
+//! applies the project's deny list). The wrapper is advisory: a lane holding
+//! the user's token can act as the user directly. A narrower credential is a
+//! new [`CredentialSource`] variant selected in [`CredentialSource::configured`]
+//! (a minted, repository-scoped GitHub App installation token); a configured
+//! source that cannot produce its credential must refuse the launch visibly,
+//! never fall back to the user's login.
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
 use std::{ffi::OsString, path::Path, time::Duration};
+
+/// Where a lane's GitHub credential comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CredentialSource {
+    /// The user's own GitHub login on this host.
+    UserLogin,
+}
+
+impl CredentialSource {
+    /// The source for this host, and the layer that chose it. No setting
+    /// selects another source yet, so this is the built-in default.
+    pub(super) fn configured() -> (Self, &'static str) {
+        (Self::UserLogin, "default")
+    }
+
+    /// The identity the lane acts as on GitHub.
+    pub(super) const fn identity(self) -> &'static str {
+        match self {
+            Self::UserLogin => "user",
+        }
+    }
+}
+
+/// How a user-login token was found on the host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TokenOrigin {
+    /// The host's `GH_TOKEN`.
+    HostEnvironment,
+    /// `gh auth token` over the host's selected gh configuration.
+    StoredLogin,
+}
+
+impl TokenOrigin {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::HostEnvironment => "host GH_TOKEN",
+            Self::StoredLogin => "gh auth token",
+        }
+    }
+}
+
+/// A login found earlier in this preparation, reused by later routes.
+pub(super) type LoginCache = Option<(OsString, TokenOrigin)>;
+
+/// How the selected credential reaches the lane.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Delivery {
+    /// Resolved on the host and placed in the lane's launch environment as
+    /// `GH_TOKEN` (sandboxed lanes).
+    Injected(TokenOrigin),
+    /// An unsandboxed lane reads the user's own login stores, as a CLI
+    /// started by hand would; nothing is injected.
+    Ambient,
+    /// The lane gets no credential from the host, for the stated reason.
+    None(String),
+}
+
+/// The one GitHub credential decision for a lane.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Selection {
+    pub(super) source: CredentialSource,
+    pub(super) source_origin: &'static str,
+    pub(super) delivery: Delivery,
+    /// Whether the lane's `gh` runs through the counting, advisory wrapper.
+    pub(super) mediated: bool,
+}
+
+impl Selection {
+    pub(super) fn new(delivery: Delivery, mediated: bool) -> Self {
+        let (source, source_origin) = CredentialSource::configured();
+        Self {
+            source,
+            source_origin,
+            delivery,
+            mediated,
+        }
+    }
+
+    /// The launch receipt's `github_credential` field. Never carries bytes.
+    pub(super) fn receipt(&self) -> serde_json::Value {
+        let (delivery, detail) = match &self.delivery {
+            Delivery::Injected(origin) => ("injected", origin.as_str().to_owned()),
+            Delivery::Ambient => (
+                "ambient",
+                "unsandboxed lane reads the host's gh login".to_owned(),
+            ),
+            Delivery::None(reason) => ("none", reason.clone()),
+        };
+        serde_json::json!({
+            "identity": match self.delivery {
+                Delivery::None(_) => None,
+                _ => Some(self.source.identity()),
+            },
+            "source": self.source_origin,
+            "delivery": delivery,
+            "detail": detail,
+            "mediation": if self.mediated { "gh wrapper (advisory)" } else { "none" },
+        })
+    }
+}
 
 /// Attempts for one lookup. Heavy host load can stall `gh` past a single
 /// bound; a stall is retried rather than dropping access for the lane.
@@ -17,26 +130,26 @@ enum Failure {
     Final(String),
 }
 
-/// Inject the host login into `environment`. A token found earlier in this
-/// preparation is reused through `cache`; a failed lookup is not cached, so a
-/// later route retries it. Returns a warning naming the cause when no token
-/// could be resolved.
+/// Inject the selected credential into `environment`. A token found earlier
+/// in this preparation is reused through `cache`; a failed lookup is not
+/// cached, so a later route retries it. Returns how the token was found, or
+/// a warning naming the cause when none could be resolved.
 pub(super) fn inject(
     executor: &dyn Executor,
     gh: &Path,
     home: &Path,
     host_paths: &impl Fn(&str) -> Option<OsString>,
     cancel: &provenant_core::CancelToken,
-    cache: &mut Option<OsString>,
+    cache: &mut LoginCache,
     environment: &mut Vec<(OsString, OsString)>,
-) -> Option<String> {
+) -> Result<TokenOrigin, String> {
     let config = config_directory(home, host_paths);
     if !environment.iter().any(|(key, _)| key == "GH_CONFIG_DIR") {
         environment.push(("GH_CONFIG_DIR".into(), config.as_os_str().to_owned()));
     }
-    let resolved = match cache.clone() {
-        Some(token) => Ok(token),
-        None => token(
+    let resolved = match (CredentialSource::configured().0, cache.clone()) {
+        (_, Some(cached)) => Ok(cached),
+        (CredentialSource::UserLogin, None) => token(
             executor,
             gh,
             home,
@@ -46,13 +159,13 @@ pub(super) fn inject(
         ),
     };
     match resolved {
-        Ok(token) => {
-            *cache = Some(token.clone());
+        Ok((token, origin)) => {
+            *cache = Some((token.clone(), origin));
             environment.retain(|(key, _)| key != "GH_TOKEN");
             environment.push(("GH_TOKEN".into(), token));
-            None
+            Ok(origin)
         }
-        Err(cause) => Some(format!(
+        Err(cause) => Err(format!(
             "GitHub login lookup failed ({cause}); this lane starts without a GitHub token, so git push and gh may be unauthenticated"
         )),
     }
@@ -115,18 +228,18 @@ fn token(
     config: &Path,
     cancel: &provenant_core::CancelToken,
     host_token: Option<OsString>,
-) -> Result<OsString, String> {
+) -> Result<(OsString, TokenOrigin), String> {
     // `gh auth token` reads the persisted login and does not return GH_TOKEN.
     // Honour the host token first, with the same bounds as captured output.
     if let Some(value) = host_token
         && valid_host_token(&value)
     {
-        return Ok(value);
+        return Ok((value, TokenOrigin::HostEnvironment));
     }
     let mut last = String::new();
     for attempt in 1..=ATTEMPTS {
         match attempt_token(executor, gh, home, config, cancel) {
-            Ok(token) => return Ok(token),
+            Ok(token) => return Ok((token, TokenOrigin::StoredLogin)),
             Err(Failure::Final(cause)) => return Err(cause),
             Err(Failure::Transient(cause)) => {
                 last = format!("{cause}; attempt {attempt} of {ATTEMPTS}")
@@ -300,7 +413,7 @@ mod tests {
                 &cancel,
                 None
             ),
-            Ok("fixture-secret".into())
+            Ok(("fixture-secret".into(), TokenOrigin::StoredLogin))
         );
         assert!(
             token(
@@ -355,7 +468,10 @@ mod tests {
             )
         };
         let executor = Flaky(AtomicUsize::new(0), 2);
-        assert_eq!(lookup(&executor), Ok("fixture-secret".into()));
+        assert_eq!(
+            lookup(&executor),
+            Ok(("fixture-secret".into(), TokenOrigin::StoredLogin))
+        );
         assert_eq!(executor.0.load(Ordering::SeqCst), 3);
         let executor = Flaky(AtomicUsize::new(0), 99);
         let cause = lookup(&executor).unwrap_err();
@@ -363,8 +479,8 @@ mod tests {
         assert!(!cause.contains("fixture-secret"));
         // A cached token needs no lookup and a failure leaves the cache empty.
         let mut env = Vec::new();
-        let mut cache = Some(OsString::from("cached"));
-        let warning = inject(
+        let mut cache = Some((OsString::from("cached"), TokenOrigin::HostEnvironment));
+        let injected = inject(
             &executor,
             Path::new("/fixture/gh"),
             Path::new("/fixture/home"),
@@ -373,8 +489,27 @@ mod tests {
             &mut cache,
             &mut env,
         );
-        assert_eq!(warning, None);
+        assert_eq!(injected, Ok(TokenOrigin::HostEnvironment));
         assert_eq!(executor.0.load(Ordering::SeqCst), 3);
         assert!(env.iter().any(|(k, v)| k == "GH_TOKEN" && v == "cached"));
+    }
+
+    /// The selection and its source reach the receipt for every delivery,
+    /// sandboxed or not, and the receipt never holds credential bytes.
+    #[test]
+    fn selection_receipt_names_identity_source_delivery_and_mediation() {
+        let injected = Selection::new(Delivery::Injected(TokenOrigin::StoredLogin), true).receipt();
+        assert_eq!(injected["identity"], "user");
+        assert_eq!(injected["source"], "default");
+        assert_eq!(injected["delivery"], "injected");
+        assert_eq!(injected["detail"], "gh auth token");
+        assert_eq!(injected["mediation"], "gh wrapper (advisory)");
+        let ambient = Selection::new(Delivery::Ambient, true).receipt();
+        assert_eq!(ambient["identity"], "user");
+        assert_eq!(ambient["delivery"], "ambient");
+        let none = Selection::new(Delivery::None("access policy".into()), false).receipt();
+        assert!(none["identity"].is_null());
+        assert_eq!(none["delivery"], "none");
+        assert_eq!(none["mediation"], "none");
     }
 }

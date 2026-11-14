@@ -93,6 +93,21 @@ pub trait QuotaEffects {
     fn login_expiry_unix_seconds(&self) -> Option<i64> {
         None
     }
+
+    /// Informational access-token expiry, never a sign-out verdict.
+    fn access_token_expiry_unix_seconds(&self) -> Option<i64> {
+        None
+    }
+
+    /// Provider-reported sign-in state; only `Some(false)` proves sign-out.
+    fn signed_in(&self) -> Option<bool> {
+        None
+    }
+
+    /// A confirmed login whose access token still needs CLI renewal/revalidation.
+    fn refresh_pending(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +159,8 @@ pub enum QuotaStatus {
     Stale,
     Unknown,
     AuthRequired,
+    /// Signed in, but the provider CLI deferred an access-token refresh.
+    RefreshPending,
     KeychainUnavailable,
     Unsupported,
 }
@@ -171,17 +188,4 @@ pub struct QuotaSnapshot {
     pub windows: Vec<QuotaWindow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<QuotaDetails>,
-}
-pub trait QuotaSource: Sync {
-    fn adapter_id(&self) -> &'static str;
-    fn probe(
-        &self,
-        account: &AccountScope,
-        input: &QuotaProbeInput,
-    ) -> Result<QuotaProbePlan, crate::QuotaError>;
-    fn decode(
-        &self,
-        plan: &QuotaProbePlan,
-        capture: &ProbeCapture,
-    ) -> Result<QuotaSnapshot, crate::QuotaError>;
 }

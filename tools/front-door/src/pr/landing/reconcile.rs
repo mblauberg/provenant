@@ -25,7 +25,16 @@ fn valid_for_retry(
     repo: &mut dyn Repo,
     approvals: Approvals<'_>,
     attempt: &PendingAttempt,
+    state: &std::path::Path,
 ) -> bool {
+    if let Some(context) = &attempt.policy.landing
+        && super::owner::fence(state, context).is_err()
+    {
+        return false;
+    }
+    if attempt.publish.mode == PublishMode::Command {
+        return false;
+    }
     let candidate = &attempt.candidate;
     publish::revalidate(forge, &mut approvals.at(repo, &candidate.base), candidate)
         .is_ok_and(|excluded| excluded.is_empty())
@@ -323,25 +332,17 @@ pub fn recover_pending(
     shadow: bool,
     recovered: &mut Vec<LandingReceipt>,
 ) -> Result<(), LandingError> {
-    #[allow(clippy::disallowed_methods, reason = "allow publication to settle")]
     recover_pending_with(
-        forge,
-        repo,
-        approvals,
-        runner,
-        alarms,
-        state,
-        repository,
-        target,
-        shadow,
-        recovered,
-        &std::thread::sleep,
+        forge, repo, approvals, runner, alarms, state, repository, target, shadow, recovered,
     )
 }
 
+/// Reconcile every pending publication marker without waiting: a marker
+/// younger than the settle window is observed now and, if still unproven,
+/// left for a later run (try-and-skip) instead of blocking this one.
 #[allow(
     clippy::too_many_arguments,
-    reason = "recovery uses the landing boundaries and injectable wait"
+    reason = "recovery uses the landing boundaries"
 )]
 pub(crate) fn recover_pending_with(
     forge: &mut dyn Forge,
@@ -354,7 +355,6 @@ pub(crate) fn recover_pending_with(
     target: &str,
     shadow: bool,
     recovered: &mut Vec<LandingReceipt>,
-    sleep: &dyn Fn(std::time::Duration),
 ) -> Result<(), LandingError> {
     for mut attempt in receipt::pending(state, repository, target)? {
         if shadow {
@@ -428,19 +428,17 @@ pub(crate) fn recover_pending_with(
         }
         .map_err(|_| unknown())?;
         let settings = attempt.policy.settings().map_err(|_| unknown())?;
-        let mut settled = false;
-        let can_retry = !shadow && valid_for_retry(forge, repo, approvals, &attempt);
-        if !shadow && !can_retry {
-            #[allow(
-                clippy::disallowed_methods,
-                reason = "allow the original publication to settle"
-            )]
-            sleep(std::time::Duration::from_secs(
-                settings.publish_settle_seconds,
-            ));
-            settled = true;
-            tip = repo.fetch_target(target).map_err(|_| unknown())?;
-        }
+        let can_retry = !shadow && valid_for_retry(forge, repo, approvals, &attempt, state);
+        // The original publication has had its settle window once the marker
+        // is that old; a younger one is observed now and never waited on.
+        let settled = !shadow
+            && !can_retry
+            && match (started_at, now_seconds()) {
+                (Some(start), Some(now)) => {
+                    now.saturating_sub(start) >= settings.publish_settle_seconds
+                }
+                _ => false,
+            };
         if can_retry
             && attempt.publish.mode == PublishMode::FastForward
             && tip == attempt.candidate.base
@@ -555,13 +553,6 @@ pub(crate) fn recover_pending_with(
                             // again before each ordered retry to detect intervening movement.
                             tip = repo.fetch_target(target).map_err(|_| unknown())?;
                             if &tip != expected {
-                                #[allow(
-                                    clippy::disallowed_methods,
-                                    reason = "allow the original publication to settle"
-                                )]
-                                sleep(std::time::Duration::from_secs(
-                                    settings.publish_settle_seconds,
-                                ));
                                 match forge.pull_request(step.pr.number) {
                                     Ok(pr) if pr.state == PullRequestState::Closed => {
                                         outcomes.insert(step.pr.number, Outcome::Excluded);
@@ -573,7 +564,8 @@ pub(crate) fn recover_pending_with(
                                 }
                                 continue;
                             }
-                            let retry = if valid_for_retry(forge, repo, approvals, &attempt) {
+                            let retry = if valid_for_retry(forge, repo, approvals, &attempt, state)
+                            {
                                 publish::merge_member(
                                     forge,
                                     step.pr.number,

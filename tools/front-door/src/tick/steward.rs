@@ -1,9 +1,7 @@
 //! Opt-in proposal sweeps, submitted through the ordinary graph service.
 use super::*;
 use provenant_cli::steward::Settings;
-use provenant_fabric_runtime::graph::{
-    FileJournal, GraphCheckpoint, NodeState, template::SubmissionIdentity,
-};
+use provenant_fabric_runtime::graph::{FileJournal, GraphCheckpoint, NodeState};
 use serde_json::{Value, json};
 
 #[derive(Default, Serialize, Deserialize)]
@@ -140,7 +138,7 @@ fn task(
 }
 
 fn checkpoint_is_live(checkpoint: &GraphCheckpoint) -> bool {
-    (!checkpoint.cancelled && checkpoint.pause_reason.is_some())
+    (!checkpoint.cancelled && checkpoint.pause.is_some())
         || checkpoint
             .nodes
             .iter()
@@ -157,7 +155,7 @@ fn classify_launch(result: &Value) -> Result<(), LaunchError> {
             .and_then(Value::as_str)
             .or_else(|| {
                 result
-                    .pointer("/checkpoint/pause_reason")
+                    .pointer("/checkpoint/pause/reason")
                     .and_then(Value::as_str)
             })
             .or_else(|| {
@@ -202,6 +200,12 @@ fn classify_launch(result: &Value) -> Result<(), LaunchError> {
     Ok(())
 }
 
+/// The graph handle of one steward generation. The launch retries under the
+/// same name, so an uncertain launch finds its graph instead of starting another.
+fn graph_name(operation: &str) -> String {
+    format!("steward-{}", operation.rsplit('-').next().unwrap_or("0"))
+}
+
 pub(super) fn run(
     settings: &Settings,
     resolved: &crate::roots::Resolved,
@@ -232,10 +236,23 @@ pub(super) fn run(
             repository.cadence_seconds,
             &SystemClock,
             |operation| {
-                let id = SubmissionIdentity::Fresh.graph_id(&Value::Null, "", Some(operation))?;
-                let checkpoint = FileJournal::read_checkpoint(&resolved.roots.state, project, &id)
-                    .map_err(|error| error.to_string())?;
-                Ok(checkpoint.as_ref().is_some_and(checkpoint_is_live))
+                // The generation's graph is `steward-G`, or `steward-G-k` when
+                // the source commit moved between retries of an uncertain launch.
+                let name = graph_name(operation);
+                let family = format!("{name}-");
+                for id in FileJournal::graph_ids(&resolved.roots.state, project)
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .filter(|id| *id == name || id.starts_with(&family))
+                {
+                    let checkpoint =
+                        FileJournal::read_checkpoint(&resolved.roots.state, project, &id)
+                            .map_err(|error| error.to_string())?;
+                    if checkpoint.as_ref().is_some_and(checkpoint_is_live) {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
             },
             |operation| {
                 let clock = SystemClock;
@@ -244,7 +261,7 @@ pub(super) fn run(
                 let result = factory
                     .graph_document(
                         json!({
-                            "op":"run", "use":"steward", "operation_id":operation,
+                            "op":"run", "template":"steward", "name":graph_name(operation),
                         }),
                         budget,
                         &CancelToken::new(),
@@ -275,7 +292,7 @@ mod tests {
         ] {
             let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
                 "schema_version": 1, "graph_id": "steward-live", "plan_digest": "digest",
-                "cancelled": cancelled, "pause_reason": pause_reason,
+                "cancelled": cancelled, "pause": pause_reason.map(|reason| json!({"cause": {"kind": "structural_limit"}, "reason": reason})),
                 "nodes": [{"id": "sweep", "state": state, "worktree": null, "attempts": []}],
             }))
             .unwrap();
@@ -425,6 +442,9 @@ mod tests {
         struct FailedOwner;
         impl AttemptOwner for FailedOwner {
             type Error = Infallible;
+            fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+                provenant_config::PortTable::builtin().worktree_layout
+            }
             fn actor(&self) -> String {
                 "fixture".into()
             }
@@ -446,6 +466,8 @@ mod tests {
                     result_path: None,
                     branch: None,
                     commit: None,
+                    settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                    stop: None,
                 })
             }
         }

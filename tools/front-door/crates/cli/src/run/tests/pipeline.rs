@@ -57,16 +57,18 @@ fn verifier_copies_count_once_and_unknown_dispositions_stay_unknown()
 #[test]
 fn mixed_model_node_stays_unknown_instead_of_charging_the_final_model()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_core::{AttemptId, OperationId, ProjectId, TaskId, WallTime};
+    use provenant_core::{AttemptId, ProjectId, WallTime};
     use provenant_records::{AttemptFact, AttemptOutcome, RouteFact, Usage};
     let mut fact = AttemptFact {
         context: None,
         attempt_id: AttemptId::from_bytes([1; 16]),
-        task_id: TaskId::from_bytes([2; 16]),
+        key: provenant_records::WorkKey::new(ProjectId::from_bytes([3; 16]), "graph", "node", 1)?,
         attempt_number: 1,
-        operation_id: OperationId::parse("pipeline-test")?,
         project_id: ProjectId::from_bytes([3; 16]),
         terminal_state: AttemptOutcome::Succeeded,
+        cause_source: provenant_records::run::CauseSource::Unavailable,
+        settlement_reason: None,
+        account_identity: provenant_records::AccountIdentity::unknown(),
         exit_code: Some(0),
         queued_at: WallTime::from_micros(0)?,
         started_at: None,
@@ -77,6 +79,7 @@ fn mixed_model_node_stays_unknown_instead_of_charging_the_final_model()
             model: Some("p/a".into()),
             effort: None,
             account_label: None,
+            account_key: None,
         }),
         usage: Usage::default(),
         reviewer: None,

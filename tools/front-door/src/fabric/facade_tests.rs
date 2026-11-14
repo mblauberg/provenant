@@ -1,8 +1,8 @@
 #[cfg(test)]
 #[test]
-fn peer_remote_base_pins_a_commit_reachable_from_the_remote(
-) -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_confinement::worktrees::{self, WorkerObserver, Occupancy};
+fn peer_remote_base_pins_a_commit_reachable_from_the_remote()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::worktrees::{self, Occupancy, WorkerObserver};
     use std::collections::BTreeMap;
     struct Free;
     impl WorkerObserver for Free {
@@ -292,14 +292,6 @@ fn graph_document_decoder_checks_header_before_typed_graph() {
 
 #[cfg(test)]
 #[test]
-fn cli_failure_uses_stderr_without_structured_json() {
-    let error = cli_failure(b"not json", b"specific failure\nadditional detail\n");
-    assert!(matches!(error, ServiceError::Cli { code, message, data }
-        if code == "CLI_FAILED" && message == "specific failure" && data.is_null()));
-}
-
-#[cfg(test)]
-#[test]
 fn scratch_prepare_lock_timeout_keeps_a_fixed_cause() {
     use provenant_confinement::worktrees::WorktreeError;
     let error = scratch_prepare_error(WorktreeError::Filesystem(
@@ -320,16 +312,47 @@ fn scratch_prepare_lock_timeout_keeps_a_fixed_cause() {
 
 #[test]
 fn prompt_limit_refusal_keeps_safe_field_and_existing_code() {
-    let error = run_error(provenant_run::RunError::PromptTooLarge {
-        task_index: Some(0),
-        limit: 1_048_576,
-    });
+    let error = run_error(provenant_run::RunError::PromptTooLarge { limit: 1_048_576 });
     let projection = error.diagnostic();
     assert_eq!(projection.code, "invalid_input");
+    assert!(matches!(error, FacadeError::InvalidInput {
+        detail: Some(provenant_fabric_runtime::coordination::facade::InvalidInputDetail::FieldTooLarge { ref field, limit: 1_048_576 })
+    } if field == "prompt"));
     let detail = projection.detail.unwrap();
-    assert!(detail.contains("tasks[0].prompt"));
-    assert!(detail.contains("1048576"));
-    assert!(projection.next.is_some());
+    assert_eq!(
+        detail,
+        "invalid input field `prompt`: exceeds 1048576 bytes"
+    );
+    assert_eq!(
+        projection.next.as_deref(),
+        Some("check the named input field and retry")
+    );
+}
+
+#[test]
+fn peer_output_binding_is_consumed_before_the_cli_projection() {
+    let origin = provenant_records::WorkKey::new(
+        provenant_core::ProjectId::from_bytes([7; 16]),
+        "origin",
+        "worker",
+        1,
+    )
+    .unwrap();
+    let output = serde_json::from_value(serde_json::json!({
+        "kind":"chunk", "target":{"attempt":"11111111111111111111111111111111"},
+        "part":"result", "state":"succeeded", "reason":null, "offset":0,
+        "next_offset":2, "eof":true, "digest":provenant_core::Digest::from_bytes([2; 32]),
+        "bytes":{"encoding":"utf8","data":"ok"}, "length":2,
+        "peer_origin_work_key":origin, "peer_graph":{}, "peer_origin_context":{},
+        "peer_graph_collected":true, "peer_subtree":{}
+    }))
+    .unwrap();
+    let checked = peer::checked_output_origin(output, &origin).unwrap();
+    let OutputResult::Chunk { extra, .. } = checked else {
+        panic!("chunk expected")
+    };
+    assert_eq!(extra.get("length"), Some(&serde_json::json!(2)));
+    assert!(extra.keys().all(|key| !key.starts_with("peer_")));
 }
 
 #[test]
@@ -337,18 +360,36 @@ fn dirty_writer_refusal_keeps_safe_cause_and_action_on_the_wire() {
     let error = run_error(provenant_run::RunError::Writer(
         provenant_confinement::worktrees::WorktreeError::Dirty("TOKEN_SENTINEL".into()),
     ));
-    let decoded: FacadeError = serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
+    let decoded: FacadeError =
+        serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
     let diagnostic = decoded.diagnostic();
-    assert!(diagnostic.detail.as_deref().unwrap().contains("uncommitted"));
+    assert!(
+        diagnostic
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("uncommitted")
+    );
     assert!(diagnostic.next.as_deref().unwrap().contains("commit"));
-    assert!(!serde_json::to_string(&diagnostic).unwrap().contains("TOKEN_SENTINEL"));
+    assert!(
+        !serde_json::to_string(&diagnostic)
+            .unwrap()
+            .contains("TOKEN_SENTINEL")
+    );
 
     let error = run_error(provenant_run::RunError::Writer(
         provenant_confinement::worktrees::WorktreeError::CheckedOut,
     ));
-    let decoded: FacadeError = serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
+    let decoded: FacadeError =
+        serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
     let diagnostic = decoded.diagnostic();
-    assert!(diagnostic.detail.as_deref().unwrap().contains("checked out"));
+    assert!(
+        diagnostic
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("checked out")
+    );
     let next = diagnostic.next.as_deref().unwrap();
     assert!(next.contains("provenant worktree list"));
     assert!(next.contains("--worktree"));
@@ -388,32 +429,56 @@ fn memory_pressure_refusal_keeps_source_and_resource_action() {
 #[test]
 fn lane_cap_refusal_retains_the_setting_through_both_adapters() {
     use provenant_records::diagnostic::{LaneLimit, SettingSource};
-    let failure = || provenant_run::RunError::Admission(provenant_run::AdmissionError::LaneCap {
-        active: 3,
-        limit: 3,
-        kind: LaneLimit::ProjectWriters,
-        origin: SettingSource::Configuration,
-    });
+    let failure = || {
+        provenant_run::RunError::Admission(provenant_run::AdmissionError::LaneCap {
+            active: 3,
+            limit: 3,
+            kind: LaneLimit::ProjectWriters,
+            origin: SettingSource::Configuration,
+        })
+    };
     for error in [run_error(failure()), dispatch_refused(failure().into())] {
-        let decoded: FacadeError = serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
+        let decoded: FacadeError =
+            serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
         let projection = decoded.diagnostic();
-        assert!(projection.detail.as_deref().unwrap().contains("max_project_writer_lanes"));
-        assert!(projection.detail.as_deref().unwrap().contains("host configuration"));
-        assert!(projection.next.as_deref().unwrap().contains("max_project_writer_lanes"));
+        assert!(
+            projection
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains("max_project_writer_lanes")
+        );
+        assert!(
+            projection
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains("host configuration")
+        );
+        assert!(
+            projection
+                .next
+                .as_deref()
+                .unwrap()
+                .contains("max_project_writer_lanes")
+        );
     }
 }
 
 #[test]
 fn process_limit_retains_io_code_and_safe_resource_facts() {
-    let failure = || provenant_run::RunError::Admission(provenant_run::AdmissionError::Processes {
-        used: 950,
-        limit: 1000,
-    });
+    let failure = || {
+        provenant_run::RunError::Admission(provenant_run::AdmissionError::Processes {
+            used: 950,
+            limit: 1000,
+        })
+    };
     for (error, code) in [
         (run_error(failure()), "io"),
         (dispatch_refused(failure().into()), "dispatch_refused"),
     ] {
-        let decoded: FacadeError = serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
+        let decoded: FacadeError =
+            serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
         let projection = decoded.diagnostic();
         assert_eq!(projection.code, code);
         let detail = projection.detail.unwrap();
@@ -432,7 +497,7 @@ fn tick_wakes_graph_without_deadline_but_respects_future_deadline()
         serde_json::from_value(serde_json::json!({
             "schema_version": 1, "graph_id": "waiter", "plan_digest": "plan", "nodes": [
                 {"id":"branch", "worktree":null, "state":"running", "attempts":[{
-                    "key":{"graph_id":"waiter", "node_id":"branch", "route_index":0},
+                    "key":{"graph_id":"waiter", "node_id":"branch", "route_index":0, "attempt": 1},
                     "route":{"adapter":"fixture", "model":"fixture/model"},
                     "state":"running", "launched":true, "launch_actor":"actor"
                 }]}
@@ -454,26 +519,22 @@ pub(crate) mod peer_tests {
     #[allow(unused_imports)]
     // The worktree driver includes this module without libtest functions.
     use provenant_confinement::worktrees;
-    use provenant_core::{AttemptId, RunId, TaskId};
+    use provenant_core::AttemptId;
     use provenant_run::{AttemptState, Outcome, RunStore};
 
-
-
-
-
-
-
-
-
-    fn graph_test_context(key: &provenant_fabric_runtime::graph::AttemptKey) -> provenant_records::run::WorkContext {
+    fn graph_test_context(
+        key: &provenant_fabric_runtime::graph::AttemptKey,
+    ) -> provenant_records::run::WorkContext {
+        // Graph advance stamps the work key's one-based launch order.
         provenant_records::run::WorkContext {
             graph_id: Some(key.graph_id.clone()),
             node_id: Some(key.node_id.clone()),
+            attempt: Some(key.attempt),
             ..Default::default()
         }
     }
 
-    pub(super) fn host_test(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    pub(crate) fn host_test(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
         if !provenant_cli::fabric::in_lane() {
             return Ok(false);
         }
@@ -490,9 +551,7 @@ pub(crate) mod peer_tests {
             provenant_run::PARENT_ATTEMPT_ENV,
         ];
         let fixture_home = tempfile::tempdir()?;
-        let isolate_home = name
-            .ends_with("explicit_writer_defers_tracking_ref_refresh_while_collection_is_busy")
-            || name.ends_with("settlement_defers_adopted_writer_cleanup");
+        let isolate_home = name.ends_with("settlement_defers_adopted_writer_cleanup");
         let mut environment: Vec<_> = std::env::vars_os()
             .filter(|(key, _)| {
                 !removed.iter().any(|name| key == name) && !(isolate_home && key == "HOME")
@@ -591,8 +650,6 @@ pub(crate) mod peer_tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let attempt = rig
             .state
-            .join("runs")
-            .join(record.run_id.to_string())
             .join("attempts")
             .join(record.attempt_id.to_string());
         let directory = provenant_os::fs::Directory::open_anchor(&attempt)?;
@@ -602,7 +659,6 @@ pub(crate) mod peer_tests {
         let exit = ExitObservation {
             publication: PublicationState::Durable,
             scope: Scope {
-                run: record.run_id,
                 attempt: record.attempt_id,
                 generation: record.generation,
             },
@@ -661,6 +717,7 @@ pub(crate) mod peer_tests {
             record.attempt_id,
             record.revision,
             &provenant_run::TerminalPublication {
+                handoff: None,
                 terminal_cause: None,
                 terminal_note: None,
                 outcome,
@@ -691,18 +748,105 @@ pub(crate) mod peer_tests {
 
         /// A settled lane whose head is one commit past its base.
         pub(crate) fn resumed_with_lane_commit() -> Result<Self, Box<dyn std::error::Error>> {
-            Self::build("settlement-resume", None, true)
+            Self::build("settlement-resume", None, "lane", true, None)
+        }
+
+        pub(crate) fn resumed_with_integrated_lane_commit()
+        -> Result<Self, Box<dyn std::error::Error>> {
+            let delivery = provenant_run::HostDeliveryContext::destination(
+                provenant_run::DeliveryMode::Integrate("origin/trunk".into()),
+                "resumed-lane",
+            )?
+            .ok_or("integration delivery")?;
+            Self::build("settlement-resume", None, "lane", true, Some(delivery))
         }
 
         fn resumed_as(operation: &str) -> Result<Self, Box<dyn std::error::Error>> {
             Self::settled_fixture(operation, None)
         }
 
-        fn settled_fixture(operation: &str, graph_id: Option<&str>) -> Result<Self, Box<dyn std::error::Error>> {
-            Self::build(operation, graph_id, false)
+        fn settled_fixture(
+            operation: &str,
+            graph_id: Option<&str>,
+        ) -> Result<Self, Box<dyn std::error::Error>> {
+            Self::build(operation, graph_id, "lane", false, None)
         }
 
-        fn build(operation: &str, graph_id: Option<&str>, lane_commit: bool) -> Result<Self, Box<dyn std::error::Error>> {
+        /// A settled attempt admitted under `graph`'s `node`, attempt 1: the
+        /// work key a graph binding this attempt to that node must carry.
+        pub(crate) fn for_node(
+            graph: &str,
+            node: &str,
+        ) -> Result<Self, Box<dyn std::error::Error>> {
+            Self::build(&format!("settled-{graph}"), Some(graph), node, false, None)
+        }
+
+        /// Dispatch another attempt in this store under `graph`'s `node`,
+        /// attempt 1, from the fixture's lane head. The caller publishes its
+        /// terminal state.
+        pub(crate) fn dispatch_keyed(
+            &self,
+            operation: &str,
+            graph: &str,
+            node: &str,
+            call: &provenant_run::Request<'_>,
+        ) -> Result<
+            (provenant_run::AttemptRecord, provenant_core::GitOid),
+            Box<dyn std::error::Error>,
+        > {
+            let head = self
+                .store
+                .record(self.settled.attempt_id, call)?
+                .head
+                .ok_or("head")?;
+            let run = provenant_run::Service::new(&self.store).dispatch(
+                provenant_run::DispatchRequest {
+                    chair: None,
+                    operation_id: operation.parse()?,
+                    lane_depth: 1,
+                    parent_attempt: None,
+                    task: provenant_run::DispatchTask {
+                        source_head: None,
+                        context: Some(provenant_records::run::WorkContext {
+                            graph_id: Some(graph.into()),
+                            node_id: Some(node.into()),
+                            attempt: Some(1),
+                            ..Default::default()
+                        }),
+                        build_heavy: false,
+                        title: None,
+                        prompt: "reply OK".into(),
+                        base: Some(head.to_string()),
+                        pinned_base: None,
+                        head: None,
+                        profile: Default::default(),
+                        route: provenant_run::RequestedRoute::Model {
+                            extra: Default::default(),
+                            provider: "fixture".into(),
+                            model: "fixture/model".into(),
+                            effort: None,
+                        },
+                        account: None,
+                        timeout_seconds: 30,
+                        delivery_id: None,
+                        deliver: None,
+                        worktree: Some(self.worktree.clone()),
+                        access: Default::default(),
+                    },
+                },
+                &self.rig.project,
+                call,
+            )?;
+            Ok((self.store.record(run.attempt_id, call)?, head))
+        }
+
+        fn build(
+            operation: &str,
+            graph_id: Option<&str>,
+            node: &str,
+            lane_commit: bool,
+            delivery: Option<provenant_run::WriterDeliveryRequest>,
+        ) -> Result<Self, Box<dyn std::error::Error>> {
             use provenant_confinement::worktrees::{
                 self, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
             };
@@ -719,7 +863,10 @@ pub(crate) mod peer_tests {
             let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
             // A nested-lane fixture may only look up an existing binding.
             if std::env::var_os("PROVENANT_PANEL_ROUTING_FIXTURE").is_some() {
-                provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(rig.project.join(".git"))?)?;
+                provenant_config::bind_project(
+                    &roots,
+                    provenant_config::ProjectLocation::new(rig.project.join(".git"))?,
+                )?;
             }
             let identity = Context::open(roots.clone(), &rig.home, &rig.project)?.identity;
             let clock = SystemClock;
@@ -759,18 +906,24 @@ pub(crate) mod peer_tests {
             let run = provenant_run::Service::new(&store).dispatch(
                 provenant_run::DispatchRequest {
                     chair: None,
-                    operation_id: if graph_id.is_some() { operation } else { "settlement-original" }.parse()?,
-                    concurrency: 1,
+                    operation_id: if graph_id.is_some() {
+                        operation
+                    } else {
+                        "settlement-original"
+                    }
+                    .parse()?,
                     lane_depth: 1,
                     parent_attempt: None,
-                    tasks: vec![provenant_run::DispatchTask {
-                    source_head: None,
-                        context: graph_id.map(|id| provenant_records::run::WorkContext {
-                            graph_id: Some(id.to_owned()), ..Default::default()
+                    task: provenant_run::DispatchTask {
+                        source_head: None,
+                        context: Some(provenant_records::run::WorkContext {
+                            graph_id: Some(graph_id.unwrap_or("lane-resumed").to_owned()),
+                            node_id: Some(node.into()),
+                            attempt: Some(1),
+                            ..Default::default()
                         }),
                         build_heavy: false,
                         title: None,
-                        task_id: TaskId::from_bytes([3; 16]),
                         prompt: "reply OK".into(),
                         base: Some(info.head.to_string()),
                         pinned_base: None,
@@ -785,19 +938,16 @@ pub(crate) mod peer_tests {
                         account: None,
                         timeout_seconds: 30,
                         delivery_id: None,
-                        deliver: None,
+                        deliver: delivery,
                         worktree: Some(info.path.clone()),
                         access: Default::default(),
-                    }],
+                    },
                 },
                 &rig.project,
                 &call,
             )?;
-            let prior = store
-                .pending_attempts(run.run_id, &call)?
-                .first()
-                .ok_or("attempt")?
-                .attempt_id;
+            let prior = run.attempt_id;
+            let prior_operation = store.attempt_operation(prior, &call)?.operation_id;
             worktrees::with_context(
                 &roots,
                 &rig.home,
@@ -810,7 +960,7 @@ pub(crate) mod peer_tests {
                         &tree,
                         &WorktreeOwner {
                             attempt_id: Some(prior),
-                            operation_id: Some(run.operation_id.clone()),
+                            operation_id: Some(prior_operation.clone()),
                             branch: "resumed-lane".into(),
                             base: info.head.to_string(),
                             host: identity.host,
@@ -827,11 +977,16 @@ pub(crate) mod peer_tests {
             )?;
             let head = if lane_commit {
                 let lane = info.path.to_str().ok_or("lane path")?;
-                let output =
-                    rig.execute(&git, &["-C", lane, "commit", "--allow-empty", "-qm", "lane work"], None)?;
+                let output = rig.execute(
+                    &git,
+                    &["-C", lane, "commit", "--allow-empty", "-qm", "lane work"],
+                    None,
+                )?;
                 assert_eq!(crate::worktree_tests::support::code(&output), 0);
                 let output = rig.execute(&git, &["-C", lane, "rev-parse", "HEAD"], None)?;
-                String::from_utf8(output.stdout.bytes)?.trim().parse::<provenant_core::GitOid>()?
+                String::from_utf8(output.stdout.bytes)?
+                    .trim()
+                    .parse::<provenant_core::GitOid>()?
             } else {
                 info.head
             };
@@ -840,12 +995,25 @@ pub(crate) mod peer_tests {
                 publish_success(&rig, &store, &record, head, &call)?;
                 let settled = provenant_run::HolderContext {
                     schema_version: 1,
-                    roots: provenant_run::RootSeed { home: rig.home.clone(), checkout: rig.project.clone(), state_root: rig.state.clone() },
-                    project_id: identity.project, actor_id: identity.inbox.actor,
-                    run_id: record.run_id, attempt_id: record.attempt_id,
-                    host_delivery: None, launch: None, sealed: None,
+                    roots: provenant_run::RootSeed {
+                        home: rig.home.clone(),
+                        checkout: rig.project.clone(),
+                        state_root: rig.state.clone(),
+                    },
+                    project_id: identity.project,
+                    actor_id: identity.inbox.actor,
+                    attempt_id: record.attempt_id,
+                    host_delivery: None,
+                    launch: None,
+                    sealed: None,
                 };
-                return Ok(Self { rig, roots, store, settled, worktree: info.path });
+                return Ok(Self {
+                    rig,
+                    roots,
+                    store,
+                    settled,
+                    worktree: info.path,
+                });
             }
             store.withdraw(
                 prior,
@@ -858,10 +1026,11 @@ pub(crate) mod peer_tests {
                 &call,
             )?;
             let resume = provenant_run::Resume {
+                extend: Vec::new(),
                 prior,
                 expected_generation: 0,
                 operation_id: operation.parse()?,
-                run_id: RunId::from_bytes([30; 16]),
+
                 attempt_id: AttemptId::from_bytes([31; 16]),
                 prompt: "continue".into(),
                 created_at: clock.wall_now()?,
@@ -878,7 +1047,6 @@ pub(crate) mod peer_tests {
                 },
                 project_id: identity.project,
                 actor_id: identity.inbox.actor,
-                run_id: record.run_id,
                 attempt_id: record.attempt_id,
                 host_delivery: None,
                 launch: None,
@@ -893,28 +1061,6 @@ pub(crate) mod peer_tests {
             })
         }
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     fn integrate_graph(
         fixture: &SettlementFixture,
@@ -943,7 +1089,6 @@ pub(crate) mod peer_tests {
             cwd: fixture.rig.project.clone(),
             assets: fixture.rig.project.clone(),
             host_launch: None,
-            mcp_project: None,
             workers: &FreeWorkers,
         };
         let document = fixture.rig.project.join(format!("{id}-graph.json"));
@@ -971,34 +1116,11 @@ pub(crate) mod peer_tests {
             WaitBudget::cli(factory.clock.mono_now(), 30)?,
             &cancel,
         );
-        let admitted = FileJournal::read_checkpoint(
-            &fixture.roots.state,
-            fixture.settled.project_id,
-            id,
-        )?
-        .is_some();
+        let admitted =
+            FileJournal::read_checkpoint(&fixture.roots.state, fixture.settled.project_id, id)?
+                .is_some();
         Ok((result, admitted))
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     pub(crate) fn writer_graph_output_preserves_lens_diff_base()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1009,6 +1131,9 @@ pub(crate) mod peer_tests {
         struct Seed(String);
         impl AttemptOwner for Seed {
             type Error = std::convert::Infallible;
+            fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+                provenant_config::PortTable::builtin().worktree_layout
+            }
             fn actor(&self) -> String {
                 "fixture".into()
             }
@@ -1041,7 +1166,6 @@ pub(crate) mod peer_tests {
             cwd: fixture.rig.project.clone(),
             assets: fixture.rig.project.clone(),
             host_launch: None,
-            mcp_project: None,
             workers: &FreeWorkers,
         };
         let cancel = CancelToken::new();
@@ -1059,15 +1183,19 @@ pub(crate) mod peer_tests {
             provenant_run::DispatchRequest {
                 chair: None,
                 operation_id: "writer-output-op".parse()?,
-                concurrency: 1,
                 lane_depth: 1,
                 parent_attempt: None,
-                tasks: vec![provenant_run::DispatchTask {
+                task: provenant_run::DispatchTask {
                     source_head: None,
-                    context: None,
+                    context: Some(provenant_records::run::WorkContext {
+                        // The work key the graph's writer node binds below.
+                        graph_id: Some("writer-output-lens-graph".into()),
+                        node_id: Some("writer".into()),
+                        attempt: Some(1),
+                        ..Default::default()
+                    }),
                     build_heavy: false,
                     title: Some("writer".into()),
-                    task_id: TaskId::from_bytes([60; 16]),
                     prompt: "implement slice".into(),
                     base: Some(node_source.to_string()),
                     pinned_base: None,
@@ -1085,38 +1213,51 @@ pub(crate) mod peer_tests {
                     deliver: None,
                     worktree: Some(fixture.worktree.clone()),
                     access: Default::default(),
-                }],
+                },
             },
             &fixture.rig.project,
             &call,
         )?;
-        let attempt_1 = fixture
-            .store
-            .pending_attempts(dispatch.run_id, &call)?
-            .first()
-            .ok_or("attempt_1")?
-            .attempt_id;
+        let attempt_1 = dispatch.attempt_id;
         let attempt_1_record = fixture.store.record(attempt_1, &call)?;
         // This graph adopts the fixture's idle lane. Bind its owner to the
         // writer attempt rather than the unrelated resume fixture lineage.
         let writer = provenant_run::prepare_writer(
             &provenant_run::WriterRequest {
-                extra: Default::default(), project: fixture.rig.project.clone(),
+                extra: [(
+                    "custody_project".into(),
+                    serde_json::json!(fixture.settled.project_id),
+                )]
+                .into(),
+                project: fixture.rig.project.clone(),
                 worktree: fixture.worktree.clone(),
-            }, fixture.roots.state.as_path(), fixture.settled.project_id,
+            },
+            fixture.roots.state.as_path(),
+            fixture.settled.project_id,
         )?;
         let mut lane_owner = worktrees::load_owner(&writer.worktree)?.ok_or("lane owner")?;
         lane_owner.attempt_id = Some(attempt_1);
-        lane_owner.operation_id = Some(dispatch.operation_id.clone());
+        lane_owner.operation_id = Some(
+            fixture
+                .store
+                .attempt_operation(attempt_1, &call)?
+                .operation_id,
+        );
         worktrees::save_owner(&writer.worktree, &lane_owner)?;
-
 
         let worktree_str = fixture.worktree.to_str().ok_or("worktree path")?;
 
         // The writer commits a subject distinct from its graph source.
-        std::fs::write(fixture.worktree.join("writer-edited"), "writer fixture completed")?;
+        std::fs::write(
+            fixture.worktree.join("writer-edited"),
+            "writer fixture completed",
+        )?;
         std::fs::write(fixture.worktree.join("first.txt"), b"first edit\n")?;
-        let output = fixture.rig.execute(&git, &["-C", worktree_str, "add", "first.txt", "writer-edited"], None)?;
+        let output = fixture.rig.execute(
+            &git,
+            &["-C", worktree_str, "add", "first.txt", "writer-edited"],
+            None,
+        )?;
         assert_eq!(crate::worktree_tests::support::code(&output), 0);
         let output = fixture.rig.execute(
             &git,
@@ -1163,9 +1304,10 @@ pub(crate) mod peer_tests {
 
         // This fixture creates a current graph; legacy pending executions must
         // still be drained before the host admits a new dependent attempt.
-        document.extra.insert("template_library".into(), serde_json::to_value(
-            graph::TemplateLibrary::bundled().snapshot(),
-        )?);
+        document.extra.insert(
+            "template_library".into(),
+            serde_json::to_value(graph::TemplateLibrary::bundled().snapshot())?,
+        );
 
         let mut journal = graph::FileJournal::open(
             &fixture.roots.state,
@@ -1177,17 +1319,13 @@ pub(crate) mod peer_tests {
         )?;
         journal.bind(graph::GraphExecution {
             extra: Default::default(),
-            integration_base: Some(node_source),
-            review_base: None,
+            bases: None,
             directory: fixture.rig.project.clone(),
             document: document.clone(),
         })?;
 
         // Seed attempt_1 for the writer node in the graph checkpoint.
-        let mut seed = Seed(format!(
-            "{}/{}",
-            factory.context.identity.host, attempt_1
-        ));
+        let mut seed = Seed(format!("{}/{}", factory.context.identity.host, attempt_1));
         graph::advance_with_budget(
             &document,
             &mut seed,
@@ -1197,11 +1335,16 @@ pub(crate) mod peer_tests {
         )?;
 
         // Now advance with BoundGraphOwner.
-        let mut owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
+        let mut owner = BoundGraphOwner {
+            writer_launch_budget: None,
+            admission_timeout: None,
+            launch_warnings: Vec::new(),
+            repo_facts: Default::default(),
             factory: &factory,
-            integration_base: Some(BoundGraphBases { integration: Some(node_source), review: None }),
+            integration_base: GraphBaseBinding::new(None, Some(node_source)),
             integration_branch: None,
-            network: None, capability_overrides: Default::default(),
+            network: None,
+            capability_overrides: Default::default(),
             exclude: Vec::new(),
             budget,
             cancel: &cancel,
@@ -1230,7 +1373,11 @@ pub(crate) mod peer_tests {
 
         // - Lens node was submitted, and its diff base stays node_source (not head_1)
         let lens_progress = &run.checkpoint.nodes[1];
-        assert_ne!(lens_progress.state, graph::NodeState::Blocked, "{lens_progress:?}");
+        assert_ne!(
+            lens_progress.state,
+            graph::NodeState::Blocked,
+            "{lens_progress:?}"
+        );
         let lens_attempt_ref = lens_progress
             .attempts
             .first()
@@ -1238,12 +1385,8 @@ pub(crate) mod peer_tests {
             .ok_or("lens attempt_ref")?;
         let (_, lens_attempt_id) = lens_attempt_ref.split_once('/').ok_or("attempt split")?;
         let lens_record = fixture.store.record(lens_attempt_id.parse()?, &call)?;
-        let lens_request = fixture.store.request(lens_record.run_id, &call)?;
-        let lens_task = lens_request
-            .tasks
-            .into_iter()
-            .find(|t| t.task_id == lens_record.task_id)
-            .ok_or("lens task")?;
+        let lens_request = fixture.store.request(lens_record.attempt_id, &call)?;
+        let lens_task = lens_request.task;
 
         let node_source_str = node_source.to_string();
         let head_1_str = head_1.to_string();
@@ -1280,7 +1423,6 @@ pub(crate) mod peer_tests {
     mod peer_writer_delivery {
         include!("peer_writer_delivery.rs");
     }
-
 }
 
 #[test]
@@ -1302,21 +1444,27 @@ fn fallback_cause_uses_only_unanimous_typed_facts() {
         unanimous_preparation_cause(std::slice::from_ref(&first)),
         Some(Cause::StaleAvailability)
     );
-    assert_eq!(unanimous_preparation_cause(&[first.clone(), route(None)]), None);
+    assert_eq!(
+        unanimous_preparation_cause(&[first.clone(), route(None)]),
+        None
+    );
     assert_eq!(
         unanimous_preparation_cause(&[first, route(Some(Cause::AuthRequired))]),
         None
     );
     assert_eq!(unanimous_preparation_cause(&[]), None);
-
 }
 
 #[test]
 fn untyped_dispatch_refusal_retains_projection_or_message_without_secrets() {
     use provenant_records::diagnostic::Diagnostic;
     let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
-    for projection in [None, Some(Box::new(Diagnostic::new("fixture")
-        .detail(format!("setup script failed: missing dependency {secret}"))))] {
+    for projection in [
+        None,
+        Some(Box::new(Diagnostic::new("fixture").detail(format!(
+            "setup script failed: missing dependency {secret}"
+        )))),
+    ] {
         let fail = provenant_cli::run::Fail {
             status: provenant_records::Outcome::Refused,
             kind: provenant_run::ErrorKind::Refused,
@@ -1328,7 +1476,12 @@ fn untyped_dispatch_refusal_retains_projection_or_message_without_secrets() {
         let wire = serde_json::to_string(&error).unwrap();
         let decoded: FacadeError = serde_json::from_str(&wire).unwrap();
         let diagnostic = decoded.diagnostic();
-        assert!(diagnostic.detail.unwrap().contains("setup script failed: missing dependency"));
+        assert!(
+            diagnostic
+                .detail
+                .unwrap()
+                .contains("setup script failed: missing dependency")
+        );
         assert!(!wire.contains(secret));
         assert!(!diagnostic.next.unwrap().contains("receipt"));
     }
@@ -1344,10 +1497,21 @@ fn confinement_refusal_keeps_actual_cause_through_cli_and_dispatch() {
         },
     ));
     assert!(fail.message.contains("setup anchor changed"));
-    assert!(!fail.message.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
+    assert!(
+        !fail
+            .message
+            .contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789")
+    );
     let error = dispatch_refused(fail);
-    let decoded: FacadeError = serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
-    assert!(decoded.diagnostic().detail.unwrap().contains("setup anchor changed"));
+    let decoded: FacadeError =
+        serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
+    assert!(
+        decoded
+            .diagnostic()
+            .detail
+            .unwrap()
+            .contains("setup anchor changed")
+    );
 }
 
 #[cfg(test)]

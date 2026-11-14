@@ -186,7 +186,9 @@ fn over_binds_item_in_overrides_and_resolves_named_lists() {
 fn review_panel_binds_per_lens_resolver_values() {
     let library = library();
     let resolvers = BTreeMap::from([
-        ("review-topology".to_owned(), vec!["f1-v1-s1".to_owned()]),
+        ("review-frame".to_owned(), vec!["true".to_owned()]),
+        ("review-verify".to_owned(), vec!["true".to_owned()]),
+        ("review-synthesis".to_owned(), vec!["true".to_owned()]),
         ("review-verifiers".to_owned(), vec!["1".to_owned()]),
         (
             "review-panel".to_owned(),
@@ -207,8 +209,7 @@ fn review_panel_binds_per_lens_resolver_values() {
         .unwrap();
     document(vec![node.clone()]).admit(&limits()).unwrap();
     let panel = node.composite.unwrap();
-    let selected = panel.nodes[0].composite.as_ref().unwrap();
-    let shape = selected.nodes[0].composite.as_ref().unwrap();
+    let shape = panel.nodes[0].composite.as_ref().unwrap();
     let group = shape.nodes.iter().find(|node| node.id == "lenses").unwrap();
     let lenses = &group.composite.as_ref().unwrap().nodes;
     assert!(!lenses[0].prompt.contains("mutation guidance"));
@@ -226,10 +227,11 @@ fn review_panel_binds_per_lens_resolver_values() {
         for verifier in [0, 1] {
             for synthesis in [0, 1] {
                 let mut selected = resolvers.clone();
-                selected.insert(
-                    "review-topology".into(),
-                    vec![format!("f{frame}-v{verifier}-s{synthesis}")],
-                );
+                selected.extend(when::review_stages(
+                    frame == 1,
+                    verifier == 1,
+                    synthesis == 1,
+                ));
                 let node = Compiler {
                     library: &library,
                     resolvers: &selected,
@@ -245,10 +247,10 @@ fn review_panel_binds_per_lens_resolver_values() {
                     ("synthesis", synthesis),
                 ] {
                     assert_eq!(
-                        expanded
-                            .nodes
-                            .iter()
-                            .any(|node| node.id.ends_with(&format!("--{stage}"))),
+                        expanded.nodes.iter().any(|node| {
+                            node.id.ends_with(&format!("--{stage}"))
+                                && node.when.iter().all(WhenTerm::holds)
+                        }),
                         expected == 1,
                         "{frame}/{verifier}/{synthesis}: {stage}"
                     );
@@ -265,12 +267,11 @@ fn review_panel_binds_per_lens_resolver_values() {
     .compile(&json!({"id":"panel", "use":"review-panel"}))
     .unwrap();
     let panel = node.composite.unwrap();
-    let selected = panel.nodes[0].composite.as_ref().unwrap();
-    let shape = selected.nodes[0].composite.as_ref().unwrap();
+    let shape = panel.nodes[0].composite.as_ref().unwrap();
     let verifier = shape.nodes.iter().find(|node| node.id == "verify").unwrap();
     assert_eq!(verifier.composite.as_ref().unwrap().nodes.len(), 2);
     let mut single = resolvers.clone();
-    single.insert("review-topology".into(), vec!["f0-v0-s0".into()]);
+    single.extend(when::review_stages(false, false, false));
     single.insert("review-panel".into(), vec!["tests".into()]);
     let mut node = Compiler {
         library: &library,
@@ -285,14 +286,17 @@ fn review_panel_binds_per_lens_resolver_values() {
     let leaves: Vec<_> = expanded
         .nodes
         .iter()
-        .filter(|node| node.composite.is_none())
+        .filter(|node| node.composite.is_none() && node.when.iter().all(WhenTerm::holds))
         .collect();
     assert_eq!(leaves.len(), 1);
     assert!(
         matches!(&leaves[0].source, Some(SourceBinding::Commit { commit }) if commit == "0123456789abcdef0123456789abcdef01234567")
     );
     let missing = BTreeMap::from([
-        ("review-topology".to_owned(), vec!["f0-v0-s0".to_owned()]),
+        ("review-frame".to_owned(), vec!["false".to_owned()]),
+        ("review-verify".to_owned(), vec!["false".to_owned()]),
+        ("review-synthesis".to_owned(), vec!["false".to_owned()]),
+        ("review-verifiers".to_owned(), vec!["1".to_owned()]),
         ("review-panel".to_owned(), vec!["tests".to_owned()]),
     ]);
     assert!(
@@ -545,7 +549,9 @@ fn review_templates_record_the_raising_lens() {
 fn delivery_templates_admit_bounded_review_repairs() {
     let bundled = library();
     let resolvers = BTreeMap::from([
-        ("review-topology".to_owned(), vec!["f1-v1-s1".to_owned()]),
+        ("review-frame".to_owned(), vec!["true".to_owned()]),
+        ("review-verify".to_owned(), vec!["true".to_owned()]),
+        ("review-synthesis".to_owned(), vec!["true".to_owned()]),
         ("review-verifiers".to_owned(), vec!["1".to_owned()]),
         (
             "review-panel".to_owned(),
@@ -559,10 +565,12 @@ fn delivery_templates_admit_bounded_review_repairs() {
         resolvers: &resolvers,
     };
     for template in ["deliver", "batch"] {
-        let node = compiler
-            .compile(&json!({"id":"delivery", "use":template,
-            "with":{"worktree":"/fixture/writer", "write_scope":["src"], "max_repair_cycles":2}}))
-            .unwrap();
+        let mut raw = json!({"id":"delivery", "use":template,
+            "with":{"worktree":"/fixture/writer", "write_scope":["src"], "max_repair_cycles":2}});
+        if template == "deliver" {
+            raw["with"]["bounded"] = json!(true);
+        }
+        let node = compiler.compile(&raw).unwrap();
         let mut doc = document(vec![node]);
         if template == "batch" {
             doc.integration_branch = Some("batch/integration".into());
@@ -629,7 +637,7 @@ fn delivery_templates_admit_bounded_review_repairs() {
             let review = expanded
                 .nodes
                 .iter()
-                .find(|node| node.id == "delivery--review--selected--f1-v1-s1--lenses--security")
+                .find(|node| node.id == "delivery--review--selected--lenses--security")
                 .unwrap();
             assert!(
                 matches!(&review.source, Some(SourceBinding::Head { node }) if node == "delivery--implement")
@@ -702,7 +710,7 @@ fn writer_template_can_disable_no_work_continuation() {
         tier = "junior"
         access = "worktree_write"
         [node]
-        auto_continue_no_work = false
+        on_stop = { stopped_early = "chair" }
     "#,
     )
     .unwrap();
@@ -715,10 +723,17 @@ fn writer_template_can_disable_no_work_continuation() {
     let compiled = Compiler::new(&templates)
         .compile(&json!({"id":"work", "use":"custom-writer", "worktree":".worktrees/work"}))
         .unwrap();
-    assert_eq!(compiled.auto_continue_no_work, Some(false));
+    assert_eq!(
+        compiled
+            .on_stop
+            .get(provenant_records::StopCause::StoppedEarly),
+        Some(provenant_records::NextStep::Chair)
+    );
     assert!(
         Compiler::new(&templates)
-            .compile(&json!({"id":"work", "use":"custom-writer", "auto_continue_no_work":"false"}))
+            .compile(
+                &json!({"id":"work", "use":"custom-writer", "on_stop":{"stopped_early":"later"}})
+            )
             .is_err()
     );
 }
@@ -763,7 +778,10 @@ fn renamed_composites_keep_their_behaviour_and_bindings() {
             .unwrap();
     }
     let resolvers = BTreeMap::from([
-        ("review-topology".into(), vec!["f0-v0-s0".into()]),
+        ("review-frame".into(), vec!["false".into()]),
+        ("review-verify".into(), vec!["false".into()]),
+        ("review-synthesis".into(), vec!["false".into()]),
+        ("review-verifiers".into(), vec!["1".into()]),
         ("review-panel".into(), vec!["tests".into()]),
         ("review-advice-tests".into(), vec![String::new()]),
     ]);
@@ -801,7 +819,9 @@ fn renamed_composites_keep_their_behaviour_and_bindings() {
 fn every_bundled_template_compiles_with_required_bindings() {
     let library = library();
     let resolvers = BTreeMap::from([
-        ("review-topology".into(), vec!["f1-v1-s1".into()]),
+        ("review-frame".into(), vec!["true".into()]),
+        ("review-verify".into(), vec!["true".into()]),
+        ("review-synthesis".into(), vec!["true".into()]),
         ("review-verifiers".into(), vec!["1".into()]),
         (
             "review-panel".into(),
@@ -1269,17 +1289,205 @@ fn template_launch_missing_parameters_names_them() {
     let bundled = TemplateLibrary::bundled();
     let compiler = Compiler::new(&bundled);
     let error = compiler
-        .compile(
-            &serde_json::json!({"id": "d", "use": "deliver", "with": {"worktree":"/some/path"}}),
-        )
+        .compile(&serde_json::json!({"id": "d", "use": "deliver"}))
         .unwrap_err();
     let CompileError::Parameter(refusal) = error else {
         panic!("expected a parameter refusal: {error}");
     };
     let text = refusal.to_string();
-    assert!(text.contains("write_scope"), "{text}");
+    assert!(text.contains("worktree"), "{text}");
     assert!(text.contains("example:"), "{text}");
     let example = refusal.example().expect("example");
     assert!(example.contains("worktree"), "{example}");
-    assert!(example.contains("write_scope"), "{example}");
+}
+
+#[test]
+fn set_values_parse_by_declared_kind_and_a_wrong_kind_names_the_declaration() {
+    let library = library();
+    let mut checked: Vec<ParameterKind> = Vec::new();
+    let names: Vec<_> = library.names().map(str::to_owned).collect();
+    for name in &names {
+        let template = library.resolve(name).unwrap();
+        for (key, parameter) in &template.parameters {
+            let (valid, wrong): (&str, &str) = match parameter.kind {
+                ParameterKind::String => ("a plain word", ""),
+                ParameterKind::Integer => ("7", "true"),
+                ParameterKind::Number => ("1.5", "true"),
+                ParameterKind::Boolean => ("true", "7"),
+                ParameterKind::List => ("[1, 2]", "7"),
+                ParameterKind::Table => ("{ a = 1 }", "7"),
+            };
+            if !checked.contains(&parameter.kind) {
+                checked.push(parameter.kind);
+            }
+            let bound = template
+                .type_binding(name, key, json!(valid))
+                .unwrap_or_else(|_| {
+                    panic!("{name}.{key}: valid {} text refused", parameter.kind.name())
+                });
+            let fits = match parameter.kind {
+                ParameterKind::String => bound.is_string(),
+                ParameterKind::Integer => bound.is_i64(),
+                ParameterKind::Number => bound.is_number(),
+                ParameterKind::Boolean => bound.is_boolean(),
+                ParameterKind::List => bound.is_array(),
+                ParameterKind::Table => bound.is_object(),
+            };
+            assert!(fits, "{name}.{key}: {bound}");
+            if parameter.kind == ParameterKind::String {
+                assert_eq!(bound, json!(valid), "a string is taken as written");
+                continue;
+            }
+            let refusal = template
+                .type_binding(name, key, json!(wrong))
+                .expect_err("a value of another kind must be refused");
+            match refusal.fault {
+                ParameterFault::Shape {
+                    key: named,
+                    expected,
+                } => {
+                    assert_eq!(&named, key);
+                    assert!(expected.contains(parameter.kind.name()), "{expected}");
+                }
+                other => panic!("{name}.{key}: {other:?}"),
+            }
+        }
+    }
+    assert!(checked.contains(&ParameterKind::String), "{checked:?}");
+}
+
+#[test]
+fn undeclared_set_keys_and_typed_values_pass_through_to_the_compiler() {
+    let library = library();
+    let template = library.resolve("task").unwrap();
+    assert_eq!(
+        template
+            .type_binding("task", "not-declared", json!("x"))
+            .unwrap(),
+        json!("x")
+    );
+    assert_eq!(
+        template.type_binding("task", "brief", json!(7)).unwrap(),
+        json!(7)
+    );
+}
+
+#[test]
+fn graph_names_are_valid_ids_within_the_bound() {
+    for ok in [
+        "a",
+        "review",
+        "fix-2",
+        "a1-b2",
+        &"a".repeat(MAX_GRAPH_NAME_BYTES),
+    ] {
+        assert_eq!(graph_name_fault(ok), None, "{ok}");
+    }
+    for bad in [
+        "",
+        "1a",
+        "-a",
+        "a-",
+        "a--b",
+        "A",
+        "a_b",
+        "a.b",
+        &"a".repeat(MAX_GRAPH_NAME_BYTES + 1),
+    ] {
+        assert!(graph_name_fault(bad).is_some(), "{bad}");
+    }
+    let names: Vec<_> = library().names().map(str::to_owned).collect();
+    for template in names {
+        let base = default_graph_base(&template);
+        assert_eq!(graph_name_fault(&format!("{base}-1")), None, "{template}");
+    }
+}
+
+/// Replays a series of launches against an in-memory journal of ids and digests.
+fn launch(
+    journal: &mut Vec<(String, String)>,
+    base: &str,
+    digest: &str,
+    named: bool,
+) -> Result<(String, bool), String> {
+    let existing: Vec<String> = journal.iter().map(|(id, _)| id.clone()).collect();
+    let stored = journal.clone();
+    match decide_graph_name(base, digest, named, &existing, |id| {
+        stored
+            .iter()
+            .find(|(known, _)| known == id)
+            .map(|(_, digest)| digest.clone())
+    })? {
+        NameDecision::Replay(id) => Ok((id, true)),
+        NameDecision::Create { id, .. } => {
+            journal.push((id.clone(), digest.to_owned()));
+            Ok((id, false))
+        }
+    }
+}
+
+#[test]
+fn a_name_replays_its_digest_and_takes_the_next_suffix_for_a_new_one() {
+    let mut journal = Vec::new();
+    assert_eq!(
+        launch(&mut journal, "fix", "d1", true).unwrap(),
+        ("fix".into(), false)
+    );
+    // The same input returns the same graph and starts nothing.
+    assert_eq!(
+        launch(&mut journal, "fix", "d1", true).unwrap(),
+        ("fix".into(), true)
+    );
+    assert_eq!(journal.len(), 1);
+    // Changed input takes the next free suffix and leaves the first alone.
+    assert_eq!(
+        launch(&mut journal, "fix", "d2", true).unwrap(),
+        ("fix-2".into(), false)
+    );
+    assert_eq!(journal[0], ("fix".into(), "d1".into()));
+    // Repeating either input finds its own graph.
+    assert_eq!(
+        launch(&mut journal, "fix", "d2", true).unwrap(),
+        ("fix-2".into(), true)
+    );
+    assert_eq!(
+        launch(&mut journal, "fix", "d1", true).unwrap(),
+        ("fix".into(), true)
+    );
+    assert_eq!(
+        launch(&mut journal, "fix", "d3", true).unwrap(),
+        ("fix-3".into(), false)
+    );
+    assert_eq!(journal.len(), 3);
+    // A graph whose name only looks like a family member is not one.
+    let mut other = vec![("fix-it".to_owned(), "d1".to_owned())];
+    assert_eq!(
+        launch(&mut other, "fix", "d1", true).unwrap(),
+        ("fix".into(), false)
+    );
+}
+
+#[test]
+fn an_unnamed_launch_takes_a_unique_valid_handle_and_never_replays() {
+    let mut journal = Vec::new();
+    let base = default_graph_base("review.adversarial");
+    assert_eq!(base, "review-adversarial");
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..5 {
+        let (id, replayed) = launch(&mut journal, &base, "same", false).unwrap();
+        assert!(!replayed);
+        assert_eq!(graph_name_fault(&id), None, "{id}");
+        assert!(seen.insert(id));
+    }
+    assert!(seen.contains("review-adversarial-1"));
+}
+
+#[test]
+fn a_name_without_room_for_its_suffix_is_refused_in_one_line() {
+    let base = "a".repeat(MAX_GRAPH_NAME_BYTES);
+    let mut journal = Vec::new();
+    assert_eq!(launch(&mut journal, &base, "d1", true).unwrap().0, base);
+    let error = launch(&mut journal, &base, "d2", true).unwrap_err();
+    assert!(!error.contains('\n') && error.contains("--name"), "{error}");
+    assert_eq!(journal.len(), 1);
 }

@@ -185,7 +185,7 @@ fn collect_resolved(
     };
     let inventory = (|| -> Result<_, Box<dyn std::error::Error>> {
         let git = provenant_os::git::git_executable().ok_or("Git executable unavailable")?;
-        let utility = UtilityRuntime::read_only(git)?;
+        let utility = UtilityRuntime::read_only(git, state)?;
         let executor = SystemExecutor::new(1)?;
         let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
         let repo = utility.open_repo(&executor, project, budget, &cancel)?;
@@ -307,7 +307,7 @@ fn other_state(path: &Path, report: &mut DiskReport) {
     };
     let mut observed = false;
     for name in names {
-        if name != "runs"
+        if name != "attempts"
             && name != "children"
             && !name
                 .to_str()
@@ -424,12 +424,9 @@ mod tests {
             fs::create_dir_all(root.join("target"))?;
             fs::write(root.join("target/CACHEDIR.TAG"), "cache")?;
         }
-        fs::create_dir_all(rig.state.join("runs/run/attempts/attempt/tmp"))?;
-        fs::create_dir_all(rig.state.join("runs/run/attempts/attempt/scratch"))?;
-        fs::write(
-            rig.state.join("runs/run/attempts/attempt/tmp/keep"),
-            "unindexed",
-        )?;
+        fs::create_dir_all(rig.state.join("attempts/attempt/tmp"))?;
+        fs::create_dir_all(rig.state.join("attempts/attempt/scratch"))?;
+        fs::write(rig.state.join("attempts/attempt/tmp/keep"), "unindexed")?;
         fs::write(rig.state.join("config.toml"), "schema_version = 1\n")?;
         for index in 0..50 {
             fs::write(rig.state.join(format!("metadata-{index}")), "state")?;
@@ -558,7 +555,7 @@ mod tests {
             } else {
                 &[]
             };
-            let attempt = state.join(format!("runs/{index}/attempts/a"));
+            let attempt = state.join(format!("attempts/{index}"));
             fs::create_dir_all(&attempt)?;
             for (name, class) in [("result.md", "other_state"), ("stdout.log", "attempt_logs")] {
                 let part = attempt.join(name);
@@ -588,7 +585,7 @@ mod tests {
         let mut before = BTreeMap::<String, (u64, u64, u64, i128)>::new();
         for entry in &report.entries {
             let total = before.entry(entry.class.clone()).or_default();
-            total.0 += 1;
+            total.0 += entry.count.unwrap_or(1);
             total.1 += entry.allocated_bytes;
             total.2 += entry.unshared_bytes;
             total.3 = total.3.max(entry.newest_write_ns);
@@ -605,12 +602,12 @@ mod tests {
                 .into_iter()
                 .collect()
         );
+        // Folding into rollups is free to group files as it likes; it must
+        // keep every observed count and byte, and one row per child store.
+        assert_eq!(report.totals["child_store"].count, RUNS);
         for entry in &report.entries {
-            let count = RUNS + u64::from(entry.class == "other_state");
-            assert_eq!(entry.count, Some(count));
             let total = &report.totals[&entry.class];
             assert!(total.allocated_bytes > 0);
-            assert_eq!(total.count, count);
             assert_eq!(total.allocated_bytes, expected[entry.class.as_str()]);
             assert_eq!(
                 (

@@ -1,26 +1,9 @@
 use super::*;
 
 #[test]
-fn cancel_wait_preserves_silence_as_non_success_without_timeout() {
-    let wait = json!({
-        "lanes": [{"state":"running"}],
-        "condition_met": false,
-        "timed_out": false,
-        "reason": "provider silent; lane attempt-1 is still running"
-    });
-    let mut data = json!({});
-    let mut status = Status::Ok;
-    apply_cancel_wait(&mut data, &wait, false, &mut status);
-    assert_eq!(status, Status::Failed);
-    assert_eq!(data["timed_out"], false);
-    assert_eq!(data["condition_met"], false);
-    assert_eq!(data["reason"], wait["reason"]);
-    assert_eq!(data["lanes"], wait["lanes"]);
-}
-#[test]
 fn graph_quality_reports_missing_checkpoint_without_failing()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_core::{AttemptId, OperationId, ProjectId, TaskId, WallTime};
+    use provenant_core::{AttemptId, ProjectId, WallTime};
     use provenant_records::{AttemptFact, AttemptOutcome, Usage};
     let temp = tempfile::tempdir()?;
     let base = std::fs::canonicalize(temp.path())?;
@@ -34,11 +17,13 @@ fn graph_quality_reports_missing_checkpoint_without_failing()
             ..Default::default()
         }),
         attempt_id: AttemptId::from_bytes([1; 16]),
-        task_id: TaskId::from_bytes([2; 16]),
+        key: provenant_records::WorkKey::new(project, "retired", "node", 1)?,
         attempt_number: 1,
-        operation_id: OperationId::parse("quality-test")?,
         project_id: project,
         terminal_state: AttemptOutcome::Succeeded,
+        cause_source: provenant_records::run::CauseSource::Unavailable,
+        settlement_reason: None,
+        account_identity: provenant_records::AccountIdentity::unknown(),
         exit_code: Some(0),
         queued_at: WallTime::from_micros(0)?,
         started_at: None,
@@ -95,45 +80,13 @@ fn graph_quality_counts_only_executed_repair_rounds_and_leaf_findings() {
             json!({"id":"initial", "state":"succeeded", "attempts":[], "round":{"loop_id":"loop","round":1,"node_id":"initial","until":false}, "gate":{"passed":true}}),
         ),
         node(
-            json!({"id":"repair", "state":"succeeded", "attempts":[{"launched":true,"key":{"graph_id":"g","node_id":"repair","route_index":0},"route":{"alias":"utility"},"state":"terminal","launch_actor":"actor"}], "round":{"loop_id":"loop","round":2,"node_id":"repair","until":false}}),
+            json!({"id":"repair", "state":"succeeded", "attempts":[{"launched":true,"key":{"graph_id":"g","node_id":"repair","route_index":0, "attempt": 1},"route":{"alias":"utility"},"state":"terminal","launch_actor":"actor"}], "round":{"loop_id":"loop","round":2,"node_id":"repair","until":false}}),
         ),
         node(
             json!({"id":"configured_only", "state":"pending", "attempts":[], "round":{"loop_id":"loop","round":3,"node_id":"configured_only","until":false}}),
         ),
     ];
     assert_eq!(graph_quality_counts(&checkpoint_nodes), (1, 1, 1));
-}
-#[test]
-fn host_native_attempts_do_not_resume_explicitly() -> Result<(), Box<dyn std::error::Error>> {
-    let temp = tempfile::tempdir()?;
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let call = request(&clock, &cancel).map_err(|error| error.message)?;
-    let store = trace_store(&temp, &call)?;
-    let input = trace_run(44, AttemptId::from_bytes([45; 16]), clock.wall_now()?)?;
-    store.create(&input, &call)?;
-    let mut record = store.record(input.attempts[0].attempt_id, &call)?;
-    record.applied_route = Some(run::RouteRecord {
-        extra: [("host_native".into(), json!("ci-fixer"))].into(),
-        provider: Some("claude".into()),
-        model: Some("claude/claude-sonnet-5-5".into()),
-        ..Default::default()
-    });
-    record.state = run::AttemptState::Terminal {
-        extra: Default::default(),
-        outcome: run::Outcome::Succeeded,
-        exit_code: Some(0),
-        finished_at: clock.wall_now()?,
-        reason: None,
-    };
-    record.session = Some("native-session".into());
-    let registry = Registry::default();
-    let error = registry
-        .check_continuable(&record)
-        .err()
-        .ok_or("host resume accepted")?;
-    assert_eq!(error.kind, ErrorKind::ContinuationUnsupported);
-    Ok(())
 }
 #[test]
 fn unsafe_store_path_reason_survives_cli_conversion() {
@@ -283,7 +236,11 @@ fn stats_text_lists_cache_share_only_where_a_provider_reported_it() {
     .unwrap();
     let chair = |usage| ChairSession {
         adapter: "claude".into(),
-        account: "work".into(),
+        account_identity: provenant_telemetry::usage::AccountIdentity::known(
+            "claude",
+            "work",
+            "fixture-epoch",
+        ),
         session: "s".into(),
         project: None,
         config: None,
@@ -365,14 +322,6 @@ fn stats_text_names_its_scope_and_reports_reasoning_only_when_present() {
     );
 }
 #[test]
-fn displaced_fallback_reports_unavailable_history() {
-    let history = super::fallback_history(Path::new(env!("CARGO_MANIFEST_DIR")), "HEAD", true);
-    assert_eq!(
-        history,
-        "[history unavailable: prior worktree is missing or reassigned]"
-    );
-}
-#[test]
 fn submit_names_the_fix_for_a_bare_word_model_and_unsupported_effort()
 -> Result<(), Box<dyn std::error::Error>> {
     let Err(bare) = super::requested(Some("junior"), None, None) else {
@@ -383,29 +332,6 @@ fn submit_names_the_fix_for_a_bare_word_model_and_unsupported_effort()
         bare.message.ends_with("did you mean --route junior?"),
         "{}",
         bare.message
-    );
-    Ok(())
-}
-#[test]
-fn contention_reply_names_the_operation_to_retry() -> Result<(), Box<dyn std::error::Error>> {
-    let id = OperationId::parse("retry-lane")?;
-    let mut reply = super::reply(
-        "run",
-        Err(Fail::new(
-            Status::Refused,
-            ErrorKind::Contention,
-            "the lane is being admitted",
-        )),
-    );
-    super::operation_reply(&mut reply, &id);
-    let repair = reply
-        .result
-        .error
-        .as_ref()
-        .and_then(|error| error.repair.as_deref());
-    assert_eq!(
-        repair,
-        Some("retry the same command with --operation-id retry-lane")
     );
     Ok(())
 }
@@ -425,94 +351,5 @@ fn pruning_intent_replays_only_for_its_missing_worktree() -> Result<(), Box<dyn 
     std::fs::remove_dir(&tree)?;
     std::os::unix::fs::symlink(temp.path().join("missing-target"), &tree)?;
     assert!(!super::worktree_was_pruned(&receipt, &tree));
-    Ok(())
-}
-#[test]
-fn retry_reuses_the_retained_brief_and_accepts_a_replacement()
--> Result<(), Box<dyn std::error::Error>> {
-    let temp = tempfile::tempdir()?;
-    let root = std::fs::canonicalize(temp.path())?;
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let call = request(&clock, &cancel).map_err(|f| f.message)?;
-    let store = trace_store(&temp, &call)?;
-    let prepared = trace_run(10, AttemptId::from_bytes([9; 16]), clock.wall_now()?)?;
-    let prior = prepared.attempts[0].attempt_id;
-    store.create(&prepared, &call)?;
-    let mut roots = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
-    roots.state_dir = Some(root.join("state"));
-    let context = run::ExecutionContext {
-        state_root: roots.resolve(&provenant_os::fs::SystemPathResolver)?.state,
-        project_id: provenant_core::ProjectId::from_bytes([1; 16]),
-        actor_id: ActorId::from_bytes([2; 16]),
-        read_prompts: true,
-    };
-    let session = Session { store, context };
-    let mut command = crate::Resume {
-        attempt: crate::Attempt(Target {
-            selection: None,
-            run: None,
-            task: None,
-            attempt: Some(prior),
-        }),
-        operation_id: OperationId::parse("retry-brief")?,
-        node: None,
-        brief: None,
-        extend: vec![],
-        no_fallback: false,
-        prompt: crate::Prompt {
-            prompt_file: None,
-            prompt_stdin: false,
-        },
-        wait: None,
-    };
-    assert_eq!(
-        resume::retry_prompt(&command, &session, prior, &call).map_err(|f| f.message)?,
-        "p"
-    );
-    command.brief = Some("repair the parser".into());
-    assert_eq!(
-        resume::retry_prompt(&command, &session, prior, &call).map_err(|f| f.message)?,
-        "repair the parser"
-    );
-    Ok(())
-}
-#[test]
-fn refused_operations_are_rendered_without_an_attempt() -> Result<(), Box<dyn std::error::Error>> {
-    let temp = tempfile::tempdir()?;
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let call = run::Request {
-        clock: &clock,
-        cancel: &cancel,
-    };
-    let store = trace_store(&temp, &call)?;
-    let input = trace_run(
-        30,
-        AttemptId::from_bytes([2; 16]),
-        now(&clock).map_err(|e| e.message)?,
-    )?;
-    store.record_refusal(
-        &input,
-        ErrorKind::Unsupported.diagnostic(),
-        Some("writer".into()),
-        &call,
-    )?;
-    let mut data = json!({"lanes": []});
-    let mut human = String::new();
-    assert!(
-        status::append_refused_operations(&store, 20, &mut data, &mut human, &call)
-            .map_err(|e| e.message)?
-    );
-    assert_eq!(
-        data["refused_operations"][0]["operation_id"],
-        input.operation_id.as_str()
-    );
-    assert_eq!(
-        data["refused_operations"][0]["refusal"]["code"],
-        "UNSUPPORTED"
-    );
-    assert!(human.contains(input.operation_id.as_str()));
-    assert!(data["lanes"].as_array().is_some_and(Vec::is_empty));
     Ok(())
 }

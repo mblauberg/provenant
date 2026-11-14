@@ -1,5 +1,128 @@
 use super::*;
 
+struct CollectorRetirementFixture {
+    custody_clear: bool,
+    forge: ForgeObservation,
+    records: std::cell::RefCell<Vec<provenant_records::custody::RetirementRecord>>,
+}
+
+impl CollectorRetirementFixture {
+    fn new(custody_clear: bool, forge: ForgeObservation) -> Self {
+        Self {
+            custody_clear,
+            forge,
+            records: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl RetirementFeeds for CollectorRetirementFixture {
+    fn authority(&self) -> Result<provenant_core::ActorId, String> {
+        Ok(provenant_core::ActorId::from_bytes([19; 16]))
+    }
+
+    fn custody(&self, _: &WorktreeInfo) -> Result<(), String> {
+        if self.custody_clear {
+            Ok(())
+        } else {
+            Err("custody feed unreadable".into())
+        }
+    }
+
+    fn forge(&self, _: &GitRefName) -> ForgeObservation {
+        self.forge.clone()
+    }
+
+    fn integration_bases(&self) -> Vec<(String, GitOid)> {
+        Vec::new()
+    }
+
+    fn remote_guard(
+        &self,
+        _: &WorktreeContext<'_>,
+        _: &str,
+        _: GitOid,
+        _: u64,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+impl RetirementPort for CollectorRetirementFixture {
+    fn begin_retirement(
+        &self,
+        intent: RetirementIntent,
+    ) -> Result<Option<provenant_records::custody::RetirementRecord>, WorktreeError> {
+        use provenant_records::custody::RetirementRecord;
+
+        let record = RetirementRecord::plan(
+            intent.project,
+            intent.related_subjects,
+            intent.reference,
+            intent.expected_tip,
+            intent.decision,
+        )
+        .map_err(|_| WorktreeError::InvalidOutput)?;
+        self.records.borrow_mut().push(record.clone());
+        Ok(Some(record))
+    }
+
+    fn retirement_for_subject(
+        &self,
+        project: provenant_core::ProjectId,
+        subject: &provenant_records::custody::Subject,
+    ) -> Result<Option<provenant_records::custody::RetirementRecord>, WorktreeError> {
+        Ok(self
+            .records
+            .borrow()
+            .iter()
+            .find(|record| record.project == project && record.owns_subject(subject))
+            .cloned())
+    }
+
+    fn pending_retirements(
+        &self,
+        project: provenant_core::ProjectId,
+    ) -> Result<Vec<provenant_records::custody::RetirementRecord>, WorktreeError> {
+        Ok(self
+            .records
+            .borrow()
+            .iter()
+            .filter(|record| {
+                record.project == project
+                    && record.outcomes.iter().any(|outcome| {
+                        !matches!(
+                            &outcome.state,
+                            provenant_records::custody::RetirementStepState::Completed { .. }
+                        )
+                    })
+            })
+            .cloned()
+            .collect())
+    }
+
+    fn advance_retirement(
+        &self,
+        record: &provenant_records::custody::RetirementRecord,
+        step: provenant_records::custody::RetirementStep,
+        state: provenant_records::custody::RetirementStepState,
+    ) -> Result<provenant_records::custody::RetirementRecord, WorktreeError> {
+        let mut updated = record.clone();
+        updated.revision = updated.revision.saturating_add(1);
+        let outcome = updated
+            .outcomes
+            .iter_mut()
+            .find(|outcome| outcome.step == step)
+            .ok_or(WorktreeError::RegistrationUnconfirmed)?;
+        outcome.state = state;
+        let mut records = self.records.borrow_mut();
+        if let Some(index) = records.iter().position(|current| current.id == updated.id) {
+            records[index] = updated.clone();
+        }
+        Ok(updated)
+    }
+}
+
 #[test]
 fn remove_reports_stale_registration_by_branch_and_directory() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
@@ -92,9 +215,9 @@ fn prune_treats_a_prunable_branch_as_not_checked_out() -> Result<(), Box<dyn Err
 #[test]
 fn creation_refuses_a_shared_writable_worktree_parent() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
-    fs::create_dir(fixture.root.join(WORKTREE_ROOT))?;
+    fs::create_dir(fixture.root.join(".worktrees"))?;
     fs::set_permissions(
-        fixture.root.join(WORKTREE_ROOT),
+        fixture.root.join(".worktrees"),
         fs::Permissions::from_mode(0o777),
     )?;
     let test_context = TestContext::new(&fixture)?;
@@ -112,7 +235,7 @@ fn creation_refuses_a_shared_writable_worktree_parent() -> Result<(), Box<dyn Er
     assert!(
         !fixture
             .root
-            .join(WORKTREE_ROOT)
+            .join(".worktrees")
             .join("feature-refused")
             .exists()
     );
@@ -761,4 +884,504 @@ fn writer_busy_names_the_holder_only_when_known() {
         WorktreeError::WriterBusy { holder: None }.to_string(),
         "worktree writer is busy"
     );
+}
+
+#[test]
+fn explicit_discard_publishes_recoverable_data_before_removing_work() -> Result<(), Box<dyn Error>>
+{
+    let fixture = Fixture::new()?;
+    let owner = TestContext::new(&fixture)?;
+    let context = owner.context();
+    let created = create(
+        &context,
+        WorktreeCreate {
+            branch: "scratch/archive".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let worktree_path = fs::canonicalize(&created.path)?;
+    let retirement = HostRetirementFixture::new(&owner)?;
+    retirement.seed_lane(&context, &created)?;
+    run_in_worktree(
+        &fixture,
+        &created.path,
+        &["commit", "--allow-empty", "-m", "unique work"],
+    )?;
+    fs::write(created.path.join("private-note"), b"untracked evidence")?;
+    let result = remove_with_retirement(
+        &context,
+        WorktreeRemove::Name {
+            name: "scratch/archive".into(),
+            discard: true,
+            integration: None,
+            expected_head: None,
+        },
+        &cancel(),
+        &provenant_config::ProjectGcSettings::default(),
+        &retirement,
+        retirement.actor,
+    )?;
+    let archive = result.archives.first().ok_or("discard had no archive")?;
+    assert!(archive.path.join("tip.bundle").is_file());
+    assert!(archive.path.join("manifest.json").is_file());
+    let tar = fs::read(archive.path.join("untracked.tar"))?;
+    assert!(
+        tar.windows(b"untracked evidence".len())
+            .any(|bytes| bytes == b"untracked evidence")
+    );
+    let worktree_subject = provenant_records::custody::Subject::new(
+        provenant_records::custody::SubjectKind::Worktree,
+        worktree_path.to_string_lossy(),
+    );
+    let record = retirement
+        .retirement_for_subject(owner.binding.project_id(), &worktree_subject)?
+        .ok_or("explicit discard had no custody lifecycle record")?;
+    let proof = match record.decision.evidence() {
+        provenant_records::custody::RemovalEvidence::ExplicitDiscard {
+            archive: Some(proof),
+        } => proof,
+        _ => return Err("explicit discard intent did not retain its archive proof".into()),
+    };
+    assert_eq!(proof.id, archive.id);
+    assert_eq!(proof.tip, archive.tip);
+    assert!(record.outcomes.iter().any(|outcome| {
+        matches!(
+            (&outcome.step, &outcome.state),
+            (
+                RetirementStep::Worktree { subject },
+                RetirementStepState::Completed {
+                    evidence: provenant_records::custody::RemovalEvidence::ExplicitDiscard {
+                        archive: Some(completion),
+                    },
+                }
+            ) if subject == &worktree_subject && completion == proof
+        )
+    }));
+    assert!(record.outcomes.iter().any(|outcome| {
+        matches!(
+            (&outcome.step, &outcome.state),
+            (
+                RetirementStep::Reference,
+                RetirementStepState::Completed {
+                    evidence: provenant_records::custody::RemovalEvidence::ExplicitDiscard {
+                        archive: Some(completion),
+                    },
+                }
+            ) if completion == proof
+        )
+    }));
+    assert!(!created.path.exists());
+    assert!(!branch_exists(&fixture, "scratch/archive"));
+    Ok(())
+}
+
+#[test]
+fn retention_proofs_distinguish_preservation_completion_and_new_work() -> Result<(), Box<dyn Error>>
+{
+    for mode in ["ancestry", "squash", "new_work", "reverted"] {
+        let fixture = Fixture::new()?;
+        let owner = TestContext::new(&fixture)?;
+        let context = owner.context();
+        let lane = create(
+            &context,
+            WorktreeCreate {
+                branch: "proof-lane".into(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        fs::write(lane.path.join("feature"), b"feature")?;
+        run_in_worktree(&fixture, &lane.path, &["add", "feature"])?;
+        run_in_worktree(&fixture, &lane.path, &["commit", "-m", "feature"])?;
+        let head =
+            context
+                .facts
+                .resolve_commit(&context, GitRefName::branch("proof-lane")?, &cancel())?;
+        if mode == "squash" {
+            fixture.run(&["merge", "--squash", "proof-lane"])?;
+            fixture.run(&["commit", "-m", "squashed feature"])?;
+        } else {
+            fixture.run(&["merge", "--no-ff", "-m", "integrated", "proof-lane"])?;
+        }
+        if mode == "reverted" {
+            fixture.run(&["revert", "--no-edit", "-m", "1", "HEAD"])?;
+        }
+        let target = fixture.head()?;
+        let head = if mode == "new_work" {
+            fs::write(lane.path.join("later"), b"later")?;
+            run_in_worktree(&fixture, &lane.path, &["add", "later"])?;
+            run_in_worktree(&fixture, &lane.path, &["commit", "-m", "new work"])?;
+            context
+                .facts
+                .resolve_commit(&context, GitRefName::branch("proof-lane")?, &cancel())?
+        } else {
+            head
+        };
+        for integration in [false, true] {
+            let references = [EvidenceRef {
+                reference: GitRefName::branch("main")?,
+                commit: target,
+                integration,
+            }];
+            let proof = removal_evidence(&context, head, &references, &cancel())?;
+            if mode == "new_work" {
+                assert!(matches!(proof, LandingAssessment::NotSubsumed));
+            } else {
+                let LandingAssessment::Proven(evidence) = proof else {
+                    return Err("retained work was not proved".into());
+                };
+                assert_eq!(
+                    evidence.predicate,
+                    if integration {
+                        provenant_records::custody::LandingPredicate::Landed
+                    } else {
+                        provenant_records::custody::LandingPredicate::Subsumed
+                    }
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn first_foreign_pass_previews_then_subsumed_detached_tree_can_go() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    fs::create_dir_all(fixture.root.join("nested/deeper"))?;
+    fs::write(
+        fixture.root.join("nested/deeper/payload"),
+        vec![42_u8; 32768],
+    )?;
+    fixture.run(&["add", "nested"])?;
+    fixture.run(&["commit", "-m", "nested allocation fixture"])?;
+    let owner = TestContext::new(&fixture)?;
+    let context = owner.context();
+    let id = context.repo.common_identity();
+    context.project_state.unlink(OsStr::new(&format!(
+        "foreign-preview-{}-{}",
+        id.device, id.inode
+    )))?;
+    let path = fixture._temp.path().join("foreign-review");
+    fixture.run(&[
+        "worktree",
+        "add",
+        "--detach",
+        path.to_str().ok_or("path")?,
+        "HEAD",
+    ])?;
+    let policy = WorktreeGcPolicy {
+        upstream: None,
+        upstream_reference: None,
+        terminal: &|_| true,
+        no_live_lanes: &|_| true,
+        regenerable: &[],
+        keep: &[],
+        written_before_ns: i128::MAX,
+        dry_run: false,
+        include_foreign: true,
+        retirement_port: None,
+        retirement_feeds: None,
+        mode: CollectionMode::Worktrees,
+        proof: None,
+        integration_patterns: &[],
+        excluded_paths: &[],
+    };
+    let first = collect(&context, &list(&context, &cancel())?, &policy, &cancel())?;
+    assert!(first.first_foreign_preview && first.dry_run && path.exists());
+    let retirement = CollectorRetirementFixture::new(true, ForgeObservation::Absent);
+    let apply_policy = WorktreeGcPolicy {
+        retirement_port: Some(&retirement),
+        retirement_feeds: Some(&retirement),
+        ..policy
+    };
+    let second = collect(
+        &context,
+        &list(&context, &cancel())?,
+        &apply_policy,
+        &cancel(),
+    )?;
+    assert!(!second.first_foreign_preview && !second.dry_run && !path.exists());
+    assert!(first.byte_errors.is_empty() && second.byte_errors.is_empty());
+    assert!(first.bytes > 0);
+    assert_eq!(first.bytes, second.bytes);
+    Ok(())
+}
+
+#[test]
+fn retirement_preserves_work_and_unknown_feeds_keep_the_candidate() -> Result<(), Box<dyn Error>> {
+    for class in ["managed", "foreign"] {
+        for feed in [
+            "clear",
+            "custody",
+            "forge",
+            "run",
+            "census",
+            "moved_after_close",
+        ] {
+            let fixture = Fixture::new()?;
+            let host = TestContext::new(&fixture)?;
+            let mut context = host.context();
+            let created = if class == "managed" {
+                create(
+                    &context,
+                    WorktreeCreate {
+                        branch: "idle-work".into(),
+                        base: None,
+                    },
+                    &cancel(),
+                )?
+                .path
+            } else {
+                let path = fixture._temp.path().join("foreign-idle");
+                fixture.run(&[
+                    "worktree",
+                    "add",
+                    "-b",
+                    "idle-work",
+                    path.to_str().ok_or("path")?,
+                ])?;
+                path
+            };
+            fs::write(created.join("unique"), b"unsubsumed work")?;
+            run_in_worktree(&fixture, &created, &["add", "unique"])?;
+            run_in_worktree(&fixture, &created, &["commit", "-m", "unsubsumed work"])?;
+            let owner = CollectorRetirementFixture::new(
+                feed != "custody",
+                if feed == "forge" {
+                    ForgeObservation::Unknown("offline fixture".into())
+                } else if feed == "moved_after_close" {
+                    ForgeObservation::Closed {
+                        head: fixture.head()?,
+                    }
+                } else {
+                    ForgeObservation::Absent
+                },
+            );
+            let unknown = UnknownWorkers;
+            if feed == "census" {
+                context.workers = &unknown;
+            }
+            let policy = WorktreeGcPolicy {
+                upstream: None,
+                upstream_reference: None,
+                terminal: &|_| true,
+                no_live_lanes: &|_| feed != "run",
+                regenerable: &[],
+                keep: &[],
+                written_before_ns: i128::MAX,
+                dry_run: false,
+                include_foreign: true,
+                retirement_port: Some(&owner),
+                retirement_feeds: Some(&owner),
+                mode: CollectionMode::Worktrees,
+                proof: None,
+                integration_patterns: &[],
+                excluded_paths: &[],
+            };
+            let _ = collect(&context, &list(&context, &cancel())?, &policy, &cancel())?;
+            assert!(branch_exists(&fixture, "idle-work"));
+            assert_eq!(created.exists(), feed != "clear");
+            let records = owner.records.borrow();
+            if feed == "clear" {
+                assert_eq!(records.len(), 1);
+                assert!(records[0].outcomes.iter().all(|outcome| matches!(
+                    &outcome.state,
+                    provenant_records::custody::RetirementStepState::Completed { .. }
+                )));
+                assert!(matches!(
+                    &records[0].decision,
+                    provenant_records::custody::RetirementDecision::RetireWorktree {
+                        evidence: provenant_records::custody::RemovalEvidence::IdleRetirement { tip },
+                        ..
+                    } if *tip == records[0].expected_tip
+                ));
+            } else {
+                assert!(records.is_empty());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn cleanup_respects_nested_roots_aliases_and_harness_locks() -> Result<(), Box<dyn Error>> {
+    for shape in ["nested", "alias", "locked"] {
+        let fixture = Fixture::new()?;
+        let owner = TestContext::new(&fixture)?;
+        let context = owner.context();
+        let path = fixture._temp.path().join("outer");
+        fixture.run(&[
+            "worktree",
+            "add",
+            "-b",
+            "outer",
+            path.to_str().ok_or("path")?,
+        ])?;
+        if shape == "nested" {
+            fixture.run(&[
+                "worktree",
+                "add",
+                "--detach",
+                path.join("inner").to_str().ok_or("path")?,
+                "HEAD",
+            ])?;
+        }
+        if shape == "locked" {
+            fixture.run(&[
+                "worktree",
+                "lock",
+                "--reason",
+                "harness pid:12345",
+                path.to_str().ok_or("path")?,
+            ])?;
+        }
+        let mut lanes = list(&context, &cancel())?;
+        if shape == "alias" {
+            let alias = fixture._temp.path().join("alias");
+            std::os::unix::fs::symlink(&path, &alias)?;
+            for lane in lanes.iter_mut().filter(|lane| lane.path == path) {
+                lane.path = alias.clone();
+            }
+        }
+        let policy = WorktreeGcPolicy {
+            upstream: None,
+            upstream_reference: None,
+            terminal: &|_| true,
+            no_live_lanes: &|_| true,
+            regenerable: &[],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: false,
+            include_foreign: true,
+            retirement_port: None,
+            retirement_feeds: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
+        };
+        let _ = collect(&context, &lanes, &policy, &cancel())?;
+        assert!(path.is_dir());
+        assert!(branch_exists(&fixture, "outer"));
+    }
+    Ok(())
+}
+
+#[test]
+fn submodule_cleanup_requires_clean_retained_heads_and_surviving_git_stores()
+-> Result<(), Box<dyn Error>> {
+    for case in [
+        "retained",
+        "detached_unpushed",
+        "dirty",
+        "store_inside_tree",
+    ] {
+        let fixture = Fixture::new()?;
+        let owner = TestContext::new(&fixture)?;
+        let context = owner.context();
+        let lane = create(
+            &context,
+            WorktreeCreate {
+                branch: "submodule-proof".into(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        let child = lane.path.join("sub");
+        fs::create_dir(&child)?;
+        let store = if case == "store_inside_tree" {
+            child.join(".git")
+        } else {
+            context
+                .repo
+                .common_git_dir()
+                .join("retained-submodule-fixture")
+        };
+        if case == "store_inside_tree" {
+            fixture.run(&["-C", child.to_str().ok_or("path")?, "init", "-b", "main"])?;
+        } else {
+            fixture.run(&[
+                "-C",
+                child.to_str().ok_or("path")?,
+                "init",
+                "-b",
+                "main",
+                "--separate-git-dir",
+                store.to_str().ok_or("path")?,
+            ])?;
+        }
+        fs::write(child.join("file"), b"retained submodule")?;
+        fixture.run(&["-C", child.to_str().ok_or("path")?, "add", "file"])?;
+        fixture.run(&[
+            "-C",
+            child.to_str().ok_or("path")?,
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "user.name=fixture",
+            "commit",
+            "-m",
+            "submodule",
+        ])?;
+        let head = fixture.run(&["-C", child.to_str().ok_or("path")?, "rev-parse", "HEAD"])?;
+        let head = std::str::from_utf8(&head.stdout.bytes)?.trim();
+        run_in_worktree(
+            &fixture,
+            &lane.path,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{head},sub"),
+            ],
+        )?;
+        run_in_worktree(&fixture, &lane.path, &["commit", "-m", "gitlink"])?;
+        fixture.run(&["merge", "--no-ff", "-m", "integrated", "submodule-proof"])?;
+        if case == "detached_unpushed" {
+            fixture.run(&["-C", child.to_str().ok_or("path")?, "checkout", "--detach"])?;
+            fs::write(child.join("file"), b"unreferenced new work")?;
+            fixture.run(&["-C", child.to_str().ok_or("path")?, "add", "file"])?;
+            fixture.run(&[
+                "-C",
+                child.to_str().ok_or("path")?,
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "user.name=fixture",
+                "commit",
+                "-m",
+                "unpushed detached work",
+            ])?;
+        }
+        if case == "dirty" {
+            fs::write(child.join("note"), b"untracked data")?;
+        }
+        let policy = WorktreeGcPolicy {
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream: None,
+            upstream_reference: None,
+            terminal: &|_| true,
+            no_live_lanes: &|_| true,
+            regenerable: &[],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: false,
+            include_foreign: true,
+            retirement_port: None,
+            retirement_feeds: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
+        };
+        let _ = collect(
+            &context,
+            &list_for_gc(&context, &cancel())?,
+            &policy,
+            &cancel(),
+        )?;
+        assert_eq!(lane.path.exists(), case != "retained");
+        assert!(store.is_dir());
+    }
+    Ok(())
 }

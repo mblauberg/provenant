@@ -8,7 +8,7 @@
 //! least once, from the normal seam and from crash recovery alike; the notice,
 //! the log and the ledger row are idempotent by attempt, so the effect is
 //! exactly once.
-use provenant_core::{ActorId, CancelToken, MessageId, OperationId, ProjectId, Roots, RunId};
+use provenant_core::{ActorId, AttemptId, CancelToken, MessageId, OperationId, ProjectId, Roots};
 use provenant_fabric_store::{HostStore, Message, MessageKind, Request, Store};
 use provenant_os::clock::SystemClock;
 use provenant_run::Reaction;
@@ -131,7 +131,7 @@ pub(crate) fn post_refusal_notice(
     let Some(chair) = &record.refusal_chair else {
         return Ok(());
     };
-    let config = provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)?;
+    let config = provenant_cli::config_reads::read_for(roots, "fabric context")?;
     let notice = record
         .extra
         .get("refusal_notice")
@@ -199,7 +199,7 @@ pub(crate) struct Subject {
     pub state_root: PathBuf,
     pub project: ProjectId,
     pub actor: ActorId,
-    pub run: RunId,
+    pub attempt: AttemptId,
 }
 
 impl Subject {
@@ -225,19 +225,32 @@ fn open_host(roots: &Roots) -> provenant_fabric_store::Result<Option<HostStore>>
 /// frozen in the row. `PROVENANT_SESSION_ID` (recorded with the chair at
 /// dispatch) comes first; otherwise the session the chair saved, confirmed
 /// against canonical discovery ownership.
-fn resolve(reaction: &mut Reaction, roots: &Roots) -> Result<(), Error> {
+fn resolve(
+    reaction: &mut Reaction,
+    roots: &Roots,
+    store: &provenant_run::RunStore,
+    call: &provenant_run::Request<'_>,
+) -> Result<(), Error> {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let request = Request {
         clock: &clock,
         cancel: &cancel,
     };
+    let key = store.work_key(reaction.attempt, call)?;
     // Lane-dispatched lanes carry no chair binding, which keeps their
     // settlements quiet.
     let chair = match open_host(roots) {
         Ok(Some(host)) => host
-            .run_chair(reaction.project, reaction.run, &request)?
-            .and_then(|found| found.chair),
+            .custody_item(
+                reaction.project,
+                &provenant_records::custody::Subject::new(
+                    provenant_records::custody::SubjectKind::Graph,
+                    key.graph(),
+                ),
+                &request,
+            )?
+            .and_then(|found| found.holder.chair().cloned()),
         Ok(None) | Err(provenant_fabric_store::Error::NotFound) => None,
         Err(error) => return Err(error.into()),
     };
@@ -288,15 +301,15 @@ fn drain_run_with_prices(
         read_prompts: false,
     };
     let store = provenant_run::RunStore::open(&context, &call)?;
-    let config = provenant_config::read_with_domains(&roots, &provenant_cli::domains::SECTIONS)?;
+    let config = provenant_cli::config_reads::read_for(&roots, "fabric context")?;
     let settings = config.domains.fabric.lanes.settlement;
-    store.drain_reactions(subject.run, &clock, &cancel, &mut |reaction, save| {
+    store.drain_reactions(subject.attempt, &clock, &cancel, &mut |reaction, save| {
         react(
             reaction,
             save,
             Effects {
                 graph: &mut *graph,
-                resolve: &mut |reaction| resolve(reaction, &roots),
+                resolve: &mut |reaction| resolve(reaction, &roots, &store, &call),
                 ledger: &mut |reaction| record_usage(reaction, &store, assets, &roots),
             },
             &settings,
@@ -324,14 +337,16 @@ fn record_usage(
         clock: &clock,
         cancel: &cancel,
     };
-    let fact = store.attempt(reaction.attempt, &call)?;
-    let prices = crate::fabric::load_graph_prices(assets)?;
-    let row = provenant_telemetry::ledger::row(
-        &fact,
-        Some(reaction.run),
-        provenant_telemetry::ledger::Source::Settlement,
-        Some(&prices),
+    crate::custody::settle_attempt(
+        roots,
+        &store.record(reaction.attempt, &call)?,
+        &store.request(reaction.attempt, &call)?,
+        reaction.sender,
     )?;
+    let fact = store.attempt(reaction.attempt, &call)?;
+    let key = store.work_key(reaction.attempt, &call)?;
+    let prices = crate::fabric::load_graph_prices(assets)?;
+    let row = provenant_telemetry::ledger::row(&fact, &key, Some(&prices))?;
     provenant_telemetry::ledger::append(roots.state.as_path(), &[row], &clock, &cancel)?;
     Ok(())
 }
@@ -514,7 +529,7 @@ pub(crate) fn append_chair_log(
 mod tests {
     #[allow(unused_imports)]
     use super::*;
-    use provenant_records::run::ChairBinding;
+    use provenant_records::custody::Chair;
     #[allow(unused_imports)]
     use std::cell::RefCell;
     #[test]
@@ -545,7 +560,6 @@ mod tests {
         Reaction {
             schema_version: 1,
             attempt: provenant_core::AttemptId::from_bytes([9; 16]),
-            run: RunId::from_bytes([5; 16]),
             project: ProjectId::from_bytes([3; 16]),
             sender: ActorId::from_bytes([4; 16]),
             notice: notice.into(),
@@ -555,7 +569,8 @@ mod tests {
             issue_ids: vec![],
             graph: false,
             resolved: true,
-            chair: Some(ChairBinding {
+            chair: Some(Chair {
+                process: None,
                 extra: Default::default(),
                 host: provenant_core::HostId::from_bytes([1; 16]),
                 actor: ActorId::from_bytes([2; 16]),
@@ -605,7 +620,6 @@ mod tests {
             operation_id: OperationId::parse("refused-1").unwrap(),
             kind: provenant_run::OperationKind::Dispatch,
             request_digest: provenant_core::Digest::from_bytes([7; 32]),
-            run_id: RunId::from_bytes([8; 16]),
             state: provenant_run::OperationState::Refused,
             blocked_reason: None,
             refusal: Some(provenant_records::diagnostic::Diagnostic::new(
@@ -697,8 +711,9 @@ mod tests {
         reaction
     }
 
-    fn binding(session: &str) -> ChairBinding {
-        ChairBinding {
+    fn binding(session: &str) -> Chair {
+        Chair {
+            process: None,
             extra: Default::default(),
             host: provenant_core::HostId::from_bytes([1; 16]),
             actor: ActorId::from_bytes([2; 16]),
@@ -827,7 +842,7 @@ mod tests {
     #[test]
     fn settlement_writes_one_priced_ledger_row_and_a_failed_append_stays_pending()
     -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_core::{AttemptId, RootInputs, TaskId, WallTime};
+        use provenant_core::{AttemptId, RootInputs, WallTime};
         use provenant_records::CanonicalV1;
         let temp = tempfile::tempdir()?;
         let base = temp.path().canonicalize()?;
@@ -851,27 +866,20 @@ mod tests {
             cancel: &cancel,
         };
         let store = provenant_run::RunStore::open(&context, &call)?;
-        let (run, attempt, task) = (
-            RunId::from_bytes([3; 16]),
-            AttemptId::from_bytes([4; 16]),
-            TaskId::from_bytes([5; 16]),
-        );
+        let attempt = AttemptId::from_bytes([4; 16]);
         store.create(
             &provenant_run::PreparedRun {
-                run_id: run,
+                attempt_id: attempt,
                 operation_id: OperationId::parse("ledger-settlement")?,
                 created_at: WallTime::from_micros(100)?,
-                attempts: vec![provenant_run::NewAttempt {
-                    attempt_id: attempt,
-                    task_id: task,
-                    prompt: String::new(),
-                }],
+                prompt: String::new(),
                 request: serde_json::from_value(serde_json::json!({
-                    "schema_version":1, "concurrency":1, "parent":null, "tasks":[{
-                        "task_id": task, "prompt_digest": CanonicalV1::file_digest(b""),
+                    "schema_version":1, "parent":null, "task":{
+                        "context": {"graph_id":"lane-ledger","node_id":"ledger","attempt":1},
+                        "prompt_digest": CanonicalV1::file_digest(b""),
                         "route": {"kind":"model","provider":"codex","model":"codex/fixture"},
                         "authority_digest": provenant_core::Digest::from_bytes([0;32]),
-                        "provider_timeout_seconds":20, "delivery_id":null }]
+                        "provider_timeout_seconds":20, "delivery_id":null }
                 }))?,
             },
             &call,
@@ -892,7 +900,7 @@ mod tests {
             state_root: roots.state.as_path().to_owned(),
             project,
             actor,
-            run,
+            attempt,
         };
         let rows =
             || -> Result<Vec<provenant_telemetry::ledger::Row>, Box<dyn std::error::Error>> {
@@ -907,7 +915,7 @@ mod tests {
                 .ok_or("reaction")?
                 .ledger_done
         );
-        assert_eq!(store.pending_reactions(run, &call)?, [attempt]);
+        assert!(store.reaction_pending(attempt, &call)?);
         // With the table installed, a later drain writes the priced row.
         std::fs::copy(
             concat!(
@@ -934,7 +942,7 @@ mod tests {
         let mut replay = store.reaction(attempt, &call)?.ok_or("reaction")?;
         replay.ledger_done = false;
         store.save_reaction(&replay, &call)?;
-        assert_eq!(store.pending_reactions(run, &call)?, [attempt]);
+        assert!(store.reaction_pending(attempt, &call)?);
         drain_run_with_prices(&subject, &checkout, &mut |_| Ok(()))?;
         assert_eq!(rows()?, first);
         assert!(

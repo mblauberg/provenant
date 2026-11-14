@@ -1,7 +1,7 @@
 use super::*;
 use provenant_core::{
     ActorId, AttemptId, CancelToken, Clock as _, Digest, MonoTime, OperationId, ProjectId,
-    RootInputs, RunId, TaskId, TestClock, WallTime,
+    RootInputs, TestClock, WallTime,
 };
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use provenant_records::CanonicalV1;
@@ -10,6 +10,45 @@ use provenant_supervisor::custody::{
 };
 use std::{ffi::OsString, path::Path, time::Duration};
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+#[test]
+fn run_store_observation_covers_commits_and_publishes_post_commit_hints() -> TestResult {
+    let temporary = tempfile::tempdir()?;
+    let execution = context(temporary.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let request = call(&clock, &cancel);
+    let store = RunStore::open(&execution, &request)?;
+    let paths = store.observation_paths();
+    let state = execution.state_root.as_path();
+    for expected in [
+        state.join("run.sqlite3"),
+        state.join("run.sqlite3-wal"),
+        state.join("run.sqlite3-journal"),
+        state.join(provenant_os::changes::FILE_NAME),
+    ] {
+        assert!(paths.contains(&expected));
+    }
+
+    let before = provenant_os::changes::read(state)?.board;
+    store.write(&request, |tx| {
+        tx.execute_batch("CREATE TABLE observation_fixture (value INTEGER)")?;
+        Ok(())
+    })?;
+    let after = provenant_os::changes::read(state)?.board;
+    assert_ne!(after, before);
+    assert!(after.is_some());
+
+    let before_failed_write = after;
+    let failed: Result<()> =
+        store.write(&request, |_tx| Err(RunError::Validation("fixture abort")));
+    assert!(failed.is_err());
+    assert_eq!(
+        provenant_os::changes::read(state)?.board,
+        before_failed_write
+    );
+    Ok(())
+}
 
 /// Synthetic admission facts, including a process table independent of the host.
 pub(super) struct HostFacts {
@@ -105,46 +144,69 @@ fn host_facts_can_override_resource_and_process_observations() {
 }
 
 #[test]
-fn command_identity_is_verified_without_manufacturing_model_evidence() {
-    let route = RouteRecord {
+fn route_identity_distinguishes_missing_evidence_from_contradictions() {
+    use crate::reader::{RouteIdentity as I, route_identity};
+    let command = RouteRecord {
         provider: Some("command".into()),
         ..Default::default()
     };
-    assert!(crate::reader::verified_route(
-        Some(&route),
-        Some(&route),
-        Some(&route)
-    ));
-    for provider in ["codex", "unknown"] {
-        let route = RouteRecord {
-            provider: Some(provider.into()),
-            ..Default::default()
-        };
-        assert!(!crate::reader::verified_route(
-            Some(&route),
-            Some(&route),
-            Some(&route)
-        ));
+    assert_eq!(
+        route_identity(Some(&command), Some(&command), Some(&command)),
+        I::Observed
+    );
+    let route = RouteRecord {
+        provider: Some("cursor".into()),
+        model: Some("cursor/model".into()),
+        effort: Some("high".into()),
+        account_key: Some("requested-account".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        route_identity(Some(&route), Some(&route), Some(&route)),
+        I::Observed
+    );
+    assert_eq!(
+        route_identity(Some(&route), Some(&route), None),
+        I::Unobserved
+    );
+    let incomplete = RouteRecord {
+        model: None,
+        ..route.clone()
+    };
+    assert_eq!(
+        route_identity(Some(&route), Some(&route), Some(&incomplete)),
+        I::Unobserved
+    );
+    for changed in [
+        RouteRecord {
+            provider: Some("other".into()),
+            ..route.clone()
+        },
+        RouteRecord {
+            model: Some("cursor/other".into()),
+            ..route.clone()
+        },
+        RouteRecord {
+            effort: Some("low".into()),
+            ..route.clone()
+        },
+        RouteRecord {
+            account_key: Some("other-account".into()),
+            ..route.clone()
+        },
+    ] {
+        assert_eq!(
+            route_identity(Some(&route), Some(&route), Some(&changed)),
+            I::Mismatch
+        );
+        assert_eq!(
+            route_identity(Some(&route), Some(&changed), Some(&route)),
+            I::Mismatch
+        );
     }
-    assert!(!crate::reader::verified_route(
-        Some(&route),
-        Some(&route),
-        None
-    ));
-    let mut invented = route.clone();
-    invented.model = Some("placeholder".into());
-    assert!(!crate::reader::verified_route(
-        Some(&route),
-        Some(&invented),
-        Some(&route)
-    ));
-    let mut effort = route.clone();
-    effort.effort = Some("high".into());
-    assert!(!crate::reader::verified_route(
-        Some(&route),
-        Some(&effort),
-        Some(&route)
-    ));
+    assert!(!I::Unobserved.permits_success(&[]));
+    assert!(I::Unobserved.permits_success(&[PartialSignal::IdentityUnobserved]));
+    assert!(!I::Mismatch.permits_success(&[PartialSignal::IdentityUnobserved]));
 }
 
 #[test]
@@ -212,8 +274,8 @@ fn lane_listings_do_not_flush_a_settled_attempts_delivery_receipt() -> TestResul
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
-    let run = store.create(&input, &call)?;
+    let id = input.attempt_id;
+    let _run = store.create(&input, &call)?;
     crate::dispatch_tests::seal_exit(&store, &exit())?;
     let settled = store.publish_terminal(id, 1, &publication(), &exit(), &call)?;
     assert!(matches!(
@@ -223,7 +285,7 @@ fn lane_listings_do_not_flush_a_settled_attempts_delivery_receipt() -> TestResul
             ..
         }
     ));
-    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let receipt = serde_json::json!({
         "schema_version": 1,
         "remote": "origin",
@@ -270,10 +332,10 @@ fn mutation_record_reads_sync_the_checkpoint_while_views_do_not() -> TestResult 
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
-    let run = store.create(&input, &call)?;
+    let id = input.attempt_id;
+    let _run = store.create(&input, &call)?;
     let record = store.record(id, &call)?;
-    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let checkpoint = serde_json::json!({
         "schema_version": 1,
         "scope": RunStore::scope(&record),
@@ -322,6 +384,15 @@ fn mutation_record_reads_sync_the_checkpoint_while_views_do_not() -> TestResult 
     Ok(())
 }
 
+/// Explicit custody for requests in the standard execution-context fixture.
+pub(super) fn writer_extra() -> provenant_records::ExtraFields {
+    [(
+        "custody_project".into(),
+        serde_json::json!(ProjectId::from_bytes([1; 16])),
+    )]
+    .into()
+}
+
 pub(super) fn context(
     base: &Path,
 ) -> std::result::Result<ExecutionContext, Box<dyn std::error::Error>> {
@@ -358,19 +429,36 @@ pub(super) fn digest_prefix(digest: impl std::fmt::Display) -> ArtifactValue {
     let text = digest.to_string();
     ArtifactValue::Digest(text.trim_start_matches("sha256:")[..12].to_string())
 }
+/// Give the fixture attempt its own work key: a graph named for the attempt,
+/// a node and attempt number one, so fixtures that mint ids also mint keys.
+pub(crate) fn rekey(prepared: &mut PreparedRun) {
+    let attempt = prepared.attempt_id;
+    let context = prepared
+        .request
+        .task
+        .context
+        .get_or_insert_with(Default::default);
+    context.graph_id = Some(format!("lane-{attempt}"));
+    context.node_id = Some("node".to_string());
+    context.attempt = Some(1);
+}
 pub(super) fn input() -> PreparedRun {
-    let task = TaskId::from_bytes([3; 16]);
+    let mut prepared = raw_input();
+    rekey(&mut prepared);
+    prepared
+}
+fn raw_input() -> PreparedRun {
     PreparedRun {
-        run_id: RunId::from_bytes([4; 16]),
+        attempt_id: AttemptId::from_bytes([6; 16]),
         operation_id: OperationId::parse("run-test").unwrap(),
         created_at: WallTime::from_micros(100).unwrap(),
+        prompt: "exact prompt".into(),
         request: CanonicalRequest {
             extra: Default::default(),
-            child_attempt_id_version: None,
             chair: None,
             fresh_continuation: None,
             schema_version: 1,
-            tasks: vec![TaskRequest {
+            task: TaskRequest {
                 context: None,
                 extra: Default::default(),
                 build_heavy: false,
@@ -381,7 +469,6 @@ pub(super) fn input() -> PreparedRun {
                 base_ref: None,
                 writer: None,
                 profile: HarnessProfile::default(),
-                task_id: task,
                 prompt_digest: CanonicalV1::file_digest(b"exact prompt"),
                 route: RequestedRoute::Model {
                     extra: Default::default(),
@@ -395,17 +482,11 @@ pub(super) fn input() -> PreparedRun {
                 delivery_id: None,
                 deliver: None,
                 access: Default::default(),
-            }],
-            concurrency: 1,
+            },
             parent: None,
             lane_depth: Some(1),
             parent_attempt: None,
         },
-        attempts: vec![NewAttempt {
-            task_id: task,
-            attempt_id: AttemptId::from_bytes([6; 16]),
-            prompt: "exact prompt".into(),
-        }],
     }
 }
 
@@ -420,7 +501,7 @@ fn refused_operation_is_durable_and_replay_checks_request_identity() -> TestResu
         .category("refused")
         .detail("admission queue is full");
     let store = RunStore::open(&context, &call)?;
-    store.db.execute_batch("CREATE TEMP TRIGGER refusal_write_failure BEFORE INSERT ON operations BEGIN SELECT RAISE(ABORT, 'fixture refusal write'); END")?;
+    store.db.execute_batch("CREATE TEMP TRIGGER refusal_write_failure BEFORE INSERT ON attempts BEGIN SELECT RAISE(ABORT, 'fixture refusal write'); END")?;
     assert!(
         store
             .record_refusal(&input, diagnostic.clone(), Some("lane".into()), &call)
@@ -472,7 +553,7 @@ fn refused_operation_is_durable_and_replay_checks_request_identity() -> TestResu
         matches!(store.create(&input, &call), Err(RunError::RecordedRefusal(saved)) if *saved == diagnostic)
     );
     let mut changed = input;
-    changed.request.concurrency = 2;
+    changed.request.lane_depth = Some(2);
     assert!(matches!(
         store.create(&changed, &call),
         Err(RunError::OperationConflict)
@@ -491,7 +572,8 @@ fn refusal_notice_obligation_survives_restart_and_completes_only_for_same_facts(
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let mut input = input();
-    input.request.chair = Some(ChairBinding {
+    input.request.chair = Some(Chair {
+        process: None,
         extra: Default::default(),
         host: provenant_core::HostId::from_bytes([1; 16]),
         actor: ActorId::from_bytes([2; 16]),
@@ -532,7 +614,9 @@ fn refusal_notice_obligation_survives_restart_and_completes_only_for_same_facts(
     );
     for n in 10_u8..91 {
         input.operation_id = OperationId::parse(&format!("notice-{n}"))?;
-        input.run_id = RunId::from_bytes([n; 16]);
+        input.attempt_id = AttemptId::from_bytes([n; 16]);
+        input.attempt_id = AttemptId::from_bytes([n; 16]);
+        crate::tests::rekey(&mut input);
         store.record_refusal(
             &input,
             provenant_records::diagnostic::Diagnostic::new("REFUSED"),
@@ -541,12 +625,11 @@ fn refusal_notice_obligation_survives_restart_and_completes_only_for_same_facts(
         )?;
     }
     // Stored records are BLOBs: SQLite JSON queries must cast these exact bytes.
-    let storage: String =
-        store
-            .db
-            .query_row("SELECT typeof(record) FROM operations LIMIT 1", [], |row| {
-                row.get(0)
-            })?;
+    let storage: String = store.db.query_row(
+        "SELECT typeof(operation_record) FROM attempts LIMIT 1",
+        [],
+        |row| row.get(0),
+    )?;
     assert_eq!(storage, "blob");
     assert_eq!(store.recent_refusals(100, &call)?.len(), 82);
     let page = store.pending_refusal_notices_after(80, 0, &call)?;
@@ -575,7 +658,8 @@ fn corrupt_refusal_notices_do_not_hide_valid_notices_after_a_full_page() -> Test
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let mut input = input();
-    input.request.chair = Some(ChairBinding {
+    input.request.chair = Some(Chair {
+        process: None,
         extra: Default::default(),
         host: provenant_core::HostId::from_bytes([1; 16]),
         actor: ActorId::from_bytes([2; 16]),
@@ -584,7 +668,9 @@ fn corrupt_refusal_notices_do_not_hide_valid_notices_after_a_full_page() -> Test
     let mut expected = Vec::new();
     for n in 0_u8..164 {
         input.operation_id = OperationId::parse(&format!("corrupt-notice-{n}"))?;
-        input.run_id = RunId::from_bytes([n; 16]);
+        input.attempt_id = AttemptId::from_bytes([n; 16]);
+        input.attempt_id = AttemptId::from_bytes([n; 16]);
+        crate::tests::rekey(&mut input);
         let record = store.record_refusal(
             &input,
             provenant_records::diagnostic::Diagnostic::new("REFUSED"),
@@ -596,7 +682,6 @@ fn corrupt_refusal_notices_do_not_hide_valid_notices_after_a_full_page() -> Test
             continue;
         }
         let mut value = serde_json::to_value(&record)?;
-        let mut operation = input.operation_id.to_string();
         let raw = if n == 0 {
             b"{malformed JSON".to_vec()
         } else {
@@ -606,7 +691,7 @@ fn corrupt_refusal_notices_do_not_hide_valid_notices_after_a_full_page() -> Test
                     serde_json::to_vec(&value)?
                 }
                 1 => {
-                    operation = format!("invalid id {n}");
+                    value["operation_id"] = serde_json::json!(format!("invalid id {n}"));
                     serde_json::to_vec(&value)?
                 }
                 _ => {
@@ -616,8 +701,8 @@ fn corrupt_refusal_notices_do_not_hide_valid_notices_after_a_full_page() -> Test
             }
         };
         store.db.execute(
-            "UPDATE operations SET operation=?1,record=?2 WHERE operation=?3",
-            rusqlite::params![operation, raw, input.operation_id.as_str()],
+            "UPDATE attempts SET operation_record=?1 WHERE operation=?2",
+            rusqlite::params![raw, input.operation_id.as_str()],
         )?;
     }
     let first = store.pending_refusal_notices_after(80, 0, &call)?;
@@ -651,7 +736,9 @@ fn recorded_refusal_freezes_the_notice_setting() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let mut input = input();
-    input.request.tasks[0]
+    input
+        .request
+        .task
         .profile
         .knobs
         .insert("chair.refusal_notice".into(), serde_json::json!("off"));
@@ -677,6 +764,7 @@ pub(super) fn route() -> RouteRecord {
 }
 pub(super) fn publication() -> TerminalPublication<'static> {
     TerminalPublication {
+        handoff: None,
         terminal_cause: None,
         terminal_note: None,
         outcome: Outcome::Succeeded,
@@ -700,8 +788,7 @@ pub(super) fn exit() -> ExitObservation {
         cancel_delivered_before_exit: None,
         publication: PublicationState::Durable,
         scope: Scope {
-            run: input().run_id,
-            attempt: input().attempts[0].attempt_id,
+            attempt: input().attempt_id,
             generation: 0,
         },
         termination: Some(Termination::Exit(0)),
@@ -753,7 +840,7 @@ fn overview_reads_committed_wal_and_bounds_rows() -> TestResult {
     let writer = RunStore::open(&context, &call)?;
     let reader = RunStore::open_read_only(&context, &call)?.ok_or("missing reader")?;
     let mut first = input();
-    first.request.tasks[0].title = Some("Review changes".into());
+    first.request.task.title = Some("Review changes".into());
     writer.create(&first, &call)?;
     let batch = reader.overview_attempts(1, 1_048_576, &call)?;
     assert!(!batch.truncated);
@@ -777,12 +864,11 @@ fn overview_bounds_aggregate_record_bytes_before_decoding() -> TestResult {
     let writer = RunStore::open(&context, &call)?;
     for n in 1..=3 {
         let mut value = input();
-        value.run_id = RunId::from_bytes([n; 16]);
+        value.attempt_id = AttemptId::from_bytes([n; 16]);
         value.operation_id = OperationId::parse(&format!("run-{n}"))?;
-        value.request.tasks[0].task_id = TaskId::from_bytes([n; 16]);
-        value.attempts[0].task_id = value.request.tasks[0].task_id;
-        value.attempts[0].attempt_id = AttemptId::from_bytes([n; 16]);
-        value.request.tasks[0].title = Some("x".repeat(200));
+        value.attempt_id = AttemptId::from_bytes([n; 16]);
+        crate::tests::rekey(&mut value);
+        value.request.task.title = Some("x".repeat(200));
         writer.create(&value, &call)?;
     }
     let mut statement = writer
@@ -836,12 +922,12 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let mut input = input();
-    input.request.tasks[0].writer = Some(WriterRequest {
-        extra: Default::default(),
+    input.request.task.writer = Some(WriterRequest {
+        extra: crate::tests::writer_extra(),
         project: temp.path().to_path_buf(),
         worktree: temp.path().join("lane"),
     });
-    input.request.tasks[0].deliver = Some(WriterDeliveryRequest {
+    input.request.task.deliver = Some(WriterDeliveryRequest {
         extra: Default::default(),
         mode: Default::default(),
         remote: "origin".into(),
@@ -851,9 +937,9 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
     });
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let head = provenant_core::GitOid::parse(&"a".repeat(40))?;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     artifacts::seal(
         &attempt,
         "writer-terminal.json",
@@ -906,7 +992,7 @@ fn record_read_is_one_snapshot_across_a_concurrent_terminal_publication() -> Tes
     let reader = RunStore::open(&context, &call)?;
     let prepared = input();
     reader.create(&prepared, &call)?;
-    let id = prepared.attempts[0].attempt_id;
+    let id = prepared.attempt_id;
     // Another connection settles the attempt after the reader has taken the
     // pre-terminal attempt row but before it looks for the settlement receipt.
     let publisher = context.clone();
@@ -946,12 +1032,12 @@ fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let mut input = input();
-    input.request.tasks[0].writer = Some(WriterRequest {
-        extra: Default::default(),
+    input.request.task.writer = Some(WriterRequest {
+        extra: crate::tests::writer_extra(),
         project: temp.path().to_path_buf(),
         worktree: temp.path().join("lane"),
     });
-    input.request.tasks[0].deliver = Some(WriterDeliveryRequest {
+    input.request.task.deliver = Some(WriterDeliveryRequest {
         extra: Default::default(),
         mode: Default::default(),
         remote: "origin".into(),
@@ -961,7 +1047,7 @@ fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
     });
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let record = store.publish_terminal(id, 1, &publication(), &exit(), &call)?;
     let receipt = record.delivery.ok_or("delivery state missing")?;
     assert_eq!(
@@ -1121,49 +1207,6 @@ fn read_only_store_reports_whether_it_holds_a_run() -> TestResult {
     Ok(())
 }
 
-// Sealed task_class members remain part of historical request digests.
-#[test]
-fn historical_task_class_preserves_request_verification_and_lane_listing() -> TestResult {
-    for task_class in [serde_json::Value::Null, serde_json::json!("mechanical")] {
-        let temp = tempfile::tempdir()?;
-        let context = context(temp.path())?;
-        let (clock, cancel) = (clock(), CancelToken::new());
-        let call = call(&clock, &cancel);
-        let store = RunStore::open(&context, &call)?;
-        let mut input = input();
-        let mut sealed = serde_json::to_value(&input.request)?;
-        sealed["tasks"][0]["profile"] = serde_json::json!({
-            "name": "", "knobs": {}, "overrides": [], "task_class": task_class
-        });
-        let digest = CanonicalV1::record_digest("run-request", 1, &sealed)?;
-        input.request = serde_json::from_value(sealed.clone())?;
-        store.create(&input, &call)?;
-        assert_eq!(store.run(input.run_id, &call)?.request_digest, digest);
-        assert_eq!(
-            serde_json::to_value(store.request(input.run_id, &call)?)?,
-            sealed
-        );
-        let page = store.lanes(
-            &LaneQuery {
-                targets: Vec::new(),
-                all: true,
-                limit: 10,
-                after: 0,
-                newest_first: false,
-                owner: None,
-                unseen_after: None,
-            },
-            &call,
-        )?;
-        assert_eq!(page.lanes.len(), 1);
-        assert_eq!(
-            serde_json::to_value(&page.lanes[0].profile)?,
-            sealed["tasks"][0]["profile"]
-        );
-    }
-    Ok(())
-}
-
 #[test]
 fn missing_output_is_not_found_only_after_terminal() -> TestResult {
     let temp = tempfile::tempdir()?;
@@ -1173,7 +1216,7 @@ fn missing_output_is_not_found_only_after_terminal() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.create(&input, &call)?;
     for part in [ArtifactPart::Result, ArtifactPart::Stderr] {
         assert!(matches!(
@@ -1225,7 +1268,7 @@ fn streamed_result_is_verified_and_redacted_across_chunks() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
     let secret = format!("ghp_{}", "a".repeat(36));
@@ -1244,13 +1287,12 @@ fn streamed_result_is_verified_and_redacted_across_chunks() -> TestResult {
     let path = context
         .state_root
         .as_path()
-        .join(format!("runs/{}/attempts/{id}/result.md", input.run_id));
+        .join(format!("attempts/{id}/result.md"));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
-        let expected =
-            std::path::PathBuf::from(format!("runs/{}/attempts/{id}/result.md", input.run_id));
+        let expected = std::path::PathBuf::from(format!("attempts/{id}/result.md"));
         assert!(
             matches!(store.stream_result(id, &call, None), Err(RunError::UnsafePath { path, check: PathCheck::Mode }) if path == expected)
         );
@@ -1292,7 +1334,7 @@ fn appended_after_eof_names_the_recorded_and_final_lengths() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
     let text = "sealed result";
@@ -1302,7 +1344,7 @@ fn appended_after_eof_names_the_recorded_and_final_lengths() -> TestResult {
     let path = context
         .state_root
         .as_path()
-        .join(format!("runs/{}/attempts/{id}/result.md", input.run_id));
+        .join(format!("attempts/{id}/result.md"));
     // Grow the file through a second handle between the streamed EOF and the
     // final metadata check, so the streamed length and digest still match the
     // record and only the final unchanged check can refuse.
@@ -1338,18 +1380,20 @@ fn tampered_request_names_the_request_digest_that_failed() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let input = input();
     store.create(&input, &call)?;
-    let stored = store.run(input.run_id, &call)?.request_digest;
+    let stored = store
+        .attempt_operation(input.attempt_id, &call)?
+        .request_digest;
     let path = context
         .state_root
         .as_path()
-        .join(format!("runs/{}/request.json", input.run_id));
+        .join(format!("attempts/{}/request.json", input.attempt_id));
     let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
-    value["concurrency"] = 99.into();
+    value["lane_depth"] = 99.into();
     let raw = crate::db::bytes(&value)?;
     let recomputed = CanonicalV1::record_digest("run-request", 1, &value)?;
     std::fs::write(&path, raw)?;
     assert_eq!(
-        artifact_provenance(store.request(input.run_id, &call)),
+        artifact_provenance(store.request(input.attempt_id, &call)),
         ArtifactProvenance {
             check: ArtifactCheck::RequestDigest,
             artifact: "request.json".into(),
@@ -1361,7 +1405,7 @@ fn tampered_request_names_the_request_digest_that_failed() -> TestResult {
 }
 
 #[test]
-fn older_request_bytes_are_verified_before_decoding() -> TestResult {
+fn sealed_request_bytes_are_verified_before_normalising_defaults() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
@@ -1372,41 +1416,36 @@ fn older_request_bytes_are_verified_before_decoding() -> TestResult {
     store.create(&input, &call)?;
 
     let mut value = serde_json::to_value(&input.request)?;
-    let task = value["tasks"][0].as_object_mut().unwrap();
+    let task = value["task"].as_object_mut().ok_or("task")?;
     task.insert(
         "profile".into(),
-        serde_json::to_value(&input.request.tasks[0].profile)?,
+        serde_json::to_value(&input.request.task.profile)?,
     );
-    // The historic request always wrote fallback, including an empty list.
-    // Construct those persisted bytes explicitly: current tasks no longer
-    // execute policy successors, but their old fields must remain readable.
-    task.insert("fallback".into(), serde_json::json!([]));
-    assert_eq!(task.len(), 9);
+    // Explicit default fields are valid current-format input. Verify the
+    // sealed bytes before decoding can omit those defaults on reserialization.
     let mut raw = crate::db::bytes(&value)?;
     let digest = CanonicalV1::record_digest("run-request", 1, &value)?;
     let path = context
         .state_root
         .as_path()
-        .join(format!("runs/{}/request.json", input.run_id));
+        .join(format!("attempts/{}/request.json", input.attempt_id));
     std::fs::write(&path, &raw)?;
-    let mut record = store.run(input.run_id, &call)?;
-    record.request_digest = digest;
+    let mut operation = store
+        .operation(&input.operation_id, &call)?
+        .ok_or("operation")?;
+    operation.request_digest = digest;
     store.db.execute(
-        "UPDATE runs SET record=?1 WHERE id=?2",
-        rusqlite::params![crate::db::bytes(&record)?, input.run_id.to_string()],
+        "UPDATE attempts SET operation_record=?1 WHERE id=?2",
+        rusqlite::params![crate::db::bytes(&operation)?, input.attempt_id.to_string()],
     )?;
-    let decoded = store.request(input.run_id, &call)?;
-    assert_eq!(decoded.tasks[0].profile, input.request.tasks[0].profile);
-    assert_eq!(
-        decoded.tasks[0].extra.get("fallback"),
-        Some(&serde_json::json!([]))
-    );
+    let decoded = store.request(input.attempt_id, &call)?;
+    assert_eq!(decoded.task.profile, input.request.task.profile);
     assert_ne!(decoded.digest()?, digest);
 
     raw[0] ^= 1;
     std::fs::write(&path, raw)?;
     assert_eq!(
-        artifact_provenance(store.request(input.run_id, &call)).check,
+        artifact_provenance(store.request(input.attempt_id, &call)).check,
         ArtifactCheck::RequestDigest
     );
     Ok(())
@@ -1422,7 +1461,7 @@ fn streamed_verdict_evidence_validates_complete_large_artifacts() -> TestResult 
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context, &call)?;
         let input = input();
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         store.create(&input, &call)?;
         seal_exit_fixture(&store, &input)?;
         let text = format!(
@@ -1435,7 +1474,7 @@ fn streamed_verdict_evidence_validates_complete_large_artifacts() -> TestResult 
         done.result = &text;
         store.publish_terminal(id, 1, &done, &exit(), &call)?;
         let captured = store.stream_result(id, &call, None)?;
-        assert!(captured.source_truncated);
+        assert!(!captured.source_truncated);
         assert!(!captured.excerpt.contains("VERDICT: FAIL"));
         assert!(!captured.tail.contains("VERDICT: FAIL"));
         assert_eq!(
@@ -1460,16 +1499,13 @@ fn transcript_part_reads_the_redacted_tail_of_the_provider_transcript() -> TestR
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
-    let run = store.create(&input, &call)?;
+    let id = input.attempt_id;
+    let _run = store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
     let mut done = publication();
     done.session = Some("sess-1848".into());
     store.publish_terminal(id, 1, &done, &exit(), &call)?;
-    let attempt = context
-        .state_root
-        .as_path()
-        .join(format!("runs/{}/attempts/{id}", run.run_id));
+    let attempt = context.state_root.as_path().join(format!("attempts/{id}"));
     let dir = attempt.join("provider-state/candidate-0/claude-config/projects/key");
     std::fs::create_dir_all(&dir)?;
     let secret = format!("ghp_{}", "a".repeat(36));
@@ -1507,7 +1543,7 @@ fn created_attempt_and_event_carry_the_host_and_submitting_parent() -> TestResul
     let mut input = input();
     input.request.parent_attempt = Some(parent);
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let record = store.record(id, &call)?;
     assert_eq!(record.trace.host, Some(host));
     assert_eq!(record.trace.parent, Some(parent));
@@ -1529,31 +1565,31 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
     let work = provenant_records::run::WorkContext {
         work_item: Some("issue-42".into()),
         role: Some("reviewer".into()),
-        ..Default::default()
+        ..input.request.task.context.clone().ok_or("work key")?
     };
-    input.request.tasks[0].context = Some(work.clone());
-    // A schema-v1 request without a profile must keep its sealed digest.
+    input.request.task.context = Some(work.clone());
+    // Omitting a default profile must keep the current request's sealed digest.
     let mut unstamped = serde_json::to_value(&input.request)?;
-    for task in unstamped["tasks"].as_array_mut().ok_or("tasks")? {
-        task.as_object_mut().ok_or("task")?.remove("profile");
-    }
+    unstamped["task"]
+        .as_object_mut()
+        .ok_or("task")?
+        .remove("profile");
     let decoded: CanonicalRequest = serde_json::from_value(unstamped.clone())?;
     assert_eq!(
         decoded.digest()?,
         CanonicalV1::record_digest("run-request", 1, &unstamped)?
     );
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let run = store.create(&input, &call)?;
     assert_eq!(admission_count(&store)?, 1);
     seal_exit_fixture(&store, &input)?;
-    assert_eq!(run.closure, Closure::Open);
     assert!(matches!(
         store.attempt(id, &call),
         Err(RunError::Nonterminal)
     ));
-    assert_eq!(store.create(&input, &call)?.run_id, run.run_id);
+    assert_eq!(store.create(&input, &call)?.attempt_id, run.attempt_id);
     let mut changed = self::input();
-    changed.request.concurrency = 2;
+    changed.request.lane_depth = Some(2);
     assert!(matches!(
         store.create(&changed, &call),
         Err(RunError::OperationConflict)
@@ -1587,7 +1623,6 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
         store.publish_terminal(id, 1, &publication(), &exit(), &call)?,
         record
     );
-    assert_eq!(store.run(run.run_id, &call)?.closure, Closure::Closed);
     assert_eq!(
         store.operation(&input.operation_id, &call)?.unwrap().state,
         OperationState::Terminal
@@ -1617,7 +1652,7 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
     assert_eq!(all.bytes, publication().result.as_bytes());
     let fact = store.attempt(id, &call)?;
     assert_eq!(
-        store.request(run.run_id, &call)?.tasks[0].context,
+        store.request(run.attempt_id, &call)?.task.context,
         Some(work.clone())
     );
     assert_eq!(fact.context, Some(work));
@@ -1636,9 +1671,7 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
     assert_ne!(reviewer.actor_id, context.actor_id);
     assert_eq!(fact.verified_owner, Some(context.actor_id));
     assert_eq!(
-        store
-            .attempts(AttemptFilter::default(), &call)?
-            .collect::<Result<Vec<_>>>()?,
+        store.attempts(&call)?.collect::<Result<Vec<_>>>()?,
         vec![fact]
     );
     let events = store.events(0, 64, None, &call)?;
@@ -1654,7 +1687,6 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
         extra: record.trace.extra.clone(),
         host: None,
         project: Some(context.project_id),
-        run: Some(run.run_id),
         attempt: Some(id),
         operation: Some(input.operation_id.clone()),
         actor: Some(context.actor_id),
@@ -1688,12 +1720,7 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
         Err(RunError::NotFound)
     ));
     drop(store);
-    assert_eq!(
-        RunStore::open(&context, &call)?
-            .attempts(AttemptFilter::default(), &call)?
-            .count(),
-        1
-    );
+    assert_eq!(RunStore::open(&context, &call)?.attempts(&call)?.count(), 1);
     Ok(())
 }
 
@@ -1708,13 +1735,13 @@ fn lanes_read_last_output_time_from_supervisor_checkpoint() -> TestResult {
     let input = input();
     store.create(&input, &call)?;
     let expected = WallTime::parse("2026-10-25T00:00:00.000000Z")?;
-    let directory = store.attempt_dir(input.run_id, input.attempts[0].attempt_id, true)?;
+    let directory = store.attempt_dir(input.attempt_id, true)?;
     artifacts::seal(
         &directory,
         "process.json",
         &serde_json::to_vec(&serde_json::json!({
             "schema_version": 1,
-            "scope": {"run": input.run_id, "attempt": input.attempts[0].attempt_id, "generation": 0},
+            "scope": {"run": input.attempt_id, "attempt": input.attempt_id, "generation": 0},
             "last_output_at": expected,
             "priority": 15,
             "publication_pending": false
@@ -1722,15 +1749,10 @@ fn lanes_read_last_output_time_from_supervisor_checkpoint() -> TestResult {
         RECORD_LIMIT,
     )?;
     assert_eq!(
-        store
-            .record(input.attempts[0].attempt_id, &call)?
-            .last_output_at,
+        store.record(input.attempt_id, &call)?.last_output_at,
         Some(expected)
     );
-    assert_eq!(
-        store.record(input.attempts[0].attempt_id, &call)?.priority,
-        Some(15)
-    );
+    assert_eq!(store.record(input.attempt_id, &call)?.priority, Some(15));
     Ok(())
 }
 
@@ -1739,14 +1761,14 @@ fn invalid_or_stale_process_checkpoint_has_unknown_silence() -> TestResult {
     for checkpoint in [
         serde_json::json!({
             "schema_version": 1,
-            "scope": {"run": RunId::from_bytes([4; 16]), "attempt": AttemptId::from_bytes([6; 16]), "generation": 9},
+            "scope": {"run": AttemptId::from_bytes([4; 16]), "attempt": AttemptId::from_bytes([6; 16]), "generation": 9},
             "silent": true,
             "silent_for_ms": 1_800_000
         }),
         serde_json::json!({"schema_version": 1, "scope": "invalid", "silent": true}),
         serde_json::json!({
             "schema_version": 1,
-            "scope": {"run": RunId::from_bytes([4; 16]), "attempt": AttemptId::from_bytes([6; 16]), "generation": 0},
+            "scope": {"run": AttemptId::from_bytes([4; 16]), "attempt": AttemptId::from_bytes([6; 16]), "generation": 0},
             "observed_at": WallTime::from_micros(1_000_000)?,
             "silent": true,
             "silent_for_ms": 1_800_000
@@ -1760,14 +1782,14 @@ fn invalid_or_stale_process_checkpoint_has_unknown_silence() -> TestResult {
         let store = RunStore::open(&context, &call)?;
         let input = input();
         store.create(&input, &call)?;
-        let directory = store.attempt_dir(input.run_id, input.attempts[0].attempt_id, true)?;
+        let directory = store.attempt_dir(input.attempt_id, true)?;
         artifacts::seal(
             &directory,
             "process.json",
             &serde_json::to_vec(&checkpoint)?,
             RECORD_LIMIT,
         )?;
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         assert!(
             store
                 .record_observed(id, &call)?
@@ -1826,7 +1848,7 @@ fn read_only_open_works_without_directory_write_access_or_creating_files() -> Te
     std::fs::set_permissions(state, std::fs::Permissions::from_mode(0o500))?;
 
     let store = RunStore::open_read_only(&context, &call)?.ok_or("initialised store missing")?;
-    assert_eq!(store.attempts(AttemptFilter::default(), &call)?.count(), 0);
+    assert_eq!(store.attempts(&call)?.count(), 0);
     drop(store);
 
     std::fs::set_permissions(state, std::fs::Permissions::from_mode(0o700))?;
@@ -1869,7 +1891,7 @@ fn oversize_is_refused_before_publication_or_read() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
     assert!(matches!(
@@ -1901,7 +1923,7 @@ fn oversize_is_refused_before_publication_or_read() -> TestResult {
     let path = context
         .state_root
         .as_path()
-        .join(format!("runs/{}/attempts/{id}/result.md", input.run_id));
+        .join(format!("attempts/{id}/result.md"));
     std::fs::write(path, &huge)?;
     assert!(matches!(
         store.read_output(
@@ -1925,35 +1947,24 @@ fn oversized_prompt_retains_code_and_projects_field_limit() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let mut request = input();
-    request.attempts[0].prompt = format!(
+    request.prompt = format!(
         "TOKEN_SENTINEL{}",
         "é".repeat((RECORD_LIMIT / 2 + 1) as usize)
     );
-    request.request.tasks[0].prompt_digest =
-        CanonicalV1::file_digest(request.attempts[0].prompt.as_bytes());
+    request.request.task.prompt_digest = CanonicalV1::file_digest(request.prompt.as_bytes());
     let Err(error) = store.create(&request, &call) else {
         return Err("oversized prompt accepted".into());
     };
-    assert_eq!(
-        error.to_string(),
-        format!("read or record exceeds byte limit {RECORD_LIMIT}")
-    );
+    assert!(matches!(error, RunError::PromptTooLarge { limit } if limit == RECORD_LIMIT));
     let projection = error.diagnostic(provenant_records::diagnostic::Destination::Local);
     assert_eq!(projection.code, "INVALID");
-    assert!(
-        projection
-            .detail
-            .as_deref()
-            .unwrap()
-            .contains("tasks[0].prompt")
+    assert_eq!(
+        projection.fact,
+        Some(provenant_records::diagnostic::DiagnosticFact::PromptLimit {
+            limit: RECORD_LIMIT
+        })
     );
-    assert!(
-        projection
-            .detail
-            .as_deref()
-            .unwrap()
-            .contains(&RECORD_LIMIT.to_string())
-    );
+    assert!(projection.next.is_some());
     assert!(!serde_json::to_string(&projection)?.contains("TOKEN_SENTINEL"));
     assert!(
         RunError::TooLarge {
@@ -1975,13 +1986,10 @@ fn contained_artifact_refuses_symlink_escape_for_reads_and_writes() -> TestResul
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
-    let attempt = context
-        .state_root
-        .as_path()
-        .join(format!("runs/{}/attempts/{id}", input.run_id));
+    let attempt = context.state_root.as_path().join(format!("attempts/{id}"));
     let outside = temp.path().join("outside");
     std::fs::create_dir(&outside)?;
     std::fs::write(outside.join("prompt.txt"), "credential sentinel")?;
@@ -2036,7 +2044,7 @@ fn publication_crash_worker() -> TestResult {
     let crash = std::env::var("PROVENANT_RUN_TEST_CRASH").unwrap_or_default();
     if crash.starts_with("withdraw-") {
         store.withdraw(
-            input.attempts[0].attempt_id,
+            input.attempt_id,
             AttemptState::Queued {
                 extra: Default::default(),
             },
@@ -2052,13 +2060,13 @@ fn publication_crash_worker() -> TestResult {
         return Err("crash phase was not reached".into());
     }
     seal_exit_fixture(&store, &input)?;
-    let attempt = store.attempt_dir(input.run_id, input.attempts[0].attempt_id, false)?;
+    let attempt = store.attempt_dir(input.attempt_id, false)?;
     crate::artifacts::seal(
         &attempt,
         "terminal-effects.json",
         &crate::db::bytes(&crate::store::TerminalEffects {
             schema_version: 1,
-            scope: RunStore::scope(&store.record(input.attempts[0].attempt_id, &call)?),
+            scope: RunStore::scope(&store.record(input.attempt_id, &call)?),
             effects: vec![(
                 SettlementEffect::ManifestConflict,
                 EffectDisposition::Failed {
@@ -2069,13 +2077,7 @@ fn publication_crash_worker() -> TestResult {
         })?,
         RECORD_LIMIT,
     )?;
-    store.publish_terminal(
-        input.attempts[0].attempt_id,
-        1,
-        &publication(),
-        &exit(),
-        &call,
-    )?;
+    store.publish_terminal(input.attempt_id, 1, &publication(), &exit(), &call)?;
     Err("crash phase was not reached".into())
 }
 #[test]
@@ -2141,10 +2143,10 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context, &call)?;
         let input = input();
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         assert_eq!(
             store.record(id, &call)?.prompt.digest,
-            input.request.tasks[0].prompt_digest
+            input.request.task.prompt_digest
         );
         if phase != "committed" {
             assert!(matches!(
@@ -2156,9 +2158,9 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
         }
         // A replay mints fresh IDs; it must land on the reserved ones.
         let mut replay = self::input();
-        replay.run_id = RunId::from_bytes([9; 16]);
-        replay.attempts[0].attempt_id = AttemptId::from_bytes([10; 16]);
-        assert_eq!(store.create(&replay, &call)?.run_id, input.run_id);
+        replay.attempt_id = AttemptId::from_bytes([9; 16]);
+        replay.attempt_id = AttemptId::from_bytes([10; 16]);
+        assert_eq!(store.create(&replay, &call)?.attempt_id, input.attempt_id);
         if !phase.starts_with("withdraw-") {
             seal_exit_fixture(&store, &input)?;
         }
@@ -2243,10 +2245,10 @@ fn result_orphan_redaction_flag_describes_the_preserved_bytes() -> TestResult {
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context, &call)?;
         let input = input();
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         store.create(&input, &call)?;
         seal_exit_fixture(&store, &input)?;
-        let dir = store.attempt_dir(input.run_id, id, false)?;
+        let dir = store.attempt_dir(id, false)?;
         super::artifacts::seal(&dir, "result.md", text.as_bytes(), RESULT_LIMIT)?;
         let mut facts = publication();
         facts.redacted = true;
@@ -2271,11 +2273,11 @@ fn result_only_orphan_is_not_poisoned_by_different_recomputed_text() -> TestResu
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
     super::artifacts::seal(
-        &store.attempt_dir(input.run_id, id, false)?,
+        &store.attempt_dir(id, false)?,
         "result.md",
         publication().result.as_bytes(),
         RESULT_LIMIT,
@@ -2296,7 +2298,6 @@ fn result_only_orphan_is_not_poisoned_by_different_recomputed_text() -> TestResu
         }
     );
     store.recover_result_only(id, &recomputed, &exit(), &call)?;
-    assert_eq!(store.run(input.run_id, &call)?.closure, Closure::Closed);
     assert_eq!(
         store
             .read_output(
@@ -2321,7 +2322,7 @@ fn full_database_retains_admission_and_recovers_original_terminal_intent() -> Te
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.create(&input, &call)?;
     assert_eq!(admission_count(&store)?, 1);
     seal_exit_fixture(&store, &input)?;
@@ -2342,12 +2343,10 @@ fn full_database_retains_admission_and_recovers_original_terminal_intent() -> Te
         Err(RunError::Nonterminal)
     ));
     assert_eq!(store.events(0, 64, None, &call)?.len(), 1);
-    assert_eq!(store.run(input.run_id, &call)?.closure, Closure::Open);
     store.db.pragma_update(None, "max_page_count", 10000)?;
     store.recover_terminal(id, &exit(), &call)?;
     assert_eq!(admission_count(&store)?, 0);
     assert_eq!(store.events(0, 64, None, &call)?.len(), 2);
-    assert_eq!(store.run(input.run_id, &call)?.closure, Closure::Closed);
     assert_eq!(
         store
             .read_output(
@@ -2377,7 +2376,7 @@ fn receipt_cancellation_requires_ordered_delivery() -> TestResult {
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context, &call)?;
         let input = input();
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         store.create(&input, &call)?;
         let mut observation = exit();
         observation.cancel_delivered_before_exit = delivered;
@@ -2411,10 +2410,10 @@ fn publication_deferred_effects_survive_commit_and_replay() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let effects = serde_json::json!({
         "schema_version": 1,
         "scope": RunStore::scope(&store.record(id, &call)?),
@@ -2447,10 +2446,10 @@ fn publication_lock_timeout_retains_exact_sealed_decision() -> TestResult {
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context, &call)?;
         let input = input();
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         store.create(&input, &call)?;
         seal_exit_fixture(&store, &input)?;
-        let run = store.run_dir(input.run_id, false)?;
+        let run = store.attempt_dir(input.attempt_id, false)?;
         let lock = run.try_lock(
             std::ffi::OsStr::new("publication.lock"),
             provenant_os::fs::LockMode::Exclusive,
@@ -2460,7 +2459,7 @@ fn publication_lock_timeout_retains_exact_sealed_decision() -> TestResult {
                 .publish_terminal(id, 1, &publication(), &exit(), &call)
                 .is_err()
         );
-        let attempt = store.attempt_dir(input.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let sealed =
             crate::artifacts::read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?
                 .ok_or("decision not sealed")?;
@@ -2494,12 +2493,12 @@ fn publication_postcommit_effect_failure_still_cleans_temporary() -> TestResult 
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let mut input = input();
-    input.request.tasks[0].writer = Some(WriterRequest {
-        extra: Default::default(),
+    input.request.task.writer = Some(WriterRequest {
+        extra: crate::tests::writer_extra(),
         project: temp.path().into(),
         worktree: temp.path().into(),
     });
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
     let temporary = store.temporary_path(id, &call)?;
@@ -2522,10 +2521,10 @@ fn publication_manifest_recovery_preserves_conflict_until_intent_is_established(
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let archive = crate::artifacts::subdir(&attempt, std::ffi::OsStr::new("quarantine"), true)?;
     let scope = RunStore::scope(&store.record(id, &call)?);
     let intended = crate::db::bytes(
@@ -2561,7 +2560,7 @@ fn publication_manifest_recovery_preserves_conflict_until_intent_is_established(
     let store = RunStore::open(&context, &call)?;
     assert!(
         store
-            .pending_effect_attempts(input.run_id, &call)?
+            .pending_effect_attempts(input.attempt_id, &call)?
             .contains(&id)
     );
     store.reconcile_terminal_effects(&store.record(id, &call)?, &call)?;
@@ -2584,7 +2583,7 @@ fn publication_manifest_recovery_preserves_conflict_until_intent_is_established(
     let path = context
         .state_root
         .as_path()
-        .join(format!("runs/{}/attempts/{id}/quarantine", input.run_id));
+        .join(format!("attempts/{id}/quarantine"));
     std::fs::rename(
         path.join("manifest.json"),
         path.join("manifest.conflict.json"),
@@ -2604,7 +2603,7 @@ fn publication_manifest_recovery_preserves_conflict_until_intent_is_established(
     ));
     assert!(
         !store
-            .pending_effect_attempts(input.run_id, &call)?
+            .pending_effect_attempts(input.attempt_id, &call)?
             .contains(&id)
     );
     Ok(())
@@ -2621,7 +2620,7 @@ fn receipt_prelaunch_cancel_and_deadline_have_distinct_evidence() -> TestResult 
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context, &call)?;
         let input = input();
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         store.create(&input, &call)?;
         let mut observation = exit();
         observation.never_spawned = prelaunch;
@@ -2637,7 +2636,7 @@ fn receipt_prelaunch_cancel_and_deadline_have_distinct_evidence() -> TestResult 
         });
         observation.cancel_delivered_before_exit = Some(false);
         seal_observation(&store, &input, &observation)?;
-        let dir = store.attempt_dir(input.run_id, id, false)?;
+        let dir = store.attempt_dir(id, false)?;
         crate::artifacts::seal(
             &dir,
             "cancel.json",
@@ -2683,7 +2682,7 @@ pub(super) fn seal_observation(
         .as_object_mut()
         .ok_or("exit fixture")?
         .insert("schema_version".into(), 1.into());
-    let dir = store.attempt_dir(input.run_id, input.attempts[0].attempt_id, false)?;
+    let dir = store.attempt_dir(input.attempt_id, false)?;
     super::artifacts::seal(
         &dir,
         "process-exit.json",
@@ -2708,7 +2707,7 @@ fn prelaunch_refusal_publishes_durable_never_launched_evidence() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.create(&input, &call)?;
     let mut observation = exit();
     observation.never_spawned = true;
@@ -2725,70 +2724,78 @@ fn prelaunch_refusal_publishes_durable_never_launched_evidence() -> TestResult {
 }
 
 #[test]
-fn the_store_initialises_at_version_ten_without_spacing() -> TestResult {
+fn host_stores_match_their_schema_and_refuse_other_versions_unchanged() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir()?;
-    let context = context(temp.path())?;
+    // tempfile uses the umask default, which can leave group or other access;
+    // the stores refuse that for their host directory. Canonical like `context`.
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+    let canonical = std::fs::canonicalize(temp.path())?;
+    let host = canonical.as_path();
     let clock = clock();
     let cancel = CancelToken::new();
     let call = call(&clock, &cancel);
-    let store = RunStore::open(&context, &call)?;
-    let version: i64 =
-        store
-            .db
-            .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
-                r.get(0)
-            })?;
-    assert_eq!(version, 10);
-    let spacing: i64 = store.db.query_row(
-        "SELECT COUNT(*) FROM sqlite_schema WHERE name='spacing'",
-        [],
-        |r| r.get(0),
-    )?;
-    assert_eq!(spacing, 0);
+    let admission = crate::ledger::open(host, &call)?;
+    let contributions = crate::pr_contribution::Contributions::open(host, &call)?;
+    let stores = [
+        ("admission.sqlite3", crate::ledger::SCHEMA, admission),
+        (
+            "pr-contributions.sqlite3",
+            crate::pr_contribution::SCHEMA,
+            contributions.0,
+        ),
+    ];
+    for (name, schema, db) in stores {
+        assert!(provenant_sqlite::schema_matches(&db, schema)?, "{name}");
+        db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        drop(db);
+        let path = host.join(name);
+        for version in [schema.version - 1, schema.version + 1] {
+            let db = provenant_sqlite::open_connection(&path, false)?;
+            db.pragma_update(None, "user_version", version)?;
+            db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+            drop(db);
+            let before = std::fs::read(&path)?;
+            let refused = match name {
+                "admission.sqlite3" => crate::ledger::open(host, &call).map(drop),
+                _ => crate::pr_contribution::Contributions::open(host, &call).map(drop),
+            };
+            assert!(
+                matches!(refused, Err(RunError::Version(found)) if found == version),
+                "{name} {version}"
+            );
+            assert_eq!(std::fs::read(&path)?, before, "{name} {version}");
+        }
+    }
     Ok(())
 }
 
 #[test]
-fn a_version_seven_store_upgrades_on_open_and_can_admit() -> TestResult {
+fn a_fresh_store_matches_its_schema_and_other_versions_are_refused_unchanged() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
     let cancel = CancelToken::new();
     let call = call(&clock, &cancel);
-    // Shape the store exactly as version 7 left it.
-    RunStore::open(&context, &call)?
-        .db
-        .execute_batch("DROP TABLE admission_windows; PRAGMA user_version=7;")?;
     let store = RunStore::open(&context, &call)?;
-    let version: i64 =
-        store
-            .db
-            .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
-                r.get(0)
-            })?;
-    assert_eq!(version, 10);
-    let operation = OperationId::parse("admit-after-upgrade")?;
-    assert!(store.admission_window(&operation, &call)?.is_none());
-    let deadline = WallTime::from_micros(1_000_000)?;
-    store.save_admission_window(
-        &operation,
-        crate::AdmissionWindow {
-            deadline,
-            wake_at: None,
-        },
-        &call,
-    )?;
-    assert!(store.admission_window(&operation, &call)?.is_some());
-    let backups = std::fs::read_dir(temp.path().join("state"))?
-        .filter_map(std::result::Result::ok)
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("run.sqlite3.bak-")
-        })
-        .count();
-    assert_eq!(backups, 1, "the upgrade keeps one pre-migration copy");
+    assert!(provenant_sqlite::schema_matches(
+        &store.db,
+        crate::db::SCHEMA
+    )?);
+    drop(store);
+    let path = context.state_root.as_path().join("run.sqlite3");
+    for version in [crate::db::SCHEMA.version - 1, crate::db::SCHEMA.version + 1] {
+        let db = provenant_sqlite::open_connection(&path, false)?;
+        db.pragma_update(None, "user_version", version)?;
+        db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        drop(db);
+        let before = std::fs::read(&path)?;
+        assert!(matches!(
+            RunStore::open(&context, &call),
+            Err(RunError::Version(found)) if found == version
+        ));
+        assert_eq!(std::fs::read(&path)?, before, "version {version}");
+    }
     Ok(())
 }
 
@@ -2818,89 +2825,6 @@ fn a_store_failure_omits_source_text_at_every_destination() {
 }
 
 #[test]
-fn the_store_refuses_a_version_newer_than_ten() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let context = context(temp.path())?;
-    let clock = clock();
-    let cancel = CancelToken::new();
-    let call = call(&clock, &cancel);
-    RunStore::open(&context, &call)?
-        .db
-        .execute_batch("PRAGMA user_version=11;")?;
-    assert!(matches!(
-        RunStore::open(&context, &call),
-        Err(RunError::Version(11))
-    ));
-    let state = context.state_root.as_path();
-    let version: i64 = provenant_sqlite::open_connection(&state.join("run.sqlite3"), true)?
-        .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
-            r.get(0)
-        })?;
-    assert_eq!(version, 11, "a refused store stays as it was");
-    assert!(
-        !std::fs::read_dir(state)?
-            .filter_map(std::result::Result::ok)
-            .any(|entry| entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("run.sqlite3.bak-")),
-        "a refused store takes no backup"
-    );
-    Ok(())
-}
-
-#[test]
-fn version_five_lets_one_run_continue_several_targets() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let context = context(temp.path())?;
-    let clock = clock();
-    let cancel = CancelToken::new();
-    let call = call(&clock, &cancel);
-    let input = input();
-    let store = RunStore::open(&context, &call)?;
-    store.create(&input, &call)?;
-    let first = input.attempts[0].attempt_id.to_string();
-    let run = input.run_id.to_string();
-    // Shape the table as version 4 left it, with one row to carry over.
-    store.db.execute_batch(&format!(
-        "DROP TABLE settlement_receipts; DROP INDEX reaction_pending; DROP TABLE reactions; DROP INDEX continuation_runs; DROP TABLE continuations; CREATE TABLE continuations (target TEXT PRIMARY KEY REFERENCES attempts(id), run TEXT NOT NULL UNIQUE REFERENCES runs(id)) STRICT; INSERT INTO continuations VALUES ('{first}','{run}'); PRAGMA user_version=4;"
-    ))?;
-    drop(store);
-    let store = RunStore::open(&context, &call)?;
-    let kept: String = store.db.query_row(
-        "SELECT run FROM continuations WHERE target=?1",
-        [&first],
-        |r| r.get(0),
-    )?;
-    assert_eq!(kept, run);
-    // A second attempt in the same run can now be continued as well.
-    let mut second = store.record(input.attempts[0].attempt_id, &call)?;
-    second.attempt_id = AttemptId::from_bytes([42; 16]);
-    second.attempt_number = 2;
-    store.db.execute(
-        "INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,2,1,0,?5)",
-        rusqlite::params![
-            second.attempt_id.to_string(),
-            run,
-            second.project_id.to_string(),
-            second.task_id.to_string(),
-            crate::db::bytes(&second)?
-        ],
-    )?;
-    store.db.execute(
-        "INSERT INTO continuations(target,run) VALUES (?1,?2)",
-        rusqlite::params![second.attempt_id.to_string(), run],
-    )?;
-    let rows: i64 = store.db.query_row(
-        "SELECT COUNT(*) FROM continuations WHERE run=?1",
-        [&run],
-        |r| r.get(0),
-    )?;
-    assert_eq!(rows, 2);
-    Ok(())
-}
-
-#[test]
 fn output_redacts_before_slicing_and_keeps_artifact_binding() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
@@ -2909,7 +2833,7 @@ fn output_redacts_before_slicing_and_keeps_artifact_binding() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
     let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
@@ -2954,7 +2878,7 @@ fn lane_selection_is_owned_and_skips_seen_completions() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let input = input();
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let query = |owner: Option<ActorId>, unseen_after: Option<u64>| LaneQuery {
         targets: vec![],
         all: unseen_after.is_some(),
@@ -2999,55 +2923,27 @@ fn work_context_bounds_are_enforced() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     for value in ["x".repeat(257), "  ".into(), "bad\nvalue".into()] {
         let mut request = input();
-        request.request.tasks[0].context = Some(provenant_records::run::WorkContext {
-            work_item: Some(value),
-            ..Default::default()
-        });
+        request
+            .request
+            .task
+            .context
+            .as_mut()
+            .ok_or("work key")?
+            .work_item = Some(value);
         assert!(matches!(
             store.create(&request, &call),
             Err(RunError::Validation("work context"))
         ));
     }
     let mut request = input();
-    request.request.tasks[0].context = Some(provenant_records::run::WorkContext {
-        work_item: Some("x".repeat(256)),
-        ..Default::default()
-    });
+    request
+        .request
+        .task
+        .context
+        .as_mut()
+        .ok_or("work key")?
+        .work_item = Some("x".repeat(256));
     store.create(&request, &call)?;
-    Ok(())
-}
-
-#[test]
-fn version_seven_is_snapshotted_before_admission_windows_are_added() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let context = context(temp.path())?;
-    let clock = clock();
-    let cancel = CancelToken::new();
-    let call = call(&clock, &cancel);
-    let store = RunStore::open(&context, &call)?;
-    store
-        .db
-        .execute_batch("DROP TABLE admission_windows; PRAGMA user_version=7;")?;
-    drop(store);
-
-    let store = RunStore::open(&context, &call)?;
-    let version: i64 = store
-        .db
-        .pragma_query_value(None, "user_version", |row| row.get(0))?;
-    assert_eq!(version, 10);
-    let backup = context.state_root.as_path().join(format!(
-        "run.sqlite3.bak-{}",
-        call.clock.wall_now()?.as_micros()
-    ));
-    let backup = provenant_sqlite::open_connection(&backup, true)?;
-    let version: i64 = backup.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    assert_eq!(version, 7);
-    let tables: i64 = backup.query_row(
-        "SELECT count(*) FROM sqlite_schema WHERE name='admission_windows'",
-        [],
-        |row| row.get(0),
-    )?;
-    assert_eq!(tables, 0);
     Ok(())
 }
 
@@ -3056,7 +2952,7 @@ fn settle_one(
     call: &Request<'_>,
 ) -> std::result::Result<PreparedRun, Box<dyn std::error::Error>> {
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.create(&input, call)?;
     let mut observation = exit();
     observation.never_spawned = true;
@@ -3079,8 +2975,8 @@ fn a_terminal_commit_owes_one_frozen_reaction_in_the_same_transaction() -> TestR
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = settle_one(&store, &call)?;
-    let id = input.attempts[0].attempt_id;
-    assert_eq!(store.pending_reactions(input.run_id, &call)?, [id]);
+    let id = input.attempt_id;
+    assert!(store.reaction_pending(input.attempt_id, &call)?);
     let owed = store.reaction(id, &call)?.ok_or("row")?;
     assert!(
         owed.notice
@@ -3106,7 +3002,7 @@ fn recovery_drains_what_a_crashed_guardian_left_and_a_failed_step_retries() -> T
     // The guardian dies after the commit, before any reaction.
     drop(store);
     let recovery = RunStore::open(&context, &call)?;
-    assert_eq!(recovery.pending_reactions(input.run_id, &call)?.len(), 1);
+    assert!(recovery.reaction_pending(input.attempt_id, &call)?);
     let calls = std::cell::RefCell::new((0, 0));
     let mut step = |reaction: &mut Reaction,
                     _save: &mut crate::reactions::Saver<'_>|
@@ -3128,13 +3024,13 @@ fn recovery_drains_what_a_crashed_guardian_left_and_a_failed_step_retries() -> T
         reaction.ledger_done = true;
         Ok(())
     };
-    let failed = recovery.drain_reactions(input.run_id, &clock, &cancel, &mut step);
+    let failed = recovery.drain_reactions(input.attempt_id, &clock, &cancel, &mut step);
     assert_eq!(failed.unwrap_err().to_string(), "inbox busy");
     // Progress is kept and the row is still owed.
-    assert_eq!(recovery.pending_reactions(input.run_id, &call)?.len(), 1);
-    recovery.drain_reactions(input.run_id, &clock, &cancel, &mut step)?;
-    assert!(recovery.pending_reactions(input.run_id, &call)?.is_empty());
-    recovery.drain_reactions(input.run_id, &clock, &cancel, &mut step)?;
+    assert!(recovery.reaction_pending(input.attempt_id, &call)?);
+    recovery.drain_reactions(input.attempt_id, &clock, &cancel, &mut step)?;
+    assert!(!recovery.reaction_pending(input.attempt_id, &call)?);
+    recovery.drain_reactions(input.attempt_id, &clock, &cancel, &mut step)?;
     // The graph ran once, the failed notice ran twice, and nothing ran after.
     assert_eq!(*calls.borrow(), (1, 2));
     Ok(())
@@ -3159,15 +3055,15 @@ fn two_concurrent_drains_react_once() -> TestResult {
     };
     // One drain is mid-flight and holds the run's lock; a second, from another
     // process's store, defers to it instead of repeating its work.
-    let held = store.reaction_lock(input.run_id)?.ok_or("lock")?;
+    let held = store.reaction_lock(input.attempt_id)?.ok_or("lock")?;
     let other = RunStore::open(&context, &call)?;
-    other.drain_reactions(input.run_id, &clock, &cancel, &mut finish)?;
+    other.drain_reactions(input.attempt_id, &clock, &cancel, &mut finish)?;
     assert_eq!(runs.get(), 0);
     drop(held);
-    other.drain_reactions(input.run_id, &clock, &cancel, &mut finish)?;
-    store.drain_reactions(input.run_id, &clock, &cancel, &mut finish)?;
+    other.drain_reactions(input.attempt_id, &clock, &cancel, &mut finish)?;
+    store.drain_reactions(input.attempt_id, &clock, &cancel, &mut finish)?;
     assert_eq!(runs.get(), 1);
-    assert!(store.pending_reactions(input.run_id, &call)?.is_empty());
+    assert!(!store.reaction_pending(input.attempt_id, &call)?);
     Ok(())
 }
 
@@ -3180,10 +3076,10 @@ fn done_rows_are_pruned_and_pending_rows_are_kept() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = settle_one(&store, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.prune_reactions(i64::MAX, &call)?;
     assert!(store.reaction(id, &call)?.is_some());
-    store.drain_reactions(input.run_id, &clock, &cancel, &mut |reaction, _| {
+    store.drain_reactions(input.attempt_id, &clock, &cancel, &mut |reaction, _| {
         reaction.graph_done = true;
         reaction.notice_done = true;
         reaction.log_done = true;
@@ -3222,12 +3118,12 @@ fn progress_saves_with_a_fresh_budget_after_a_long_step() -> TestResult {
     let call = call(&base, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = settle_one(&store, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let skewed = SkewClock {
         inner: clock(),
         skew: Default::default(),
     };
-    store.drain_reactions(input.run_id, &skewed, &cancel, &mut |reaction, save| {
+    store.drain_reactions(input.attempt_id, &skewed, &cancel, &mut |reaction, save| {
         // A graph advance can run for longer than one call budget.
         skewed
             .skew
@@ -3239,7 +3135,7 @@ fn progress_saves_with_a_fresh_budget_after_a_long_step() -> TestResult {
         reaction.ledger_done = true;
         Ok(())
     })?;
-    assert!(store.pending_reactions(input.run_id, &call)?.is_empty());
+    assert!(!store.reaction_pending(input.attempt_id, &call)?);
     assert!(store.reaction(id, &call)?.ok_or("row")?.graph_done);
     Ok(())
 }
@@ -3252,8 +3148,8 @@ fn a_step_boundary_save_survives_a_failure_after_it() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = settle_one(&store, &call)?;
-    let id = input.attempts[0].attempt_id;
-    let failed = store.drain_reactions(input.run_id, &clock, &cancel, &mut |reaction, save| {
+    let id = input.attempt_id;
+    let failed = store.drain_reactions(input.attempt_id, &clock, &cancel, &mut |reaction, save| {
         reaction.resolved = true;
         save(reaction)?;
         // The step dies before it records anything else.
@@ -3273,15 +3169,15 @@ fn a_closed_run_with_pending_reactions_is_open_for_reconcile() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = settle_one(&store, &call)?;
-    assert_eq!(store.open_runs(10, &call)?, vec![input.run_id]);
-    store.drain_reactions(input.run_id, &clock, &cancel, &mut |reaction, _| {
+    assert_eq!(store.open_attempts(10, &call)?, vec![input.attempt_id]);
+    store.drain_reactions(input.attempt_id, &clock, &cancel, &mut |reaction, _| {
         reaction.notice_done = true;
         reaction.log_done = true;
         reaction.ledger_done = true;
         reaction.graph_done = true;
         Ok(())
     })?;
-    assert!(store.open_runs(10, &call)?.is_empty());
+    assert!(store.open_attempts(10, &call)?.is_empty());
     Ok(())
 }
 
@@ -3293,7 +3189,7 @@ fn a_forged_row_cannot_carry_launch_authority() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = settle_one(&store, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     // A lane rewrites the row to name its own executables and config root.
     let mut forged = serde_json::to_value(store.reaction(id, &call)?.ok_or("row")?)?;
     forged["graph"] = serde_json::json!({
@@ -3310,7 +3206,7 @@ fn a_forged_row_cannot_carry_launch_authority() -> TestResult {
     // The row has no place for host authority, so it is refused, not obeyed.
     assert!(store.reaction(id, &call).is_err());
     let mut ran = false;
-    let result = store.drain_reactions(input.run_id, &clock, &cancel, &mut |_, _| {
+    let result = store.drain_reactions(input.attempt_id, &clock, &cancel, &mut |_, _| {
         ran = true;
         Ok(())
     });
@@ -3328,7 +3224,7 @@ fn receipt_lost_recovery_converges_on_a_sealed_non_lost_decision() -> TestResult
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context, &call)?;
         let input = input();
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         store.create(&input, &call)?;
         let blocker = rusqlite::Connection::open(context.state_root.as_path().join("run.sqlite3"))?;
         blocker.execute_batch("BEGIN IMMEDIATE")?;
@@ -3350,7 +3246,7 @@ fn receipt_lost_recovery_converges_on_a_sealed_non_lost_decision() -> TestResult
                 .publish_terminal(id, 1, &conflicting, &exit(), &call)
                 .is_err()
         );
-        let attempt = store.attempt_dir(input.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let intent =
             attempt.read_stable(std::ffi::OsStr::new("terminal-pending.json"), RECORD_LIMIT)?;
         assert!(!intent.is_empty());
@@ -3383,7 +3279,7 @@ fn receipt_busy_then_replay_converges_and_retains_conflict() -> TestResult {
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context, &call)?;
         let input = input();
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         store.create(&input, &call)?;
         let blocker = rusqlite::Connection::open(context.state_root.as_path().join("run.sqlite3"))?;
         blocker.execute_batch("BEGIN IMMEDIATE")?;
@@ -3396,8 +3292,6 @@ fn receipt_busy_then_replay_converges_and_retains_conflict() -> TestResult {
         let path = context
             .state_root
             .as_path()
-            .join("runs")
-            .join(input.run_id.to_string())
             .join("attempts")
             .join(id.to_string());
         let original = std::fs::read(path.join("terminal-pending.json"))?;
@@ -3463,8 +3357,8 @@ fn pressure_collection_uses_configured_logs_age() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = settle_one(&store, &call)?;
-    let id = input.attempts[0].attempt_id;
-    store.drain_reactions(input.run_id, &clock, &cancel, &mut |reaction, _| {
+    let id = input.attempt_id;
+    store.drain_reactions(input.attempt_id, &clock, &cancel, &mut |reaction, _| {
         reaction.graph_done = true;
         reaction.notice_done = true;
         reaction.log_done = true;
@@ -3483,131 +3377,171 @@ fn pressure_collection_uses_configured_logs_age() -> TestResult {
     Ok(())
 }
 
+/// A graph node's launch: its own attempt id under `key`.
+fn keyed_input(seed: u8, operation: &str, graph: &str, node: &str, attempt: u32) -> PreparedRun {
+    let mut prepared = input();
+    prepared.attempt_id = AttemptId::from_bytes([seed + 2; 16]);
+    prepared.operation_id = OperationId::parse(operation).unwrap();
+    crate::tests::rekey(&mut prepared);
+    prepared.request.task.context = Some(provenant_records::run::WorkContext {
+        graph_id: Some(graph.into()),
+        node_id: Some(node.into()),
+        attempt: Some(attempt),
+        ..Default::default()
+    });
+    prepared
+}
+
+fn run_database(
+    context: &ExecutionContext,
+) -> std::result::Result<rusqlite::Connection, Box<dyn std::error::Error>> {
+    Ok(rusqlite::Connection::open(
+        context.state_root.as_path().join("run.sqlite3"),
+    )?)
+}
+
+/// Every admitted row has a key, and the store never invents one.
 #[test]
-fn historical_run_stores_upgrade_with_attempts_and_backups() -> TestResult {
-    for version in [1, 2, 5] {
-        let temp = tempfile::tempdir()?;
-        let context = context(temp.path())?;
-        let clock = clock();
-        let cancel = CancelToken::new();
-        let call = call(&clock, &cancel);
-        let input = input();
-        let store = RunStore::open(&context, &call)?;
-        store.create(&input, &call)?;
-        store.db.execute_batch(
-            "DROP TABLE settlement_receipts; DROP INDEX reaction_pending; DROP TABLE reactions;",
-        )?;
-        if version < 5 {
-            store.db.execute_batch("DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT;")?;
-        }
-        if version == 1 {
-            store.db.execute_batch("DROP TABLE cancellations;")?;
-        }
-        store.db.pragma_update(None, "user_version", version)?;
-        drop(store);
-        let upgraded = RunStore::open(&context, &call)?;
-        let backup = context.state_root.as_path().join(format!(
-            "run.sqlite3.bak-{}",
-            call.clock.wall_now()?.as_micros()
-        ));
-        let backup = provenant_sqlite::open_connection(&backup, true)?;
-        assert_eq!(
-            backup.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))?,
-            version
-        );
-        assert_eq!(
-            backup.query_row("SELECT count(*) FROM attempts", [], |r| r.get::<_, i64>(0))?,
-            1
-        );
-        upgraded.record(input.attempts[0].attempt_id, &call)?;
-        if version == 1 {
-            let op = OperationId::parse("stop")?;
-            upgraded.bind_cancel(&op, "attempt", &call)?;
-            assert!(matches!(
-                upgraded.bind_cancel(&op, "other", &call),
-                Err(RunError::OperationConflict)
-            ));
-        }
-    }
+fn admission_requires_a_key_and_records_it() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    assert!(store.create(&raw_input(), &call).is_err());
+    let keyed = input();
+    store.create(&keyed, &call)?;
+    let record = store.record(keyed.attempt_id, &call)?;
+    let key = record.key.clone();
+    let raw: Vec<u8> = store.db.query_row(
+        "SELECT record FROM attempts WHERE id=?1",
+        [record.attempt_id.to_string()],
+        |row| row.get(0),
+    )?;
+    let persisted = crate::db::decode_attempt(&raw)?;
+    assert_eq!(persisted.key, key);
+    // A restarted host finds the same attempt by its key alone.
+    drop(store);
+    let restarted = RunStore::open(&context, &call)?;
+    assert_eq!(
+        restarted.attempt_by_key(&key, &call)?.attempt_id,
+        record.attempt_id
+    );
     Ok(())
 }
 
 #[test]
-fn ledger_capacity_upgrades_preserve_terminal_attempt_references() -> TestResult {
-    for version in [8, 9] {
-        let temp = tempfile::tempdir()?;
-        let context = context(temp.path())?;
+fn plain_lane_and_one_node_graph_store_the_same_attempt_row() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let plain = input();
+    let graph = keyed_input(20, "graph-test", "graph-one", "review", 1);
+    store.create(&plain, &call)?;
+    store.create(&graph, &call)?;
+    let plain_key = provenant_records::WorkKey::new(
+        context.project_id,
+        format!("lane-{}", plain.attempt_id),
+        "node",
+        1,
+    )?;
+    let graph_key = provenant_records::WorkKey::new(context.project_id, "graph-one", "review", 1)?;
+    for (prepared, key) in [(&plain, &plain_key), (&graph, &graph_key)] {
+        let id = prepared.attempt_id;
+        assert_eq!(&store.work_key(id, &call)?, key);
+        let record = store.attempt_by_key(key, &call)?;
+        assert_eq!(record.attempt_id, id);
+        assert_eq!(&record.key, key);
+        assert_eq!(&store.record(id, &call)?.key, key);
+    }
+    let database = run_database(&context)?;
+    let shape = |id: AttemptId| {
+        database.query_row(
+            "SELECT refused,terminal,revision,number,continues IS NULL,record IS NOT NULL,sealed \
+             FROM attempts WHERE id=?1",
+            [id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, bool>(4)?,
+                    row.get::<_, bool>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            },
+        )
+    };
+    assert_eq!(shape(plain.attempt_id)?, shape(graph.attempt_id)?);
+    Ok(())
+}
+
+#[test]
+fn concurrent_creates_of_one_work_key_admit_one_attempt() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    {
         let clock = clock();
         let cancel = CancelToken::new();
-        let call = call(&clock, &cancel);
-        let input = input();
-        let id = input.attempts[0].attempt_id;
-        let store = RunStore::open(&context, &call)?;
-        store.create(&input, &call)?;
-        store.withdraw(
-            id,
-            AttemptState::Queued {
-                extra: Default::default(),
-            },
-            Outcome::Rejected,
-            "fixture rejection",
-            WallTime::from_micros(200)?,
-            &call,
-        )?;
-        let before = store.record(id, &call)?;
-        let event_count: i64 = store.db.query_row(
-            "SELECT count(*) FROM events WHERE attempt=?1",
-            [id.to_string()],
-            |row| row.get(0),
-        )?;
-        assert!(event_count > 0);
-        if version == 9 {
-            // Exercise the real former SQL cap, not just its version marker.
-            store.db.execute_batch("PRAGMA foreign_keys=OFF;")?;
-            store.db.execute_batch(include_str!("schema_v9.sql"))?;
-            store.db.execute_batch("PRAGMA foreign_keys=ON;")?;
-        }
-        store.db.pragma_update(None, "user_version", version)?;
-        drop(store);
-        let upgraded = RunStore::open(&context, &call)?;
-        assert_eq!(upgraded.record(id, &call)?, before);
-        assert_eq!(
-            upgraded.db.query_row(
-                "SELECT count(*) FROM events WHERE attempt=?1",
-                [id.to_string()],
-                |row| row.get::<_, i64>(0)
-            )?,
-            event_count
-        );
-        assert_eq!(
-            upgraded
-                .db
-                .pragma_query_value(None, "foreign_keys", |row| row.get::<_, i64>(0))?,
-            1
-        );
-        assert_eq!(
-            upgraded
-                .db
-                .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
-                    row.get::<_, i64>(0)
-                })?,
-            0
-        );
+        RunStore::open(&context, &call(&clock, &cancel))?;
+    }
+    let first = keyed_input(30, "graph-race-a", "graph-race", "build", 1);
+    let second = keyed_input(40, "graph-race-b", "graph-race", "build", 1);
+    let results: Vec<Result<AttemptRecord>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = [&first, &second]
+            .into_iter()
+            .map(|prepared| {
+                let context = &context;
+                scope.spawn(move || {
+                    let clock = clock();
+                    let cancel = CancelToken::new();
+                    let call = call(&clock, &cancel);
+                    RunStore::open(context, &call)?.create(prepared, &call)
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let attempts = results.into_iter().collect::<Result<Vec<_>>>()?;
+    assert_eq!(attempts[0].attempt_id, attempts[1].attempt_id);
+    assert_eq!(attempts[0].key, attempts[1].key);
+    let rows: i64 = run_database(&context)?.query_row(
+        "SELECT COUNT(*) FROM attempts WHERE graph='graph-race' AND node='build' AND attempt=1",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(rows, 1);
+    Ok(())
+}
+
+#[test]
+fn run_store_keeps_no_run_or_operation_tables() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    RunStore::open(&context, &call(&clock, &cancel))?;
+    let names: Vec<String> = run_database(&context)?
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")?
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for dropped in [
+        "admission_windows",
+        "cancellations",
+        "continuations",
+        "operations",
+        "runs",
+    ] {
         assert!(
-            upgraded
-                .db
-                .execute(
-                    "UPDATE attempts SET record=record WHERE id=?1",
-                    [id.to_string()]
-                )
-                .is_err()
-        );
-        assert!(
-            upgraded
-                .db
-                .execute("DELETE FROM attempts WHERE id=?1", [id.to_string()])
-                .is_err()
+            !names.iter().any(|name| name == dropped),
+            "{dropped}: {names:?}"
         );
     }
+    assert!(names.iter().any(|name| name == "attempts"));
     Ok(())
 }

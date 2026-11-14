@@ -58,6 +58,12 @@ pub(super) fn fixture_token() -> crate::claude::OauthToken {
     crate::claude::OauthToken::parse(item.as_bytes(), 1_000).expect("fixture token")
 }
 
+pub(super) fn fixture_policy() -> &'static provenant_records::policy::Policy {
+    static POLICY: std::sync::OnceLock<provenant_records::policy::Policy> =
+        std::sync::OnceLock::new();
+    POLICY.get_or_init(provenant_records::policy::Policy::default)
+}
+
 pub(super) fn fixture_input<'a>(
     route: &'a ResolvedRoute,
     confined: &'a provenant_confinement::ConfinedPlan,
@@ -74,6 +80,7 @@ pub(super) fn fixture_input<'a>(
         prompt,
         continuation: None,
         grant_digest: "fixture",
+        policy: fixture_policy(),
         executable,
         home: std::path::Path::new("/fixture/home"),
         user: std::ffi::OsStr::new("fixture"),
@@ -92,7 +99,6 @@ pub(super) fn fixture_input<'a>(
             depth: 1,
             attempt: provenant_core::AttemptId::from_bytes([7; 16]),
             assets: std::path::Path::new("/fixture/provenant"),
-            fabric_mcp: true,
         },
     }
 }
@@ -467,6 +473,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
             .adapter
             .prepare(fixture_input(&route, &confined, &prompt, repo, token));
         let spec = result?;
+        assert_eq!(cargo_home_path(&spec), Path::new("/fixture/home/.cargo"));
         // Only Agy runs its commands on a pseudo-terminal.
         assert_eq!(spec.profile.spec.allow_pseudo_tty, id == "agy");
         // Agy keeps its prompt on argv and has no lane runtime; its own test pins its launch.
@@ -589,7 +596,8 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                             .as_path()
                     )
                 );
-                assert!(argv.iter().any(|arg| arg == "--mcp-config"));
+                assert!(argv.iter().any(|arg| arg == "--strict-mcp-config"));
+                assert!(!argv.iter().any(|arg| arg == "--mcp-config"));
                 assert!(argv.iter().any(|arg| arg == "--settings"));
                 assert!(!argv.iter().any(|arg| arg == "--safe-mode"));
                 assert!(spec.argv.windows(2).any(|args| {
@@ -632,7 +640,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                     .iter()
                     .position(|arg| arg == "--allowedTools")
                     .expect("allow-list");
-                assert_eq!(argv[allowed + 1], "Bash,Skill,mcp__fabric__*");
+                assert_eq!(argv[allowed + 1], "Bash,Skill");
                 assert!(spec.profile.spec.authentication.is_empty());
                 assert!(spec.profile.spec.deny_keychain_access);
                 for (key, value) in [
@@ -852,14 +860,18 @@ fn cursor_launches_fresh_and_resume_with_edits_only_for_writers() -> Result<(), 
     }
     let plan = read_only_plan("/fixture", Some("login"));
     let prompt = Prompt::new("x".repeat(65_537));
+    let mut strict = provenant_records::policy::Policy::default();
+    strict.overlay(
+        &std::collections::BTreeMap::from([(
+            "ARGV_PROMPT".into(),
+            provenant_records::policy::Strength::Refuse,
+        )]),
+        provenant_records::policy::Source::Project,
+    );
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.policy = &strict;
     assert!(matches!(
-        cursor::Cursor.prepare(fixture_input(
-            &route,
-            &plan,
-            &prompt,
-            Path::new("/fixture/repo"),
-            None
-        )),
+        cursor::Cursor.prepare(input),
         Err(ProviderError::PromptTooLarge { .. })
     ));
     Ok(())
@@ -1152,12 +1164,10 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
                     .find(|(name, _)| name == key)
                     .map(|(_, value)| value)
             };
-            let expected_home = if sandboxed {
-                Some(std::ffi::OsString::from("/fixture/home"))
-            } else {
-                std::env::var_os("HOME")
-            };
-            assert_eq!(env("HOME"), expected_home.as_ref());
+            assert_eq!(
+                env("HOME"),
+                Some(&std::ffi::OsString::from("/fixture/home"))
+            );
             for (key, expected) in [
                 ("XDG_CONFIG_HOME", "/fixture/state/config"),
                 ("XDG_DATA_HOME", "/fixture/state/data"),
@@ -1438,12 +1448,22 @@ fn native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation()
             &|name| (name == provenant_confinement::run_config::SANDBOX_ENV).then(|| "off".into());
         let native = adapter.prepare(input)?;
         for (key, value) in &host {
-            // These selectors bind the child to its provider and Fabric context.
+            // These selectors bind the child to its provider, Fabric context
+            // and private Cargo configuration/target with shared downloads.
             if key.to_str().is_some_and(|key| {
                 key.starts_with("PROVENANT_")
                     || matches!(
                         key,
                         "PATH"
+                            | "HOME"
+                            | "TMPDIR"
+                            | "TMPPREFIX"
+                            | "CARGO_HOME"
+                            | "RUSTUP_HOME"
+                            | "RUSTUP_AUTO_INSTALL"
+                            | "CARGO_TARGET_DIR"
+                            | "CARGO_BUILD_BUILD_DIR"
+                            | "CARGO_CACHE_AUTO_CLEAN_FREQUENCY"
                             | "CODEX_HOME"
                             | "CLAUDE_CONFIG_DIR"
                             | "CLAUDE_CODE_TMPDIR"
@@ -1461,6 +1481,14 @@ fn native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation()
                 "native adapter dropped a host environment binding"
             );
         }
+        let homes: Vec<_> = native
+            .env
+            .iter()
+            .filter(|(key, _)| key == "CARGO_HOME")
+            .collect();
+        assert_eq!(homes.len(), 1);
+        assert_eq!(homes[0].1, "/fixture/home/.cargo");
+        assert_eq!(cargo_home_path(&native), Path::new("/fixture/home/.cargo"));
         if let Some((_, host_path)) = host.iter().find(|(key, _)| key == "PATH") {
             let child_path = &native.env.iter().find(|(key, _)| key == "PATH").unwrap().1;
             let child_paths: Vec<_> = std::env::split_paths(child_path).collect();
@@ -1478,6 +1506,99 @@ fn native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation()
                 Some(&token),
             ))?;
             assert!(!confined.tool_requirements.exec.is_empty());
+        }
+    }
+    Ok(())
+}
+
+/// Small: all adapters use the same identity/cache bindings, including a
+/// sparse native environment. No process-global environment mutation is needed.
+#[test]
+fn every_adapter_finalises_missing_lane_environment() -> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture".into());
+    let token = fixture_token();
+    let argv = vec!["/bin/echo".to_owned(), "fixture".to_owned()];
+    for entry in REGISTRY {
+        let id = entry.adapter.id();
+        for native in [false, true] {
+            let auth = match id {
+                "codex" | "cursor" | "opencode" => Some("login"),
+                "agy" => Some("keychain"),
+                _ => None,
+            };
+            let plan = fixture_access_plan(Access::ReadOnly, auth, false);
+            let mut route = route(id, if id == "command" { "" } else { "fixture-model" });
+            route.account_key = None;
+            let host_var = |name: &str| {
+                (native && name == provenant_confinement::run_config::SANDBOX_ENV)
+                    .then(|| "off".into())
+            };
+            let mut input = fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                Path::new("/fixture/repo"),
+                (id == "claude").then_some(&token),
+            );
+            input.host_var = &host_var;
+            if id == "command" {
+                input.command = Some(command::Invocation {
+                    argv: &argv,
+                    program: Path::new("/bin/echo"),
+                    runtimes: &[],
+                });
+            }
+            let mut spec = entry.adapter.prepare(input)?;
+            let selected_home = spec
+                .env
+                .iter()
+                .find(|(key, _)| key == "HOME")
+                .map(|(_, value)| value.clone())
+                .expect("adapter HOME");
+            if native {
+                assert_eq!(selected_home, std::ffi::OsString::from("/fixture/home"));
+            }
+            let assert_bindings = |spec: &LaunchSpec| {
+                for (key, expected) in [
+                    ("HOME", Path::new(&selected_home).to_path_buf()),
+                    ("TMPDIR", plan.permissions().scratch.path.clone()),
+                    ("CARGO_HOME", cargo_home_path(spec)),
+                ] {
+                    let values: Vec<_> = spec
+                        .env
+                        .iter()
+                        .filter(|(name, _)| name == key)
+                        .map(|(_, value)| value.as_os_str())
+                        .collect();
+                    assert_eq!(
+                        values,
+                        vec![expected.as_os_str()],
+                        "{id} native={native} {key}"
+                    );
+                }
+            };
+            assert_bindings(&spec);
+            spec.env
+                .retain(|(key, _)| !matches!(key.to_str(), Some("TMPDIR" | "CARGO_HOME")));
+            let mut input = fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                Path::new("/fixture/repo"),
+                (id == "claude").then_some(&token),
+            );
+            input.host_var = &host_var;
+            crate::launch::finalise_provider_env(&input, &mut spec)?;
+            assert_bindings(&spec);
+            spec.env.retain(|(key, _)| key != "HOME");
+            crate::launch::finalise_provider_env(&input, &mut spec)?;
+            let homes: Vec<_> = spec
+                .env
+                .iter()
+                .filter(|(key, _)| key == "HOME")
+                .map(|(_, value)| value.as_os_str())
+                .collect();
+            assert_eq!(homes, [input.home.as_os_str()]);
         }
     }
     Ok(())

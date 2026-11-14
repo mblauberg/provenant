@@ -24,7 +24,7 @@ public struct HumanRequest: Decodable, Equatable, Sendable, Identifiable {
     public let updatedAt: String
     public let projectId: String?
     public let projectKey: String?
-    /// The host that owns the request. Every row carries it, local rows included; an old CLI omits it.
+    /// The host that owns the request. Every row carries it, local rows included.
     public let ownerHost: String?
     /// The project's name, set by `InboxClient.list` from the host-wide listing; nil in a project's own listing.
     public var projectLabel: String?
@@ -227,7 +227,7 @@ public struct InboxClient: Sendable {
         /// Present when the CLI listed the whole host: each project's name and path. A peer's projects are keyed
         /// `"<host>:<project_id>"`.
         let projects: [String: Project]?
-        /// Present on a first page listed with `--hosts`: what each peer contributed. Absent from an old CLI.
+        /// Present on a first page listed with `--hosts`: what each peer contributed.
         let peers: [PeerCoverage]?
     }
     struct Project: Decodable, Sendable { let label: String?; let host: String? }
@@ -235,36 +235,17 @@ public struct InboxClient: Sendable {
 
     /// Requests across pages, in the CLI's order, from every registered project on the host.
     public func list(includeClosed: Bool = false, pageSize: Int = 50, maxPages: Int = 10) async throws -> Page<HumanRequest> {
-        // An old CLI does not know `--hosts`; once it has said so, the rest of the listing is this host's rows.
-        let hosts = HostsFlag()
         return try await collectPages(maxPages: maxPages) { cursor in
             var arguments = ["inbox", "--all-projects", "--state", includeClosed ? "all" : "open", "--limit", String(pageSize)]
             // Peers are read on the first page only; a cursor page is this host's rows.
             if let cursor { arguments += ["--cursor", cursor] }
-            let withPeers = cursor == nil && hosts.supported
+            let withPeers = cursor == nil
             // The peer fan-out waits up to the configured peer deadline (30 s by default) after the local listing, so
             // a call that asks for peers gets a longer budget than that; otherwise an unreachable peer would time
             // out the call and hide the local rows.
-            do {
-                let listed = try await cli.call(arguments + (withPeers ? ["--hosts", "all"] : []), command: "inbox",
-                                                limit: withPeers ? Self.peerListLimit : nil, as: Listed.self)
-                return Page(items: Self.attribute(listed), nextCursor: listed.nextCursor, truncated: listed.truncated, peers: listed.peers)
-            } catch let error as ClientError where withPeers && Self.rejectsHosts(error) {
-                hosts.supported = false
-                let listed = try await cli.call(arguments, command: "inbox", as: Listed.self)
-                return Page(items: Self.attribute(listed), nextCursor: listed.nextCursor, truncated: listed.truncated, peers: listed.peers)
-            }
-        }
-    }
-
-    private final class HostsFlag: @unchecked Sendable { var supported = true }
-
-    /// True when the CLI refused the call as a usage error that names `--hosts`: an old CLI without the flag.
-    static func rejectsHosts(_ error: ClientError) -> Bool {
-        switch error {
-        case .command(let error): error.code == "INVALID" && error.message.contains("--hosts")
-        case .exited(_, let detail): detail.contains("--hosts")
-        default: false
+            let listed = try await cli.call(arguments + (withPeers ? ["--hosts", "all"] : []), command: "inbox",
+                                            limit: withPeers ? Self.peerListLimit : nil, as: Listed.self)
+            return Page(items: Self.attribute(listed), nextCursor: listed.nextCursor, truncated: listed.truncated, peers: listed.peers)
         }
     }
 

@@ -36,6 +36,10 @@ pub(crate) fn launch_contention(error: &(dyn Error + 'static)) -> bool {
                 | FacadeError::WriterLockBusy
                 | FacadeError::WriterUnknown
                 | FacadeError::WriterBusy { .. }
+                | FacadeError::GitMutationFailed {
+                    lock_failure: true,
+                    ..
+                }
         )
     )
 }
@@ -212,7 +216,7 @@ pub(crate) fn apply_launch_disposition(
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
     }) {
-        format!("; after correcting the cause, retry with `provenant retry {graph_id} --node {id}`")
+        format!("; after correcting the cause, retry with `provenant retry {graph_id}/{id}`")
     } else {
         "; inspect the graph, then use `provenant retry` with its graph and node selectors".into()
     };
@@ -300,17 +304,29 @@ fn routing_outcome(outcome: AttemptOutcome) -> provenant_routing::FallbackOutcom
 /// Launching the next route additionally requires live preparation evidence.
 pub(crate) fn fallback_candidate(
     outcome: AttemptOutcome,
-    access: AccessMode,
+    _access: AccessMode,
     launched: bool,
 ) -> bool {
-    (!launched || access == AccessMode::ReadOnly)
-        && matches!(
-            outcome,
-            AttemptOutcome::AuthRequired
-                | AttemptOutcome::UsageLimited
-                | AttemptOutcome::AdapterUnavailable
-                | AttemptOutcome::PreparationRefused(_)
-        )
+    !launched
+        && fallback_cause(outcome)
+            .is_some_and(|cause| cause.default_next() == provenant_records::NextStep::NewRoute)
+}
+
+/// The stop class that decides a route fallback. A host refusal before launch
+/// is a route that cannot serve the node, whatever refused it.
+fn fallback_cause(outcome: AttemptOutcome) -> Option<provenant_records::StopCause> {
+    use provenant_records::StopCause;
+    match outcome {
+        AttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
+        AttemptOutcome::UsageLimited => Some(StopCause::UsageLimited),
+        AttemptOutcome::PreparationRefused(provenant_records::run::TerminalCause::SpawnFailure) => {
+            Some(StopCause::SpawnFailure)
+        }
+        AttemptOutcome::AdapterUnavailable | AttemptOutcome::PreparationRefused(_) => {
+            Some(StopCause::AdapterUnavailable)
+        }
+        _ => None,
+    }
 }
 
 /// A settled review task can be independently re-attempted without changing
@@ -345,20 +361,11 @@ pub(super) fn review_preparation_substitution(node: &PlannedNode, attempt: &Grap
 pub(crate) fn live_fallback_allowed(
     outcome: AttemptOutcome,
     launched: bool,
-    access: AccessMode,
     evidence: Option<PreparationFallbackEvidence>,
 ) -> bool {
     use provenant_records::run::PreparationFailure;
     if launched {
-        return provenant_routing::FallbackPolicy {
-            outcome: routing_outcome(outcome),
-            handoff: provenant_routing::FallbackHandoff::Launched,
-            custody_released: false,
-            read_only: access == AccessMode::ReadOnly,
-            budget_remaining: true,
-            pinned: false,
-        }
-        .allows_switch();
+        return false;
     }
     let Some(evidence) = evidence else {
         return false;
@@ -375,11 +382,10 @@ pub(crate) fn live_fallback_allowed(
             outcome: expected,
             handoff: evidence.handoff,
             custody_released: evidence.custody_released,
-            read_only: access == AccessMode::ReadOnly,
             budget_remaining: true,
             pinned: false,
         }
-        .allows_switch()
+        .allows_preparation_switch()
 }
 
 pub(crate) fn fallback_denial(
@@ -547,31 +553,29 @@ pub(super) fn next_attempt_transition(
             let Some(fallback) = &facts.fallback else {
                 return NextAttemptDecision::ObservePreparationFallback;
             };
-            if !live_fallback_allowed(outcome, last.launched, node.access, fallback.evidence) {
-                let (code, message) = fallback_denial(
-                    last.launched,
-                    node.access,
-                    fallback.unreadable,
-                    outcome,
-                    fallback.cause.as_ref(),
-                );
-                return NextAttemptDecision::Ready(NextAttempt::Fail {
-                    code: Some(code),
-                    message: Some(message),
-                });
-            }
-            if review_preparation_substitution(node, last)
-                && progress
-                    .attempts
-                    .iter()
-                    .filter(|attempt| attempt.review_substitution)
-                    .count()
-                    >= limits.review_substitutions
-            {
-                return NextAttemptDecision::Ready(NextAttempt::Fail {
-                    code: Some("review_substitution_limit"),
-                    message: Some("review substitution limit reached".into()),
-                });
+            match next_step::settlement_fallback_decision(
+                node,
+                usize::from(last.key.route_index),
+                outcome,
+                last.launched,
+                FallbackEvidence {
+                    preparation: fallback.evidence,
+                    unreadable: fallback.unreadable,
+                    review_limit_reached: review_preparation_substitution(node, last)
+                        && progress
+                            .attempts
+                            .iter()
+                            .filter(|attempt| attempt.review_substitution)
+                            .count()
+                            >= limits.review_substitutions,
+                    cause: fallback.cause.as_ref(),
+                    skipped_accounts: &[],
+                },
+            ) {
+                SettlementFallback::Continue => {}
+                SettlementFallback::Fail { code, message } => {
+                    return NextAttemptDecision::Ready(NextAttempt::Fail { code, message });
+                }
             }
             progress.attempts.len()
         }
@@ -673,7 +677,7 @@ pub(super) fn decide_next_attempt<R: AttemptOwner>(
                     _ => (None, false),
                 };
                 let denied = last.outcome.is_some_and(|outcome| {
-                    !live_fallback_allowed(outcome, last.launched, node.access, evidence)
+                    !live_fallback_allowed(outcome, last.launched, evidence)
                 });
                 let cause = denied
                     .then(|| {
@@ -712,120 +716,9 @@ pub(super) fn fail_node(
     }
 }
 
-/// Settlement fallback decision outcome.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum SettlementFallback {
-    Continue,
-    Fail {
-        code: Option<String>,
-        message: Option<String>,
-    },
-}
-
-/// Settle an attempt outcome, evaluating whether fallback should fire or node should fail.
-pub(super) struct FallbackEvidence<'a> {
-    pub preparation: Option<PreparationFallbackEvidence>,
-    pub unreadable: bool,
-    pub review_limit_reached: bool,
-    pub cause: Option<&'a provenant_records::RouteExclusionReason>,
-    pub skipped_accounts: &'a [provenant_records::SkippedAccount],
-}
-
-pub(super) fn settlement_fallback_decision(
-    node: &PlannedNode,
-    route_index: usize,
-    outcome: AttemptOutcome,
-    launched: bool,
-    evidence: FallbackEvidence<'_>,
-) -> SettlementFallback {
-    let FallbackEvidence {
-        preparation: fallback_evidence,
-        unreadable: evidence_unreadable,
-        review_limit_reached,
-        cause: fallback_cause,
-        skipped_accounts,
-    } = evidence;
-    let route = node.routes.get(route_index);
-
-    if !live_fallback_allowed(outcome, launched, node.access, fallback_evidence)
-        || route_index + 1 == node.routes.len()
-        || review_limit_reached
-    {
-        let (mut advance_error_code, mut advance_error) = match outcome {
-            AttemptOutcome::PreparationRefused(cause) => (
-                Some("preparation_refused".into()),
-                Some(bounded(cause.detail(), MAX_ADVANCE_ERROR_BYTES)),
-            ),
-            AttemptOutcome::AuthRequired => (
-                Some("auth_required".into()),
-                Some("The lane requires authentication.".into()),
-            ),
-            AttemptOutcome::AdapterUnavailable => (
-                Some("adapter_unavailable".into()),
-                Some("The lane's adapter is unavailable.".into()),
-            ),
-            _ => (None, None),
-        };
-        if outcome == AttemptOutcome::UsageLimited {
-            advance_error_code = Some("usage_limited".into());
-            let pool = route
-                .and_then(|r| r.alias.as_deref())
-                .map_or_else(String::new, |alias| format!(" for pool {alias}"));
-            // A refusal before launch names each account it passed over: a
-            // stale failure or a login is not a spent allowance.
-            advance_error = Some(bounded(
-                &if !launched && !skipped_accounts.is_empty() {
-                    format!(
-                        "No account could take the route{pool}: {}; repair or refresh an account (`provenant quota tick`) or choose an eligible route.",
-                        provenant_records::SkippedAccount::describe(skipped_accounts)
-                    )
-                } else {
-                    format!(
-                        "Provider quota or rate limit reached{pool}; wait for the allowance to reset or choose an eligible route."
-                    )
-                },
-                MAX_ADVANCE_ERROR_BYTES,
-            ));
-        }
-        if route_index + 1 == node.routes.len()
-            && launched
-            && node.access == AccessMode::ReadOnly
-            && route.is_some_and(|r| r.account.is_some() || r.model.is_some())
-        {
-            advance_error_code = Some("fallback_route_pinned".into());
-            advance_error = Some("The selected route is pinned and has no fallback.".into());
-        }
-        if !live_fallback_allowed(outcome, launched, node.access, fallback_evidence)
-            && route_index + 1 < node.routes.len()
-        {
-            let (code, message) = fallback_denial(
-                launched,
-                node.access,
-                evidence_unreadable,
-                outcome,
-                fallback_cause,
-            );
-            advance_error_code = Some(code.into());
-            advance_error = Some(message);
-        }
-        if review_limit_reached
-            && route_index + 1 < node.routes.len()
-            && live_fallback_allowed(outcome, launched, node.access, fallback_evidence)
-        {
-            advance_error_code = Some("review_substitution_limit".into());
-            advance_error = Some("review substitution limit reached".into());
-        }
-        SettlementFallback::Fail {
-            code: advance_error_code,
-            message: advance_error,
-        }
-    } else {
-        SettlementFallback::Continue
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::next_step::settlement_fallback_decision;
     use super::*;
     use provenant_records::run::PreparationFailure;
     use provenant_routing::FallbackHandoff;
@@ -840,37 +733,31 @@ mod tests {
         assert!(live_fallback_allowed(
             AttemptOutcome::AuthRequired,
             false,
-            AccessMode::WorktreeWrite,
             Some(evidence)
         ));
         assert!(!live_fallback_allowed(
             AttemptOutcome::AuthRequired,
             true,
-            AccessMode::WorktreeWrite,
             Some(evidence)
         ));
         assert!(!live_fallback_allowed(
             AttemptOutcome::UsageLimited,
             false,
-            AccessMode::WorktreeWrite,
             Some(evidence)
         ));
         assert!(!live_fallback_allowed(
             AttemptOutcome::TaskFailed,
             false,
-            AccessMode::WorktreeWrite,
             Some(evidence)
         ));
         assert!(!live_fallback_allowed(
             AttemptOutcome::AuthRequired,
             false,
-            AccessMode::WorktreeWrite,
             None
         ));
         assert!(!live_fallback_allowed(
             AttemptOutcome::AuthRequired,
             false,
-            AccessMode::WorktreeWrite,
             Some(PreparationFallbackEvidence {
                 custody_released: false,
                 ..evidence
@@ -879,7 +766,6 @@ mod tests {
         assert!(!live_fallback_allowed(
             AttemptOutcome::AuthRequired,
             false,
-            AccessMode::WorktreeWrite,
             Some(PreparationFallbackEvidence {
                 handoff: FallbackHandoff::UncertainOrLaunched,
                 ..evidence
@@ -902,6 +788,9 @@ mod tests {
 
     impl AttemptOwner for Owner {
         type Error = std::convert::Infallible;
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
 
         fn actor(&self) -> String {
             "actor".into()
@@ -936,7 +825,7 @@ mod tests {
     ) -> serde_json::Value {
         serde_json::json!({
             "launched": launched,
-            "key": {"graph_id": "g", "node_id": "n", "route_index": route_index},
+            "key": {"graph_id": "g", "node_id": "n", "route_index": route_index, "attempt": route_index + 1},
             "route": {"adapter": "a", "model": "a/m"},
             "state": state,
             "attempt_ref": null,
@@ -954,46 +843,6 @@ mod tests {
             .unwrap()
             .extend(extra.as_object().unwrap().clone());
         serde_json::from_value(value).unwrap()
-    }
-
-    /// Every terminal launched attempt spends one infrastructure retry on
-    /// every pass, not only when this pass switches route.
-    #[test]
-    fn launched_switches_spend_the_allowance_on_every_pass() {
-        let node = planned(serde_json::json!({
-            "id": "n", "prompt": "p", "access": "read_only", "routes": [
-                {"adapter": "a", "model": "a/m"}, {"adapter": "b", "model": "b/m"}
-            ]
-        }));
-        let limits = crate::config::GraphLimits::default();
-        let retry = serde_json::json!({"retry": {"retries": 2}});
-        // Observing the second route after a launched switch.
-        let observing = progress(
-            vec![
-                attempt(0, true, "terminal", Some("usage_limited")),
-                attempt(1, true, "running", None),
-            ],
-            retry.clone(),
-        );
-        assert_eq!(
-            decide_next_attempt(&node, &observing, &limits, &mut Owner, None).unwrap(),
-            NextAttempt::Candidate {
-                route_index: 1,
-                settlement_retries: Some(1)
-            }
-        );
-        // The switch itself spends the same retry.
-        let switching = progress(
-            vec![attempt(0, true, "terminal", Some("usage_limited"))],
-            retry,
-        );
-        assert_eq!(
-            decide_next_attempt(&node, &switching, &limits, &mut Owner, None).unwrap(),
-            NextAttempt::Candidate {
-                route_index: 1,
-                settlement_retries: Some(1)
-            }
-        );
     }
 
     /// A decision without its own reason fails the node but keeps the
@@ -1058,7 +907,7 @@ mod tests {
         assert_eq!(
             decision,
             SettlementFallback::Fail {
-                code: Some("auth_required".into()),
+                code: Some("auth_required"),
                 message: Some("The lane requires authentication.".into())
             }
         );
@@ -1111,7 +960,7 @@ mod tests {
             Vec::new(),
             serde_json::json!({"advance_error_code": "earlier", "advance_error": "kept"}),
         );
-        fail_node(&mut settled, code, message);
+        fail_node(&mut settled, code.map(str::to_owned), message);
         assert_eq!(settled.state, NodeState::Failed);
         assert_eq!(settled.advance_error_code.as_deref(), Some("auth_required"));
         assert_eq!(
@@ -1240,8 +1089,8 @@ mod tests {
         let json = serde_json::json!({
             "account": "acct-1",
             "build_heavy": true,
-            "capability": ["postgres"],
-            "write_root": ["/tmp/write"]
+            "capabilities": ["postgres"],
+            "write_roots": ["/tmp/write"]
         });
         let spec: AttemptSpec = serde_json::from_value(json).unwrap();
         assert_eq!(spec.account.as_deref(), Some("acct-1"));

@@ -208,6 +208,7 @@ fn an_excluded_account_is_named_when_another_account_cannot_serve_the_model()
             let mut record = availability();
             record.adapter = "opencode".into();
             record.account_key = Some(key.into());
+            record.plan = Some(key.into());
             record
         })
         .to_vec();

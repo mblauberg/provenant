@@ -32,6 +32,24 @@ impl<J: provenant_fabric_runtime::graph::GraphJournal> provenant_fabric_runtime:
         }
         Ok(())
     }
+    fn apply_cancellation(
+        &mut self,
+        document: &provenant_fabric_runtime::graph::GraphDocument,
+        checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
+    ) -> Result<bool, Self::Error> {
+        self.journal.apply_cancellation(document, checkpoint)
+    }
+}
+
+pub(super) fn cancellation_receipt(
+    mut run: provenant_fabric_runtime::graph::GraphRun,
+    request_id: String,
+) -> provenant_fabric_runtime::graph::GraphRun {
+    run.checkpoint.extra.insert(
+        "cancellation_request_receipt".into(),
+        serde_json::json!({"request_id":request_id}),
+    );
+    run
 }
 
 /// Discover pending journals and check deadlines under the same lock as explicit advance.
@@ -83,7 +101,6 @@ pub(crate) fn tick_graphs(
                 let due_at_start = checkpoint.cancelled || graph_wake_due(&checkpoint, now);
                 let clock = SystemClock::new();
                 let cancel = CancelToken::new();
-                let budget = WaitBudget::cli(clock.mono_now(), 55)?;
                 let mut journal = match FileJournal::open(
                     &resolved.roots.state,
                     project,
@@ -139,6 +156,10 @@ pub(crate) fn tick_graphs(
                 if context.identity.project != project || context.in_lane {
                     return Err(EdgeError::Invalid.into());
                 }
+                // A tick has no caller wait: its launches, including writer
+                // binding, have the configured launch allowance.
+                let budget =
+                    WaitBudget::cli(clock.mono_now(), context.config.graph.launch_wait_seconds)?;
                 let factory = Factory {
                     project_attribution: crate::usage::attribution_enabled(&context.roots),
                     context,
@@ -149,7 +170,6 @@ pub(crate) fn tick_graphs(
                     cwd: execution.directory,
                     assets: resolved.assets.clone(),
                     host_launch: None,
-                    mcp_project: None,
                     workers,
                 };
                 let mut owner = BoundGraphOwner {
@@ -158,10 +178,7 @@ pub(crate) fn tick_graphs(
                     launch_warnings: Vec::new(),
                     repo_facts: Default::default(),
                     factory: &factory,
-                    integration_base: Some(BoundGraphBases {
-                        integration: execution.integration_base,
-                        review: execution.review_base,
-                    }),
+                    integration_base: checkpoint.bases,
                     integration_branch: execution.document.integration_branch.clone(),
                     network: graph_network(&execution.document)?,
                     capability_overrides: graph_capability_overrides(&execution.document)?,
@@ -414,6 +431,31 @@ impl Factory {
         admission_timeout: Option<WaitBudget>,
         announce: Option<Announce<'_>>,
     ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
+        self.graph_launch_result(
+            input,
+            budget,
+            cancel,
+            prepared_scratch,
+            admission_timeout,
+            announce,
+            None,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "submission replay disposition is separate from graph advancement"
+    )]
+    pub(crate) fn graph_launch_result(
+        &self,
+        input: GraphInput,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        prepared_scratch: Option<&Path>,
+        admission_timeout: Option<WaitBudget>,
+        announce: Option<Announce<'_>>,
+        replayed: Option<&mut bool>,
+    ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
         let facts = provenant_confinement::worktrees::RepoFacts::default();
         use provenant_fabric_runtime::coordination::input::ValidateInput;
         use provenant_fabric_runtime::graph::{FileJournal, GraphJournal};
@@ -485,6 +527,7 @@ impl Factory {
                         &mut document,
                         &submission_key,
                         &self.context.config.graph.limits,
+                        self.context.port_table.worktree_layout.clone(),
                     )
                     .map_err(|_| FacadeError::InvalidInput { detail: None })?;
                 }
@@ -603,8 +646,7 @@ impl Factory {
                 status: GraphStatus::Paused,
                 outcome: None,
                 checkpoint: GraphCheckpoint {
-                    bound_review_base: None,
-                    bound_integration_base: None,
+                    bases: None,
                     extra: Default::default(),
                     expansions: Vec::new(),
                     remaining: None,
@@ -615,8 +657,7 @@ impl Factory {
                     integration_pin: None,
                     cancelled: false,
                     cancel_reason: None,
-                    pause_reason: None,
-                    pause_code: None,
+                    pause: None,
                     unknown_usage: Vec::new(),
                     unknown_usage_omitted: 0,
                     usage_events: Vec::new(),
@@ -628,7 +669,7 @@ impl Factory {
                     wake_at: None,
                     pause_asks: 0,
                     limit_notes: Vec::new(),
-                    schema_version: 1,
+                    schema_version: 2,
                     graph_id: id.to_owned(),
                     plan_digest: String::new(),
                     nodes: Vec::new(),
@@ -695,21 +736,18 @@ impl Factory {
                             first_error.get_or_insert(error);
                         }
                     }
-                    if let (Some(instance_id), Some(actor)) =
-                        (&checkpoint.instance_id, &checkpoint.ask_actor)
-                    {
-                        for ask in checkpoint.asks.iter().filter(|ask| !ask.closed) {
-                            let scope = provenant_fabric_runtime::graph::AskScope {
-                                graph_id: &checkpoint.graph_id,
-                                instance_id,
-                                actor,
-                                ask,
-                            };
-                            if let Err(error) = graph_ask_edge(self, cancel, scope, true) {
+                    if let Some(actor) = &checkpoint.ask_actor {
+                        for ask in &checkpoint.asks {
+                            let scope = provenant_fabric_runtime::graph::AskScope { actor, ask };
+                            if let Err(error) =
+                                graph_ask_with(self, cancel, actor, &ask.ask_id, |service| {
+                                    graph_ask_close(service, &scope, cancel)
+                                })
+                            {
                                 first_error.get_or_insert(error);
                             }
                         }
-                    } else if checkpoint.asks.iter().any(|ask| !ask.closed) {
+                    } else if !checkpoint.asks.is_empty() {
                         first_error.get_or_insert(FacadeError::StateCorrupt);
                     }
                     if let Some(error) = first_error {
@@ -728,15 +766,100 @@ impl Factory {
                 "Unreadable graph record retired. Identifiable attempts and inbox requests were cancelled; unidentifiable work and writer fences require inspection.".into(),
             ));
         }
-        let mut journal = FileJournal::open(
-            &self.context.roots.state,
-            self.context.identity.project,
-            id,
-            budget,
-            cancel,
-            &self.clock,
-        )
-        .map_err(|_| FacadeError::io("access graph journal"))?;
+        let cancel_request = match &input {
+            GraphInput::Cancel { reason, .. } => Some(
+                FileJournal::request_cancellation(
+                    &self.context.roots.state,
+                    self.context.identity.project,
+                    provenant_fabric_runtime::graph::CancellationTarget {
+                        graph_id: id,
+                        node: None,
+                        reason: reason.as_deref(),
+                    },
+                    budget,
+                    cancel,
+                    &self.clock,
+                )
+                .map_err(graph_journal_error)?,
+            ),
+            _ => None,
+        };
+        let open = |budget| {
+            FileJournal::open(
+                &self.context.roots.state,
+                self.context.identity.project,
+                id,
+                budget,
+                cancel,
+                &self.clock,
+            )
+        };
+        let launch_digest = document
+            .as_ref()
+            .and_then(|document| document.replay_digest());
+        let mut journal = if let Some(request_id) = cancel_request.as_ref() {
+            match FileJournal::try_open(
+                &self.context.roots.state,
+                self.context.identity.project,
+                id,
+            ) {
+                Ok(journal) => journal,
+                Err(provenant_fabric_runtime::graph::JournalError::Filesystem(
+                    provenant_os::fs::FsError::LockTimeout { .. },
+                )) => {
+                    let checkpoint = FileJournal::read_checkpoint(
+                        &self.context.roots.state,
+                        self.context.identity.project,
+                        id,
+                    )
+                    .map_err(graph_journal_error)?
+                    .ok_or(FacadeError::NotFound)?;
+                    return Ok(cancellation_receipt(
+                        graph_snapshot(checkpoint),
+                        request_id.clone(),
+                    ));
+                }
+                Err(error) => return Err(graph_journal_error(error)),
+            }
+        } else {
+            match launch_digest {
+                // A fresh launch does not queue behind another launch that bound
+                // this name to other input: it loses the name at once and takes
+                // the next one. While the holder has not bound yet, probe in short
+                // slices so the answer arrives as soon as it binds. The same input
+                // waits, as a replay.
+                Some(digest) => loop {
+                    let slice = WaitBudget::up_to(
+                        self.clock.mono_now(),
+                        provenant_core::DurationMicros::from_micros(200_000),
+                    )
+                    .cap_at(budget.deadline().as_mono_time());
+                    match open(slice) {
+                        Err(provenant_fabric_runtime::graph::JournalError::Filesystem(
+                            provenant_os::fs::FsError::LockTimeout { .. },
+                        )) if budget.remaining(self.clock.mono_now()).as_micros() > 0 => {
+                            let bound = FileJournal::execution(
+                                &self.context.roots.state,
+                                self.context.identity.project,
+                                id,
+                            )
+                            .ok()
+                            .flatten();
+                            match bound {
+                                Some(bound) if bound.document.replay_digest() != Some(digest) => {
+                                    return Err(FacadeError::Conflict);
+                                }
+                                Some(_) => break open(budget),
+                                None => continue,
+                            }
+                        }
+                        opened => break opened,
+                    }
+                },
+                None => open(budget),
+            }
+            .map_err(|_| FacadeError::io("access graph journal"))?
+        };
         if let Some(document) = &document {
             // GC and admission hold this graph's lock. If collection removed
             // the source after it was read, restore the exact bytes before
@@ -744,7 +867,8 @@ impl Factory {
             if let Some((directory, name, bytes)) = &scratch_source {
                 restore_scratch_source(directory, name, bytes)?;
             }
-            let existing = journal.load(id).map_err(graph_journal_error)?.is_some();
+            let checkpoint = journal.load(id).map_err(graph_journal_error)?;
+            let existing = checkpoint.is_some();
             let bound_execution = if existing {
                 Some(
                     FileJournal::execution(
@@ -758,9 +882,35 @@ impl Factory {
             } else {
                 None
             };
+            // A graph name holds one launch input. A new launch that finds the
+            // name bound to another digest lost a race for it; never resume or
+            // patch the other launch's graph.
+            if let (Some(bound), Some(digest)) = (&bound_execution, document.replay_digest()) {
+                if bound.document.replay_digest() != Some(digest) {
+                    return Err(FacadeError::Conflict);
+                }
+                if let Some(replayed) = replayed {
+                    // The journal lock, not the optimistic name lookup, decides
+                    // who created this submission. A matching waiter only reads.
+                    *replayed = true;
+                    let mut run = graph_snapshot(checkpoint.ok_or(FacadeError::StateCorrupt)?);
+                    redact_checkout_paths(&mut run.checkpoint);
+                    run.advance_error = FileJournal::read_advance_error(
+                        &self.context.roots.state,
+                        self.context.identity.project,
+                        id,
+                    )
+                    .map_err(graph_journal_error)?
+                    .or(run.advance_error);
+                    return Ok(run);
+                }
+            }
             let mut ledger_warning = None;
             let integration_base = if existing {
-                journal.integration_base()
+                checkpoint
+                    .as_ref()
+                    .and_then(|checkpoint| checkpoint.bases)
+                    .and_then(|bases| bases.integration)
             } else if let Some(branch) = &document.integration_branch {
                 let reference = match branch.strip_prefix("origin/") {
                     Some(branch) => format!("refs/remotes/origin/{branch}"),
@@ -809,9 +959,10 @@ impl Factory {
                 None
             };
             let review_base = if existing {
-                bound_execution
+                checkpoint
                     .as_ref()
-                    .and_then(|execution| execution.review_base)
+                    .and_then(|checkpoint| checkpoint.bases)
+                    .and_then(|bases| bases.review)
             } else if let Some(reference) = document
                 .review_base
                 .as_deref()
@@ -823,9 +974,8 @@ impl Factory {
             };
             journal
                 .bind(provenant_fabric_runtime::graph::GraphExecution {
-                    review_base,
                     extra: Default::default(),
-                    integration_base,
+                    bases: GraphBaseBinding::new(review_base, integration_base),
                     directory: self.cwd.clone(),
                     document: document.clone(),
                 })
@@ -850,10 +1000,7 @@ impl Factory {
                 launch_warnings: ledger_warning.into_iter().collect(),
                 repo_facts: facts.clone(),
                 factory: rebound.as_ref().unwrap_or(self),
-                integration_base: Some(BoundGraphBases {
-                    integration: integration_base,
-                    review: review_base,
-                }),
+                integration_base: GraphBaseBinding::new(review_base, integration_base),
                 integration_branch: document.integration_branch.clone(),
                 network: graph_network(document)?,
                 capability_overrides: graph_capability_overrides(document)?,
@@ -933,20 +1080,23 @@ impl Factory {
             .map_err(graph_journal_error)?
             .ok_or(FacadeError::NotFound)?;
         if let GraphInput::Cancel { reason, .. } = &input {
+            let execution = FileJournal::execution(
+                &self.context.roots.state,
+                self.context.identity.project,
+                id,
+            )
+            .map_err(graph_journal_error)?
+            .ok_or(FacadeError::NotFound)?;
+            journal
+                .apply_cancellation(&execution.document, &mut checkpoint)
+                .map_err(graph_journal_error)?;
             // Persist the admission fence before asking the run owner to stop live attempts.
             if !checkpoint.cancelled || reason.is_some() {
                 checkpoint.cancel_reason = reason.clone();
             }
             checkpoint.cancelled = true;
             let detached = provenant_fabric_runtime::graph::relay::fence_detached_cancellation(
-                &FileJournal::execution(
-                    &self.context.roots.state,
-                    self.context.identity.project,
-                    id,
-                )
-                .map_err(graph_journal_error)?
-                .ok_or(FacadeError::NotFound)?
-                .document,
+                &execution.document,
                 &mut checkpoint,
             )
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
@@ -1017,7 +1167,11 @@ impl Factory {
                 return Err(error);
             }
         }
-        Ok(graph_snapshot(checkpoint))
+        let run = graph_snapshot(checkpoint);
+        Ok(match cancel_request {
+            Some(request_id) => cancellation_receipt(run, request_id),
+            None => run,
+        })
     }
 
     fn graph_checkout(&self) -> Result<PathBuf, provenant_os::fs::FsError> {
@@ -1220,18 +1374,14 @@ impl Factory {
                 let store = owner.store(cancel)?;
                 let call = owner.call(cancel);
                 // An operation this actor never accepted launched nothing to stop.
-                match store.operation(&accepted, &call).map_err(run_error)? {
-                    Some(record) => store
-                        .pending_attempts(record.run_id, &call)
-                        .map_err(run_error)?
-                        .into_iter()
-                        .map(|record| AttemptTarget {
-                            extra: Default::default(),
-                            host: Some(self.context.identity.host),
-                            attempt: record.attempt_id,
-                        })
-                        .collect(),
-                    None => vec![],
+                match store.operation_attempt(&accepted, &call) {
+                    Ok(admitted) => vec![AttemptTarget {
+                        extra: Default::default(),
+                        host: Some(self.context.identity.host),
+                        attempt: admitted,
+                    }],
+                    Err(provenant_run::RunError::NotFound) => vec![],
+                    Err(error) => return Err(run_error(error)),
                 }
             }
         };
@@ -1318,7 +1468,6 @@ mod tests {
                 cwd: nested,
                 assets: rig.project.clone(),
                 host_launch: None,
-                mcp_project: None,
                 workers: &provenant_confinement::worktrees::SystemWorkerObserver,
             };
             for selector in ["plan.json", source.to_str().ok_or("graph path")?, &digest] {

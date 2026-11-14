@@ -49,12 +49,11 @@ pub struct DiskVolume {
     pub available_bytes: u64,
 }
 
-/// A lane cache's immediate children: `target`, `cargo-home` and the rest.
+/// A lane cache's immediate children: `target` and the rest.
 /// The parts use unshared bytes and sum to the lane's unshared total.
 #[derive(Debug, Default, Serialize)]
 pub struct DiskParts {
     pub target: u64,
-    pub cargo_home: u64,
     pub other: u64,
 }
 
@@ -215,7 +214,7 @@ impl DiskReport {
         self.measure_with(class, path, false)
     }
 
-    /// Split only immediate lane children into target, cargo-home and other.
+    /// Split only immediate lane children into target and other.
     /// Parts contain the same unshared-byte observations as the entry total.
     pub fn measure_lane(&mut self, path: &Path) -> Option<usize> {
         self.measure_with("lane_cache", path, true)
@@ -537,7 +536,6 @@ impl DiskReport {
                 if let Some(parts) = &mut entry.parts {
                     match name.to_str() {
                         Some("target") => parts.target = bytes,
-                        Some("cargo-home") => parts.cargo_home = bytes,
                         _ => parts.other = parts.other.saturating_add(bytes),
                     }
                 }
@@ -547,10 +545,7 @@ impl DiskReport {
             && depth == 0
             && let Some(parts) = &mut entry.parts
         {
-            parts.other = entry
-                .unshared_bytes
-                .saturating_sub(parts.target)
-                .saturating_sub(parts.cargo_home);
+            parts.other = entry.unshared_bytes.saturating_sub(parts.target);
         }
     }
 
@@ -807,7 +802,7 @@ mod tests {
     #[test]
     fn state_inside_a_worktree_keeps_first_observation_ownership() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
-        let temporary = temp.path().join("state/runs/run/attempts/a/tmp");
+        let temporary = temp.path().join("state/attempts/a/tmp");
         fs::create_dir_all(temporary.join("target"))?;
         fs::write(temporary.join("target/CACHEDIR.TAG"), "cache")?;
         fs::write(temporary.join("target/payload"), vec![1; 16384])?;
@@ -863,7 +858,7 @@ mod tests {
             .as_ref()
             .ok_or("missing parts")?;
         assert_eq!(
-            parts.target + parts.cargo_home + parts.other,
+            parts.target + parts.other,
             report.entries[index].unshared_bytes
         );
         Ok(())

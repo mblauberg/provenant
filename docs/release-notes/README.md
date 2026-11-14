@@ -1,110 +1,15 @@
 # Release notes
 
-Released versions, newest first:
-
-- [1.11.2](v1.11.2.md)
-- [1.11.1](v1.11.1.md)
-- [1.11.0](v1.11.0.md)
-- [1.10.0](v1.10.0.md)
-- [1.9.1](v1.9.1.md)
-- [1.9.0](v1.9.0.md)
-- [1.8.0](v1.8.0.md)
-- [1.7.1](v1.7.1.md)
-- [1.7.0](v1.7.0.md)
-- [1.6.24](v1.6.24.md)
-- [1.6.23](v1.6.23.md)
-- [1.6.22](v1.6.22.md)
-- [1.6.21](v1.6.21.md)
-- [1.6.20](v1.6.20.md)
-- [1.6.19](v1.6.19.md)
-- [1.6.18](v1.6.18.md)
-- [1.6.17](v1.6.17.md)
-- [1.6.16](v1.6.16.md)
-- [1.6.15](v1.6.15.md)
-- [1.6.14](v1.6.14.md)
-- [1.6.13](v1.6.13.md)
-- [1.6.12](v1.6.12.md)
-- [1.6.11](v1.6.11.md)
-- [1.6.10](v1.6.10.md)
-- [1.6.9](v1.6.9.md)
-- [1.6.8](v1.6.8.md)
-- [1.6.7](v1.6.7.md)
-- [1.6.6](v1.6.6.md)
-- [1.6.5](v1.6.5.md)
-- [1.6.4](v1.6.4.md)
-- [1.6.3](v1.6.3.md)
-- [1.6.2](v1.6.2.md)
-- [1.6.1](v1.6.1.md)
-- [1.6.0](v1.6.0.md)
-- [1.5.6](v1.5.6.md)
-- [1.5.5](v1.5.5.md)
-- [1.5.4](v1.5.4.md)
-- [1.5.3](v1.5.3.md)
-- [1.5.2](v1.5.2.md)
-- [1.5.1](v1.5.1.md)
-- [1.5.0](v1.5.0.md)
-- [1.4.2](v1.4.2.md)
-- [1.4.1](v1.4.1.md)
-- [1.4.0](v1.4.0.md)
-- [1.3.0](v1.3.0.md)
-- [1.2.1](v1.2.1.md)
-- [1.2.0](v1.2.0.md)
-- [1.1.0](v1.1.0.md)
-- [1.0.0](v1.0.0.md)
-
-[Pending fragments](next.d/) describe changes for the next release. The
-[maintenance procedure](../../MAINTAINING.md#change-history) covers collation
-with [the release-note script](../../scripts/collate-release-notes) and updating
-this version list when publishing a release.
+Published versions are on [GitHub Releases](https://github.com/mblauberg/provenant/releases). [Pending fragments](next.d/) feed the next release; the [maintenance procedure](../../MAINTAINING.md#change-history) covers collation.
 
 ## Stability
 
-Provenant makes no stability promise. Commands, flags, `--json` output,
-`config.toml` keys, the state layout and Fabric MCP tool names and schemas can
-change in any release, with no deprecation period and no compatibility shims.
-Upgrade every host together, because peers on different versions are not
-supported. Each release lists its breaking changes first. This is the only
-place the policy is stated; release notes do not repeat or link it.
+Provenant makes no stability promise. Commands, configuration, state and output may change without a deprecation period or compatibility shims. Upgrade every host together; mixed peer versions are unsupported. Each release lists breaking changes first.
 
 ## Writing a fragment
 
-Follow the release-notes guidance in the [`writing`](../../skills/writing/SKILL.md) skill.
-Add one file per user-visible change under `next.d/`, named `<issue>-<topic>.md`.
+Add one file per user-visible change to `next.d/`, named `<issue>-<topic>.md`. Follow the `writing` skill's release-note guidance. Use a section heading (`Breaking changes`, `Behaviour changes`, `Additions` or `Fixes`), then an area heading from the list below, then a concise bullet ending in the issue number. Breaking changes state the required action. Link a guide for detail and omit internal-only changes. Paths are relative to `next.d/`.
 
-```markdown
-## Fixes
-### Lanes and settlement
+Areas: CLI and install; Lanes and settlement; Git and safety; Accounts, quota and routing; Pipelines and graphs; Chair, inbox and console; Fabric; Telemetry and providers.
 
-- `status` no longer reports a finished run as running (#123).
-```
-
-- **First line.** Use `## Breaking changes`, `## Behaviour changes`,
-  `## Additions` or `## Fixes`. The collator normalises case and whitespace;
-  an unknown heading is warned about and treated as Additions. Later `##`
-  headings are warned about and ignored.
-- **Second line (area).** `### <Area>`, from the project list below. Tag every
-  fragment; an unknown area is warned about and treated as untagged. The
-  collator decides whether to show the tag: it renders `### Area` sub-headings,
-  in the order below, only in a section with more than 12 entries, and lists a
-  smaller section flat in the same order, with untagged entries last.
-  1. CLI and install
-  2. Lanes and settlement
-  3. Git and safety
-  4. Accounts, quota and routing
-  5. Pipelines and graphs
-  6. Chair, inbox and console
-  7. Fabric and MCP
-  8. Telemetry and providers
-- **Body.** One bullet per change, each one to three sentences for the
-  published notes: subject first, in the user's terms, ending with `(#issue)`.
-  A breaking change states the action: `**The change.** What to do.`
-- **Upgrade actions.** Anything a user must do on upgrade is a breaking change.
-  A change that needs no action never goes under Breaking changes.
-- **Do not include.** Stability or version boilerplate, an intro, mechanism or
-  failure-sequence detail, internal-only changes, or entries copied from commit
-  messages. A change no user can notice needs no fragment.
-- **Links.** Paths are relative to `next.d/`. Link to a guide or ADR for depth
-  instead of explaining it in the entry.
-- **Intro.** `next.d/_intro.md` is two sentences on what the release is about
-  and a pointer to Breaking changes if the release has any. Maintainers write
-  it last.
+Keep `_intro.md` to two sentences about the release and its breaking changes. Preview with `scripts/collate-release-notes` and check with `scripts/collate-release-notes --check`.

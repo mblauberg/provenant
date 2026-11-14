@@ -16,12 +16,12 @@ mod view;
 pub(crate) mod worktree;
 #[cfg(test)]
 use view::object_binding;
+pub(crate) use view::{
+    ObjectSource, bound_source, copy_index, merge_head, merge_objects, prepare_bound,
+    prepare_read_only, private_tip, restore_index, set_private_tip,
+};
 #[cfg(test)]
 pub(crate) use view::{bind, prepare_refs};
-pub(crate) use view::{
-    bound_source, copy_index, merge_head, merge_objects, prepare_bound, prepare_read_only,
-    private_tip, restore_index, set_private_tip,
-};
 
 fn invalid() -> RunError {
     RunError::Validation("lane Git import failed")
@@ -176,7 +176,7 @@ pub(crate) fn execute_bounded(
     Ok(output.stdout.bytes)
 }
 
-fn quote_alternate(path: &Path) -> String {
+pub(crate) fn quote_alternate(path: &Path) -> String {
     let mut value = String::from("\"");
     for byte in path.as_os_str().as_encoded_bytes() {
         match byte {
@@ -393,10 +393,8 @@ fn sanitise_source(source: &Directory, repo: &VerifiedRepo) -> Result<u64> {
         match info.read_stable(OsStr::new("alternates"), 1024 * 1024) {
             Ok(bytes) => {
                 let shared = repo.common_git_dir().join("objects");
-                // Older launches used an unquoted path. Only the host's own
-                // alternate is accepted; a lane-supplied foreign path fails.
+                // Only the host's quoted alternate is accepted; foreign paths fail.
                 if bytes != format!("{}\n", quote_alternate(&shared)).as_bytes()
-                    && bytes != format!("{}\n", shared.display()).as_bytes()
                     && !bytes.is_empty()
                 {
                     return Err(RunError::Validation("lane object alternates are untrusted"));

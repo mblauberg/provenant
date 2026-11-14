@@ -62,14 +62,14 @@ fn value_has_v2(value: &serde_json::Value) -> bool {
 /// Schema 2 is a superset, so callers may retain an authored version 2 even
 /// when the minimum is 1.
 pub fn minimum_schema_version(document: &GraphDocument) -> u32 {
-    if document_requires_schema_v2(document) {
+    if document_requires_review_fields(document) {
         2
     } else {
         1
     }
 }
 
-pub(super) fn document_requires_schema_v2(document: &GraphDocument) -> bool {
+pub(super) fn document_requires_review_fields(document: &GraphDocument) -> bool {
     document.review_base.is_some() || nodes_have_v2(&document.nodes)
 }
 
@@ -293,6 +293,8 @@ pub(super) fn validate_flat_plan(
     if !matches!(document.schema_version, 1 | 2) {
         return Err(AdmissionError::Plan("schema version".into()));
     }
+    let pruned = when::prune(document)?;
+    let document = pruned.as_ref().unwrap_or(document);
     if document
         .context
         .as_ref()
@@ -714,11 +716,12 @@ pub(super) fn validate_flat_plan(
                 required.push(*kind);
             }
         }
+        next_step::validate_on_stop(node).map_err(AdmissionError::Plan)?;
         let mut depends_on = node.depends_on.clone();
         depends_on.sort();
         nodes.push(PlannedNode {
             review_launch: is_review_node(node),
-            auto_continue_no_work: node.auto_continue_no_work,
+            on_stop: node.on_stop.clone(),
             family_group: node.family_group.clone(),
             context: node.context.clone(),
             extra: node.extra.clone(),
@@ -774,6 +777,7 @@ pub(super) fn validate_flat_plan(
             routes,
             required_verdict: node.required_verdict.clone(),
             deadline_seconds: node.deadline_seconds,
+            when: node.when.clone(),
             require_findings: node.require_findings,
             skip_without_findings: node.skip_without_findings,
         });
@@ -917,10 +921,8 @@ fn attempt_error(node: &GraphNode, spec: &AttemptSpec) -> Option<&'static str> {
         if node.source.is_some() || node.continues.is_some() {
             return Some("new worktree cannot override a source binding");
         }
-        let path = format!(".worktrees/{}", new.branch.replace('/', "-"));
-        if node.worktree.as_deref() != Some(path.as_str())
-            || path.len() > 251
-            || provenant_confinement::repo::GitRefName::branch(&new.branch).is_err()
+        if provenant_confinement::repo::GitRefName::branch(&new.branch).is_err()
+            || node.worktree.as_deref().is_none_or(|path| path.len() > 251)
             || provenant_confinement::repo::GitRevision::new(&new.base).is_err()
         {
             return Some("invalid new worktree binding");
@@ -993,6 +995,7 @@ pub(super) fn route_is_bounded(route: &GraphRoute) -> bool {
         && route.model.as_deref().is_none_or(|value| field(value, 256))
         && route.alias.as_deref().is_none_or(|value| field(value, 128))
         && route.effort.as_deref().is_none_or(|value| field(value, 64))
+        && route.tier.as_deref().is_none_or(|value| field(value, 128))
         && route
             .account
             .as_deref()
@@ -1190,28 +1193,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
     plan: &PlannedGraph,
     digest: &str,
 ) -> Result<(), GraphError<R, J>> {
-    if checkpoint
-        .instance_id
-        .as_ref()
-        .is_some_and(|id| id.parse::<provenant_core::RunId>().is_err())
-    {
-        return Err(GraphError::BadCheckpoint {
-            node: plan.graph_id.clone(),
-            invariant: "instance identity must be a run ID",
-        });
-    }
-    if checkpoint
-        .bound_review_base
-        .iter()
-        .chain(checkpoint.bound_integration_base.iter())
-        .any(|base| base.parse::<provenant_core::GitOid>().is_err())
-    {
-        return Err(GraphError::BadCheckpoint {
-            node: plan.graph_id.clone(),
-            invariant: "graph bases must be full object IDs",
-        });
-    }
-    if checkpoint.schema_version != 1
+    if checkpoint.schema_version != 2
         || checkpoint.graph_id != plan.graph_id
         || checkpoint.delivery_required
             != (plan.delivery == Some(provenant_records::run::DeliveryMode::Pr))
@@ -1257,8 +1239,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         .count();
     if active_expansions > 1
         || (active_expansions == 1)
-            != (checkpoint.pause_code.as_deref() == Some("invalid_plan_expansion")
-                && checkpoint.pause_reason.is_some())
+            != (checkpoint.pause_cause() == Some(PauseCause::InvalidPlanExpansion))
     {
         return Err(GraphError::BadCheckpoint {
             node: checkpoint.graph_id.clone(),
@@ -1266,14 +1247,12 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         });
     }
     if let Some(cause) = checkpoint
-        .pause_code
-        .as_deref()
-        .and_then(NodeDecisionCause::from_loop_code)
-        && (checkpoint.pause_reason.is_none()
-            || !checkpoint
-                .nodes
-                .iter()
-                .any(|node| node.loop_cause.as_ref() == Some(&cause)))
+        .pause_cause()
+        .and_then(NodeDecisionCause::from_pause)
+        && (!checkpoint
+            .nodes
+            .iter()
+            .any(|node| node.loop_cause.as_ref() == Some(&cause)))
     {
         return Err(GraphError::BadCheckpoint {
             node: checkpoint.graph_id.clone(),
@@ -1517,6 +1496,19 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         } else if progress.gate.is_some() && !repair::is_repair(node) || progress.ci.is_some() {
             return Err(bad("only gate nodes may carry gate or CI evidence"));
         }
+        if !when::holds(&node.when) {
+            // A node its own condition skips is a leaf of the live graph: it
+            // never runs, whatever its former parents do.
+            if progress.state != NodeState::Skipped
+                || !progress.attempts.is_empty()
+                || progress.outputs.is_some()
+            {
+                return Err(bad(
+                    "a node skipped by its when condition has no attempts or outputs",
+                ));
+            }
+            continue;
+        }
         if progress.state == NodeState::Skipped
             && (dependency_state(node, plan, checkpoint, &positions) != Some(NodeState::Skipped)
                 && !loops::inactive_round(node, plan, checkpoint, &positions)
@@ -1624,6 +1616,18 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         }
         if node.condition.is_some() {
             continue;
+        }
+        let mut previous_number = 0;
+        for attempt in progress.recorded_attempts() {
+            if attempt.key.graph_id != plan.graph_id
+                || attempt.key.node_id != node.id
+                || attempt.key.attempt <= previous_number
+            {
+                return Err(bad(
+                    "attempts must retain distinct WorkKey identities for this node",
+                ));
+            }
+            previous_number = attempt.key.attempt;
         }
         for (index, attempt) in progress.attempts.iter().enumerate() {
             if document.schema_version >= 2 && attempt.input_manifest.is_none() {
@@ -1735,7 +1739,10 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             NodeState::Succeeded => {
                 last.is_some_and(|attempt| {
                     attempt.state == AttemptState::Terminal
-                        && attempt.outcome == Some(AttemptOutcome::Succeeded)
+                        && matches!(
+                            attempt.outcome,
+                            Some(AttemptOutcome::Succeeded | AttemptOutcome::ReviewRequired)
+                        )
                 }) || fallback_settled(node, progress, document, checkpoint)
             }
             NodeState::Failed if progress.advance_error.is_some() => last.is_none_or(|attempt| {

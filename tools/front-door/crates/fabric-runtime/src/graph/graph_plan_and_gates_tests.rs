@@ -11,8 +11,8 @@ fn plan_fixture_expands_and_replays_without_replanning() {
     .unwrap();
     let fragment = r#"```fragment
 {"schema_version":1,"nodes":[
-{"id":"first","goal":"First slice","access":"read_only","write_scope":["docs/a"],"acceptance_checks":["read a"]},
-{"id":"second","brief":"Second slice","access":"read_only","write_scope":["docs/b"],"acceptance_checks":["read b"],"depends_on":["first"]}
+{"id":"first","prompt":"First slice","access":"read_only","write_scope":["docs/a"],"acceptance_checks":["read a"]},
+{"id":"second","prompt":"Second slice","access":"read_only","write_scope":["docs/b"],"acceptance_checks":["read b"],"depends_on":["first"]}
 ]}
 ```"#;
     let mut owner = FakeOwner {
@@ -46,7 +46,7 @@ fn plan_fragment_target_is_checked_before_expansion_is_published() {
     }))
     .unwrap();
     let fragment = r#"```fragment
-{"schema_version":1,"nodes":[{"id":"writer","goal":"Write","access":"worktree_write","worktree":"lane","write_scope":["src"],"acceptance_checks":["check"],"delivery":"integrate:target"}]}
+{"schema_version":1,"nodes":[{"id":"writer","prompt":"Write","access":"worktree_write","worktree":"lane","write_scope":["src"],"acceptance_checks":["check"],"delivery":"integrate:target"}]}
 ```"#;
     let mut owner = FakeOwner {
         observations: [terminal_with_result(AttemptOutcome::Succeeded, fragment)].into(),
@@ -188,23 +188,6 @@ fn gate_threshold_fixtures_count_missing_verdicts_and_strict_majorities() {
         assert_eq!(gate.outputs, Some(gate_outputs(passed)));
         assert!(gate.attempts.is_empty());
         assert_eq!(run.checkpoint.successful(), passed);
-        let mut legacy = serde_json::to_value(&run.checkpoint).unwrap();
-        for node in legacy["nodes"].as_array_mut().unwrap() {
-            if let Some(outputs) = node
-                .get_mut("outputs")
-                .and_then(serde_json::Value::as_object_mut)
-            {
-                outputs.remove("findings_available");
-            }
-        }
-        let legacy: GraphCheckpoint = serde_json::from_value(legacy).unwrap();
-        journal.0 = Some(legacy.clone());
-        assert_eq!(
-            advance(&document, &mut owner, &mut journal)
-                .unwrap()
-                .checkpoint,
-            legacy
-        );
         journal.0 =
             Some(serde_json::from_value(serde_json::to_value(&run.checkpoint).unwrap()).unwrap());
         assert_eq!(

@@ -169,6 +169,9 @@ pub struct ExecOptions<'a> {
     pub stderr_filter: Option<&'a mut dyn CaptureFilter>,
     pub cancel: Option<&'a CancelToken>,
     pub timeout: Duration,
+    /// Once spawned, finish the operation even after its soft deadline or cancellation.
+    /// For non-interruptible transactions such as single-use credential rotation.
+    pub wait_for_completion: bool,
     pub terminate_grace: Duration,
     pub reap_timeout: Duration,
     pub stop_on_output_limit: bool,
@@ -194,6 +197,7 @@ impl<'a> ExecOptions<'a> {
             stderr_filter: None,
             cancel: None,
             timeout,
+            wait_for_completion: false,
             terminate_grace: Duration::from_millis(250),
             reap_timeout: Duration::from_millis(250),
             stop_on_output_limit: false,
@@ -208,7 +212,9 @@ pub enum ExecError {
     DurationOutOfRange,
     #[error("capture or queue limit exceeds its bound")]
     InvalidLimit,
-    #[error("a group watchdog requires process_group and cleanup_process_group")]
+    #[error(
+        "a group watchdog requires process_group, cleanup_process_group and an interruptible deadline"
+    )]
     WatchdogRequiresGroupCleanup,
     #[error("capture stream has already been finished")]
     CaptureFinished,
@@ -411,7 +417,10 @@ fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecErr
     if options.stdout.limit() > MAX_CAPTURE_LIMIT || options.stderr.limit() > MAX_CAPTURE_LIMIT {
         return Err(ExecError::InvalidLimit);
     }
-    if options.group_watchdog && !(options.process_group && options.cleanup_process_group) {
+    if options.group_watchdog
+        && (options.wait_for_completion
+            || !(options.process_group && options.cleanup_process_group))
+    {
         return Err(ExecError::WatchdogRequiresGroupCleanup);
     }
     if options.cancel.is_some_and(CancelToken::is_cancelled) {
@@ -524,7 +533,11 @@ fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecErr
         let overflow = options.stop_on_output_limit
             && (out_pump.outcome().truncated || err_pump.outcome().truncated);
         let cancelled = options.cancel.is_some_and(CancelToken::is_cancelled);
-        if status.is_none() && term_at.is_none() && (now >= deadline || overflow || cancelled) {
+        if !options.wait_for_completion
+            && status.is_none()
+            && term_at.is_none()
+            && (now >= deadline || overflow || cancelled)
+        {
             stdin = None;
             let delivered = match child.signal(if options.process_group {
                 Signal::Kill

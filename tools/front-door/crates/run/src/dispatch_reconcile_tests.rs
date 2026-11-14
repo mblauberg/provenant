@@ -8,11 +8,11 @@ fn reconcile_does_not_spawn_for_queued_or_terminal_attempts() -> TestResult {
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
     store.create(&run, &call)?;
-    store.queue_reconcile_with(run.run_id, &call, |_, _| {
+    store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
         panic!("a queued attempt has no settlement work");
     })?;
     store.withdraw(
-        run.attempts[0].attempt_id,
+        run.attempt_id,
         AttemptState::Queued {
             extra: Default::default(),
         },
@@ -23,13 +23,13 @@ fn reconcile_does_not_spawn_for_queued_or_terminal_attempts() -> TestResult {
     )?;
     // The terminal commit owes its reactions, so recovery is queued for them.
     let mut spawned = 0;
-    store.queue_reconcile_with(run.run_id, &call, |_, _| {
+    store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
         spawned += 1;
         Ok(())
     })?;
     assert_eq!(spawned, 1);
     // Once they are done, a terminal run has no settlement work.
-    store.drain_reactions(run.run_id, &clock, &cancel, &mut |reaction, _| {
+    store.drain_reactions(run.attempt_id, &clock, &cancel, &mut |reaction, _| {
         reaction.graph_done = true;
         reaction.notice_done = true;
         reaction.log_done = true;
@@ -38,7 +38,7 @@ fn reconcile_does_not_spawn_for_queued_or_terminal_attempts() -> TestResult {
     })?;
     assert!(
         store
-            .queue_reconcile_with(run.run_id, &call, |_, _| {
+            .queue_reconcile_with(run.attempt_id, &call, |_, _| {
                 panic!("a terminal run has no settlement work");
             })?
             .is_empty()
@@ -97,15 +97,15 @@ fn resolved_named_route_survives_launch_admission() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let mut prepared = input();
-    prepared.request.tasks[0].route = RequestedRoute::Named {
+    prepared.request.task.route = RequestedRoute::Named {
         extra: Default::default(),
         name: "fixture".into(),
         effort: None,
     };
     store.create(&prepared, &call)?;
-    let pending = store.record(prepared.attempts[0].attempt_id, &call)?;
+    let pending = store.record(prepared.attempt_id, &call)?;
     store.mark_starting(&pending, &route, &[], &Default::default(), None, &call)?;
-    let record = store.record(prepared.attempts[0].attempt_id, &call)?;
+    let record = store.record(prepared.attempt_id, &call)?;
     assert_eq!(
         record
             .applied_route
@@ -130,11 +130,12 @@ fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
             _: &str,
             _: &LaunchPaths,
             _: Option<&AttemptRecord>,
-        ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
-            Err(crate::PrepareRefusal {
+        ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
+            Err(Box::new(crate::PrepareRefusal {
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+                policy_code: None,
                 resource: None,
-                terminal_cause: None,
+                terminal_cause: provenant_records::run::TerminalCause::HandoffRefused,
                 terminal_note: None,
                 message: self.message.into(),
                 fallback_outcome: None,
@@ -152,7 +153,7 @@ fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
                     detail: "opaque candidate detail".into(),
                 })
                 .collect(),
-            })
+            }))
         }
         fn decode(
             &self,
@@ -186,10 +187,10 @@ fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let run = input();
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         store.create(&run, &call)?;
         let started = store.start(
-            run.run_id,
+            run.attempt_id,
             &Excluded {
                 cause: cause.clone(),
                 message,
@@ -223,11 +224,12 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
             _: &str,
             _: &LaunchPaths,
             _: Option<&AttemptRecord>,
-        ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
-            Err(crate::PrepareRefusal {
+        ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
+            Err(Box::new(crate::PrepareRefusal {
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+                policy_code: None,
                 resource: None,
-                terminal_cause: None,
+                terminal_cause: provenant_records::run::TerminalCause::HandoffRefused,
                 terminal_note: None,
                 message: "all candidates require sign-in; run provenant accounts".into(),
                 fallback_outcome: (!self.0)
@@ -245,7 +247,7 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
                         detail: "sign-in required".into(),
                     })
                     .to_vec(),
-            })
+            }))
         }
         fn decode(
             &self,
@@ -263,9 +265,14 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let run = input();
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         store.create(&run, &call)?;
-        store.start(run.run_id, &SignedOut(mixed), &|_, _| unreachable!(), &call)?;
+        store.start(
+            run.attempt_id,
+            &SignedOut(mixed),
+            &|_, _| unreachable!(),
+            &call,
+        )?;
         assert_eq!(
             terminal(&store, id, &call)?,
             if mixed {
@@ -285,6 +292,18 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
             (!mixed).then_some(provenant_records::run::PreparationFailure::AuthRequired)
         );
         assert!(store.custody_released(&record, &call)?);
+        let mut corrupt_stop = record.clone();
+        if let AttemptState::Terminal { extra, .. } = &mut corrupt_stop.state {
+            extra.insert("stop".into(), serde_json::json!({"cause": false}));
+        }
+        assert!(matches!(
+            crate::reader::validate_attempt(&corrupt_stop),
+            Err(RunError::Validation(_))
+        ));
+        assert!(matches!(
+            crate::reader::fact(corrupt_stop),
+            Err(RunError::Validation(_))
+        ));
         if !mixed {
             let mut corrupt = record.clone();
             corrupt.provider_launched = None;
@@ -304,65 +323,9 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
     }
     Ok(())
 }
-#[test]
-fn upgrading_a_version_1_ledger_is_atomic() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
-    let call = stepped_call(&host, &cancel);
-    let mut store = RunStore::open(&context(temp.path())?, &call)?;
-    store.set_admission_policy(AdmissionPolicy {
-        startup_spacing_ms: 20_000,
-        read_only_spacing_ms: 2_000,
-        ..AdmissionPolicy::default()
-    });
-    let version_1 = "CREATE TABLE leases (attempt TEXT PRIMARY KEY, project TEXT NOT NULL, store BLOB NOT NULL) STRICT;
-         CREATE INDEX lease_projects ON leases(project);";
-    // A spacing that cannot be dropped fails the upgrade after it has added
-    // the lease class column. A crash at that point must leave version 1 whole.
-    old_ledger(
-        &store,
-        &format!(
-            "{version_1}
-             CREATE VIEW spacing AS SELECT 1 AS id, 4000000000000 AS last_start;
-             PRAGMA user_version=1;"
-        ),
-    )?;
-    let [first, second] = writers(&store, [98, 99], &call)?;
-    assert!(store.claim(first, &host, &call).is_err());
-    let file = store.writer_registry.join("admission.sqlite3");
-    let raw = rusqlite::Connection::open(&file)?;
-    let classes: i64 = raw.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('leases') WHERE name='class'",
-        [],
-        |r| r.get(0),
-    )?;
-    let version: i64 = raw.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    assert_eq!(
-        (classes, version),
-        (0, 1),
-        "the failed upgrade left no trace"
-    );
-    raw.execute_batch(
-        "DROP VIEW spacing;
-         CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT;
-         INSERT INTO spacing(id,last_start) VALUES (1,4000000000000);",
-    )?;
-    drop(raw);
-    assert!(
-        store.claim(first, &host, &call)?.is_none(),
-        "the upgrade carried the start into the new ledger"
-    );
-    host.pass_ms(20_500);
-    assert!(
-        store.claim(first, &host, &call)?.is_some(),
-        "a start in the wall future held the class one spacing, and no longer"
-    );
-    assert!(store.claim(second, &host, &call)?.is_none());
-    Ok(())
-}
 
 #[test]
-fn reconcile_retries_busy_store_and_keeps_judging_other_records() -> TestResult {
+fn reconcile_retries_busy_store() -> TestResult {
     use std::{sync::mpsc, time::Duration};
     for clears in [true, false] {
         provenant_sqlite::with_busy_timeout(Duration::from_millis(300), || -> TestResult {
@@ -375,10 +338,9 @@ fn reconcile_retries_busy_store_and_keeps_judging_other_records() -> TestResult 
             };
             let context = context(temp.path())?;
             let store = RunStore::open(&context, &call)?;
-            let run = two_tasks(2);
+            let run = input();
             store.create(&run, &call)?;
-            let first = run.attempts[0].attempt_id;
-            let second = run.attempts[1].attempt_id;
+            let first = run.attempt_id;
             store.mark_starting(
                 &store.record(first, &call)?,
                 &route(),
@@ -400,7 +362,7 @@ fn reconcile_retries_busy_store_and_keeps_judging_other_records() -> TestResult 
                 blocker.execute_batch("ROLLBACK").unwrap();
             });
             let found = store.reconcile_with_observer(
-                run.run_id,
+                run.attempt_id,
                 &Fake::default(),
                 &call,
                 &provenant_supervisor::census::SystemProcessObserver,
@@ -409,19 +371,17 @@ fn reconcile_retries_busy_store_and_keeps_judging_other_records() -> TestResult 
                 release.send(())?;
             }
             holder.join().unwrap();
-            assert!(found.contains(&(second, Reconciled::Queued)), "{found:?}");
             if clears {
                 assert!(found.contains(&(first, Reconciled::Withdrawn)), "{found:?}");
                 assert!(
                     store
                         .reconcile_with_observer(
-                            run.run_id,
+                            run.attempt_id,
                             &Fake::default(),
                             &call,
                             &provenant_supervisor::census::SystemProcessObserver
                         )?
-                        .iter()
-                        .all(|(id, _)| *id == second)
+                        .is_empty()
                 );
             } else {
                 assert!(

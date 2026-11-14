@@ -295,7 +295,8 @@ fn delivered_within(
 /// newest head of `writer`'s chain among its own upstream nodes. A review that
 /// ran before a continuation therefore never judges the continuation's head.
 /// The base is the node's resolved review base or, without one, the graph's
-/// bound review or integration base.
+/// bound review or integration base. A finding decision recorded against
+/// another head, or without the resolved review base, leaves no subject.
 /// A composite boundary has no subject of its own, so its verdict resolves to
 /// the member that exported it: a council pinned to an earlier head never
 /// vouches for a later one that merely precedes the boundary. Members that read
@@ -356,15 +357,40 @@ fn reviewed_head(
     {
         return None;
     }
-    let head = match &checkpoint.nodes[index].source_commit {
+    let progress = &checkpoint.nodes[index];
+    let head = match &progress.source_commit {
         Some(commit) => commit.clone(),
         None => chain_head(plan, checkpoint, positions, reviewer, writer)?,
     };
-    let base = checkpoint.nodes[index]
+    let graph_review_base = checkpoint
+        .bases
+        .and_then(|bases| bases.review)
+        .map(|base| base.to_string());
+    let review_base = progress
         .review_base
-        .clone()
-        .or_else(|| checkpoint.bound_review_base.clone())
-        .or_else(|| checkpoint.bound_integration_base.clone());
+        .as_deref()
+        .or(graph_review_base.as_deref())
+        .or_else(|| {
+            node.extra
+                .get("review_base")
+                .and_then(serde_json::Value::as_str)
+        });
+    for decision in &progress.decisions {
+        let decision_base = decision.reviewed_base()?;
+        if review_base.is_none_or(|b| provenant_core::GitOid::parse(b).ok() != Some(decision_base))
+        {
+            return None;
+        }
+        if provenant_core::GitOid::parse(&head).ok() != Some(decision.reviewed_head()) {
+            return None;
+        }
+    }
+    let base = review_base.map(str::to_owned).or_else(|| {
+        checkpoint
+            .bases
+            .and_then(|bases| bases.integration)
+            .map(|base| base.to_string())
+    });
     Some(ReviewedSubject { head, base })
 }
 
@@ -435,7 +461,7 @@ pub(super) fn chain_attempts(
 /// merge-in from the target or a rebase with an unchanged delta. A failed gate
 /// whose `on_fail` reaches the land is not acceptance. A gate replaced with a
 /// condition accepting rejection is not approval either.
-fn acceptance_error<R: AttemptOwner>(
+pub(super) fn acceptance_error<R: AttemptOwner>(
     plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
@@ -514,14 +540,33 @@ pub(super) fn session<'a>(spec: &'a LandSpec, plan: &'a PlannedGraph) -> Option<
     spec.session.as_deref().or(plan.decision_session.as_deref())
 }
 
-pub(super) fn sequence(ask: &NodeAsk, node_id: &str) -> Option<u64> {
-    ask.ask_id
-        .strip_prefix(node_id)?
-        .strip_prefix(".ask-")?
-        .parse()
-        .ok()
-        .filter(|sequence| *sequence > 0)
+/// The ID of a land node's ask: the sequence number, which moves past a request
+/// a cancel closed, and the node's retry generation, which keeps a retried node
+/// from finding the request an earlier run left answered.
+pub(super) fn ask_id(node_id: &str, sequence: u64, generation: u64) -> String {
+    let base = format!("{node_id}.ask-{sequence}");
+    match generation {
+        0 => base,
+        generation => format!("{base}.retry-{generation}"),
+    }
 }
+
+/// The sequence and retry generation an ask ID names.
+pub(super) fn parse(ask_id: &str, node_id: &str) -> Option<(u64, u64)> {
+    let identity = ask_id.strip_prefix(node_id)?.strip_prefix(".ask-")?;
+    let (sequence, generation) = match identity.split_once(".retry-") {
+        Some((sequence, generation)) => {
+            (sequence, generation.parse::<u64>().ok().filter(|g| *g > 0)?)
+        }
+        None => (identity, 0),
+    };
+    let sequence = sequence.parse::<u64>().ok().filter(|s| *s > 0)?;
+    Some((sequence, generation))
+}
+
+/// The most closed requests one land node may leave behind before a new raise
+/// is refused.
+const MAX_LAND_SEQUENCE: u64 = 1_000;
 
 fn source_name(source: LandSource) -> &'static str {
     match source {
@@ -545,9 +590,11 @@ pub(super) fn land_ask(
     node: &PlannedNode,
     record: &LandRecord,
     session: &str,
-) -> NodeAsk {
+    sequence: u64,
+    generation: u64,
+) -> AskRequest {
     let mut ask = asks::ask(
-        format!("{}.ask-1", node.id),
+        ask_id(&node.id, sequence, generation),
         AskKind::Land,
         session,
         format!(
@@ -614,6 +661,7 @@ fn outputs(record: &LandRecord) -> NodeOutputs {
         extra: Default::default(),
         verdict_error: None,
         schema_version: 2,
+        decide_outcome: None,
         result: Some(ResultOutput {
             extra: Default::default(),
             digest: CanonicalV1::file_digest(excerpt.as_bytes()).to_string(),
@@ -813,7 +861,7 @@ fn ask_chair<R: AttemptOwner, J: GraphJournal>(
     owner: &mut R,
     journal: &mut J,
 ) -> Result<Option<String>, GraphError<R::Error, J::Error>> {
-    let mine = |ask: &NodeAsk| ask.node.as_deref() == Some(node.id.as_str());
+    let mine = |ask: &AskLink| ask.node.as_deref() == Some(node.id.as_str());
     let position = match checkpoint.asks.iter().rposition(mine) {
         Some(position) => position,
         None => {
@@ -833,25 +881,33 @@ fn ask_chair<R: AttemptOwner, J: GraphJournal>(
                 )?;
                 return Ok(None);
             };
-            asks::identity::<R, J::Error>(checkpoint, owner)?;
-            checkpoint
-                .asks
-                .push(land_ask(&plan.graph_id, node, record, &session));
+            let generation = asks::retry_generation(&checkpoint.nodes[index]);
+            let mut filed = None;
+            for sequence in 1..=MAX_LAND_SEQUENCE {
+                let request =
+                    land_ask(&plan.graph_id, node, record, &session, sequence, generation);
+                let (link, closed) = asks::file(checkpoint, owner, journal, &request)?;
+                // A request an earlier cancel closed keeps its ask ID, so a
+                // raise after a resume files under the next one.
+                if !closed {
+                    filed = Some(link);
+                    break;
+                }
+            }
+            let Some(link) = filed else {
+                return Err(GraphError::Refused(format!(
+                    "node {}: {MAX_LAND_SEQUENCE} land requests are already closed; retry the node",
+                    node.id
+                )));
+            };
+            checkpoint.asks.push(link);
             asks::refresh_wake(checkpoint);
             journal.save(checkpoint).map_err(GraphError::Journal)?;
             checkpoint.asks.len() - 1
         }
     };
     let ask_id = checkpoint.asks[position].ask_id.clone();
-    if checkpoint.asks[position].resolved {
-        return Ok(None);
-    }
-    let before = checkpoint.asks[position].inbox_error.clone();
-    let reply = asks::poll(checkpoint, position, owner);
-    let Ok(Some(reply)) = reply else {
-        if checkpoint.asks[position].inbox_error != before {
-            journal.save(checkpoint).map_err(GraphError::Journal)?;
-        }
+    let Ok(Some(reply)) = asks::poll(checkpoint, position, owner) else {
         return Ok(Some(ask_id));
     };
     let answer = asks::answered(reply);
@@ -877,9 +933,7 @@ fn ask_chair<R: AttemptOwner, J: GraphJournal>(
     if let Some(land) = progress.land.as_mut() {
         land.wake_at = None;
     }
-    let ask = &mut checkpoint.asks[position];
-    ask.answer = Some(answer);
-    ask.resolved = true;
+    checkpoint.asks.remove(position);
     asks::refresh_wake(checkpoint);
     journal.save(checkpoint).map_err(GraphError::Journal)?;
     Ok(None)
@@ -887,7 +941,7 @@ fn ask_chair<R: AttemptOwner, J: GraphJournal>(
 
 pub(super) fn validate_progress(
     progress: &NodeProgress,
-    checkpoint: &GraphCheckpoint,
+    _checkpoint: &GraphCheckpoint,
 ) -> Result<(), ()> {
     let authority = progress
         .land
@@ -899,12 +953,10 @@ pub(super) fn validate_progress(
                 .land
                 .as_ref()
                 .is_some_and(|record| record.policy == LandPolicy::Ask)
-                && checkpoint.asks.iter().any(|ask| {
-                    &ask.ask_id == ask_id
-                        && ask.kind == AskKind::Land
-                        && ask.node.as_deref() == Some(progress.id.as_str())
-                        && ask.answer.is_none()
-                })
+                // The ask itself is the inbox's; the chair landed by hand on its
+                // authority, so the node names the one ask it raises.
+                && parse(ask_id, &progress.id)
+                    .is_some_and(|(_, generation)| generation == asks::retry_generation(progress))
         }
         Some(LandAuthority::Policy) => progress
             .land

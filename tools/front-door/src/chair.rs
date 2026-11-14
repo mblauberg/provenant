@@ -273,8 +273,7 @@ fn switch(
     automatic: bool,
     deadline: Option<Instant>,
 ) -> Result<Option<Value>, Error> {
-    let config =
-        provenant_config::read_with_domains(&context.roots, &provenant_cli::domains::SECTIONS)?;
+    let config = provenant_cli::config_reads::read_for(&context.roots, "chair")?;
     let knob = |name: &str| config.knobs.get(name).map(|k| &k.value);
     if automatic && knob("chair.auto_switch").and_then(Value::as_bool) != Some(true) {
         return Ok(None);
@@ -425,8 +424,7 @@ fn prepared_response(context: &Context, handoff: &Handoff) -> Value {
             .target_account
             .as_deref()
             .ok_or("handoff target unavailable")?;
-        let config =
-            provenant_config::read_with_domains(&context.roots, &provenant_cli::domains::SECTIONS)?;
+        let config = provenant_cli::config_reads::read_for(&context.roots, "chair")?;
         if !config
             .knobs
             .get("chair.switch_accounts")
@@ -570,7 +568,10 @@ fn summary_run(command: ChairSummary, globals: &Globals) -> u8 {
         match command {
             ChairSummary::Show { ref session } | ChairSummary::Diff { ref session, .. } => {
                 let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-                let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
+                let runtime = provenant_confinement::UtilityRuntime::read_only(
+                    git,
+                    resolved.roots.state.as_path(),
+                )?;
                 let executor = SystemExecutor::new(1)?;
                 let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
                 let location = runtime
@@ -762,10 +763,7 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
                     return Err(LaneAppend.into());
                 }
                 let (input, warnings) = log_request(&file)?;
-                let config = provenant_config::read_with_domains(
-                    &context.roots,
-                    &provenant_cli::domains::SECTIONS,
-                )?;
+                let config = provenant_cli::config_reads::read_for(&context.roots, "chair")?;
                 let settings = config.retention;
                 let retention = Retention {
                     max_age_seconds: settings.chair_log_days * 86400,
@@ -808,7 +806,10 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
                 limit,
             } => {
                 let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-                let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
+                let runtime = provenant_confinement::UtilityRuntime::read_only(
+                    git,
+                    resolved.roots.state.as_path(),
+                )?;
                 let executor = SystemExecutor::new(1)?;
                 let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
                 let location = runtime
@@ -822,11 +823,8 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
                 let project = provenant_config::lookup_project(&resolved.roots, &location)?
                     .ok_or("project not registered")?
                     .project_id();
-                let settings = provenant_config::read_with_domains(
-                    &resolved.roots,
-                    &provenant_cli::domains::SECTIONS,
-                )?
-                .retention;
+                let settings =
+                    provenant_cli::config_reads::read_for(&resolved.roots, "chair")?.retention;
                 let retention = Retention {
                     max_age_seconds: settings.chair_log_days * 86400,
                     replay_horizon_seconds: settings.chair_log_replay_seconds(),
@@ -928,15 +926,38 @@ fn config_hint(context: &Context) -> Option<String> {
             .all(|part| matches!(part, std::path::Component::Normal(_))))
     .then(|| text.to_owned())
 }
-// Attribution is best effort and must not prevent consuming a handoff. A
-// session whose config directory is not a registered account (the default
-// `~/.claude` included) is still recorded, as `unattributed`: launching the
-// chair with `CLAUDE_CONFIG_DIR` set to a registered account's directory is
-// what attributes it.
+// Identity is resolved through the provider adapter on every session start.
+// The config directory selects auth state and never supplies account identity.
+fn session_identity(context: &Context) -> provenant_telemetry::usage::AccountIdentity {
+    use provenant_telemetry::usage::AccountIdentity;
+
+    let identity = (|| -> Result<_, provenant_providers::ProviderError> {
+        let live = provenant_providers::quota_live::LiveQuota::new(
+            &context.roots,
+            &context.home,
+            &provenant_providers::accounts::Settings::default(),
+        )
+        .map_err(|_| provenant_providers::ProviderError::UnknownIdentity)?;
+        let adapter = provenant_providers::REGISTRY
+            .iter()
+            .find(|registration| registration.adapter.id() == "claude")
+            .ok_or(provenant_providers::ProviderError::UnknownIdentity)?;
+        let directory = context
+            .claude_config
+            .clone()
+            .unwrap_or_else(|| context.home.join(".claude"));
+        adapter.adapter.session_identity(&live, &directory)
+    })();
+    identity.unwrap_or_else(|_| {
+        eprintln!(
+            "provenant: warning: Claude account identity could not be verified; usage is attributed as unknown"
+        );
+        AccountIdentity::unknown()
+    })
+}
+
+// Attribution is best effort and must not prevent consuming a handoff.
 fn record_start(context: &Context, input: &Input) {
-    let account = crate::registered_claude(&context.roots)
-        .ok()
-        .and_then(|accounts| current(&accounts, context).ok().map(|a| a.key().to_owned()));
     let project = if crate::usage::attribution_enabled(&context.roots) {
         crate::hooks::with_git(|runtime, executor, budget, cancel| {
             let location = runtime
@@ -953,9 +974,7 @@ fn record_start(context: &Context, input: &Input) {
     provenant_telemetry::usage::record_chair(
         &context.roots,
         &provenant_os::clock::SystemClock::new(),
-        account
-            .as_deref()
-            .unwrap_or(provenant_telemetry::usage::UNATTRIBUTED),
+        session_identity(context),
         input.session_id.as_str(),
         project,
         config_hint(context).as_deref(),
@@ -1116,12 +1135,25 @@ mod tests {
             if shell != "/bin/sh" && !Path::new(shell).is_file() {
                 continue;
             }
-            let argv = vec![shell.into(), "-c".into(), command.clone().into()];
+            let argv = if shell == "/bin/zsh" {
+                vec![
+                    shell.into(),
+                    "-f".into(),
+                    "-c".into(),
+                    command.clone().into(),
+                ]
+            } else {
+                vec![shell.into(), "-c".into(), command.clone().into()]
+            };
             let mut options = ExecOptions::new(&argv, &home, Duration::from_secs(2));
             options.env = Some(env.as_slice());
             options.stdout = StreamPolicy::Capture { limit: 16 * 1024 };
             let output = SystemExecutor::new(1)?.execute(options)?;
-            assert_eq!(output.termination, Termination::Exit(0));
+            assert_eq!(
+                output.termination,
+                Termination::Exit(0),
+                "shell={shell} outcome={output:?}"
+            );
             let output = std::str::from_utf8(&output.stdout.bytes)?;
             let mut lines = output.lines();
             assert_eq!(lines.next(), cwd.to_str());
@@ -1149,7 +1181,11 @@ mod tests {
                     .as_str()
                 )
             );
-            let hook_argv = vec![shell.into(), "-c".into(), hook.into()];
+            let hook_argv = if shell == "/bin/zsh" {
+                vec![shell.into(), "-f".into(), "-c".into(), hook.into()]
+            } else {
+                vec![shell.into(), "-c".into(), hook.into()]
+            };
             let mut hook_options = ExecOptions::new(&hook_argv, &home, Duration::from_secs(2));
             hook_options.stdout = StreamPolicy::Capture { limit: 16 * 1024 };
             let hook_output = SystemExecutor::new(1)?.execute(hook_options)?;

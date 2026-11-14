@@ -1,21 +1,20 @@
 //! Local demand counters: a bounded, rotated JSON-lines log in the state root.
 //! The command edge decides what to count; this module owns the log.
 use provenant_core::{Clock, ProjectId, Roots};
-use provenant_os::fs::{Directory, FsError, LockMode};
+use provenant_os::fs::{Directory, FsError, ledger::Ledger};
 use provenant_records::Trace;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     ffi::OsStr,
-    io::{self, Read, Seek, SeekFrom, Write},
+    io::{self, Read, Seek, SeekFrom},
 };
 use thiserror::Error;
 
-pub const EVENT_KINDS: &[&str] = &["cli.verb", "mcp.tool"];
+pub const EVENT_KINDS: &[&str] = &["cli.verb"];
 const CAP: u64 = 5_000_000;
 const LOG: &str = "usage.jsonl";
 const BACKUP: &str = "usage.jsonl.1";
-const LOCK: &str = "usage.lock";
 const LINE_CAP: usize = 512;
 
 #[derive(Debug, Error)]
@@ -36,6 +35,10 @@ impl UsageError {
     }
 }
 
+pub use provenant_records::{
+    AccountIdentity, Identity, IdentityEpoch, IdentityEvidenceSource, UnknownIdentityReason,
+};
+
 #[derive(Serialize, Deserialize)]
 struct Event {
     kind: String,
@@ -49,8 +52,7 @@ struct Event {
     /// Only the project, and only when attribution is on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     trace: Option<Trace>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    account: Option<String>,
+    account_identity: AccountIdentity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     session: Option<String>,
     /// A chair session's Claude config directory, relative to the home
@@ -69,37 +71,6 @@ fn project_trace(project_id: Option<ProjectId>) -> Option<Trace> {
     })
 }
 
-fn rotate(directory: &Directory, incoming: u64) -> Option<()> {
-    let size = || {
-        directory
-            .open_read(OsStr::new(LOG))
-            .ok()?
-            .metadata()
-            .ok()
-            .map(|m| m.size)
-    };
-    if size()?.saturating_add(incoming) <= CAP {
-        return Some(());
-    }
-    // Only rotation locks. Contending appenders keep their single write.
-    let _lock = directory
-        .try_lock(OsStr::new(LOCK), LockMode::Exclusive)
-        .ok()?;
-    if size()?.saturating_add(incoming) > CAP {
-        directory
-            .replace(OsStr::new(LOG), directory, OsStr::new(BACKUP))
-            .ok()?;
-    }
-    Some(())
-}
-
-/// Called by existing MCP workers, never by the transport event loop.
-pub fn maintain_tools(roots: &Roots) {
-    if let Ok(directory) = Directory::open_anchor(roots.state.as_path()) {
-        let _ = rotate(&directory, LINE_CAP as u64);
-    }
-}
-
 fn append(roots: &Roots, event: Event, rotate_log: bool) -> Option<()> {
     let mut line = serde_json::to_vec(&event).ok()?;
     line.push(b'\n');
@@ -108,12 +79,11 @@ fn append(roots: &Roots, event: Event, rotate_log: bool) -> Option<()> {
     }
     // Counting never creates the state root: reads and help create no state.
     let directory = Directory::open_anchor(roots.state.as_path()).ok()?;
+    let ledger = Ledger::new(&directory, OsStr::new(LOG));
     if rotate_log {
-        let _ = rotate(&directory, line.len() as u64);
+        let _ = ledger.rotate(CAP, line.len() as u64, &[OsStr::new(BACKUP)]);
     }
-    let mut file = directory.open_append(OsStr::new(LOG)).ok()?;
-    // O_APPEND and one small write; readers skip torn/malformed lines.
-    (file.write(&line).ok()? == line.len()).then_some(())
+    ledger.append(&line).ok()
 }
 
 pub fn record_cli(
@@ -173,7 +143,7 @@ pub fn record_cli_context(
                 ..Trace::default()
             })
             .filter(|trace| trace.project.is_some() || trace.attempt.is_some()),
-            account: None,
+            account_identity: AccountIdentity::no_provider_account(),
             session: session.map(str::to_owned),
             config: None,
             wait,
@@ -182,45 +152,15 @@ pub fn record_cli_context(
     );
 }
 
-pub fn record_tool(
-    roots: &Roots,
-    clock: &dyn Clock,
-    tool: &str,
-    outcome: &str,
-    duration_ms: u64,
-    project_id: Option<ProjectId>,
-) {
-    let Ok(now) = clock.wall_now() else { return };
-    let _ = append(
-        roots,
-        Event {
-            kind: EVENT_KINDS[1].into(),
-            unit: tool.into(),
-            exit_code: None,
-            outcome: Some(outcome.into()),
-            duration_ms,
-            timestamp: now.to_string(),
-            trace: project_trace(project_id),
-            account: None,
-            session: None,
-            config: None,
-            wait: None,
-        },
-        false,
-    );
-}
-
-/// The account recorded for a chair session whose config directory is not a
-/// registered account, so such sessions stay visible instead of being dropped.
+/// The reserved display key for an account identity that was not resolved.
 pub const UNATTRIBUTED: &str = "unattributed";
 
-/// Record the serving account resolved by the chair's SessionStart hook, or
-/// [`UNATTRIBUTED`] when none resolved. `config` is the session's Claude config
-/// directory relative to the home directory, when it lies under it.
+/// Record the provider evidence resolved at SessionStart. Transcript location
+/// remains separately recorded for discovery and never supplies identity.
 pub fn record_chair(
     roots: &Roots,
     clock: &dyn Clock,
-    account: &str,
+    account_identity: AccountIdentity,
     session: &str,
     project: Option<ProjectId>,
     config: Option<&str>,
@@ -236,7 +176,7 @@ pub fn record_chair(
             duration_ms: 0,
             timestamp: now.to_string(),
             trace: project_trace(project),
-            account: Some(account.into()),
+            account_identity,
             session: Some(session.into()),
             config: config.map(str::to_owned),
             wait: None,
@@ -248,7 +188,7 @@ pub fn record_chair(
 #[derive(Debug)]
 pub struct ChairSession {
     pub adapter: String,
-    pub account: String,
+    pub account_identity: AccountIdentity,
     pub session: String,
     pub project: Option<ProjectId>,
     /// Claude config directory relative to home, as recorded by the hook.
@@ -261,7 +201,7 @@ pub struct ChairSession {
 }
 
 /// Recent chair observations. The caller deduplicates repeated SessionStart
-/// events by project, account and session within the selected window.
+/// events by project, identity and session within the selected window.
 pub fn chair_sessions(
     roots: &Roots,
     since: jiff::Timestamp,
@@ -283,7 +223,7 @@ pub fn chair_sessions(
             }
             Some(ChairSession {
                 adapter: event.unit,
-                account: event.account?,
+                account_identity: event.account_identity,
                 session: event.session?,
                 project: event.trace.and_then(|trace| trace.project),
                 config: event.config,

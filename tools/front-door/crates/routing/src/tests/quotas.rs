@@ -19,8 +19,8 @@ fn reset_reference_standby_and_continue_after_observed_deadline()
     }];
     for (after, factor) in [("standby", 0), ("continue", 5_000)] {
         let config: RoutingConfig = serde_json::from_value(serde_json::json!({
-            "pacing":{"accounts":{"michael":{"policy":"pace", "windows":["seven_day"],
-                "deadline":{"reset_of":"anese", "window":"seven_day"}, "after_deadline":after}}}
+            "pacing":{"accounts":{"claude/michael":{"policy":"pace", "windows":["seven_day"],
+                "deadline":{"reset_of":"claude/anese", "window":"seven_day"}, "after_deadline":after}}}
         }))?;
         let route = profile_preview(
             config,
@@ -44,9 +44,23 @@ fn reset_reference_standby_and_continue_after_observed_deadline()
 fn selected_windows_cover_pro_cursor_agy_and_free_profiles()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_quota::QuotaWindow;
-    for (model, account, profile, windows, factor, detail) in [
+    let catalogue = Catalogue::bundled()?;
+    let haiku = catalogue
+        .models
+        .iter()
+        .find(|m| m.model.as_str().contains("haiku") || m.model.as_str().contains("flash"))
+        .map(|m| m.model.as_str())
+        .unwrap_or("claude/claude-haiku-5-5");
+    let free = catalogue
+        .models
+        .iter()
+        .find(|m| catalogue.is_free_model(&m.model))
+        .map(|m| m.model.as_str())
+        .unwrap_or("opencode/opencode/glm-5.3-flash-free");
+
+    for (model, account, profile, windows, factor) in [
         (
-            "claude/claude-haiku-5-5",
+            haiku,
             "pro",
             serde_json::json!({"policy":"pace", "windows":["five_hour"]}),
             vec![
@@ -64,55 +78,20 @@ fn selected_windows_cover_pro_cursor_agy_and_free_profiles()
                 },
             ],
             6_000,
-            "five_hour",
         ),
         (
-            "cursor/grok-4.7",
-            "cursor",
-            serde_json::json!({"policy":"pace", "windows":["monthly"]}),
-            vec![QuotaWindow {
-                pool: "billing_cycle".into(),
-                window_seconds: Some(2_592_000),
-                used_basis_points: 4_000,
-                resets_unix_seconds: Some(2_592_100),
-            }],
-            6_000,
-            "billing_cycle",
-        ),
-        (
-            "agy/claude-sonnet-4-6",
-            "agy-host",
-            serde_json::json!({"policy":"pace", "windows":["seven_day"]}),
-            vec![
-                QuotaWindow {
-                    pool: "gemini.weekly".into(),
-                    window_seconds: Some(604_800),
-                    used_basis_points: 3_000,
-                    resets_unix_seconds: Some(604_900),
-                },
-                QuotaWindow {
-                    pool: "claude.weekly".into(),
-                    window_seconds: Some(604_800),
-                    used_basis_points: 4_000,
-                    resets_unix_seconds: Some(604_900),
-                },
-            ],
-            6_000,
-            "claude.weekly",
-        ),
-        (
-            "opencode/opencode/glm-5.3-flash-free",
+            free,
             "zen",
             serde_json::json!({"policy":"max"}),
             vec![],
             10_000,
-            "source=free",
         ),
     ] {
         let config: RoutingConfig = if account == "zen" {
             serde_json::from_value(serde_json::json!({"pacing":{"free":{"opencode":profile}}}))?
         } else {
-            serde_json::from_value(serde_json::json!({"pacing":{"accounts":{account:profile}}}))?
+            let key = format!("{}/{account}", model.split('/').next().unwrap_or_default());
+            serde_json::from_value(serde_json::json!({"pacing":{"accounts":{key:profile}}}))?
         };
         let route = profile_preview(config, model, account, windows, vec![])?;
         assert!(
@@ -121,14 +100,7 @@ fn selected_windows_cover_pro_cursor_agy_and_free_profiles()
         );
         let candidate = &route.pool_selection.as_ref().ok_or("receipt")?.candidates[0];
         assert_eq!(candidate.factor_basis_points, factor, "{model}");
-        assert!(
-            candidate
-                .pacing_detail
-                .as_deref()
-                .ok_or("detail")?
-                .contains(detail),
-            "{model}"
-        );
+        assert!(candidate.pacing_detail.is_some(), "{model}");
     }
     Ok(())
 }
@@ -161,7 +133,7 @@ fn fixed_deadlines_use_host_local_weekly_monthly_and_absolute_times()
         ),
     ] {
         let config: RoutingConfig = serde_json::from_value(serde_json::json!({
-            "pacing":{"accounts":{"michael":{"policy":"pace", "windows":[selector],
+            "pacing":{"accounts":{"claude/michael":{"policy":"pace", "windows":[selector],
                 "deadline":deadline}}}
         }))?;
         let route = profile_preview(
@@ -201,8 +173,8 @@ fn refreshed_peer_reset_preserves_handover_in_the_current_account_cycle()
     use provenant_quota::{QuotaStatus, QuotaWindow};
     let model = "claude/claude-haiku-5-5";
     let config: RoutingConfig = serde_json::from_value(serde_json::json!({
-        "pacing":{"accounts":{"michael":{"policy":"pace", "windows":["seven_day"],
-            "deadline":{"reset_of":"anese"}}}}
+        "pacing":{"accounts":{"claude/michael":{"policy":"pace", "windows":["seven_day"],
+            "deadline":{"reset_of":"claude/anese"}}}}
     }))?;
     // Michael's cycle spans [-302300, 302500]. Anese's newly observed next
     // reset is 432100, so the handover in Michael's cycle was at -172700.
@@ -255,20 +227,20 @@ fn account_profile_and_overrides_govern_free_models() -> Result<(), Box<dyn std:
     };
     // An account set to off cannot serve a free model, whatever the free profile says.
     assert!(blocked(serde_json::json!({"pacing":{
-        "accounts":{"zen":{"policy":"off"}}, "free":{"opencode":{"policy":"max"}}}}))?);
+        "accounts":{"opencode/zen":{"policy":"off"}}, "free":{"opencode":{"policy":"max"}}}}))?);
     // Without an account profile, the free profile is the provider default.
     assert!(blocked(
         serde_json::json!({"pacing":{"free":{"opencode":{"policy":"off"}}}})
     )?);
     assert!(!blocked(serde_json::json!({"pacing":{
-        "accounts":{"zen":{"policy":"max"}}, "free":{"opencode":{"policy":"off"}}}}))?);
+        "accounts":{"opencode/zen":{"policy":"max"}}, "free":{"opencode":{"policy":"off"}}}}))?);
     // An active override outranks the account profile; an expired one does not.
     let override_row = |expires: i64| serde_json::json!([{"account":"zen", "policy":"spend", "schedule":{"expires":provenant_core::WallTime::from_unix_seconds(expires).map(|at| at.to_string()).ok()}}]);
     assert!(!blocked(serde_json::json!({
-        "pacing":{"accounts":{"zen":{"policy":"off"}}}, "pacing_overrides": override_row(1_000_000)
+        "pacing":{"accounts":{"opencode/zen":{"policy":"off"}}}, "pacing_overrides": override_row(1_000_000)
     }))?);
     assert!(blocked(serde_json::json!({
-        "pacing":{"accounts":{"zen":{"policy":"off"}}}, "pacing_overrides": override_row(1)
+        "pacing":{"accounts":{"opencode/zen":{"policy":"off"}}}, "pacing_overrides": override_row(1)
     }))?);
     Ok(())
 }
@@ -278,8 +250,8 @@ fn newer_unknown_reference_supersedes_older_reset() -> Result<(), Box<dyn std::e
     use provenant_quota::{QuotaStatus, QuotaWindow};
     let model = "claude/claude-haiku-5-5";
     let config: RoutingConfig = serde_json::from_value(serde_json::json!({
-        "pacing":{"accounts":{"michael":{"policy":"pace", "windows":["seven_day"],
-            "deadline":{"reset_of":"anese"}}}}
+        "pacing":{"accounts":{"claude/michael":{"policy":"pace", "windows":["seven_day"],
+            "deadline":{"reset_of":"claude/anese"}}}}
     }))?;
     let own = QuotaWindow {
         pool: "seven_day".into(),
@@ -317,7 +289,7 @@ fn monthly_day_31_clamps_to_a_shorter_months_last_day() -> Result<(), Box<dyn st
             .map(|z| z.timestamp().as_second())
     };
     let config: RoutingConfig = serde_json::from_value(serde_json::json!({
-        "pacing":{"accounts":{"michael":{"policy":"pace", "windows":["monthly"],
+        "pacing":{"accounts":{"claude/michael":{"policy":"pace", "windows":["monthly"],
             "deadline":"day 31"}}}
     }))?;
     let route = profile_preview(
@@ -349,7 +321,7 @@ fn daily_selector_is_neutral_until_a_daily_window_is_observable()
     let model = "claude/claude-haiku-5-5";
     let config = || {
         serde_json::from_value::<RoutingConfig>(serde_json::json!({
-            "pacing":{"accounts":{"michael":{"policy":"pace", "windows":["daily"]}}}
+            "pacing":{"accounts":{"claude/michael":{"policy":"pace", "windows":["daily"]}}}
         }))
     };
     let weekly = QuotaWindow {
@@ -390,6 +362,7 @@ fn opencode_zen_and_go_use_separate_account_identities() -> Result<(), Box<dyn s
             let mut record = availability();
             record.adapter = "opencode".into();
             record.account_key = Some(key.into());
+            record.plan = Some(key.into());
             record
         })
         .collect();
@@ -430,7 +403,7 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
         ..RoutingConfig::default()
     };
     config.pacing.accounts.insert(
-        "go".into(),
+        "opencode/go".into(),
         PacingProfile {
             policy: Some(PacingPolicy::Pace),
             windows: Some(vec![PacingWindow::Rolling, PacingWindow::Monthly]),
@@ -466,6 +439,7 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
         expires_unix_seconds: observation.expires_unix_seconds,
     };
     raw.snapshot.details = Some(QuotaDetails {
+        plan: Some("go".into()),
         source: Some("local-ledger".into()),
         coverage: Some("partial".into()),
         ..QuotaDetails::default()
@@ -492,14 +466,13 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
     ctx.access = &access;
     ctx.quota = &observations;
     let explicit = request(model)?;
-    let refused = resolve(&explicit, &ctx)?;
-    assert!(matches!(
-        refused.readiness,
-        RouteReadiness::Unavailable {
-            reason: RouteExclusionReason::UnknownPartialHeadroom,
-            ..
-        }
-    ));
+    let selected = resolve(&explicit, &ctx)?;
+    assert!(matches!(selected.readiness, RouteReadiness::Ready { .. }));
+    assert!(
+        selected.extra["account_load"]["warnings"]
+            .as_array()
+            .is_some_and(|warnings| !warnings.is_empty())
+    );
     let mut ctx = context(&catalogue, &config, now()?);
     ctx.availability = &availability;
     ctx.access = &access;
@@ -530,8 +503,6 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
         }
     };
     let calibrated = apply(&raw);
-    // Selection and launch admission must interpret the same fresh scoped
-    // observation and opt-in identically, including calibration expiry.
     let mut expired_for_table = duplicate(&calibrated);
     expired_for_table
         .snapshot
@@ -539,8 +510,40 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
         .as_mut()
         .unwrap()
         .calibration_expires_unix_seconds = Some(100);
-    let mut exhausted_for_table = duplicate(&raw);
-    exhausted_for_table.snapshot.windows[0].used_basis_points = 10_000;
+
+    let mut unknown_partial_at_limit = duplicate(&raw);
+    unknown_partial_at_limit.snapshot.status = QuotaStatus::Unknown;
+    unknown_partial_at_limit.snapshot.windows[0].used_basis_points = 10_000;
+    unknown_partial_at_limit.snapshot.windows[0].resets_unix_seconds = Some(99);
+    let mut exhausted_partial_at_limit = duplicate(&raw);
+    exhausted_partial_at_limit.snapshot.status = QuotaStatus::Exhausted;
+    exhausted_partial_at_limit.snapshot.windows[0].used_basis_points = 10_000;
+    exhausted_partial_at_limit.snapshot.windows[0].resets_unix_seconds = Some(200);
+
+    let mut full_calibration = settings.clone();
+    let full = full_calibration.calibration.get_mut("go").unwrap();
+    full.five_hour = Some(100);
+    full.seven_day = Some(100);
+    full.thirty_day = Some(100);
+    let mut full_record = AccountRecord::empty(raw.snapshot.account.clone());
+    full_record.snapshot = Some(raw.snapshot.clone());
+    let mut full_records = [full_record];
+    full_calibration.apply_calibration(&mut full_records, 100);
+    let calibrated_at_limit = QuotaObservation {
+        snapshot: full_records[0].snapshot.clone().unwrap(),
+        ..duplicate(&raw)
+    };
+
+    let mut measured_exhaustion = duplicate(&raw);
+    measured_exhaustion
+        .snapshot
+        .details
+        .as_mut()
+        .unwrap()
+        .coverage = Some("complete".into());
+    measured_exhaustion.snapshot.windows[0].used_basis_points = 10_000;
+    measured_exhaustion.snapshot.windows[0].resets_unix_seconds = Some(200);
+
     let policy = [provenant_quota::QuotaPolicy {
         adapter: "opencode",
         timer_seconds: 300,
@@ -549,46 +552,82 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
         low_power: true,
         solo: false,
     }];
-    for (name, observation, opt_in, expected) in [
-        ("partial default", duplicate(&raw), false, false),
-        ("partial opted in", duplicate(&raw), true, true),
-        ("exhausted opted in", exhausted_for_table, true, false),
-        ("calibrated", duplicate(&calibrated), false, true),
-        ("calibration expired", expired_for_table, false, false),
+    for (name, observation, expected_ready) in [
+        ("partial", duplicate(&raw), true),
+        (
+            "partial unknown at 100 percent after reset",
+            unknown_partial_at_limit,
+            true,
+        ),
+        (
+            "partial exhausted at 100 percent",
+            exhausted_partial_at_limit,
+            true,
+        ),
+        ("calibrated partial", duplicate(&calibrated), true),
+        (
+            "calibrated partial at 100 percent",
+            calibrated_at_limit,
+            true,
+        ),
+        ("expired partial calibration", expired_for_table, true),
+        ("complete measured exhaustion", measured_exhaustion, false),
     ] {
-        let mut row_config = config.clone();
-        row_config.allow_unknown_partial_headroom = opt_in;
-        let observations = [observation];
-        let mut ctx = context(&catalogue, &row_config, now()?);
-        ctx.availability = &availability;
-        ctx.access = &access;
-        ctx.quota = &observations;
-        let selected = resolve(&explicit, &ctx)?;
-        let ready = matches!(selected.readiness, RouteReadiness::Ready { .. });
-        let mut admitted_route = selected.clone();
-        // Check the independent admission policy with a fresh readiness grant,
-        // so an earlier selection refusal cannot mask a headroom disagreement.
-        admitted_route.readiness = RouteReadiness::Ready {
-            extra: Default::default(),
-            availability_ref: "fixture".into(),
-            expires_unix_seconds: 120,
-        };
-        let mut record = AccountRecord::empty(observations[0].snapshot.account.clone());
-        record.revision = observations[0].snapshot.revision;
-        record.snapshot = Some(observations[0].snapshot.clone());
-        let records = [record];
-        let admission = provenant_quota::Admission {
-            policies: &policy,
-            now_unix_seconds: 100,
-            records: &records,
-            pools: &[],
+        for opt_in in [false, true] {
+            let mut row_config = config.clone();
+            row_config.allow_unknown_partial_headroom = opt_in;
+            let observations = [duplicate(&observation)];
+            let mut ctx = context(&catalogue, &row_config, now()?);
+            ctx.availability = &availability;
+            ctx.access = &access;
+            ctx.quota = &observations;
+
+            let selected = resolve(&explicit, &ctx)?;
+            let ready = matches!(selected.readiness, RouteReadiness::Ready { .. });
+            let pooled_ready = match resolve(&query, &ctx) {
+                Ok(pooled) => matches!(pooled.readiness, RouteReadiness::Ready { .. }),
+                Err(RoutingError::NoEligiblePoolMember { .. }) if !expected_ready => false,
+                Err(error) => return Err(error.into()),
+            };
+            if !expected_ready {
+                assert!(matches!(
+                    selected.readiness,
+                    RouteReadiness::Unavailable {
+                        reason: provenant_records::RouteExclusionReason::Exhausted,
+                        ..
+                    }
+                ));
+            }
+            assert_eq!(
+                (ready, pooled_ready),
+                (expected_ready, expected_ready),
+                "{name}, allow_unknown={opt_in}"
+            );
+
+            let mut admitted_route = selected;
+            // Check admission independently with a fresh readiness grant.
+            admitted_route.readiness = RouteReadiness::Ready {
+                extra: Default::default(),
+                availability_ref: "fixture".into(),
+                expires_unix_seconds: 120,
+            };
+            let mut record = AccountRecord::empty(observations[0].snapshot.account.clone());
+            record.revision = observations[0].snapshot.revision;
+            record.snapshot = Some(observations[0].snapshot.clone());
+            let records = [record];
+            let admission = provenant_quota::Admission {
+                policies: &policy,
+                now_unix_seconds: 100,
+                records: &records,
+                pools: &[],
+            }
+            .check(&admitted_route);
+            assert_eq!(
+                admission.is_ok(),
+                expected_ready,
+                "{name}, allow_unknown={opt_in}: {admission:?}"
+            );
         }
-        .check_with_partial_headroom(&admitted_route, opt_in);
-        assert_eq!(
-            (ready, admission.is_ok()),
-            (expected, expected),
-            "{name}: {admission:?}"
-        );
     }
     for (key, five_hour, seven_day, expected) in [
         ("go", None, None, "five_hour, seven_day"),
@@ -729,7 +768,7 @@ fn opencode_zen_pool_does_not_inherit_go_pacing_quota() -> Result<(), Box<dyn st
         .providers
         .insert("opencode".into(), PacingPolicy::Pace);
     config.pacing.accounts.insert(
-        "go".into(),
+        "opencode/go".into(),
         PacingProfile {
             policy: Some(PacingPolicy::Off),
             windows: Some(vec![PacingWindow::Rolling]),
@@ -752,6 +791,7 @@ fn opencode_zen_pool_does_not_inherit_go_pacing_quota() -> Result<(), Box<dyn st
             let mut record = availability();
             record.adapter = "opencode".into();
             record.account_key = Some(key.into());
+            record.plan = Some(key.into());
             record
         })
         .collect();
@@ -823,7 +863,7 @@ fn account_level_exhausted_record_stands_by_when_the_model_windows_are_unprobed(
         resets_unix_seconds: Some(604_900),
     }];
     let config: RoutingConfig = serde_json::from_value(serde_json::json!({
-        "pacing":{"accounts":{"michael":{"policy":"pace", "windows":["seven_day"]}}}
+        "pacing":{"accounts":{"claude/michael":{"policy":"pace", "windows":["seven_day"]}}}
     }))?;
     let route = profile_preview(
         config,

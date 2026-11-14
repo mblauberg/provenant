@@ -156,12 +156,16 @@ pub struct ControlReceipt {
 }
 
 /// Stable refusal code for an unsupported control receipt. Every edge that
-/// reports one, CLI or MCP, uses this code and `ControlReceipt::refusal_message`.
+/// reports one, CLI or relay, uses this code and `ControlReceipt::refusal_message`.
 pub const CONTROL_UNSUPPORTED: &str = "control_unsupported";
+pub const CONTROL_UNSUPPORTED_REPAIR: &str = "Read `provenant help --all --json` provider_controls for what each provider supports; use `provenant retry` to continue a lane.";
 
 impl ControlReceipt {
     pub fn refusal_message(&self) -> String {
-        format!("control unsupported: {}", self.reason)
+        format!(
+            "control unsupported: {}; use `provenant retry` to continue the lane",
+            self.reason
+        )
     }
 }
 

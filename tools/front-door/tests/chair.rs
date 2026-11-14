@@ -8,10 +8,14 @@ use std::{
     os::unix::fs::PermissionsExt,
     time::{SystemTime, UNIX_EPOCH},
 };
-use support::{Result, TestRig, code, register_account};
+use support::{
+    Result, TestRig, code, install_fake_claude_auth, register_account, set_claude_config_dir,
+    write_fake_claude_identity,
+};
 
 fn configured() -> Result<TestRig> {
-    let rig = TestRig::new()?;
+    let mut rig = TestRig::new()?;
+    install_fake_claude_auth(&mut rig)?;
     let spare = rig.root.join("spare's account");
     fs::create_dir(&spare)?;
     fs::create_dir_all(&rig.state)?;
@@ -20,13 +24,9 @@ fn configured() -> Result<TestRig> {
         rig.state.join("config.toml"),
         "schema_version = 1\n[knobs]\n\"chair.auto_switch\" = true\n\"chair.switch_accounts\" = ['spare']\n",
     )?;
-    register_account(
-        &rig,
-        "claude",
-        "current",
-        "current",
-        &rig.root.join("claude"),
-    )?;
+    let current = rig.root.join("claude");
+    register_account(&rig, "claude", "current", "current", &current)?;
+    set_claude_config_dir(&mut rig, &current);
     register_account(&rig, "claude", "spare", "spare", &spare)?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     for (key, used) in [("current", 9200), ("spare", 100)] {
@@ -215,15 +215,18 @@ fn hook(rig: &TestRig, start: bool, session: &str) -> Result<provenant_os::exec:
     }))?))
 }
 #[test]
-fn chair_start_records_serving_account_without_a_pending_handoff() -> Result {
-    let rig = configured()?;
+fn chair_start_records_verified_identity_without_a_pending_handoff() -> Result {
+    let mut rig = configured()?;
+    let identity_key =
+        write_fake_claude_identity(&rig.root.join("claude"), "primary@example.test")?;
     assert_eq!(code(&rig.command(&["fabric", "identity", "--json"])?), 0);
     let config = rig.state.join("config.toml");
     let text = fs::read_to_string(&config)?;
     fs::write(
         config,
         text.replace("[knobs]", "[knobs]\n\"usage.project_attribution\" = true")
-            .replace("label = \"current\"", "label = \"primary\""),
+            .replace("label = \"current\"", "label = \"primary\"")
+            .replace("key = \"current\"", &format!("key = \"{identity_key}\"")),
     )?;
     write_transcript(&rig.root.join("claude"), "ordinary-session")?;
     for _ in 0..2 {
@@ -241,33 +244,19 @@ fn chair_start_records_serving_account_without_a_pending_handoff() -> Result {
         .find(|e| e["kind"] == "chair.session")
         .ok_or("SessionStart did not record the serving account without a handoff")?;
     assert_eq!(event["unit"], "claude");
-    assert_eq!(event["account"], "current");
+    assert_eq!(event["account_identity"]["identity"]["state"], "known");
+    assert_eq!(event["account_identity"]["identity"]["provider"], "claude");
+    assert_eq!(
+        event["account_identity"]["identity"]["account_key"],
+        identity_key
+    );
+    assert_eq!(event["account_identity"]["epoch"]["state"], "unknown");
+    assert_eq!(event["account_identity"]["evidence_source"], "provider");
+    assert!(event.get("account").is_none());
     assert_eq!(event["session"], "ordinary-session");
     assert!(event["trace"]["project"].is_string());
     assert!(!log.contains("PRIVATE PROMPT"));
     assert!(!log.contains("transcript.jsonl"));
-    let output = rig.command(&["quota", "usage", "--json"])?;
-    assert_eq!(
-        code(&output),
-        0,
-        "{}",
-        String::from_utf8_lossy(&output.stderr.bytes)
-    );
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
-    let rows = report["data"]["rows"].as_array().ok_or("usage rows")?;
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0]["account"], "primary");
-    assert_eq!(rows[0]["chair_sessions"], 1);
-    assert_eq!(rows[0]["chair_sessions_unread"], 0);
-    // Tokens come from the session's own transcript: 5 uncached, 400 read.
-    assert_eq!(rows[0]["chair_usage"]["uncached_input"]["known"], 5);
-    assert_eq!(rows[0]["chair_usage"]["cache_read"]["known"], 400);
-    assert_eq!(rows[0]["chair_cache"]["read_share_basis_points"], 9638);
-    assert!(
-        report["data"]["chair_usage_note"]
-            .as_str()
-            .is_some_and(|s| s.contains("unattributed"))
-    );
     fs::create_dir_all(rig.project.join("config"))?;
     fs::write(
         rig.project.join("config/telemetry-prices.toml"),
@@ -284,7 +273,10 @@ fn chair_start_records_serving_account_without_a_pending_handoff() -> Result {
     let stats: serde_json::Value = serde_json::from_slice(&stats.stdout.bytes)?;
     let chair = &stats["data"]["chair"];
     assert_eq!(chair["sessions"], 1);
-    assert_eq!(chair["groups"][0]["account"], "primary");
+    assert_eq!(
+        chair["groups"][0]["account"],
+        format!("claude/{identity_key}")
+    );
     assert_eq!(chair["groups"][0]["model"], "claude/claude-opus-5-5");
     assert_eq!(chair["groups"][0]["usage"]["cache_read"]["known"], 400);
     Ok(())
@@ -324,13 +316,15 @@ fn chair_on_an_unregistered_config_directory_is_recorded_as_unattributed() -> Re
         .into_iter()
         .find(|e| e["kind"] == "chair.session")
         .ok_or("the default config directory must still be recorded")?;
-    assert_eq!(event["account"], "unattributed");
+    assert_eq!(event["account_identity"]["identity"]["state"], "unknown");
+    assert_eq!(event["account_identity"]["epoch"]["state"], "unknown");
+    assert_eq!(event["account_identity"]["evidence_source"], "unknown");
+    assert_eq!(
+        event["account_identity"]["identity"]["reason"],
+        "provider_identity_unavailable",
+    );
+    assert!(event.get("account").is_none());
     assert_eq!(event["config"], ".claude");
-    let report = rig.command(&["quota", "usage", "--json"])?;
-    let report: serde_json::Value = serde_json::from_slice(&report.stdout.bytes)?;
-    let row = &report["data"]["rows"][0];
-    assert_eq!(row["account"], "unattributed");
-    assert_eq!(row["chair_usage"]["cache_read"]["known"], 400);
     Ok(())
 }
 
@@ -347,15 +341,18 @@ fn chair_start_obeys_project_attribution_opt_in() -> Result {
         .into_iter()
         .find(|e| e["kind"] == "chair.session")
         .ok_or("chair event")?;
-    assert_eq!(event["account"], "current");
+    assert_eq!(event["account_identity"]["identity"]["state"], "unknown");
+    assert_eq!(event["account_identity"]["epoch"]["state"], "unknown");
+    assert_eq!(event["account_identity"]["evidence_source"], "unknown");
+    assert_eq!(
+        event["account_identity"]["identity"]["reason"],
+        "provider_identity_unavailable",
+    );
+    assert!(event.get("account").is_none());
     assert!(
         event.get("trace").is_none(),
         "project attribution is off: {event}"
     );
-    let report = rig.command(&["quota", "usage", "--json"])?;
-    let report: serde_json::Value = serde_json::from_slice(&report.stdout.bytes)?;
-    assert!(report["data"]["rows"][0]["project"].is_null());
-    assert_eq!(report["data"]["rows"][0]["chair_sessions"], 1);
     Ok(())
 }
 
@@ -375,10 +372,6 @@ fn chair_attribution_does_not_register_unbound_projects() -> Result {
         !rig.state.join("projects").exists(),
         "telemetry registered the project"
     );
-    let report = rig.command(&["quota", "usage", "--json"])?;
-    let report: serde_json::Value = serde_json::from_slice(&report.stdout.bytes)?;
-    assert!(report["data"]["rows"][0]["project"].is_null());
-    assert_eq!(report["data"]["rows"][0]["chair_sessions"], 1);
     Ok(())
 }
 
@@ -614,9 +607,7 @@ fn chair_snapshot_allows_slow_identity_without_initialising_a_run_store() -> Res
 
 #[test]
 fn chair_snapshot_preserves_active_lanes_while_a_writer_is_open() -> Result {
-    use provenant_core::{
-        ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, RootInputs, RunId, TaskId,
-    };
+    use provenant_core::{ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, RootInputs};
     use provenant_os::clock::SystemClock;
     use provenant_records::CanonicalV1;
     use provenant_run as run;
@@ -642,21 +633,23 @@ fn chair_snapshot_preserves_active_lanes_while_a_writer_is_open() -> Result {
         cancel: &cancel,
     };
     let store = run::RunStore::open(&context, &call)?;
-    let run_id = RunId::from_bytes([2; 16]);
-    let task_id = TaskId::from_bytes([3; 16]);
     let attempt_id = AttemptId::from_bytes([4; 16]);
-    store.create(
+    let record = store.create(
         &run::PreparedRun {
-            run_id,
+            attempt_id,
             operation_id: OperationId::parse("chair-snapshot")?,
             request: run::CanonicalRequest {
                 extra: Default::default(),
-                child_attempt_id_version: None,
                 chair: None,
                 fresh_continuation: None,
                 schema_version: 1,
-                tasks: vec![run::TaskRequest {
-                    context: None,
+                task: run::TaskRequest {
+                    context: Some(provenant_records::run::WorkContext {
+                        graph_id: Some("chair-lane".into()),
+                        node_id: Some("node".into()),
+                        attempt: Some(1),
+                        ..Default::default()
+                    }),
                     extra: Default::default(),
                     build_heavy: false,
                     title: None,
@@ -665,7 +658,6 @@ fn chair_snapshot_preserves_active_lanes_while_a_writer_is_open() -> Result {
                     source_head: None,
                     base_ref: None,
                     profile: Default::default(),
-                    task_id,
                     prompt_digest: CanonicalV1::file_digest(b"existing lane"),
                     route: run::RequestedRoute::Named {
                         extra: Default::default(),
@@ -679,17 +671,12 @@ fn chair_snapshot_preserves_active_lanes_while_a_writer_is_open() -> Result {
                     provider_timeout_seconds: 60,
                     delivery_id: None,
                     access: Default::default(),
-                }],
-                concurrency: 1,
+                },
                 parent: None,
                 lane_depth: Some(1),
                 parent_attempt: None,
             },
-            attempts: vec![run::NewAttempt {
-                attempt_id,
-                task_id,
-                prompt: "existing lane".into(),
-            }],
+            prompt: "existing lane".into(),
             created_at: clock.wall_now()?,
         },
         &call,
@@ -700,10 +687,7 @@ fn chair_snapshot_preserves_active_lanes_while_a_writer_is_open() -> Result {
     let checkpoint = value["data"]["checkpoint"].as_str().ok_or("checkpoint")?;
     let handoff: provenant_workflow::chair::Handoff =
         serde_json::from_slice(&fs::read(checkpoint)?)?;
-    assert_eq!(
-        handoff.open_lanes,
-        [format!("{run_id}/{task_id}/{attempt_id}")]
-    );
+    assert_eq!(handoff.open_lanes, [format!("{} {attempt_id}", record.key)]);
     // Keep the writer connection alive through the snapshot.
     drop(store);
     Ok(())

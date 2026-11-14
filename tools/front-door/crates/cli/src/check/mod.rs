@@ -22,6 +22,8 @@ mod dates;
 mod release;
 #[derive(Debug, Subcommand)]
 pub enum Check {
+    /// Check every configured provider route without launching a lane
+    Providers(Providers),
     /// Check configuration files
     Config(Page),
     /// Check the installed release
@@ -54,6 +56,20 @@ pub enum Check {
         #[command(flatten)]
         page: Page,
     },
+}
+
+/// Provider smoke checks use ordinary read-only lanes and consume provider quota.
+#[derive(Debug, clap::Args)]
+pub struct Providers {
+    /// Launch one tiny read-only lane per route; consumes quota like any lane
+    #[arg(long)]
+    pub live: bool,
+    /// Exact ADAPTER/ACCOUNT/MODEL (MODEL may contain slashes); repeatable
+    #[arg(long = "route", value_name = "ROUTE")]
+    pub routes: Vec<String>,
+    /// Override timeout_seconds (default 60) or concurrency (default 2); repeatable
+    #[arg(long = "set", value_name = "NAME=VALUE")]
+    pub set: Vec<String>,
 }
 
 #[derive(Debug, Error)]
@@ -250,6 +266,7 @@ fn next_cursor<T>(page: &CheckPage<T>) -> Result<Option<String>, CheckError> {
 }
 
 pub struct GitContext<'a> {
+    pub host_state: &'a Path,
     pub repo: &'a ReadOnlyRepo,
     pub runtime: &'a UtilityRuntime,
     pub executor: &'a dyn Executor,
@@ -462,22 +479,15 @@ pub fn config_page(
             ConfigError::Schema { location, .. } | ConfigError::CollectionLimit { location } => (
                 "config.schema",
                 location.line,
-                "configuration violates the typed TOML schema; repair: delete the line or run `provenant config migrate`".to_owned(),
+                "configuration violates the typed TOML schema; run `provenant config check` and edit the reported key".to_owned(),
             ),
             ConfigError::Domain {
                 location, source, ..
             } => {
-                let repair = if source.code.starts_with("moved_to_schedule.")
-                    || source.code.starts_with("retired.")
-                {
-                    "; repair: run `provenant config migrate`"
-                } else {
-                    ""
-                };
                 (
                     "config.schema",
                     location.line,
-                    format!("{}: {}{repair}", source.field, source.detail.unwrap_or(source.code)),
+                    format!("{}: {}", source.field, source.detail.unwrap_or(source.code)),
                 )
             }
             _ => return Err(CheckError::Evidence("config inspection failed")),
@@ -603,8 +613,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn config_check_domain_errors_include_field_code_and_migration_repair()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn config_check_domain_errors_include_field_and_code() -> Result<(), Box<dyn std::error::Error>>
+    {
         let path = provenant_records::PathWire::from_relative(
             &provenant_core::RelativePath::parse("config.toml")?,
         )?;
@@ -644,7 +654,6 @@ mod tests {
         let message = &page.findings[0].message;
         assert!(message.contains("limits.bundle_bytes"), "{message}");
         assert!(message.contains("retired.bundle_bytes"), "{message}");
-        assert!(message.contains("provenant config migrate"), "{message}");
         Ok(())
     }
 

@@ -1,7 +1,7 @@
 //! Provider-neutral human requests. These records confer no workflow authority.
 use provenant_core::{
     ActorId, AttemptId, GitOid, HostId, HumanAnswerId, HumanRequestId, OperationId, ProjectId,
-    RunId, TaskId, WallTime,
+    WallTime,
 };
 use serde::{Deserialize, Serialize};
 
@@ -107,8 +107,9 @@ pub struct RequestOption {
 pub struct RequestWork {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
-    pub run_id: RunId,
-    pub task_id: Option<TaskId>,
+    /// The graph the request concerns; `node` and `attempt_id` narrow it.
+    pub graph: String,
+    pub node: Option<String>,
     pub attempt_id: Option<AttemptId>,
     pub repository: Option<crate::AbsolutePath>,
     pub head: Option<GitOid>,
@@ -215,7 +216,7 @@ pub struct HumanAnswer {
     /// Exact submitted text, including whitespace.
     pub text: Option<String>,
     pub actor: ActorId,
-    /// Source host for a federated answer; absent for local and legacy answers.
+    /// Source host for a federated answer; absent for local answers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_host: Option<HostId>,
     pub channel: InteractionChannel,

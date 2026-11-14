@@ -144,7 +144,6 @@ struct RestPull {
     state: String,
     head: RestBranch,
     base: RestBranch,
-    mergeable: Option<bool>,
     #[allow(dead_code)]
     mergeable_state: Option<String>,
     merged_at: Option<String>,
@@ -175,20 +174,6 @@ struct RestUser {
 }
 fn pull_endpoint(number: &str) -> String {
     format!("repos/{{owner}}/{{repo}}/pulls/{number}")
-}
-fn rest_pull(read: &impl Fn(&[&str]) -> Result<ExecOutcome>, number: &str) -> Result<RestPull> {
-    let endpoint = pull_endpoint(number);
-    let bytes = successful(read(&[
-        "gh",
-        "api",
-        &endpoint,
-        "-H",
-        "X-GitHub-Api-Version:2026-03-10",
-    ])?)?;
-    Ok(serde_json::from_slice(&bytes)?)
-}
-fn head(project: &Path, number: &str) -> Result<GitOid> {
-    Ok(rest_pull(&|argv| execute(project, argv), number)?.head.sha)
 }
 /// The pull request a graph lands: found by head branch, never by `gh pr
 /// view BRANCH`, which reads a numeric branch as a pull request number.
@@ -278,10 +263,9 @@ fn pull_for_branch_with(
         .into()),
     }
 }
-/// How long `pr watch` waits for CI to report its first check, and how often
-/// it asks. A push is followed by a gap before any workflow registers.
+/// How long `pr watch` waits for CI to report its first check. Its poll
+/// interval comes from the observer's configured adaptive cadence.
 const UNREPORTED_WAIT: Duration = Duration::from_secs(180);
-const UNREPORTED_POLL: Duration = Duration::from_secs(10);
 /// The longest `pr watch` follows the CI of one head.
 const WATCH_BUDGET: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -294,6 +278,7 @@ type Observed = std::result::Result<Vec<observer::Check>, observer::ObserveError
 fn watch_with(
     read: &mut dyn FnMut() -> Observed,
     sleep: &dyn Fn(Duration),
+    poll_interval: &dyn Fn() -> Duration,
     number: &str,
 ) -> Result<()> {
     let mut waited = Duration::ZERO;
@@ -315,12 +300,15 @@ fn watch_with(
                     ),
                 ));
             }
-            sleep(UNREPORTED_POLL);
-            waited += UNREPORTED_POLL;
+            let delay = poll_interval()
+                .max(Duration::from_millis(1))
+                .min(UNREPORTED_WAIT.saturating_sub(waited));
+            sleep(delay);
+            waited += delay;
             continue;
         }
         if checks.iter().any(|check| check.bucket == "pending") {
-            sleep(observer::POLL);
+            sleep(poll_interval().max(Duration::from_millis(1)));
             continue;
         }
         if !checks.iter().any(|check| check.bucket == "pass")
@@ -340,24 +328,34 @@ fn watch(project: &Path, state: &Path, number: &str, head: GitOid, repository: &
     let mut ci = observer::Observer::open(state, project, repository, WATCH_BUDGET)
         .map_err(|error| wait::ci_failure(error, &format!("provenant pr watch {number}")))?;
     let commit = head.to_string();
+    let max_age = ci.fast_interval();
+    let next_poll = std::cell::Cell::new(max_age);
     watch_with(
         &mut || {
-            ci.checks(
+            let result = ci.checks(
                 &commit,
-                observer::POLL,
+                max_age,
                 WATCH_BUDGET.saturating_sub(started.elapsed()),
-            )
+            );
+            next_poll.set(ci.next_poll_interval());
+            result
         },
         &std::thread::sleep,
+        &|| next_poll.get(),
         number,
     )?;
-    if self::head(project, number)? != head {
+    let pull = ci
+        .resource(
+            &format!("pulls/{number}"),
+            Duration::ZERO,
+            WATCH_BUDGET.saturating_sub(started.elapsed()),
+        )
+        .map_err(|error| wait::ci_failure(error, &format!("provenant pr watch {number}")))?;
+    let expected_head = head.to_string();
+    if pull["head"]["sha"].as_str() != Some(expected_head.as_str()) {
         return Err(format!("pull request head moved from {head}").into());
     }
     Ok(())
-}
-fn merge(reader: &wait::Reader<'_>, number: &str, head: GitOid) -> Result<()> {
-    merge_with(reader, number, head, MergeMethod::Merge).map(|_| ())
 }
 /// Merge a pull request pinned to `head` with `method`, returning the commit
 /// GitHub created. A moved head (409) and a refused merge (405) are named.
@@ -428,67 +426,78 @@ fn merge_with(
         .map(str::to_owned))
 }
 pub fn run(command: Pr, globals: &Globals, _workers: &dyn WorkerObserver) -> u8 {
-    let (leaf, number) = match command {
-        Pr::Watch { number } => ("pr watch", number),
+    let numbers = match command {
+        Pr::Watch { numbers } => numbers,
         Pr::Open(command) => return open::run(*command, globals),
-        Pr::Status { numbers, wait } => return status::run(numbers, wait, globals),
+        Pr::Status { numbers } => return status::run(numbers, globals),
         Pr::Contributions { number, bind } => return contributions::run(number, bind, globals),
     };
-    let mut captured = None;
-    let result = (|| -> Result<()> {
-        let project = roots::selected_project(globals.project.as_deref(), true)?;
-        let number = number.to_string();
-        let pull = rest_pull(&|argv| execute(&project, argv), &number)?;
-        let current = pull.head.sha;
-        captured = Some(current);
-        let repository = pull
-            .base
-            .repo
-            .map(|repo| repo.full_name)
-            .ok_or("pull request base repository is unavailable")?;
-        let state = roots::resolve(globals, roots::Workspace::Project, roots::Product::Optional)?
-            .roots
-            .state;
-        watch(&project, state.as_path(), &number, current, &repository)?;
-        Ok(())
-    })();
-    let Some(head) = captured else {
-        return fail(
-            leaf,
-            Outcome::Error,
-            "PR",
-            &result.err().map_or_else(
-                || "pull request head is unavailable".into(),
-                |error| error.to_string(),
-            ),
-            globals,
-        );
-    };
-    let (outcome, status) = if result.is_ok() {
-        (Outcome::Ok, "pass")
+    const LEAF: &str = "pr watch";
+    // Each pull request is watched in turn; the result reports every head.
+    let mut pulls = Vec::new();
+    let mut human = String::new();
+    let mut failures = Vec::new();
+    for number in numbers {
+        let mut captured = None;
+        let result = (|| -> Result<()> {
+            let project = roots::selected_project(globals.project.as_deref(), true)?;
+            let number = number.to_string();
+            let state =
+                roots::resolve(globals, roots::Workspace::Project, roots::Product::Optional)?
+                    .roots
+                    .state;
+            let repository = status::wait_repository(state.as_path(), &project, WATCH_BUDGET)?;
+            let mut observer =
+                observer::Observer::open(state.as_path(), &project, &repository, WATCH_BUDGET)
+                    .map_err(|error| {
+                        wait::ci_failure(error, &format!("provenant pr watch {number}"))
+                    })?;
+            let pull = observer
+                .resource(&format!("pulls/{number}"), Duration::ZERO, WATCH_BUDGET)
+                .map_err(|error| {
+                    wait::ci_failure(error, &format!("provenant pr watch {number}"))
+                })?;
+            let pull: RestPull = serde_json::from_value(pull)?;
+            let current = pull.head.sha;
+            captured = Some(current);
+            watch(&project, state.as_path(), &number, current, &repository)?;
+            Ok(())
+        })();
+        let Some(head) = captured else {
+            return fail(
+                LEAF,
+                Outcome::Error,
+                "PR",
+                &result.err().map_or_else(
+                    || format!("pull request #{number} head is unavailable"),
+                    |error| format!("#{number}: {error}"),
+                ),
+                globals,
+            );
+        };
+        let status = if result.is_ok() { "pass" } else { "fail" };
+        if let Err(error) = result {
+            failures.push(format!("fail #{number} {head}: {error}"));
+        }
+        human.push_str(&format!("{status} #{number} {head}\n"));
+        pulls.push(serde_json::json!({"number": number, "head": head, "result": status}));
+    }
+    let outcome = if failures.is_empty() {
+        Outcome::Ok
     } else {
-        (Outcome::Error, "fail")
+        Outcome::Error
     };
-    let mut report = CommandResult::new(
-        leaf,
-        outcome,
-        serde_json::json!({"number": number, "head": head, "result": status}),
-    );
-    if let Err(error) = result {
+    let mut report = CommandResult::new(LEAF, outcome, serde_json::json!({"pulls": pulls}));
+    if !failures.is_empty() {
         report.error = Some(provenant_records::CommandError {
             diagnostic: None,
             code: "PR".into(),
-            message: format!("fail #{number} {head}: {error}"),
+            message: failures.join("; "),
             cause: None,
             repair: None,
         });
     }
-    emit(
-        &report,
-        globals,
-        &format!("{status} #{number} {head}\n"),
-        true,
-    )
+    emit(&report, globals, &human, true)
 }
 
 #[cfg(test)]
@@ -620,11 +629,40 @@ mod unreported_checks_tests {
                 })
             },
             &|delay| slept.set(slept.get() + delay),
+            &|| observer::POLL,
             "7",
         )
         .expect("checks registered after three empty reads and then passed");
         assert_eq!(reads.get(), 5);
-        assert_eq!(slept.get(), UNREPORTED_POLL * 3 + observer::POLL);
+        assert_eq!(slept.get(), observer::POLL * 4);
+    }
+
+    #[test]
+    fn watch_uses_the_adapter_interval_selected_after_each_pending_read() {
+        let reads = Cell::new(0);
+        let interval = Cell::new(Duration::from_secs(1));
+        let slept = Cell::new(Duration::ZERO);
+        watch_with(
+            &mut || {
+                reads.set(reads.get() + 1);
+                match reads.get() {
+                    1 => {
+                        interval.set(Duration::from_secs(15));
+                        Ok(vec![check("pending")])
+                    }
+                    2 => {
+                        interval.set(Duration::from_secs(2));
+                        Ok(vec![check("pending")])
+                    }
+                    _ => Ok(vec![check("pass")]),
+                }
+            },
+            &|delay| slept.set(slept.get() + delay),
+            &|| interval.get(),
+            "7",
+        )
+        .expect("checks settle after slow and fast pending intervals");
+        assert_eq!(slept.get(), Duration::from_secs(17));
     }
 
     #[test]
@@ -639,10 +677,16 @@ mod unreported_checks_tests {
                 })
             },
             &|_| {},
+            &|| observer::POLL,
             "7",
         )
         .expect("the real workflow registered and passed");
-        let error = watch_with(&mut || Ok(vec![check("skipping")]), &|_| {}, "7");
+        let error = watch_with(
+            &mut || Ok(vec![check("skipping")]),
+            &|_| {},
+            &|| observer::POLL,
+            "7",
+        );
         assert!(error.is_err(), "only skipped checks at the bound");
     }
 
@@ -652,6 +696,7 @@ mod unreported_checks_tests {
         let error = watch_with(
             &mut || Ok(Vec::new()),
             &|delay| slept.set(slept.get() + delay),
+            &|| observer::POLL,
             "7",
         )
         .expect_err("checks never registered");
@@ -673,6 +718,7 @@ mod unreported_checks_tests {
             let error = watch_with(
                 &mut || Ok(buckets.iter().map(|bucket| check(bucket)).collect()),
                 &|_| panic!("a finished run must not wait"),
+                &|| observer::POLL,
                 "7",
             );
             assert!(error.is_err(), "{buckets:?}");
@@ -690,6 +736,7 @@ mod unreported_checks_tests {
                 })
             },
             &|_| panic!("the observer owns the rate-limit wait"),
+            &|| observer::POLL,
             "7",
         )
         .expect_err("the rate limit outlasts the budget");

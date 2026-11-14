@@ -30,7 +30,6 @@ fn panel(topology: &str) -> GraphDocument {
 fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
     let library = template::TemplateLibrary::bundled();
     let resolvers = std::collections::BTreeMap::from([
-        ("review-topology".into(), vec![topology.to_owned()]),
         (
             "review-panel".into(),
             lenses.iter().map(|lens| (*lens).to_owned()).collect(),
@@ -43,6 +42,7 @@ fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
         ("review-advice-tests".into(), vec![String::new()]),
     ]);
     let mut resolvers = resolvers;
+    resolvers.extend(super::when_tests::stages(topology));
     for lens in lenses {
         resolvers.insert(format!("review-advice-{lens}"), vec![String::new()]);
     }
@@ -101,6 +101,9 @@ fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
                         }]), "VERDICT: PASS")));
                     }
                     let mut owner = FakeOwner {
+                        // These members have exhausted their restart allowance;
+                        // this test judges final panel coverage, not alias redraw.
+                        retry_limit: Some(0),
                         observations,
                         ..Default::default()
                     };
@@ -190,6 +193,9 @@ fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
                         &answer(json!([]), "VERDICT: PASS"),
                     ));
                     let mut owner = FakeOwner {
+                        // These members have exhausted their restart allowance;
+                        // this test judges final panel coverage, not alias redraw.
+                        retry_limit: Some(0),
                         observations,
                         ..Default::default()
                     };
@@ -457,7 +463,7 @@ fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
 
     /// A long review ending in one verdict, a blank line and a pretty-printed
     /// handoff block is one verdict. Size alone (past the run store's head
-    /// window) costs the findings, never the verdict.
+    /// window) costs neither complete findings nor the verdict.
     #[test]
     fn a_long_review_with_a_spaced_handoff_keeps_its_single_verdict() {
         let overlong = format!("Traced {} to its call sites.", "a/b/c ".repeat(400));
@@ -493,6 +499,8 @@ fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
                     result_path: None,
                     branch: None,
                     commit: None,
+                    settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                    stop: None,
                 }]
                 .into(),
                 ..Default::default()
@@ -1149,4 +1157,82 @@ fn maximal_panel_verify_and_synthesis_prompts_fit_default_limits() {
     }
     assert_eq!(verifiers, 2);
     assert_eq!(synthesis, 1);
+}
+
+/// Medium: size affects only the checkpoint summary. The full artifact,
+/// verdict and every blocking finding survive storage, replay and retrieval.
+#[test]
+fn oversized_blocking_findings_remain_retrievable_with_the_verdict() {
+    let mut entries = Vec::new();
+    while canonical_len(&entries) <= FINDINGS_BYTES {
+        let index = entries.len();
+        let mut entry = finding();
+        entry["id"] = json!(format!("F{index}"));
+        entry["summary"] = json!(format!(
+            "Finding {index}: {}",
+            "full evidence ".repeat(60)
+        ));
+        entry["triage"]["reason"] = json!("Verified the failing path. ".repeat(15));
+        entry["evidence"] = json!("Trace the reachable failing path. ".repeat(12));
+        entries.push(entry);
+    }
+    let response = answer(json!(entries), "VERDICT: FAIL");
+    let mut capture = crate::result_capture::ResultCapture::new(None);
+    for chunk in response.as_bytes().chunks(37) {
+        capture.push(chunk);
+    }
+    let captured = capture.finish();
+    assert!(!captured.source_truncated);
+    let mut observation = terminal_with_result(AttemptOutcome::Succeeded, &response);
+    if let AttemptObservation::Terminal {
+        result,
+        result_path,
+        ..
+    } = &mut observation
+    {
+        *result = Some(Box::new(captured));
+        *result_path = Some("attempts/review/result.md".into());
+    }
+    let document = graph(vec![review("review.tests", "review")]);
+    let mut owner = FakeOwner {
+        observations: [observation].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let progress = &run.checkpoint.nodes[0];
+    let outputs = progress.outputs.as_ref().unwrap();
+    assert_eq!(outputs.verdict.as_deref(), Some("VERDICT: FAIL"));
+    assert!(canonical_len(&outputs.findings) <= FINDINGS_BYTES);
+    assert_eq!(outputs.findings_available, Some(true));
+    assert_eq!(
+        outputs.result.as_ref().unwrap().path.as_deref(),
+        Some("attempts/review/result.md")
+    );
+    let temp = crate::test_support::tempdir().unwrap();
+    let directory = Directory::open_anchor(temp.path()).unwrap();
+    let mut stored = json!({"checkpoint":run.checkpoint});
+    prompt_store::externalise(&directory, &document.graph_id, &mut stored).unwrap();
+    assert!(stored["checkpoint"]["nodes"][0]["outputs"]["_artifact_findings"].is_null());
+    let bytes = serde_json::to_vec(&stored).unwrap();
+    assert!(bytes.len() < response.len());
+    let hydrated = prompt_store::rehydrate(&directory, &document.graph_id, &bytes).unwrap();
+    let hydrated: Value = serde_json::from_slice(&hydrated).unwrap();
+    let mut checkpoint: GraphCheckpoint =
+        serde_json::from_value(hydrated["checkpoint"].clone()).unwrap();
+    materialise_checkpoint_findings(&document, &mut checkpoint).unwrap();
+    let findings = &checkpoint.nodes[0].outputs.as_ref().unwrap().findings;
+    for entry in &entries {
+        let id = entry["id"].as_str().unwrap();
+        let finding = findings.iter().find(|finding| finding.id == id).unwrap();
+        assert_eq!(finding.summary, entry["summary"].as_str().unwrap());
+        assert_eq!(finding.extra["evidence"], entry["evidence"]);
+        assert!(repair::blocking(finding));
+    }
+    assert_eq!(
+        advance(&document, &mut owner, &mut journal)
+            .unwrap()
+            .checkpoint,
+        run.checkpoint
+    );
 }

@@ -7,7 +7,7 @@ use provenant_records::{CommandResult, Outcome};
 use provenant_telemetry::usage::{self, EVENT_KINDS};
 
 pub fn attribution_enabled(roots: &Roots) -> bool {
-    provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
+    provenant_cli::config_reads::read_for(roots, "knobs")
         .ok()
         .and_then(|config| config.knobs.get("usage.project_attribution").cloned())
         .and_then(|knob| knob.value.as_bool())
@@ -20,7 +20,9 @@ pub fn project_id(resolved: &Resolved) -> Option<ProjectId> {
     }
     use std::time::Duration;
     let git = provenant_os::git::git_executable()?;
-    let runtime = provenant_confinement::UtilityRuntime::read_only(git).ok()?;
+    let runtime =
+        provenant_confinement::UtilityRuntime::read_only(git, resolved.roots.state.as_path())
+            .ok()?;
     let executor = provenant_os::exec::SystemExecutor::new(1).ok()?;
     let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(1)).ok()?;
     let location = runtime
@@ -37,20 +39,11 @@ pub fn project_id(resolved: &Resolved) -> Option<ProjectId> {
         .map(|binding| binding.project_id())
 }
 
-/// Every installed CLI verb and MCP tool, so unused units report zero calls.
+/// Every installed CLI verb, so unused units report zero calls.
 fn inventory() -> Vec<(String, String)> {
     provenant_cli::usage_verbs()
         .into_iter()
         .map(|verb| (EVENT_KINDS[0].into(), verb))
-        .chain(
-            provenant_fabric_mcp::tools::catalogue()
-                .iter()
-                .filter_map(|tool| {
-                    tool["name"]
-                        .as_str()
-                        .map(|name| (EVENT_KINDS[1].into(), name.into()))
-                }),
-        )
         .collect()
 }
 
@@ -95,8 +88,8 @@ pub fn run(stats: &Stats, globals: &Globals) -> u8 {
 }
 
 /// Ingest native Claude sessions into the state root's token store. Registered
-/// accounts attribute their directories; every other `~/.claude*` directory is
-/// `unattributed`, never dropped.
+/// and other `~/.claude*` directories locate transcripts; identity comes only
+/// from a chair session record and otherwise stays typed unknown.
 pub fn ingest_native(
     roots: &Roots,
     home: &std::path::Path,
@@ -105,27 +98,25 @@ pub fn ingest_native(
     deadline: Option<std::time::Instant>,
 ) -> Result<provenant_telemetry::ingest::Report, String> {
     use provenant_telemetry::ingest;
-    let config = provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
+    let config = provenant_cli::config_reads::read_for(roots, "telemetry")
         .map_err(|error| error.to_string())?;
-    let accounts: Vec<(String, Vec<std::path::PathBuf>)> = config
+    let directories: Vec<std::path::PathBuf> = config
         .domains
         .accounts
         .entries
         .values()
         .filter(|entry| entry.adapter == ingest::PROVIDER)
-        .map(|entry| {
-            let mut directories = vec![entry.directory.clone()];
-            directories.extend(entry.directories.iter().cloned());
-            (entry.label.clone(), directories)
+        .flat_map(|entry| {
+            std::iter::once(entry.directory.clone()).chain(entry.directories.iter().cloned())
         })
         .collect();
-    let dirs = ingest::config_dirs(&accounts, home);
-    let chairs: std::collections::BTreeSet<String> =
-        usage::chair_sessions(roots, jiff::Timestamp::MIN, jiff::Timestamp::MAX)
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .map(|chair| chair.session)
-            .collect();
+    let dirs = ingest::config_dirs(&directories, home);
+    let mut chairs = std::collections::BTreeMap::new();
+    for chair in usage::chair_sessions(roots, jiff::Timestamp::MIN, jiff::Timestamp::MAX)
+        .map_err(|error| error.to_string())?
+    {
+        merge_chair_identity(&mut chairs, chair.session, chair.account_identity);
+    }
     {
         use std::os::unix::fs::DirBuilderExt;
         std::fs::DirBuilder::new()
@@ -146,6 +137,45 @@ pub fn ingest_native(
         },
     )
     .map_err(|error| error.to_string())
+}
+
+fn merge_chair_identity(
+    chairs: &mut std::collections::BTreeMap<String, provenant_telemetry::usage::AccountIdentity>,
+    session: String,
+    incoming: provenant_telemetry::usage::AccountIdentity,
+) {
+    use provenant_records::Identity;
+    use std::collections::btree_map::Entry;
+
+    match chairs.entry(session) {
+        Entry::Vacant(entry) => {
+            entry.insert(incoming);
+        }
+        Entry::Occupied(mut entry) => {
+            let current = entry.get().clone();
+            if matches!(
+                &current.identity,
+                Identity::Unknown {
+                    reason: provenant_records::UnknownIdentityReason::ConflictingProviderIdentity,
+                }
+            ) {
+                return;
+            }
+            match (
+                matches!(&current.identity, Identity::Known { .. }),
+                matches!(&incoming.identity, Identity::Known { .. }),
+            ) {
+                (true, true) if current != incoming => {
+                    *entry.get_mut() =
+                        provenant_telemetry::usage::AccountIdentity::conflicting_provider_observations();
+                }
+                (false, true) => {
+                    *entry.get_mut() = incoming;
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 /// Wall budget for the SessionStart ingest, inside the hook's five-second host
@@ -320,6 +350,29 @@ mod tests {
         fn resolve_existing_ancestor(&self, path: &Path) -> std::io::Result<PathBuf> {
             Ok(path.to_owned())
         }
+    }
+
+    #[test]
+    fn conflicting_session_identities_become_unknown_without_losing_unambiguous_enrichment() {
+        use provenant_telemetry::usage::AccountIdentity;
+
+        let first = AccountIdentity::provider_observation("claude", "account-a");
+        let second = AccountIdentity::provider_observation("claude", "account-b");
+        let mut chairs = std::collections::BTreeMap::new();
+        merge_chair_identity(&mut chairs, "session".into(), AccountIdentity::unknown());
+        merge_chair_identity(&mut chairs, "session".into(), first.clone());
+        assert_eq!(chairs["session"], first);
+
+        merge_chair_identity(&mut chairs, "session".into(), second);
+        assert_eq!(
+            chairs["session"],
+            AccountIdentity::conflicting_provider_observations()
+        );
+        merge_chair_identity(&mut chairs, "session".into(), first);
+        assert_eq!(
+            chairs["session"],
+            AccountIdentity::conflicting_provider_observations()
+        );
     }
 
     #[test]

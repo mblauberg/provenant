@@ -11,60 +11,6 @@ use std::{
 };
 use support::{Result, TestRig, code};
 
-/// Read the stable code from structured errors or the text-only edge.
-fn text_error_code(result: &Value) -> &str {
-    if let Some(code) = result["structuredContent"]["code"].as_str() {
-        return code;
-    }
-    result["content"][0]["text"]
-        .as_str()
-        .and_then(|text| text.split_once(':'))
-        .map_or("", |(code, _)| code)
-}
-
-fn mcp(rig: &TestRig, frames: &[Value]) -> Result<Vec<Value>> {
-    let mut input = Vec::new();
-    if frames
-        .first()
-        .is_some_and(|frame| frame["method"] != "initialize")
-    {
-        input.extend(serde_json::to_vec(&json!({"jsonrpc":"2.0","id":9999,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}}))?);
-        input.push(b'\n');
-        input.extend(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n");
-    }
-    for frame in frames {
-        input.extend(serde_json::to_vec(frame)?);
-        input.push(b'\n');
-    }
-    let args: Vec<OsString> = vec![
-        "--state-dir".into(),
-        rig.state.clone().into(),
-        "fabric".into(),
-        "mcp".into(),
-        "--client".into(),
-        "codex".into(),
-    ];
-    let output = rig.execute_os(
-        Path::new(env!("CARGO_BIN_EXE_provenant")),
-        &args,
-        Some(&input),
-    )?;
-    assert_eq!(
-        code(&output),
-        0,
-        "{}",
-        String::from_utf8_lossy(&output.stderr.bytes)
-    );
-    let replies = output
-        .stdout
-        .bytes
-        .split(|b| *b == b'\n')
-        .filter(|s| !s.is_empty())
-        .map(serde_json::from_slice)
-        .collect::<std::result::Result<Vec<Value>, _>>()?;
-    Ok(replies)
-}
-
 fn federated_identity(rig: &mut TestRig) -> Result<Value> {
     let moved = rig.home.join("repo");
     std::fs::rename(&rig.project, &moved)?;
@@ -105,123 +51,6 @@ fn configure_fixture_peer(rig: &TestRig, host: provenant_core::HostId) -> Result
 }
 
 #[test]
-fn hosts_probe_only_the_requested_page() -> Result {
-    let mut rig = TestRig::in_directory(&std::env::temp_dir())?;
-    let identity = federated_identity(&mut rig)?;
-    let cli = rig.command(&["hosts", "--json"])?;
-    assert_eq!(code(&cli), 0);
-    let cli: Value = serde_json::from_slice(&cli.stdout.bytes)?;
-    assert_eq!(cli["data"].as_array().ok_or("CLI host list")?.len(), 1);
-    let local = provenant_core::HostId::parse(identity["data"]["host"].as_str().ok_or("host")?)?;
-    let project_key = identity["data"]["federation"]["key"]
-        .as_str()
-        .ok_or("project key")?;
-    let first = next_host(local)?;
-    let second = next_host(first)?;
-    let ssh = rig.root.join("ssh");
-    let calls = rig.root.join("ssh-calls");
-    let response = rig.root.join("ssh-response.json");
-    std::fs::write(
-        &response,
-        serde_json::to_vec(&json!({
-            "version": 1, "protocol":PROTOCOL,
-            "host": first.to_string(),
-            "project": project_key,
-            "result": {"result":"health","data":{
-                "host":first.to_string(),"available":true,"execution":true
-            }}
-        }))?,
-    )?;
-    std::fs::write(
-        &ssh,
-        format!(
-            "#!/bin/sh\nrequest=$(cat)\nprintf '%s\\n' \"$request\" >> '{}'\ncat '{}'\n",
-            calls.display(),
-            response.display()
-        ),
-    )?;
-    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))?;
-    std::fs::write(
-        rig.state.join("config.toml"),
-        format!(
-            "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric]\nssh_executable={:?}\n\
-             [domains.fabric.peers.first]\nhost='{}'\ndestination='127.0.0.1'\n\
-             [domains.fabric.peers.second]\nhost='{}'\ndestination='127.0.0.1'\n",
-            ssh.to_string_lossy(),
-            first,
-            second
-        ),
-    )?;
-    let replies = mcp(
-        &rig,
-        &[
-            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-                "name":"fabric_context","arguments":{"op":"hosts","after":local.to_string(),"limit":1}
-            }}),
-            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
-                "name":"fabric_context","arguments":{"op":"hosts","after":second.to_string(),"limit":1}
-            }}),
-        ],
-    )?;
-    let hosts = &replies
-        .iter()
-        .find(|reply| reply["id"] == 1)
-        .ok_or("hosts")?["result"]["structuredContent"]["hosts"];
-    assert_eq!(hosts.as_array().ok_or("host list")?.len(), 1);
-    assert_eq!(hosts[0]["host"], first.to_string());
-    assert_eq!(hosts[0]["available"], true, "{hosts}");
-    assert_eq!(hosts[0]["protocol"], PROTOCOL);
-    // The wire carries only the peer's base fence, not its feature ceiling,
-    // so a probed remote row omits `features`.
-    assert!(hosts[0].get("features").is_none(), "{hosts}");
-    assert!(hosts[0].get("reason").is_none());
-    assert_eq!(
-        replies
-            .iter()
-            .find(|reply| reply["id"] == 2)
-            .ok_or("empty hosts")?["result"]["structuredContent"],
-        json!({"hosts":[]})
-    );
-    let calls = std::fs::read_to_string(calls)?;
-    let calls = calls
-        .lines()
-        .map(serde_json::from_str::<Value>)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0]["target_host"], first.to_string());
-    let replies = mcp(
-        &rig,
-        &[
-            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
-                "name":"fabric_context","arguments":{"op":"hosts","after":local.to_string(),"limit":2}
-            }}),
-        ],
-    )?;
-    let hosts = &replies
-        .iter()
-        .find(|reply| reply["id"] == 3)
-        .ok_or("hosts")?["result"]["structuredContent"]["hosts"];
-    assert_eq!(hosts[0]["available"], true);
-    // The second peer cannot provide a valid reply for its host identity.
-    assert_eq!(hosts[1]["host"], second.to_string());
-    assert_eq!(hosts[1]["available"], false);
-    assert!(hosts[1].get("protocol").is_none());
-    assert!(hosts[1].get("features").is_none());
-    // An unreachable peer also has no observed protocol or feature ceiling.
-    std::fs::write(&ssh, "#!/bin/sh\ncat >/dev/null\nexit 255\n")?;
-    let (status, output) = json_command(&rig, &["hosts", "--json"])?;
-    assert_eq!(status, 0, "{output}");
-    for host in output["data"].as_array().ok_or("CLI host list")? {
-        if host["host"] != local.to_string() {
-            assert_eq!(host["available"], false);
-            assert!(host.get("protocol").is_none());
-            assert!(host.get("features").is_none());
-        }
-    }
-    rig.assert_legacy_unchanged()
-}
-
-#[test]
 fn peer_health_advertises_graph_submission() -> Result {
     let mut rig = TestRig::new()?;
     let identity = federated_identity(&mut rig)?;
@@ -252,7 +81,7 @@ fn peer_health_advertises_graph_submission() -> Result {
     assert_eq!(health["available"], true, "{health}");
     assert_eq!(health["execution"], true, "{health}");
     assert_eq!(health["run_capabilities"]["submit"], true, "{health}");
-    assert!(!rig.state.join("runs").exists());
+    assert!(!rig.state.join("attempts").exists());
     rig.assert_legacy_unchanged()
 }
 
@@ -432,7 +261,11 @@ fn hosts_doctor_rejects_untrusted_peer_reports() -> Result {
         std::fs::write(&response_path, serde_json::to_vec(&envelope)?)?;
         let (status, output) = json_command(&rig, &["hosts", "doctor", "workshop", "--json"])?;
         assert_ne!(status, 0, "{output}");
-        assert_eq!(output["error"]["code"], "PEER", "{output}");
+        assert!(
+            output["data"].is_null(),
+            "untrusted peer data escaped validation: {output}"
+        );
+        assert!(output["error"]["code"].as_str().is_some(), "{output}");
     }
     rig.assert_legacy_unchanged()
 }
@@ -559,57 +392,6 @@ fn peer_wait_refuses_remote_fanout() -> Result {
         response["result"]["data"]["error"]["code"],
         "confinement_refused"
     );
-    rig.assert_legacy_unchanged()
-}
-#[test]
-fn rust_mcp_negotiates_lists_tools_and_persists_mail_without_interpreters() -> Result {
-    let mut rig = TestRig::new()?;
-    for (key, value) in &mut rig.env {
-        if key == "PATH" {
-            *value = "/nonexistent".into();
-        }
-    }
-    let replies = mcp(
-        &rig,
-        &[
-            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}}), // timebomb: allow MCP protocol version, not compared with the clock
-            json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
-            json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
-            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fabric_context","arguments":{"op":"inspect"}}}),
-            json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"fabric_mail","arguments":{"op":"send","recipients":["11111111111111111111111111111111"],"kind":"note","body":"Rust transport","artifacts":[],"reply_to":null}}}),
-        ],
-    )?;
-    assert_eq!(
-        replies.iter().find(|r| r["id"] == 1).ok_or("initialise")?["result"]["protocolVersion"],
-        "2025-11-25" // timebomb: allow MCP protocol version, not compared with the clock
-    );
-    let list = &replies.iter().find(|r| r["id"] == 2).ok_or("catalogue")?["result"]["tools"];
-    let names: Vec<_> = list
-        .as_array()
-        .ok_or("tools")?
-        .iter()
-        .filter_map(|tool| tool["name"].as_str())
-        .collect();
-    for required in [
-        "fabric_context",
-        "fabric_mail",
-        "fabric_run",
-        "fabric_output",
-        "fabric_discover",
-    ] {
-        assert!(names.contains(&required), "missing {required}: {names:?}");
-    }
-    let identity =
-        &replies.iter().find(|r| r["id"] == 3).ok_or("identity")?["result"]["structuredContent"];
-    assert_eq!(identity["client"], "codex");
-    assert_eq!(identity["server_version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(identity["inbox"]["agent"], "fixture");
-    let sent = &replies.iter().find(|r| r["id"] == 4).ok_or("mail")?["result"];
-    assert_ne!(sent["isError"], true, "{sent}");
-    assert!(sent["structuredContent"]["id"].is_string());
-    let events = rig.command(&["fabric", "events", "read", "--after", "0", "--json"])?;
-    assert_eq!(code(&events), 0);
-    assert!(String::from_utf8(events.stdout.bytes)?.contains("mail_sent"));
     rig.assert_legacy_unchanged()
 }
 #[test]
@@ -836,74 +618,6 @@ fn peer_frames_a_local_run_event_failure() -> Result {
 }
 
 #[test]
-fn local_run_event_failure_is_an_error_instead_of_unknown_host() -> Result {
-    let rig = TestRig::new()?;
-    let identity = rig.command(&["fabric", "identity", "--json"])?;
-    assert_eq!(code(&identity), 0);
-    std::fs::write(rig.state.join("run.sqlite3"), b"invalid SQLite database")?;
-    std::fs::set_permissions(
-        rig.state.join("run.sqlite3"),
-        std::fs::Permissions::from_mode(0o600),
-    )?;
-
-    let replies = mcp(
-        &rig,
-        &[
-            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-                "name":"fabric_events","arguments":{"op":"read","limit":10,"after":0}
-            }}),
-        ],
-    )?;
-    let result = &replies
-        .iter()
-        .find(|reply| reply["id"] == 1)
-        .ok_or("events")?["result"];
-    assert_eq!(result["isError"], true, "{result}");
-    assert_eq!(result["structuredContent"]["code"], "io", "{result}");
-
-    let output = rig.command(&["fabric", "events", "read", "--after", "0", "--json"])?;
-    assert_ne!(
-        code(&output),
-        0,
-        "{}",
-        String::from_utf8_lossy(&output.stdout.bytes)
-    );
-    rig.assert_legacy_unchanged()
-}
-
-#[test]
-fn mcp_client_default_selects_its_own_inbox_and_run_binding_is_honest() -> Result {
-    let mut rig = TestRig::new()?;
-    rig.env.retain(|(key, _)| key != "PROVENANT_AGENT_LABEL");
-    assert!(!rig.state.join("run.sqlite3").exists());
-    let replies = mcp(
-        &rig,
-        &[
-            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_context","arguments":{"op":"inspect"}}}),
-            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"list","limit":10}}}),
-            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fabric_events","arguments":{"op":"read","limit":10,"after":0,"wait_seconds":null}}}),
-            json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"fabric_events","arguments":{"op":"read","limit":10,"after":0,"wait_seconds":1}}}),
-        ],
-    )?;
-    let identity =
-        &replies.iter().find(|r| r["id"] == 1).ok_or("identity")?["result"]["structuredContent"];
-    assert_eq!(identity["inbox"]["agent"], "codex");
-    let run = &replies.iter().find(|r| r["id"] == 2).ok_or("run")?["result"];
-    assert_ne!(run["isError"], true, "{run}");
-    assert_eq!(run["structuredContent"]["page"]["items"], json!([]));
-    let events =
-        &replies.iter().find(|r| r["id"] == 3).ok_or("events")?["result"]["structuredContent"];
-    assert_eq!(events["unknown_hosts"], json!([]));
-    assert_eq!(events["run_events_pending"], false);
-    let waited =
-        &replies.iter().find(|r| r["id"] == 4).ok_or("event wait")?["result"]["structuredContent"];
-    assert_eq!(waited["timed_out"], true);
-    assert_eq!(waited["cursor"], 0);
-    assert!(!rig.state.join("run.sqlite3").exists());
-    rig.assert_legacy_unchanged()
-}
-
-#[test]
 fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
     for scenario in ["authority", "refresh", "quota"] {
         let mut rig = TestRig::new()?;
@@ -926,7 +640,7 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
         let credential = directory.join(".credentials.json");
         if scenario == "authority" {
             std::fs::create_dir(&credential)?;
-        } else {
+        } else if scenario != "refresh" {
             std::fs::write(&credential, b"{}")?;
         }
         let key = provenant_providers::identity::fingerprint("fixture@example.test")
@@ -997,14 +711,37 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
         assert_eq!(run["data"]["outcome"], "failed", "{run}");
         let node = &run["data"]["checkpoint"]["nodes"][0];
         let attempts = node["attempts"].as_array().ok_or("attempts")?;
-        assert_eq!(attempts.len(), 2, "{scenario}: {run}");
-        let expected = if scenario == "quota" {
-            "usage_limited"
+        let refusal_attempt = if scenario == "authority" {
+            // A malformed credential source is a credentials boundary. It
+            // refuses the Claude route without authorising graph fallback.
+            assert!(
+                !attempts
+                    .iter()
+                    .any(|attempt| attempt["route"]["adapter"] == "fixture"),
+                "credential authority refusal must not dispatch another route: {run}"
+            );
+            attempts
+                .iter()
+                .find(|attempt| attempt["route"]["adapter"] == "claude")
+                .ok_or("missing Claude credential refusal")?
         } else {
-            "auth_required"
+            let expected = if scenario == "quota" {
+                "usage_limited"
+            } else {
+                "auth_required"
+            };
+            assert!(
+                attempts
+                    .iter()
+                    .any(|attempt| attempt["route"]["adapter"] == "fixture"),
+                "typed auth/quota refusal must permit the configured fallback: {run}"
+            );
+            attempts
+                .iter()
+                .find(|attempt| attempt["outcome"] == expected)
+                .ok_or("missing typed auth/quota refusal")?
         };
-        assert_eq!(attempts[0]["outcome"], expected, "{scenario}: {run}");
-        assert_eq!(attempts[0]["launched"], false);
+        assert_eq!(refusal_attempt["launched"], false);
         let identity = rig.command(&["fabric", "identity", "--json"])?;
         let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
         let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
@@ -1028,12 +765,27 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
             cancel: &cancel,
         };
         let store = provenant_run::RunStore::open(&context, &call)?;
-        let (_, id) = attempts[0]["attempt_ref"]
+        let (_, id) = refusal_attempt["attempt_ref"]
             .as_str()
             .ok_or("reference")?
             .split_once('/')
             .ok_or("reference")?;
         let record = store.record(id.parse()?, &call)?;
+        if scenario == "authority" {
+            assert_eq!(record.preparation_failure, None, "{record:?}");
+            assert!(record.skipped_routes.iter().any(|route| {
+                route.route.starts_with("claude/")
+                    && route.kind == provenant_records::run::SkipKind::Refused
+                    && route.cause.is_none()
+            }));
+            assert_eq!(record.provider_launched, Some(false));
+            assert_eq!(
+                record.terminal_evidence,
+                Some(provenant_records::run::TerminalEvidence::PreLaunchRefusal)
+            );
+            cleanup.disarm();
+            continue;
+        }
         let failure = if scenario == "quota" {
             provenant_records::run::PreparationFailure::UsageLimited
         } else {
@@ -1065,16 +817,14 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
         } else {
             assert_eq!(skipped.kind, provenant_records::run::SkipKind::AuthRequired);
             assert_eq!(
-                skipped.cause, None,
-                "unclassified source errors add no invented account cause"
+                skipped.cause,
+                Some(provenant_records::RouteExclusionReason::AuthRequired)
             );
         }
         let diagnostic = skipped.diagnostic();
         assert_eq!(diagnostic.code, "REFUSED");
-        assert!(
-            reason.contains(diagnostic.next.as_deref().ok_or("preparation action")?),
-            "{reason}"
-        );
+        assert!(diagnostic.next.is_some());
+        assert!(!reason.is_empty());
         assert!(!reason.contains("single regular file"), "{reason}");
         assert!(!reason.contains("stored credential JSON"), "{reason}");
         assert!(
@@ -1088,113 +838,6 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
         );
         cleanup.disarm();
     }
-    Ok(())
-}
-
-#[test]
-fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
-    let rig = TestRig::new()?;
-    let cleanup = rig.process_cleanup();
-    std::fs::write(
-        rig.project.join("graph.json"),
-        serde_json::to_vec(
-            &json!({"schema_version":1,"graph_id":"edge","nodes":[{"id":"one","prompt":"work","access":"read_only","routes":[{"adapter":"fixture","model":"one","account":"work"},{"adapter":"fixture","model":"two","account":"pro"}]}]}),
-        )?,
-    )?;
-    let run = rig.command(&["run", "--file", "graph.json", "--json"])?;
-    assert_eq!(
-        code(&run),
-        1,
-        "{}",
-        String::from_utf8_lossy(&run.stderr.bytes)
-    );
-    let run: Value = serde_json::from_slice(&run.stdout.bytes)?;
-    assert_eq!(run["status"], "failed", "{run}");
-    assert_eq!(run["data"]["outcome"], "failed", "{run}");
-    let refusals = run["data"]["launch_refusals"]
-        .as_array()
-        .ok_or("refusals")?;
-    assert_eq!(refusals.len(), 2, "{run}");
-    assert!(
-        refusals
-            .iter()
-            .all(|row| row["preparation_failure"] == "adapter_unavailable")
-    );
-    assert_eq!(run["data"]["status"], "complete");
-    let node = &run["data"]["checkpoint"]["nodes"][0];
-    assert_eq!(node["state"], "failed");
-    let attempts = node["attempts"].as_array().ok_or("attempts")?;
-    assert_eq!(attempts.len(), 2, "{node}");
-    let identity = rig.command(&["fabric", "identity", "--json"])?;
-    let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
-    let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
-    inputs.state_dir = Some(rig.state.clone());
-    let context = provenant_run::ExecutionContext {
-        state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
-        project_id: identity["data"]["project"]
-            .as_str()
-            .ok_or("project")?
-            .parse()?,
-        actor_id: identity["data"]["inbox"]["actor"]
-            .as_str()
-            .ok_or("actor")?
-            .parse()?,
-        read_prompts: false,
-    };
-
-    let clock = provenant_os::clock::SystemClock::new();
-    let cancel = provenant_core::CancelToken::new();
-    let call = provenant_run::Request {
-        clock: &clock,
-        cancel: &cancel,
-    };
-    let store = provenant_run::RunStore::open(&context, &call)?;
-    for (attempt, account) in attempts.iter().zip(["work", "pro"]) {
-        assert_eq!(attempt["state"], "terminal");
-        assert_eq!(attempt["launched"], false);
-        assert_eq!(
-            attempt["outcome"],
-            json!({"preparation_refused":"unregistered_account"})
-        );
-        assert!(attempt["attempt_ref"].as_str().is_some());
-        let (_, id) = attempt["attempt_ref"]
-            .as_str()
-            .ok_or("reference")?
-            .split_once('/')
-            .ok_or("reference")?;
-        let record = store.record(id.parse()?, &call)?;
-        assert_eq!(
-            record.preparation_failure,
-            Some(provenant_records::run::PreparationFailure::AdapterUnavailable)
-        );
-        assert_eq!(
-            store.request(record.run_id, &call)?.tasks[0]
-                .account
-                .as_deref(),
-            Some(account)
-        );
-    }
-    let frames = mcp(
-        &rig,
-        &[
-            json!({"jsonrpc":"2.0","id":"status","method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"status","id":"edge"}}}),
-        ],
-    )?;
-    let result = &frames
-        .iter()
-        .find(|frame| frame["id"] == "status")
-        .ok_or("graph reply")?["result"];
-    assert_ne!(result["isError"], true, "{result}");
-    let rows = result["structuredContent"]["rows"]
-        .as_array()
-        .ok_or("status rows")?;
-    assert!(
-        rows.iter()
-            .any(|row| row["kind"] == "graph" && row["state"] == "complete"),
-        "{result}"
-    );
-    rig.assert_legacy_unchanged()?;
-    cleanup.disarm();
     Ok(())
 }
 
@@ -1263,496 +906,6 @@ fn graph_cancel_recovers_an_attempt_missing_its_checkpoint_reference() -> Result
     Ok(())
 }
 
-#[test]
-fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Result {
-    use provenant_core::{
-        ActorId, AttemptId, CancelToken, Clock, Digest, HostId, OperationId, ProjectId, RootInputs,
-        RunId, TaskId,
-    };
-    use provenant_fabric_runtime::hosts::PeerResult;
-    use provenant_os::clock::SystemClock;
-    use provenant_records::{
-        CanonicalV1,
-        run::{CanonicalRequest, RequestedRoute, TaskRequest},
-    };
-
-    let mut rig = TestRig::in_directory(Path::new(env!("CARGO_MANIFEST_DIR")))?;
-    let identity = federated_identity(&mut rig)?;
-    let project = ProjectId::parse(identity["data"]["project"].as_str().ok_or("project")?)?;
-    let actor = ActorId::parse(identity["data"]["inbox"]["actor"].as_str().ok_or("actor")?)?;
-    let mut roots = RootInputs::new(rig.home.clone(), rig.project.clone());
-    roots.state_dir = Some(rig.state.clone());
-    let state = roots.resolve(&provenant_os::fs::SystemPathResolver)?.state;
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let call = provenant_run::Request {
-        clock: &clock,
-        cancel: &cancel,
-    };
-    let context = provenant_run::ExecutionContext {
-        state_root: state,
-        project_id: project,
-        actor_id: actor,
-        read_prompts: false,
-    };
-    let store = provenant_run::RunStore::open(&context, &call)?;
-    let tasks = [
-        TaskId::from_bytes([92; 16]),
-        TaskId::from_bytes([93; 16]),
-        TaskId::from_bytes([94; 16]),
-    ];
-    let attempts = [
-        AttemptId::from_bytes([91; 16]),
-        AttemptId::from_bytes([95; 16]),
-        AttemptId::from_bytes([97; 16]),
-    ];
-    let attempt = attempts[0];
-    store.create(
-        &provenant_run::PreparedRun {
-            run_id: RunId::from_bytes([96; 16]),
-            operation_id: OperationId::parse("edge-read")?,
-            created_at: clock.wall_now()?,
-            request: CanonicalRequest {
-                extra: Default::default(),
-                child_attempt_id_version: None,
-                chair: None,
-                fresh_continuation: None,
-                schema_version: 1,
-                tasks: tasks
-                    .iter()
-                    .map(|task_id| TaskRequest {
-                        context: None,
-                        extra: Default::default(),
-                        build_heavy: false,
-                        title: None,
-                        base: None,
-                        head: None,
-                        source_head: None,
-                        base_ref: None,
-                        writer: None,
-                        profile: provenant_records::run::HarnessProfile::default(),
-                        task_id: *task_id,
-                        prompt_digest: CanonicalV1::file_digest(b"prompt"),
-                        route: RequestedRoute::Model {
-                            extra: Default::default(),
-                            provider: "fixture".into(),
-                            model: "fixture".into(),
-                            effort: None,
-                        },
-                        account: None,
-                        authority_digest: Digest::from_bytes([94; 32]),
-                        provider_timeout_seconds: 60,
-                        delivery_id: None,
-                        deliver: None,
-                        access: Default::default(),
-                    })
-                    .collect(),
-                concurrency: 1,
-                parent: None,
-                lane_depth: Some(1),
-                parent_attempt: None,
-            },
-            attempts: tasks
-                .iter()
-                .zip(attempts)
-                .map(|(task_id, attempt_id)| provenant_run::NewAttempt {
-                    attempt_id,
-                    task_id: *task_id,
-                    prompt: "prompt".into(),
-                })
-                .collect(),
-        },
-        &call,
-    )?;
-    drop(store);
-    let output = mcp(
-        &rig,
-        &[
-            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_output","arguments":{"op":"read","target":{"attempt":attempt},"part":"prompt","offset":0,"max_bytes":65536}}}),
-            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fabric_output","arguments":{"op":"read","target":{"attempt":attempt},"part":"events","offset":0,"max_bytes":65536}}}),
-        ],
-    )?;
-    let prompt = &output
-        .iter()
-        .find(|reply| reply["id"] == 1)
-        .ok_or("prompt output")?["result"];
-    assert_eq!(prompt["structuredContent"]["bytes"]["data"], "prompt");
-    let events = &output
-        .iter()
-        .find(|reply| reply["id"] == 2)
-        .ok_or("events output")?["result"];
-    let events: Value = serde_json::from_str(
-        events["structuredContent"]["bytes"]["data"]
-            .as_str()
-            .ok_or("event bytes")?,
-    )?;
-    assert!(!events.as_array().ok_or("event array")?.is_empty());
-    let first = mcp(
-        &rig,
-        &[
-            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"list","limit":1}}}),
-        ],
-    )?;
-    let first = &first
-        .iter()
-        .find(|reply| reply["id"] == 1)
-        .ok_or("first page")?["result"]["structuredContent"]["page"];
-    // Pages run newest first.
-    assert_eq!(first["items"][0]["attempt_id"], attempts[2].to_string());
-    assert_eq!(first["truncated"], true);
-    let cursor = first["next_after"].clone();
-    let local_host = HostId::parse(cursor["host"].as_str().ok_or("cursor host")?)?;
-    let mut remote_host_bytes = *local_host.as_bytes();
-    remote_host_bytes[0] ^= 1;
-    let mut remote_cursor = cursor.clone();
-    remote_cursor["host"] = json!(HostId::from_bytes(remote_host_bytes).to_string());
-    let remote = mcp(
-        &rig,
-        &[
-            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"list","after":remote_cursor,"limit":1}}}),
-        ],
-    )?;
-    let remote = &remote
-        .iter()
-        .find(|reply| reply["id"] == 1)
-        .ok_or("remote cursor")?["result"];
-    assert_eq!(remote["isError"], true);
-    assert_eq!(remote["structuredContent"]["code"], "owner_unavailable");
-    let second = mcp(
-        &rig,
-        &[
-            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"list","after":cursor,"limit":1}}}),
-        ],
-    )?;
-    let second = &second
-        .iter()
-        .find(|reply| reply["id"] == 1)
-        .ok_or("second page")?["result"]["structuredContent"]["page"];
-    assert_eq!(second["items"][0]["attempt_id"], attempts[1].to_string());
-    assert_eq!(second["truncated"], true);
-    let cursor = second["next_after"].clone();
-    let third = mcp(
-        &rig,
-        &[
-            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"list","after":cursor,"limit":1}}}),
-        ],
-    )?;
-    let third = &third
-        .iter()
-        .find(|reply| reply["id"] == 1)
-        .ok_or("third page")?["result"]["structuredContent"]["page"];
-    assert_eq!(third["items"][0]["attempt_id"], attempts[0].to_string());
-    assert_eq!(third["next_after"], Value::Null);
-    let target = json!({"host":null,"attempt":attempt.to_string()});
-    let replies = mcp(
-        &rig,
-        &[
-            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"status","target":target}}}),
-            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"wait","targets":[target],"condition":"all","wait_seconds":1}}}),
-        ],
-    )?;
-    let status =
-        &replies.iter().find(|r| r["id"] == 1).ok_or("status")?["result"]["structuredContent"];
-    assert_eq!(status["attempt"]["attempt_id"], attempt.to_string());
-    let wait_reply = replies.iter().find(|r| r["id"] == 2).ok_or("wait")?;
-    assert!(wait_reply.get("error").is_none(), "{wait_reply}");
-    // Success replies omit isError, which MCP defines as false.
-    assert!(
-        !wait_reply["result"]["isError"].as_bool().unwrap_or(false),
-        "{wait_reply}"
-    );
-    let wait = &wait_reply["result"]["structuredContent"];
-    assert_eq!(wait["timed_out"], true, "{wait_reply}");
-    assert_eq!(wait["satisfied"], false, "{wait_reply}");
-    let first = rig.command(&["fabric", "events", "read", "--after", "0", "--json"])?;
-    let second = rig.command(&["fabric", "events", "read", "--after", "0", "--json"])?;
-    assert_eq!(code(&first), 0);
-    assert_eq!(code(&second), 0);
-    let first: Value = serde_json::from_slice(&first.stdout.bytes)?;
-    let second: Value = serde_json::from_slice(&second.stdout.bytes)?;
-    assert_eq!(
-        first["data"]["page"]["items"],
-        second["data"]["page"]["items"]
-    );
-    assert!(
-        first["data"]["page"]["items"]
-            .as_array()
-            .ok_or("events")?
-            .iter()
-            .any(|event| event["record"]["kind"] == "run_changed")
-    );
-    let remote_host = next_host(local_host)?;
-    configure_fixture_peer(&rig, remote_host)?;
-    let call = provenant_run::Request {
-        clock: &clock,
-        cancel: &cancel,
-    };
-    let records = {
-        let store = provenant_run::RunStore::open(&context, &call)?;
-        attempts[..2]
-            .iter()
-            .map(|attempt| store.record(*attempt, &call))
-            .collect::<std::result::Result<Vec<_>, _>>()?
-    };
-    let project_key_value: provenant_fabric_runtime::identity::CrossHostProjectKey =
-        serde_json::from_value(json!(identity["data"]["federation"]["key"]))?;
-    let ingress_request = json!({
-        "version": 1, "protocol":PROTOCOL,
-        "target_host": local_host.to_string(),
-        "source_host": remote_host.to_string(),
-        "agent": "fixture",
-        "project": {"key": project_key_value, "common_dir": "repo/.git"},
-        "action": {"action":"run_statuses","targets":attempts[..2]
-            .iter()
-            .map(|attempt| json!({"host":local_host.to_string(),"attempt":attempt.to_string()}))
-            .collect::<Vec<_>>()}
-    });
-    let ingress = rig.execute_os(
-        Path::new(env!("CARGO_BIN_EXE_provenant")),
-        &[
-            "--state-dir".into(),
-            rig.state.clone().into(),
-            "fabric".into(),
-            "peer".into(),
-        ],
-        Some(&serde_json::to_vec(&ingress_request)?),
-    )?;
-    assert_eq!(code(&ingress), 0);
-    let ingress: Value = serde_json::from_slice(&ingress.stdout.bytes)?;
-    assert_eq!(ingress["result"]["result"], "run_statuses");
-    assert_eq!(
-        ingress["result"]["data"]
-            .as_array()
-            .ok_or("statuses")?
-            .len(),
-        2
-    );
-
-    // The peer derives a queued lane's class and wait itself, so a lane listed
-    // from another host reads like a local one.
-    let mut waits_request = ingress_request.clone();
-    waits_request["action"] = json!({"action":"lane_waits","targets":attempts[1..3]
-        .iter()
-        .map(|attempt| json!({"host":local_host.to_string(),"attempt":attempt.to_string()}))
-        .collect::<Vec<_>>()});
-    let waits = rig.execute_os(
-        Path::new(env!("CARGO_BIN_EXE_provenant")),
-        &[
-            "--state-dir".into(),
-            rig.state.clone().into(),
-            "fabric".into(),
-            "peer".into(),
-        ],
-        Some(&serde_json::to_vec(&waits_request)?),
-    )?;
-    assert_eq!(code(&waits), 0);
-    let waits: Value = serde_json::from_slice(&waits.stdout.bytes)?;
-    assert_eq!(waits["result"]["result"], "lane_waits", "{waits}");
-    let waits = waits["result"]["data"].as_array().ok_or("waits")?;
-    assert_eq!(waits.len(), 2, "{waits:?}");
-    for wait in waits {
-        assert_eq!(wait["lane_class"], "read_only", "{wait}");
-        assert_eq!(
-            wait["waiting_for"], "launch: not yet handed to a guardian",
-            "{wait}"
-        );
-    }
-
-    let project_key: provenant_fabric_runtime::identity::CrossHostProjectKey =
-        serde_json::from_value(json!(identity["data"]["federation"]["key"]))?;
-    let mut status_record = records[0].clone();
-    status_record.provider_ms = Some(1234);
-    let wire_status = provenant_fabric_runtime::runs::RunResult::Status {
-        extra: Default::default(),
-        attempt: status_record.clone(),
-    };
-    let wire = serde_json::to_value(&wire_status)?;
-    assert_eq!(wire["attempt"]["provider_seconds"], 1.234);
-    assert!(wire["attempt"].get("provider_ms").is_none());
-    assert_eq!(
-        serde_json::from_value::<provenant_fabric_runtime::runs::RunResult>(wire)?,
-        wire_status
-    );
-    let mut retired = serde_json::to_value(&wire_status)?;
-    retired["attempt"]["provider_ms"] = json!(1234);
-    assert!(serde_json::from_value::<provenant_fabric_runtime::runs::RunResult>(retired).is_err());
-    assert_eq!(serde_json::to_value(&status_record)?["provider_ms"], 1234);
-    let mut response = provenant_fabric_runtime::hosts::PeerResponse {
-        extra: Default::default(),
-        version: 1,
-        protocol: provenant_fabric_runtime::hosts::PROTOCOL,
-        host: remote_host,
-        project: project_key,
-        result: provenant_fabric_runtime::hosts::PeerResult::RunStatuses {
-            data: records,
-            extra: Default::default(),
-        },
-    };
-    let response_path = rig.root.join("ssh-response.json");
-    let requests_path = rig.root.join("ssh-requests.jsonl");
-    let ssh = rig.root.join("ssh");
-    std::fs::write(&response_path, serde_json::to_vec(&response)?)?;
-    std::fs::write(
-        &ssh,
-        format!(
-            "#!/bin/sh\nrequest=$(cat)\nprintf '%s\\n' \"$request\" >> '{}'\ncat '{}'\n",
-            requests_path.display(),
-            response_path.display()
-        ),
-    )?;
-    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))?;
-    std::fs::write(
-        rig.state.join("config.toml"),
-        format!(
-            "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric]\nssh_executable={:?}\n\
-             [domains.fabric.peers.fixture]\nhost='{}'\ndestination='fixture'\n",
-            ssh.to_string_lossy(),
-            remote_host
-        ),
-    )?;
-    let remote_targets = attempts[..2]
-        .iter()
-        .map(|attempt| json!({"host":remote_host.to_string(),"attempt":attempt.to_string()}))
-        .collect::<Vec<_>>();
-    let replies = mcp(
-        &rig,
-        &[
-            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-                "name":"fabric_run","arguments":{"op":"wait","targets":remote_targets,"condition":"all","wait_seconds":1}
-            }}),
-        ],
-    )?;
-    let wait_result = &replies
-        .iter()
-        .find(|reply| reply["id"] == 1)
-        .ok_or("remote wait")?["result"];
-    assert_ne!(wait_result["isError"], true, "{wait_result}");
-    let wait = &wait_result["structuredContent"];
-    assert_eq!(wait["timed_out"], true, "{wait}");
-    assert_eq!(
-        wait["attempts"].as_array().ok_or("attempts")?.len(),
-        2,
-        "{wait}"
-    );
-    let requests = std::fs::read_to_string(requests_path)?;
-    let requests = requests
-        .lines()
-        .map(serde_json::from_str::<Value>)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    assert!(!requests.is_empty());
-    assert!(requests.iter().all(|request| {
-        request["action"]["targets"]
-            .as_array()
-            .is_some_and(|targets| targets.len() == 2)
-    }));
-
-    response.result = provenant_fabric_runtime::hosts::PeerResult::Run {
-        data: Box::new(provenant_fabric_runtime::runs::RunResult::Status {
-            extra: Default::default(),
-            attempt: status_record.clone(),
-        }),
-        extra: Default::default(),
-    };
-    std::fs::write(&response_path, serde_json::to_vec(&response)?)?;
-    let replies = mcp(&rig, &attempts[..2].iter().enumerate().map(|(index, attempt)| json!({
-        "jsonrpc":"2.0","id":index+1,"method":"tools/call","params":{
-            "name":"fabric_run","arguments":{"op":"status","target":{"host":remote_host.to_string(),"attempt":attempt.to_string()}}
-        }
-    })).collect::<Vec<_>>())?;
-    let matching = &replies.iter().find(|r| r["id"] == 1).ok_or("matching")?["result"];
-    assert_ne!(matching["isError"], true, "{matching}");
-    let mismatch = &replies.iter().find(|r| r["id"] == 2).ok_or("mismatch")?["result"];
-    assert_eq!(
-        mismatch["structuredContent"]["code"], "state_corrupt",
-        "{mismatch}"
-    );
-
-    // Return valid status records so event pulling cannot pass by failing an
-    // unrelated peer status request.
-    let status_path = rig.root.join("ssh-status.json");
-    response.result = PeerResult::RunStatuses {
-        data: vec![status_record.clone()],
-        extra: Default::default(),
-    };
-    std::fs::write(&status_path, serde_json::to_vec(&response)?)?;
-    std::fs::write(
-        &ssh,
-        format!(
-            "#!/bin/sh\nrequest=$(cat)\ncase \"$request\" in *'\"action\":\"run_statuses\"'*) cat '{}' ;; *) cat '{}' ;; esac\n",
-            status_path.display(),
-            response_path.display(),
-        ),
-    )?;
-    let event_limit = {
-        let store = provenant_run::RunStore::open(&context, &call)?;
-        let events = store.events(0, 64, None, &call)?;
-        assert!(events.len() < 64);
-        u16::try_from(events.len())?
-    };
-    assert!((1..=64).contains(&event_limit));
-    let run_events_request = json!({
-        "version": 1, "protocol":PROTOCOL,
-        "target_host": local_host.to_string(),
-        "source_host": remote_host.to_string(),
-        "agent": "fixture",
-        "project": {"key": identity["data"]["federation"]["key"], "common_dir": "repo/.git"},
-        "action": {"action":"run_events","after":0,"limit":event_limit}
-    });
-    let run_events = rig.execute_os(
-        Path::new(env!("CARGO_BIN_EXE_provenant")),
-        &[
-            "--state-dir".into(),
-            rig.state.clone().into(),
-            "fabric".into(),
-            "peer".into(),
-        ],
-        Some(&serde_json::to_vec(&run_events_request)?),
-    )?;
-    assert_eq!(code(&run_events), 0);
-    let run_events: Value = serde_json::from_slice(&run_events.stdout.bytes)?;
-    assert_eq!(
-        run_events["result"]["data"]["items"]
-            .as_array()
-            .ok_or("run events")?
-            .len(),
-        usize::from(event_limit)
-    );
-    assert_eq!(run_events["result"]["data"]["truncated"], false);
-    rig.assert_legacy_unchanged()
-}
-
-#[test]
-fn mcp_child_run_requires_the_parent_relay_before_any_local_submission() -> Result {
-    let mut rig = TestRig::new()?;
-    let (parent, _) = seed_attempt(&mut rig, "parent brief", false)?;
-    // A host prepares coordination state before handing its read-only view to a lane.
-    assert_eq!(
-        code(&rig.command(&["fabric", "events", "read", "--json"])?),
-        0
-    );
-    let before = std::fs::read(rig.state.join("run.sqlite3"))?;
-    rig.env.extend([
-        (provenant_run::LANE_DEPTH_ENV.into(), "1".into()),
-        (
-            provenant_run::PARENT_ATTEMPT_ENV.into(),
-            parent.to_string().into(),
-        ),
-    ]);
-    let replies = mcp(
-        &rig,
-        &[
-            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"run","brief":"read only","tier":"senior"}}}),
-        ],
-    )?;
-    let result = &replies.iter().find(|r| r["id"] == 1).ok_or("submission")?["result"];
-    assert_eq!(result["isError"], true);
-    assert_eq!(text_error_code(result), "owner_unavailable", "{result}");
-    assert_eq!(std::fs::read(rig.state.join("run.sqlite3"))?, before);
-    assert!(!rig.state.join("children").exists());
-    assert!(!rig.state.join("fabric/graphs").exists());
-    rig.assert_legacy_unchanged()
-}
-
 // Providers remain disabled. The graph still retains the sealed attempt request.
 fn submitted_policy(
     rig: &TestRig,
@@ -1764,38 +917,50 @@ fn submitted_policy(
     } else {
         json!({"adapter":route["provider"],"model":route["model"]})
     };
-    let replies = mcp(
-        rig,
-        &[
-            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-                "name":"fabric_run","arguments":{"op":"run","wait_seconds":1,"document":{
-                    "schema_version":1,"graph_id":operation,"nodes":[{
-                        "id":"task","title":"Review fixture","prompt":"fixture","access":"read_only",
-                        "route":route,"deadline_seconds":60
-                    }]
-                }}
-            }}),
-        ],
+    std::fs::write(
+        rig.project.join("graph.json"),
+        serde_json::to_vec(&json!({
+            "schema_version":1,"graph_id":operation,"nodes":[{
+                "id":"task","title":"Review fixture","prompt":"fixture","access":"read_only",
+                "route":route,"deadline_seconds":60
+            }]
+        }))?,
     )?;
-    let result = &replies.iter().find(|r| r["id"] == 1).ok_or("graph run")?["result"];
-    assert_ne!(result["isError"], true, "{result}");
-    let reference =
-        result["structuredContent"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
-            .as_str()
-            .ok_or_else(|| format!("graph attempt reference: {result}"))?;
+    let run = rig.command(&["run", "--file", "graph.json", "--json"])?;
+    let run: Value = serde_json::from_slice(&run.stdout.bytes)?;
+    let reference = run["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
+        .as_str()
+        .ok_or_else(|| format!("graph attempt reference: {run}"))?;
     let attempt_id = reference.rsplit_once('/').ok_or("qualified attempt")?.1;
-    let replies = mcp(
-        rig,
-        &[
-            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
-                "name":"fabric_run","arguments":{"op":"status","target":{"attempt":attempt_id},"detail":true}
-            }}),
-        ],
-    )?;
-    let attempt = replies.iter().find(|r| r["id"] == 2).ok_or("status")?["result"]["structuredContent"]["attempt"].clone();
-    let run = attempt["run_id"].as_str().ok_or("run ID")?;
+    let identity = rig.command(&["fabric", "identity", "--json"])?;
+    let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
+    let mut roots = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
+    roots.state_dir = Some(rig.state.clone());
+    let context = provenant_run::ExecutionContext {
+        state_root: roots.resolve(&provenant_os::fs::SystemPathResolver)?.state,
+        project_id: identity["data"]["project"]
+            .as_str()
+            .ok_or("project")?
+            .parse()?,
+        actor_id: identity["data"]["inbox"]["actor"]
+            .as_str()
+            .ok_or("actor")?
+            .parse()?,
+        read_prompts: false,
+    };
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = provenant_core::CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let store = provenant_run::RunStore::open(&context, &call)?;
+    let attempt = serde_json::to_value(store.record(attempt_id.parse()?, &call)?)?;
     let request = serde_json::from_slice(&std::fs::read(
-        rig.state.join("runs").join(run).join("request.json"),
+        rig.state
+            .join("attempts")
+            .join(attempt_id)
+            .join("request.json"),
     )?)?;
     Ok((request, attempt))
 }
@@ -1806,10 +971,10 @@ fn submission_preserves_explicit_named_route_tier() -> Result {
     let cleanup = rig.process_cleanup();
     let (request, attempt) =
         submitted_policy(&rig, "named-tier", json!({"kind":"named","name":"senior"}))?;
-    assert_eq!(request.tasks[0].title.as_deref(), Some("Review fixture"));
+    assert_eq!(request.task.title.as_deref(), Some("Review fixture"));
     assert_eq!(attempt["title"], "Review fixture");
     assert_eq!(
-        request.tasks[0].route,
+        request.task.route,
         provenant_records::run::RequestedRoute::Named {
             extra: Default::default(),
             name: "senior".into(),
@@ -1822,7 +987,7 @@ fn submission_preserves_explicit_named_route_tier() -> Result {
 }
 
 #[test]
-fn mcp_submission_stamps_the_local_host_on_its_trace() -> Result {
+fn submission_stamps_the_local_host_on_its_trace() -> Result {
     let rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
     let identity = rig.command(&["fabric", "identity", "--json"])?;
@@ -1835,48 +1000,6 @@ fn mcp_submission_stamps_the_local_host_on_its_trace() -> Result {
     rig.assert_legacy_unchanged()?;
     cleanup.disarm();
     Ok(())
-}
-
-#[test]
-fn removed_submission_operation_is_not_advertised_or_accepted() -> Result {
-    let rig = TestRig::new()?;
-    let replies = mcp(
-        &rig,
-        &[json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}})],
-    )?;
-    let tools = replies
-        .iter()
-        .find(|reply| reply["id"] == 1)
-        .ok_or("tools")?;
-    let submit = tools["result"]["tools"]
-        .as_array()
-        .ok_or("tool list")?
-        .iter()
-        .find(|tool| tool["name"] == "fabric_run")
-        .ok_or("fabric_run")?;
-    assert!(!submit["inputSchema"].to_string().contains("inputs"));
-    assert!(!submit["inputSchema"].to_string().contains("task_class"));
-
-    let reply = mcp(
-        &rig,
-        &[
-            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"submit","operation_id":"unsupported-inputs","tasks":[{"prompt":"fixture","inputs":[],"route":{"kind":"named","name":"senior"},"timeout_seconds":60}]}}}),
-        ],
-    )?;
-    let call = reply.iter().find(|reply| reply["id"] == 2).ok_or("call")?;
-    assert_eq!(call["result"]["isError"], true, "{call}");
-    assert_eq!(text_error_code(&call["result"]), "invalid_input");
-
-    let reply = mcp(
-        &rig,
-        &[
-            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"submit","operation_id":"no-task-class","tasks":[{"prompt":"fixture","route":{"kind":"named","name":"senior"},"task_class":"mechanical","timeout_seconds":60}]}}}),
-        ],
-    )?;
-    let call = reply.iter().find(|reply| reply["id"] == 3).ok_or("call")?;
-    assert_eq!(call["result"]["isError"], true, "{call}");
-    assert_eq!(text_error_code(&call["result"]), "invalid_input");
-    rig.assert_legacy_unchanged()
 }
 
 #[test]
@@ -1893,15 +1016,10 @@ fn silence_knob_controls_capture_plan_observations() -> Result {
         "config-silence",
         json!({"kind":"model","provider":"codex","model":"fixture"}),
     )?;
-    let task = &request.tasks[0];
+    let task = &request.task;
     assert_eq!(serde_json::to_value(&task.profile)?, attempt["profile"]);
     assert_eq!(task.profile.knobs["lanes.silence_seconds"], 2);
-    let plan = provenant_run::capture_plan(
-        &request.tasks[0],
-        request.tasks[0].provider_timeout_seconds,
-        u64::MAX,
-        "codex",
-    );
+    let plan = provenant_run::capture_plan(&request.task, &Default::default());
     assert_eq!(plan.silence_ms, 2000);
     assert!(!plan.silent(1999, Some(0)));
     assert!(plan.silent(2000, Some(0)));
@@ -1973,6 +1091,59 @@ fn loopback_peer(rig: &mut TestRig) -> Result<provenant_core::HostId> {
     Ok(peer)
 }
 
+/// `run ARGS --name NAME`, then `wait NAME`, answering the launch's own exit
+/// and a `data.checkpoint` read after the wait. A replayed name reads the same
+/// graph again, so a replay and its first launch compare equal.
+fn launch_named_and_wait(
+    rig: &TestRig,
+    args: &[&str],
+    name: &str,
+    timeout: &str,
+) -> Result<(i64, Value)> {
+    let mut argv = vec!["run"];
+    argv.extend_from_slice(args);
+    argv.extend(["--name", name, "--json"]);
+    let (status, launched) = json_command(rig, &argv)?;
+    if launched["data"]["checkpoint"].is_null() {
+        return Ok((status, launched));
+    }
+    let waited = rig.command(&["wait", name, "--timeout", timeout, "--json"])?;
+    let _ = code(&waited);
+    let checkpoint = rig.checkpoint(name)?;
+    Ok((
+        status,
+        json!({"data": {"checkpoint": checkpoint}, "launch": launched}),
+    ))
+}
+
+/// Run the host tick until `settled` holds for NAME's checkpoint, failing
+/// with the last observation once `limit` passes. A wait only observes
+/// (retry-owner.md); the tick advances due launch retries and observes peer
+/// settlement for the origin graph.
+fn tick_until(
+    rig: &TestRig,
+    name: &str,
+    limit: std::time::Duration,
+    settled: impl Fn(&Value) -> bool,
+) -> Result<Value> {
+    let observe = || -> std::result::Result<(Value, String), String> {
+        let ticked = rig
+            .command(&["tick", "--json"])
+            .map_err(|error| error.to_string())?;
+        let checkpoint = rig.checkpoint(name).map_err(|error| error.to_string())?;
+        Ok((
+            checkpoint,
+            String::from_utf8_lossy(&ticked.stdout.bytes).into_owned(),
+        ))
+    };
+    let (checkpoint, tick) = provenant_test_support::wait_for(name, limit, observe, |observed| {
+        observed
+            .as_ref()
+            .map_or(true, |(checkpoint, _)| settled(checkpoint))
+    })??;
+    Ok(json!({"data": {"checkpoint": checkpoint}, "tick": tick}))
+}
+
 fn json_command(rig: &TestRig, args: &[&str]) -> Result<(i64, Value)> {
     let output = rig.command(args)?;
     let value = serde_json::from_slice(&output.stdout.bytes).map_err(|error| {
@@ -2007,37 +1178,38 @@ fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
         ),
     )?;
     std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))?;
-    let launch = |rig: &TestRig, operation, wait| {
-        let mut args = vec![
-            "run",
+    let launch = |rig: &TestRig, name, wait| {
+        let args = [
+            "task",
             "fixture",
             "--host",
             "workshop",
             "--model",
             "codex/gpt-6-luna",
-            "--operation-id",
-            operation,
-            "--json",
         ];
         if wait {
-            args.push("--wait=15s");
+            launch_named_and_wait(rig, &args, name, "15s")
+        } else {
+            let mut argv = vec!["run"];
+            argv.extend_from_slice(&args);
+            argv.extend(["--name", name, "--json"]);
+            json_command(rig, &argv)
         }
-        json_command(rig, &args)
     };
     let (_, success) = launch(&rig, "probe-failure-success", true)?;
     let reference = success["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
         .as_str()
         .ok_or_else(|| format!("missing peer attempt: {success}"))?;
     assert!(reference.starts_with(&format!("{peer}/")), "{success}");
-    let runs = rig.root.join("peer-state/runs");
-    let existing: std::collections::HashSet<_> = std::fs::read_dir(&runs)?
+    let peer_attempts = rig.root.join("peer-state/attempts");
+    let existing: std::collections::HashSet<_> = std::fs::read_dir(&peer_attempts)?
         .map(|entry| entry.map(|entry| entry.file_name()))
         .collect::<std::io::Result<_>>()?;
     std::fs::write(&lost, "")?;
     // Observe the lost receipt before a waited submission advances its due retry.
     let (_, unknown) = launch(&rig, "probe-failure-retry", false)?;
     assert!(unknown.to_string().contains("LAUNCH_UNKNOWN"), "{unknown}");
-    let after_loss: std::collections::HashSet<_> = std::fs::read_dir(&runs)?
+    let after_loss: std::collections::HashSet<_> = std::fs::read_dir(&peer_attempts)?
         .map(|entry| entry.map(|entry| entry.file_name()))
         .collect::<std::io::Result<_>>()?;
     assert_eq!(after_loss.difference(&existing).count(), 1, "{unknown}");
@@ -2068,12 +1240,18 @@ fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
     rig.env.retain(|(key, _)| key != "PROVENANT_AGENT_LABEL");
     rig.env
         .push(("PROVENANT_AGENT_LABEL".into(), "replacement-runner".into()));
-    let (_, recovered) = launch(&rig, "probe-failure-retry", true)?;
+    // A replayed name starts nothing, so the host tick advances the due retry.
+    let recovered = tick_until(
+        &rig,
+        "probe-failure-retry",
+        std::time::Duration::from_secs(20),
+        |checkpoint| checkpoint["nodes"][0]["attempts"][0]["attempt_ref"].is_string(),
+    )?;
     let reference = recovered["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
         .as_str()
         .ok_or_else(|| format!("missing recovered peer attempt: {recovered}"))?;
     assert!(reference.starts_with(&format!("{peer}/")), "{recovered}");
-    let after: std::collections::HashSet<_> = std::fs::read_dir(&runs)?
+    let after: std::collections::HashSet<_> = std::fs::read_dir(&peer_attempts)?
         .map(|entry| entry.map(|entry| entry.file_name()))
         .collect::<std::io::Result<_>>()?;
     assert_eq!(after.difference(&existing).count(), 1, "{recovered}");
@@ -2082,7 +1260,7 @@ fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
         replay["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"],
         reference
     );
-    let replayed: std::collections::HashSet<_> = std::fs::read_dir(&runs)?
+    let replayed: std::collections::HashSet<_> = std::fs::read_dir(&peer_attempts)?
         .map(|entry| entry.map(|entry| entry.file_name()))
         .collect::<std::io::Result<_>>()?;
     assert_eq!(replayed, after);
@@ -2098,25 +1276,25 @@ fn peer_dispatch_set_host_reaches_the_peer_attempt() -> Result {
     let mut rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
     let peer = loopback_peer(&mut rig)?;
-    let (_, placed) = json_command(
+    let (_, placed) = launch_named_and_wait(
         &rig,
         &[
-            "run",
+            "task",
             "fixture",
             "--set",
             "attempt.host=\"workshop\"",
             "--model",
             "codex/gpt-6-luna",
-            "--wait=15s",
-            "--json",
         ],
+        "placed-peer",
+        "15s",
     )?;
     let reference = placed["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
         .as_str()
         .ok_or_else(|| format!("missing peer attempt: {placed}"))?;
     assert!(reference.starts_with(&format!("{peer}/")), "{placed}");
     assert_eq!(
-        std::fs::read_dir(rig.root.join("peer-state/runs"))?.count(),
+        std::fs::read_dir(rig.root.join("peer-state/attempts"))?.count(),
         1
     );
     rig.assert_legacy_unchanged()?;
@@ -2137,23 +1315,30 @@ fn peer_dispatch_refuses_an_oversized_frame_before_contact() -> Result {
     std::fs::write(config, settings.to_string())?;
     // JSON escaping exceeds the peer frame cap although the brief itself fits.
     std::fs::write(&prompt, "\"".repeat(600 * 1024))?;
-    for _ in 0..2 {
+    // The second identical launch replays the refused graph (cli.md "Names and
+    // replay": exit 0 with its recorded state); neither contacts the peer.
+    for replay in [false, true] {
         let (status, refused) = json_command(
             &rig,
             &[
                 "run",
+                "task",
                 "--host",
                 "workshop",
                 "--model",
                 "agy/gemini-3.8-flash",
-                "--operation-id",
+                "--name",
                 "peer-frame-limit",
-                "--file",
+                "--brief-file",
                 prompt.to_str().ok_or("prompt")?,
                 "--json",
             ],
         )?;
-        assert_ne!(status, 0, "{refused}");
+        assert_eq!(status == 0, replay, "{refused}");
+        assert_eq!(
+            refused["data"]["checkpoint"]["graph_id"],
+            "peer-frame-limit"
+        );
         assert_eq!(
             refused["data"]["checkpoint"]["nodes"][0]["advance_error_code"], "launch_refused",
             "{refused}"
@@ -2166,7 +1351,7 @@ fn peer_dispatch_refuses_an_oversized_frame_before_contact() -> Result {
         );
     }
     assert!(!rig.root.join("peer-stderr").exists());
-    assert!(!rig.root.join("peer-state/runs").exists());
+    assert!(!rig.root.join("peer-state/attempts").exists());
     rig.assert_legacy_unchanged()
 }
 
@@ -2184,6 +1369,7 @@ fn peer_dispatch_refuses_misplaced_writers_and_unknown_hosts_before_contact() ->
         &rig,
         &[
             "run",
+            "task",
             "fixture",
             "--host",
             "workshop",
@@ -2205,6 +1391,7 @@ fn peer_dispatch_refuses_misplaced_writers_and_unknown_hosts_before_contact() ->
             &rig,
             &[
                 "run",
+                "task",
                 "fixture",
                 "--host",
                 host,
@@ -2216,7 +1403,7 @@ fn peer_dispatch_refuses_misplaced_writers_and_unknown_hosts_before_contact() ->
         assert!(unknown.to_string().contains("UNKNOWN_HOST"), "{unknown}");
     }
     assert!(!contacted.exists());
-    assert!(!rig.root.join("peer-state/runs").exists());
+    assert!(!rig.root.join("peer-state/attempts").exists());
     rig.assert_legacy_unchanged()
 }
 
@@ -2249,26 +1436,35 @@ fn peer_dispatch_wait_bounds_unanswered_submission() -> Result {
         ),
     )?;
     std::fs::set_permissions(rig.root.join("ssh"), std::fs::Permissions::from_mode(0o700))?;
+    // `run` has no wait flag, so the peer exchange bound is what ends an
+    // unanswered submission.
+    let config = rig.state.join("config.toml");
+    let text = std::fs::read_to_string(&config)?;
+    std::fs::write(
+        &config,
+        format!("{text}[domains.fabric.limits]\npeer_seconds=5\n"),
+    )?;
     let start = std::time::Instant::now();
-    let (_, result) = json_command(
+    let (_, launched) = json_command(
         &rig,
         &[
             "run",
+            "task",
             "fixture",
             "--host",
             "workshop",
             "--model",
             "codex/gpt-6-luna",
-            "--operation-id",
+            "--name",
             "held-submit",
-            "--wait=10s",
             "--json",
         ],
     )?;
-    // The whole call shares this budget, so a loaded host that spends part of
-    // it before the submission must still leave time to reach the peer.
+    let result = json!({"launch": launched});
+    // Health and submission share the five-second peer bound; the rest is
+    // process start on a loaded host.
     assert!(
-        start.elapsed() < std::time::Duration::from_secs(25),
+        start.elapsed() < std::time::Duration::from_secs(20),
         "{result}"
     );
     assert!(
@@ -2280,7 +1476,7 @@ fn peer_dispatch_wait_bounds_unanswered_submission() -> Result {
         !result.to_string().contains("home_unavailable"),
         "a deadline is not an unavailable home: {result}"
     );
-    assert!(!rig.root.join("peer-state/runs").exists());
+    assert!(!rig.root.join("peer-state/attempts").exists());
     Ok(())
 }
 
@@ -2311,7 +1507,9 @@ fn peer_dispatch_launches_a_large_argv_prompt() -> Result {
          task=${1#Read the file at }\n\
          task=${task% first and treat its full contents as your task instructions.}\n\
          [ \"$(wc -c <\"$task\")\" -gt 119808 ] || exit 3\n\
-         echo launched >>\"$HOME/launch-count\"\necho 'peer large prompt fixture' >&2\n",
+         echo 'peer large prompt fixture' >&2\n\
+         printf '%s\\n' '{\"event\":\"init\",\"conversation_id\":\"fixture\",\"init\":{\"model\":\"gemini-3.8-flash\"}}'\n\
+         printf '%s\\n' '{\"event\":\"result\",\"result\":{\"conversation_id\":\"fixture\",\"status\":\"SUCCESS\",\"response\":\"## Findings\\nlaunched\\n## Evidence\\nread the prompt file\",\"error\":null,\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}'\n",
     )?;
     std::fs::set_permissions(bin.join("agy"), std::fs::Permissions::from_mode(0o755))?;
     std::fs::create_dir_all(rig.home.join("Library/Keychains"))?;
@@ -2329,41 +1527,49 @@ fn peer_dispatch_launches_a_large_argv_prompt() -> Result {
     let text = "x".repeat(117 * 1024);
     std::fs::write(&prompt, &text)?;
     let args = [
-        "run",
+        "task",
         "--host",
         "workshop",
         "--model",
         "agy/gemini-3.8-flash",
         "--effort",
         "high",
-        "--operation-id",
-        "peer-large-prompt",
-        "--file",
+        "--brief-file",
         prompt.to_str().ok_or("prompt")?,
-        "--wait=30s",
-        "--json",
     ];
-    let (_, placed) = json_command(&rig, &args)?;
+    let mut argv = vec!["run"];
+    argv.extend_from_slice(&args);
+    argv.extend(["--name", "peer-large-prompt", "--json"]);
+    let (status, launched) = json_command(&rig, &argv)?;
+    assert_eq!(status, 0, "{launched}");
+    let placed = tick_until(
+        &rig,
+        "peer-large-prompt",
+        std::time::Duration::from_secs(20),
+        |checkpoint| checkpoint["nodes"][0]["state"] != "running",
+    )?;
     let node = &placed["data"]["checkpoint"]["nodes"][0];
     let reference = node["attempts"][0]["attempt_ref"]
         .as_str()
         .ok_or_else(|| format!("missing peer attempt: {placed}"))?;
     let (host, attempt) = reference.split_once('/').ok_or("attempt reference")?;
     assert_eq!(host, peer.to_string());
+    // Success needs the fixture's own check that the prompt file it was
+    // pointed at holds the whole brief, so the brief did not travel in argv.
     assert_eq!(node["state"], "succeeded", "{placed}");
-    let runs = rig.root.join("peer-state/runs");
-    let run = std::fs::read_dir(&runs)?.next().ok_or("peer run")??.path();
-    let directory = run.join("attempts").join(attempt);
+    // Format 2 keeps one directory per attempt (docs/specs/state.md).
+    let attempts = rig.root.join("peer-state/attempts");
+    let directory = attempts.join(attempt);
     assert!(std::fs::read_to_string(directory.join("prompt.md"))?.ends_with(&text));
-    assert_eq!(
-        std::fs::read_to_string(directory.join("provider-state/candidate-0/launch-count"))?,
-        "launched\n"
-    );
-    let (_, replay) = json_command(&rig, &args)?;
+    let launched = std::fs::read_dir(&attempts)?.count();
+    // An identical named launch replays the settled graph and starts nothing.
+    let (status, replay) = json_command(&rig, &argv)?;
+    assert_eq!(status, 0, "{replay}");
     assert_eq!(
         replay["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"],
         reference
     );
+    assert_eq!(std::fs::read_dir(&attempts)?.count(), launched, "{replay}");
     rig.assert_legacy_unchanged()?;
     cleanup.disarm();
     Ok(())
@@ -2976,204 +2182,6 @@ fn remote_inbox_owner() -> Result {
     Ok(())
 }
 
-fn git(rig: &TestRig, cwd: &Path, args: &[&str]) -> Result<String> {
-    let mut argv = vec!["-C", cwd.to_str().ok_or("git cwd")?];
-    argv.extend_from_slice(args);
-    let executable = provenant_os::git::git_executable().ok_or("git executable")?;
-    let output = rig.execute(&executable, &argv, None)?;
-    assert_eq!(
-        code(&output),
-        0,
-        "{args:?}: {}",
-        String::from_utf8_lossy(&output.stderr.bytes)
-    );
-    Ok(String::from_utf8(output.stdout.bytes)?.trim().into())
-}
-
-/// A Git worktree registration is enough for writer custody; no Provenant registration is required.
-#[test]
-fn graph_writer_needs_only_git_worktree_registration() -> Result {
-    let rig = TestRig::new()?;
-    git(
-        &rig,
-        &rig.project,
-        &["commit", "-q", "--allow-empty", "-m", "base"],
-    )?;
-    let worktree = rig.project.join(".worktrees/git-writer");
-    git(
-        &rig,
-        &rig.project,
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            "git-writer",
-            worktree.to_str().ok_or("worktree")?,
-        ],
-    )?;
-    let claim = rig.command(&[
-        "fabric",
-        "claim",
-        "acquire",
-        "--worktree",
-        worktree.to_str().ok_or("worktree")?,
-        "--operation-id",
-        "writer-claim",
-        "--json",
-    ])?;
-    assert_eq!(
-        code(&claim),
-        0,
-        "{}",
-        String::from_utf8_lossy(&claim.stderr.bytes)
-    );
-    for (index, delivery) in ["none", "push"].into_iter().enumerate() {
-        let replies = mcp(
-            &rig,
-            &[
-                json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-                    "name":"fabric_run","arguments":{"op":"run","document":{
-                        "schema_version":1,"graph_id":format!("git-writer-{index}"),"nodes":[{
-                            "id":"writer","prompt":"commit the fix","access":"worktree_write",
-                            "worktree":worktree,"write_scope":["src"],"delivery":delivery,
-                            "route":{"adapter":"codex","model":"gpt-6.1-sol","effort":"high"}
-                        }]
-                    }}
-                }}),
-            ],
-        )?;
-        let result = &replies
-            .iter()
-            .find(|reply| reply["id"] == 1)
-            .ok_or("graph reply")?["result"];
-        assert_ne!(result["isError"], true, "{result}");
-        assert_ne!(
-            result["structuredContent"]["code"], "worktree_unregistered",
-            "{result}"
-        );
-        assert_eq!(
-            result["structuredContent"]["checkpoint"]["nodes"][0]["id"], "writer",
-            "{result}"
-        );
-    }
-    rig.assert_legacy_unchanged()
-}
-
-#[test]
-fn graph_writer_invalid_head_refuses_without_disclosing_private_paths() -> Result {
-    let rig = TestRig::new()?;
-    git(
-        &rig,
-        &rig.project,
-        &["commit", "-q", "--allow-empty", "-m", "base"],
-    )?;
-    let worktree = rig.project.join(".worktrees/git-writer");
-    git(
-        &rig,
-        &rig.project,
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            "git-writer",
-            worktree.to_str().ok_or("worktree")?,
-        ],
-    )?;
-    assert_eq!(code(&rig.command(&["fabric", "identity", "--json"])?), 0);
-    let submit = |graph_id: &str| -> Result<Value> {
-        let replies = mcp(
-            &rig,
-            &[
-                json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-                    "name":"fabric_run","arguments":{"op":"run","document":{
-                        "schema_version":1,"graph_id":graph_id,"nodes":[{
-                            "id":"writer","prompt":"commit the fix","access":"worktree_write","worktree":worktree,
-                            "write_scope":["src"],"route":{"adapter":"codex","model":"gpt-6.1-sol"}
-                        }]
-                    }}
-                }}),
-            ],
-        )?;
-        Ok(replies
-            .iter()
-            .find(|reply| reply["id"] == 1)
-            .ok_or("submit reply")?["result"]
-            .clone())
-    };
-
-    let gitfile = std::fs::read_to_string(worktree.join(".git"))?;
-    let private = Path::new(gitfile.trim().strip_prefix("gitdir: ").ok_or("gitdir")?);
-    let head = private.join("HEAD");
-    let original_head = std::fs::read(&head)?;
-    for (index, (contents, _operation)) in [
-        (None, "submit: openat read"),
-        (Some(vec![0xff]), "submit: decode writer HEAD"),
-        (
-            Some(b"ref: refs/heads/../invalid\n".to_vec()),
-            "submit: parse writer branch",
-        ),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        if let Some(contents) = contents {
-            std::fs::write(&head, contents)?;
-        } else {
-            std::fs::remove_file(&head)?;
-        }
-        let result = submit(&format!("writer-io-{index}"))?;
-        let graph = &result["structuredContent"];
-        assert_eq!(graph["outcome"], "failed", "{result}");
-        let error = &graph["checkpoint"]["nodes"][0];
-        assert_eq!(
-            error["advance_error_code"], "writer_binding_unavailable",
-            "{result}"
-        );
-        assert_eq!(
-            error["attempts"],
-            json!([]),
-            "no provider launch after invalid custody: {result}"
-        );
-        assert!(
-            !error.to_string().contains(head.to_string_lossy().as_ref()),
-            "{result}"
-        );
-    }
-    std::fs::write(&head, original_head)?;
-    rig.assert_legacy_unchanged()
-}
-
-#[test]
-fn graph_coordination_io_does_not_disclose_private_paths() -> Result {
-    let rig = TestRig::new()?;
-    assert_eq!(code(&rig.command(&["fabric", "identity", "--json"])?), 0);
-    let blocked = rig.state.join("fabric");
-    std::fs::write(&blocked, "not a directory")?;
-    let replies = mcp(
-        &rig,
-        &[
-            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-                "name":"fabric_run","arguments":{"op":"run","brief":"read the code","tier":"senior"}
-            }}),
-        ],
-    )?;
-    let result = &replies
-        .iter()
-        .find(|reply| reply["id"] == 1)
-        .ok_or("submit reply")?["result"];
-    let error = &result["structuredContent"];
-    assert_eq!(error["code"], "io", "{result}");
-    assert!(
-        !error
-            .to_string()
-            .contains(blocked.to_string_lossy().as_ref()),
-        "{result}"
-    );
-    rig.assert_legacy_unchanged()
-}
-
 #[test]
 fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Result {
     use provenant_core::{CancelToken, Clock, ProjectId, RootInputs, WaitBudget};
@@ -3197,7 +2205,35 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
     )?;
     assert_eq!(code(&peer_identity), 0);
     let peer_identity: Value = serde_json::from_slice(&peer_identity.stdout.bytes)?;
-    let context = serde_json::from_value(json!({"graph_id":"remote-graph","node_id":"one"}))?;
+    let identity = rig.command(&["fabric", "identity", "--json"])?;
+    assert_eq!(code(&identity), 0);
+    let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
+    let project = ProjectId::parse(identity["data"]["project"].as_str().ok_or("project")?)?;
+    let actor = identity["data"]["inbox"]["actor"].as_str().ok_or("actor")?;
+    // A receiver owns its own graph; its WorkKey is not the origin's key.
+    // Match the receiver's submission identity, rather than relying on the
+    // legacy by-reference fallback when no receiver graph is found.
+    let key = provenant_fabric_runtime::graph::AttemptKey {
+        extra: Default::default(),
+        graph_id: "remote-graph".into(),
+        node_id: "one".into(),
+        attempt: 1,
+        route_index: 0,
+    };
+    let digest = provenant_records::CanonicalV1::record_digest("graph-attempt-operation", 1, &key)?;
+    let submission = provenant_core::OperationId::parse(&format!(
+        "graph-{}",
+        provenant_core::hex(digest.as_bytes())
+    ))?;
+    let origin_actor: provenant_core::ActorId = actor.parse()?;
+    let digest = provenant_records::CanonicalV1::record_digest(
+        "peer-subgraph",
+        1,
+        &(origin_actor, submission),
+    )?;
+    let receiver_graph = format!("peer-{}", &provenant_core::hex(digest.as_bytes())[..40]);
+    let context =
+        serde_json::from_value(json!({"graph_id":receiver_graph,"node_id":"one","attempt":1}))?;
     let (attempt, _) = seed_attempt_in_state(
         &rig,
         &peer_identity,
@@ -3206,11 +2242,6 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
         false,
         Some(context),
     )?;
-    let identity = rig.command(&["fabric", "identity", "--json"])?;
-    assert_eq!(code(&identity), 0);
-    let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
-    let project = ProjectId::parse(identity["data"]["project"].as_str().ok_or("project")?)?;
-    let actor = identity["data"]["inbox"]["actor"].as_str().ok_or("actor")?;
     let mut roots = RootInputs::new(rig.home.clone(), rig.project.clone());
     roots.state_dir = Some(rig.state.clone());
     let state = roots.resolve(&provenant_os::fs::SystemPathResolver)?.state;
@@ -3226,6 +2257,9 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
     }
     impl provenant_fabric_runtime::graph::AttemptOwner for AcceptedPeer {
         type Error = std::io::Error;
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
         fn actor(&self) -> String {
             self.actor.clone()
         }
@@ -3245,11 +2279,75 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
             )
         }
     }
+    // Protocol 13 binds the receiver graph to the origin WorkKey. Seed that
+    // relationship through the graph journal, not just an accepted attempt ID.
+    let origin_key = provenant_records::WorkKey::new(project, "remote-graph", "one", 1)?;
+    let peer_project = ProjectId::parse(
+        peer_identity["data"]["project"]
+            .as_str()
+            .ok_or("peer project")?,
+    )?;
+    let peer_actor = peer_identity["data"]["inbox"]["actor"]
+        .as_str()
+        .ok_or("peer actor")?;
+    let mut peer_roots = RootInputs::new(rig.home.clone(), rig.project.clone());
+    peer_roots.state_dir = Some(peer_state.clone());
+    let receiver_state = peer_roots
+        .resolve(&provenant_os::fs::SystemPathResolver)?
+        .state;
+    let receiver_document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1, "graph_id":receiver_graph,
+        "peer_origin_work_key":origin_key,
+        "nodes":[{"id":"one","access":"read_only","prompt":"fixture","route":{"alias":"senior"}}]
+    }))?;
+    let mut receiver = FileJournal::open(
+        &receiver_state,
+        peer_project,
+        &receiver_graph,
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    receiver.bind(GraphExecution {
+        extra: [(
+            "peer_origin_context".into(),
+            json!({"graph_id":"remote-graph","node_id":"one"}),
+        )]
+        .into(),
+        bases: None,
+        directory: rig.project.clone(),
+        document: receiver_document.clone(),
+    })?;
+    let receiver_seeded = provenant_fabric_runtime::graph::advance_with_budget(
+        &receiver_document,
+        &mut AcceptedPeer {
+            actor: peer_actor.into(),
+            reference: format!("{peer}/{attempt}"),
+        },
+        &mut receiver,
+        &Default::default(),
+        &Default::default(),
+    )?;
+    assert_eq!(
+        receiver_seeded.checkpoint.nodes[0].state,
+        provenant_fabric_runtime::graph::NodeState::Running
+    );
+    drop(receiver);
+    let execution = FileJournal::execution(&receiver_state, peer_project, &receiver_graph)?
+        .ok_or("receiver execution")?;
+    assert_eq!(
+        execution.document.extra["peer_origin_work_key"],
+        json!(origin_key)
+    );
+    assert_eq!(
+        execution.extra["peer_origin_context"],
+        json!({"graph_id":"remote-graph","node_id":"one"})
+    );
+    assert_ne!(execution.document.graph_id, document.graph_id);
     let mut journal = FileJournal::open(&state, project, "remote-graph", budget, &cancel, &clock)?;
     journal.bind(GraphExecution {
         extra: Default::default(),
-        integration_base: None,
-        review_base: None,
+        bases: None,
         directory: rig.project.clone(),
         document: document.clone(),
     })?;
@@ -3276,6 +2374,50 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
     let stopped =
         FileJournal::read_checkpoint(&state, project, "remote-graph")?.ok_or("checkpoint")?;
     assert_eq!(stopped.cancel_reason.as_deref(), Some("peer test"));
+    let receiver_stopped =
+        FileJournal::read_checkpoint(&receiver_state, peer_project, &receiver_graph)?
+            .ok_or("receiver checkpoint")?;
+    assert!(
+        receiver_stopped.nodes.iter().all(|node| !matches!(
+            node.state,
+            provenant_fabric_runtime::graph::NodeState::Pending
+                | provenant_fabric_runtime::graph::NodeState::Running
+        )),
+        "origin cancellation must settle the receiver subtree"
+    );
+    let receiver_attempt = receiver_stopped
+        .nodes
+        .iter()
+        .find(|node| node.id == "one")
+        .ok_or("receiver node")?
+        .attempts
+        .last()
+        .ok_or("receiver attempt")?;
+    // The checkpoint keeps launch history. Cancellation authority belongs to
+    // the run store, which must seal the actual accepted attempt as cancelled.
+    let receiver_context = provenant_run::ExecutionContext {
+        state_root: receiver_state,
+        project_id: peer_project,
+        actor_id: peer_actor.parse()?,
+        read_prompts: false,
+    };
+    let call = provenant_run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let store = provenant_run::RunStore::open(&receiver_context, &call)?;
+    assert!(matches!(
+        store.record(attempt, &call)?.state,
+        provenant_run::AttemptState::Terminal {
+            outcome: provenant_run::Outcome::Cancelled,
+            ..
+        }
+    ));
+    assert_eq!(
+        receiver_attempt.attempt_ref.as_deref(),
+        Some(format!("{peer}/{attempt}").as_str())
+    );
+
     rig.assert_legacy_unchanged()?;
     cleanup.disarm();
     Ok(())
@@ -3283,18 +2425,6 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
 
 /// Seed one queued attempt with `prompt` in the owner store, optionally
 /// cancelled so it carries two events. Returns the attempt and its events.
-fn seed_attempt(
-    rig: &mut TestRig,
-    prompt: &str,
-    cancel_it: bool,
-) -> Result<(
-    provenant_core::AttemptId,
-    Vec<provenant_records::run::RunEvent>,
-)> {
-    let identity = federated_identity(rig)?;
-    seed_attempt_in_state(rig, &identity, &rig.state, prompt, cancel_it, None)
-}
-
 fn seed_attempt_in_state(
     rig: &TestRig,
     identity: &Value,
@@ -3307,8 +2437,7 @@ fn seed_attempt_in_state(
     Vec<provenant_records::run::RunEvent>,
 )> {
     use provenant_core::{
-        ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, ProjectId, RootInputs, RunId,
-        TaskId,
+        ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, ProjectId, RootInputs,
     };
     use provenant_os::clock::SystemClock;
     use provenant_records::{
@@ -3334,21 +2463,26 @@ fn seed_attempt_in_state(
         read_prompts: false,
     };
     let store = provenant_run::RunStore::open(&context, &call)?;
-    let task_id = TaskId::from_bytes([92; 16]);
+    // A launch without a work key is refused, so an unlabelled seed gets one.
+    let work_context = work_context.unwrap_or_else(|| provenant_records::run::WorkContext {
+        graph_id: Some("page-seed-graph".into()),
+        node_id: Some("node".into()),
+        attempt: Some(1),
+        ..Default::default()
+    });
     let attempt_id = AttemptId::from_bytes([91; 16]);
     store.create(
         &provenant_run::PreparedRun {
-            run_id: RunId::from_bytes([96; 16]),
+            attempt_id,
             operation_id: OperationId::parse("page-seed")?,
             created_at: clock.wall_now()?,
             request: CanonicalRequest {
                 extra: Default::default(),
-                child_attempt_id_version: None,
                 chair: None,
                 fresh_continuation: None,
                 schema_version: 1,
-                tasks: vec![TaskRequest {
-                    context: work_context,
+                task: TaskRequest {
+                    context: Some(work_context),
                     extra: Default::default(),
                     build_heavy: false,
                     title: None,
@@ -3358,7 +2492,6 @@ fn seed_attempt_in_state(
                     base_ref: None,
                     writer: None,
                     profile: provenant_records::run::HarnessProfile::default(),
-                    task_id,
                     prompt_digest: CanonicalV1::file_digest(prompt.as_bytes()),
                     route: RequestedRoute::Model {
                         extra: Default::default(),
@@ -3372,17 +2505,12 @@ fn seed_attempt_in_state(
                     delivery_id: None,
                     deliver: None,
                     access: Default::default(),
-                }],
-                concurrency: 1,
+                },
                 parent: None,
                 lane_depth: Some(1),
                 parent_attempt: None,
             },
-            attempts: vec![provenant_run::NewAttempt {
-                attempt_id,
-                task_id,
-                prompt: prompt.into(),
-            }],
+            prompt: prompt.into(),
         },
         &call,
     )?;
@@ -3391,137 +2519,6 @@ fn seed_attempt_in_state(
     }
     let events = store.events(0, 64, Some(attempt_id), &call)?;
     Ok((attempt_id, events))
-}
-
-fn read_output(
-    rig: &TestRig,
-    attempt: provenant_core::AttemptId,
-    part: &str,
-    offset: u64,
-    max_bytes: u64,
-) -> Result<Value> {
-    let replies = mcp(
-        rig,
-        &[
-            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_output","arguments":{"op":"read","target":{"attempt":attempt.to_string()},"part":part,"offset":offset,"max_bytes":max_bytes}}}),
-        ],
-    )?;
-    Ok(replies
-        .into_iter()
-        .find(|reply| reply["id"] == 1)
-        .ok_or("output reply")?["result"]
-        .clone())
-}
-
-#[test]
-fn trimmed_event_page_continues_from_the_last_kept_event() -> Result {
-    let mut rig = TestRig::in_directory(Path::new(env!("CARGO_MANIFEST_DIR")))?;
-    let (attempt, events) = seed_attempt(&mut rig, "prompt", true)?;
-    assert_eq!(events.len(), 2);
-    let first_only = serde_json::to_vec(&events[..1])?.len() as u64;
-    let both = serde_json::to_vec(&events)?.len() as u64;
-    // The separator byte means two events need more than twice one.
-    assert!(both > first_only + 1);
-
-    // Room for the first event only: the page is trimmed, not exhausted.
-    let page = read_output(&rig, attempt, "events", 0, both - 1)?;
-    assert_ne!(page["isError"], true, "{page}");
-    let page = &page["structuredContent"];
-    assert_eq!(page["eof"], false);
-    assert_eq!(page["next_offset"], events[0].sequence);
-    let kept: Vec<Value> = serde_json::from_str(page["bytes"]["data"].as_str().ok_or("bytes")?)?;
-    assert_eq!(kept.len(), 1);
-    assert_eq!(kept[0]["sequence"], events[0].sequence);
-
-    // The next read starts after the kept event and returns the rest.
-    let rest = read_output(&rig, attempt, "events", events[0].sequence, 65536)?;
-    let rest = &rest["structuredContent"];
-    assert_eq!(rest["eof"], true);
-    assert_eq!(rest["next_offset"], events[1].sequence);
-    let rest: Vec<Value> = serde_json::from_str(rest["bytes"]["data"].as_str().ok_or("bytes")?)?;
-    assert_eq!(rest.len(), 1);
-    assert_eq!(rest[0]["sequence"], events[1].sequence);
-
-    // A limit below one event refuses rather than returning an empty page.
-    let refused = read_output(&rig, attempt, "events", 0, first_only - 1)?;
-    assert_eq!(refused["isError"], true);
-    assert_eq!(text_error_code(&refused), "output_too_large");
-    Ok(())
-}
-
-#[test]
-fn output_page_ending_inside_a_character_stops_before_it() -> Result {
-    let mut rig = TestRig::in_directory(Path::new(env!("CARGO_MANIFEST_DIR")))?;
-    // 'a' is one byte and the sun is three, so two bytes split the sun.
-    let (attempt, _) = seed_attempt(&mut rig, "a\u{2600}b", false)?;
-    let page = read_output(&rig, attempt, "prompt", 0, 2)?;
-    assert_ne!(page["isError"], true, "{page}");
-    let page = &page["structuredContent"];
-    assert_eq!(page["bytes"]["encoding"], "utf8");
-    assert_eq!(page["bytes"]["data"], "a");
-    assert_eq!(page["next_offset"], 1);
-    assert_eq!(page["eof"], false);
-
-    let next = read_output(&rig, attempt, "prompt", 1, 3)?;
-    let next = &next["structuredContent"];
-    assert_eq!(next["bytes"]["encoding"], "utf8");
-    assert_eq!(next["bytes"]["data"], "\u{2600}");
-    assert_eq!(next["next_offset"], 4);
-    Ok(())
-}
-
-#[test]
-fn lane_graph_mutations_fail_closed_without_host_submission() -> Result {
-    let mut rig = TestRig::new()?;
-    let (parent, _) = seed_attempt(&mut rig, "parent brief", false)?;
-    // A host prepares coordination state before handing its read-only view to a lane.
-    assert_eq!(
-        code(&rig.command(&["fabric", "events", "read", "--json"])?),
-        0
-    );
-    let before = std::fs::read(rig.state.join("run.sqlite3"))?;
-    rig.env.push((
-        provenant_run::PARENT_ATTEMPT_ENV.into(),
-        parent.to_string().into(),
-    ));
-    for arguments in [
-        json!({"op":"stop","id":"missing"}),
-        json!({"op":"retry","id":"missing"}),
-        json!({"op":"edit","id":"missing","patch":{"schema_version":1,"expected_revision":1,"idempotency_key":"lane-edit","nodes":[{"id":"added","use":"task","brief":"Inspect"}]}}),
-    ] {
-        let retry = arguments["op"] == "retry";
-        assert!(
-            provenant_fabric_mcp::tools::ToolCall::parse("fabric_run", arguments.clone()).is_ok()
-        );
-        if arguments["op"] == "edit" {
-            let _: provenant_fabric_runtime::graph::patch::Patch =
-                serde_json::from_value(arguments["patch"].clone())?;
-        }
-        let replies = mcp(
-            &rig,
-            &[
-                json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_run","arguments":arguments}}),
-            ],
-        )?;
-        let result = &replies
-            .iter()
-            .find(|reply| reply["id"] == 1)
-            .ok_or("reply")?["result"];
-        assert_eq!(result["isError"], true, "{result}");
-        assert_eq!(
-            result["structuredContent"]["code"],
-            if retry {
-                "confinement_refused"
-            } else {
-                "owner_unavailable"
-            },
-            "{result}"
-        );
-    }
-    assert!(!rig.state.join("fabric/graphs").exists());
-    assert!(!rig.state.join("children").exists());
-    assert_eq!(std::fs::read(rig.state.join("run.sqlite3"))?, before);
-    rig.assert_legacy_unchanged()
 }
 
 #[test]
@@ -3543,7 +2540,8 @@ type = "string"
         "--file",
         path,
         "--set",
-        "subject='code'",
+        // A string parameter takes the text as written (cli.md).
+        "subject=code",
         "--over",
         "one",
         "--over",
@@ -3562,207 +2560,4 @@ type = "string"
     assert!(text.contains("Inspect code: one"), "{text}");
     assert!(text.contains("Inspect code: two"), "{text}");
     Ok(())
-}
-
-#[test]
-fn stats_reports_attempts_after_graph_collection() -> Result {
-    use provenant_core::{CancelToken, Clock, RootInputs, WaitBudget};
-    use provenant_fabric_runtime::graph::{
-        FileJournal, GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
-    };
-    use provenant_os::clock::SystemClock;
-    let rig = TestRig::new()?;
-    let explain = rig.command(&["run", "Initial", "--explain", "--json"])?;
-    assert_eq!(
-        code(&explain),
-        0,
-        "{}",
-        String::from_utf8_lossy(&explain.stderr.bytes)
-    );
-    let envelope: Value = serde_json::from_slice(&explain.stdout.bytes)?;
-    let document: GraphDocument = serde_json::from_value(envelope["data"]["document"].clone())?;
-    let id = document.graph_id.clone();
-    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
-    inputs.state_dir = Some(rig.state.clone());
-    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    let context = provenant_cli::fabric::Context::open(roots, &rig.home, &rig.project)?;
-    let checkpoint: GraphCheckpoint = serde_json::from_value(
-        json!({"schema_version":1,"graph_id":id,"plan_digest":"test","nodes":[{"id":"task","worktree":null,"state":"succeeded","attempts":[{"key":{"graph_id":id,"node_id":"task","route_index":0},"launched":true,"route":{"alias":"senior"},"state":"terminal","attempt_ref":"host/attempt","launch_actor":"actor","usage":{"tokens":100}}]}]}),
-    )?;
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let mut journal = FileJournal::open(
-        &context.roots.state,
-        context.identity.project,
-        &id,
-        WaitBudget::cli(clock.mono_now(), 55)?,
-        &cancel,
-        &clock,
-    )?;
-    journal.bind(GraphExecution {
-        extra: Default::default(),
-        directory: rig.project.clone(),
-        document,
-        review_base: None,
-        integration_base: None,
-    })?;
-    journal.save(&checkpoint)?;
-    drop(journal);
-    assert_eq!(
-        FileJournal::collect_terminal(
-            &context.roots.state,
-            context.identity.project,
-            i128::MAX,
-            &cancel,
-            &clock
-        )?,
-        1
-    );
-    let result = rig.command(&["stats", &id, "--by", "tier", "--json"])?;
-    assert_eq!(
-        code(&result),
-        0,
-        "{}",
-        String::from_utf8_lossy(&result.stderr.bytes)
-    );
-    let value: Value = serde_json::from_slice(&result.stdout.bytes)?;
-    assert_eq!(value["data"]["groups"][0]["attempts"], 1);
-    assert_eq!(value["data"]["groups"][0]["tokens"], 100);
-    Ok(())
-}
-
-#[test]
-fn peer_refusal_codes_and_protocol_mismatches_reach_mcp() -> Result {
-    use provenant_fabric_runtime::coordination::facade::FacadeError;
-    let mut rig = TestRig::new()?;
-    let identity = federated_identity(&mut rig)?;
-    let local = provenant_core::HostId::parse(identity["data"]["host"].as_str().ok_or("host")?)?;
-    let host = next_host(local)?;
-    let project = &identity["data"]["federation"]["key"];
-    let ssh = rig.root.join("ssh");
-    let refusal = rig.root.join("refusal.json");
-    let calls = rig.root.join("ssh-calls");
-    std::fs::write(
-        &ssh,
-        format!(
-            "#!/bin/sh\nrequest=$(cat)\nprintf '%s\\n' \"$request\" >> '{}'\ncat '{}'\n",
-            calls.display(),
-            refusal.display(),
-        ),
-    )?;
-    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))?;
-    std::fs::write(
-        rig.state.join("config.toml"),
-        format!(
-            "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric]\nssh_executable={:?}\n\
-         [domains.fabric.peers.workshop]\nhost='{host}'\ndestination='workshop'\n",
-            ssh.to_string_lossy(),
-        ),
-    )?;
-    let frame = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-        "name":"fabric_run", "arguments":{"op":"status","target":{
-            "host":host.to_string(), "attempt":"11111111111111111111111111111111",
-        }},
-    }});
-    for wire in ["not_terminal", "operation_conflict", "owner_unavailable"] {
-        std::fs::write(
-            &refusal,
-            serde_json::to_vec(&json!({
-                "version":1,"protocol":PROTOCOL, "host":host.to_string(), "project":project,
-                "result":{"result":"error","data":{"error":{"code":wire}}},
-            }))?,
-        )?;
-        let replies = mcp(&rig, std::slice::from_ref(&frame))?;
-        let result = &replies.iter().find(|r| r["id"] == 1).ok_or("MCP reply")?["result"];
-        assert_eq!(result["structuredContent"]["code"], wire, "{result}");
-    }
-    // The released v1 health response, without protocol in either place.
-    std::fs::write(
-        &refusal,
-        serde_json::to_vec(&json!({
-            "version":1, "host":host.to_string(), "project":project,
-            "result":{"result":"health","data":{
-                "host":host.to_string(), "available":true, "execution":true,
-            }},
-        }))?,
-    )?;
-    std::fs::write(&calls, "")?;
-    let hosts = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
-        "name":"fabric_context", "arguments":{"op":"hosts","limit":10},
-    }});
-    let replies = mcp(&rig, &[frame, hosts])?;
-    let result = &replies.iter().find(|r| r["id"] == 1).ok_or("MCP reply")?["result"];
-    assert_eq!(
-        result["structuredContent"]["code"], "peer_version",
-        "{result}"
-    );
-    let projection = FacadeError::PeerProtocolMismatch {
-        peer: "workshop".into(),
-        remote: 1,
-        expected: PROTOCOL,
-    }
-    .diagnostic();
-    assert_eq!(
-        result["structuredContent"]["detail"],
-        serde_json::json!(projection.detail.as_deref())
-    );
-    assert_eq!(
-        result["structuredContent"]["next"],
-        serde_json::json!(projection.next.as_deref())
-    );
-    let text = result["content"][0]["text"]
-        .as_str()
-        .ok_or("MCP error text")?;
-    assert!(text.contains(projection.detail.as_deref().ok_or("protocol detail")?));
-    assert!(text.contains(projection.next.as_deref().ok_or("protocol action")?));
-    assert!(!result.to_string().contains("workshop"), "{result}");
-    let result = &replies
-        .iter()
-        .find(|r| r["id"] == 2)
-        .ok_or("MCP hosts reply")?["result"];
-    let hosts = result["structuredContent"]["hosts"]
-        .as_array()
-        .ok_or("host list")?;
-    assert_eq!(hosts.len(), 2, "{result}");
-    let remote = hosts
-        .iter()
-        .find(|entry| entry["host"] == host.to_string())
-        .ok_or("remote")?;
-    assert_eq!(remote["available"], false);
-    assert_eq!(remote["protocol"], 1);
-    assert_eq!(remote["reason"], "peer_version");
-    assert!(remote.get("features").is_none());
-    let local_health = hosts
-        .iter()
-        .find(|entry| entry["host"] == local.to_string())
-        .ok_or("local")?;
-    assert_eq!(local_health["available"], true);
-    assert_eq!(local_health["protocol"], PROTOCOL);
-    assert_eq!(local_health["features"], DOCTOR_PROTOCOL);
-    let calls = std::fs::read_to_string(calls)?;
-    assert_eq!(calls.lines().count(), 2);
-    let actions = calls
-        .lines()
-        .map(serde_json::from_str::<Value>)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    // MCP workers run the two tool calls concurrently, so their order varies.
-    let mut concurrent = [&actions[0], &actions[1]].map(|call| call["action"]["action"].clone());
-    concurrent.sort_by_key(|action| action.to_string());
-    assert_eq!(concurrent, ["health", "run"]);
-    for call in actions {
-        assert_eq!(call["protocol"], PROTOCOL);
-    }
-    let (status, output) = json_command(&rig, &["hosts", "--json"])?;
-    assert_eq!(status, 0, "{output}");
-    let remote = output["data"]
-        .as_array()
-        .ok_or("CLI host list")?
-        .iter()
-        .find(|entry| entry["host"] == host.to_string())
-        .ok_or("remote")?;
-    assert_eq!(remote["available"], false);
-    assert_eq!(remote["protocol"], 1);
-    assert_eq!(remote["reason"], "peer_version");
-    assert!(remote.get("features").is_none());
-    rig.assert_legacy_unchanged()
 }

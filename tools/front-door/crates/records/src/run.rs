@@ -1,8 +1,7 @@
 //! Strict run-store records. Facts are constructed only after store validation.
 use crate::{CanonicalError, CanonicalV1, FileDigest, PathWire};
 use provenant_core::{
-    ActorId, AttemptId, DeliveryId, Digest, GitOid, HostId, OperationId, ProjectId, RunId, TaskId,
-    WallTime,
+    ActorId, AttemptId, DeliveryId, Digest, GitOid, OperationId, ProjectId, WallTime,
 };
 use serde::{Deserialize, Serialize};
 
@@ -34,36 +33,24 @@ pub const RESULT_LIMIT: u64 = 4 * 1024 * 1024;
 pub const CAPTURE_LIMIT: u64 = 64 * 1024 * 1024;
 pub const OUTPUT_LIMIT: u64 = 65536;
 
-/// Explicit submitting chair identity, separate from a worker provider session.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChairBinding {
-    #[serde(flatten)]
-    pub extra: crate::ExtraFields,
-    pub host: HostId,
-    pub actor: ActorId,
-    /// The chair's host session, when its harness names one. It addresses the
-    /// chair log that settlement appends to.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session: Option<String>,
-}
+/// Attempt metadata needed by its owner but omitted from public projections.
+pub const REPOSITORY_ADMISSION_BINDING_FIELD: &str = "repository_admission_binding";
+pub const PRIVATE_ATTEMPT_EXTRA_FIELDS: &[&str] = &[REPOSITORY_ADMISSION_BINDING_FIELD];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanonicalRequest {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
-    /// Host-verifiable child run and attempt IDs. Absent on legacy, unindexed runs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub child_attempt_id_version: Option<u64>,
     /// Submission proposal only. Readers trust the host-owned Fabric index.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chair: Option<ChairBinding>,
+    pub chair: Option<crate::custody::Chair>,
     /// A fresh continuation retains the parent for lineage and admission, but
     /// starts the provider without its previous session. The reason is sealed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fresh_continuation: Option<String>,
     pub schema_version: u64,
-    pub tasks: Vec<TaskRequest>,
-    pub concurrency: u64,
+    /// One launch admits exactly one attempt.
+    pub task: TaskRequest,
     pub parent: Option<AttemptId>,
     /// Depth assigned to this run when it was dispatched from a lane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -76,44 +63,6 @@ impl CanonicalRequest {
     pub fn digest(&self) -> Result<Digest, CanonicalError> {
         CanonicalV1::record_digest("run-request", 1, self)
     }
-
-    /// The host-derived run ID for this request under `operation`, or `None`
-    /// for a legacy, unversioned request. Version 1 binds the ID to the whole
-    /// proposal and the host's namespace, so no proposed ID is ever adopted.
-    pub fn child_run_id(
-        &self,
-        project: ProjectId,
-        operation: &OperationId,
-    ) -> Result<Option<RunId>, ChildIdError> {
-        match self.child_attempt_id_version {
-            None => Ok(None),
-            Some(1) => {
-                let parent = self.parent_attempt.ok_or(ChildIdError::MissingParent)?;
-                use sha2::{Digest as _, Sha256};
-                let mut hash = Sha256::new();
-                hash.update(b"provenant-child-run-v1\0");
-                hash.update(project.as_bytes());
-                hash.update(parent.as_bytes());
-                hash.update(CanonicalV1::file_digest(operation.as_str().as_bytes()).bytes());
-                hash.update(self.digest()?.as_bytes());
-                let digest = hash.finalize();
-                let mut id = [0; 16];
-                id.copy_from_slice(&digest[..16]);
-                Ok(Some(RunId::from_bytes(id)))
-            }
-            Some(_) => Err(ChildIdError::UnsupportedVersion),
-        }
-    }
-}
-/// Why a request cannot yield a host-derived child run ID.
-#[derive(Debug, thiserror::Error)]
-pub enum ChildIdError {
-    #[error("unsupported child attempt ID version")]
-    UnsupportedVersion,
-    #[error("derived child IDs require a parent attempt")]
-    MissingParent,
-    #[error(transparent)]
-    Canonical(#[from] CanonicalError),
 }
 /// Effective dispatch policy, sealed with the request and copied to each attempt.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,20 +78,6 @@ pub struct HarnessProfile {
     /// Remaining settlement retries sealed for a graph task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settlement_retry_limit: Option<u8>,
-    // Preserve the removed field only to verify sealed request and attempt digests.
-    #[doc(hidden)]
-    #[serde(
-        rename = "task_class",
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_legacy_task_class"
-    )]
-    pub legacy_task_class: Option<Option<String>>,
-}
-fn deserialize_legacy_task_class<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<Option<String>>, D::Error> {
-    Option::<String>::deserialize(deserializer).map(Some)
 }
 impl HarnessProfile {
     fn is_empty(&self) -> bool {
@@ -155,6 +90,9 @@ impl HarnessProfile {
 /// Work labels and host-stamped graph provenance. Labels are at most 256 UTF-8 bytes.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkContext {
+    /// Sources of writer budget fields, retained by graph compilation.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub budget_sources: std::collections::BTreeMap<String, crate::LimitSource>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -167,6 +105,10 @@ pub struct WorkContext {
     pub graph_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
+    /// The graph's one-based launch order within the node. With `graph_id`
+    /// and `node_id` it is the attempt's work key; the store never assigns it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
     /// Stamped by trusted graph launch admission, never inferred from labels.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub graph_template_launch: bool,
@@ -227,6 +169,7 @@ impl WorkContext {
         .into_iter()
         .flatten()
         .all(|s| !s.trim().is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
+            && self.attempt != Some(0)
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,7 +186,6 @@ pub struct TaskRequest {
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "HarnessProfile::is_empty")]
     pub profile: HarnessProfile,
-    pub task_id: TaskId,
     pub prompt_digest: FileDigest,
     /// Chair-verified review head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -365,7 +307,7 @@ pub struct WriterRequest {
 pub struct WriterDeliveryRequest {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
-    /// Push is the legacy behaviour; integration never checks out either head.
+    /// Push is the default delivery mode; integration never checks out either head.
     #[serde(default, skip_serializing_if = "DeliveryMode::is_push")]
     pub mode: DeliveryMode,
     /// A configured remote name, never a URL supplied by a provider.
@@ -502,8 +444,7 @@ pub struct WriterDeliveryReceipt {
     pub review_acceptance: Option<WriterReviewAcceptance>,
     pub state: WriterDeliveryState,
     /// The destination ref's tips around a delivered push or integration.
-    /// Absent on receipts that did not publish, and on older receipts, whose
-    /// destinations are then unobserved.
+    /// Absent when this receipt did not publish to a destination.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integration: Option<WriterIntegration>,
 }
@@ -573,6 +514,7 @@ impl RequestedRoute {
                 model: None,
                 effort: None,
                 account_label: None,
+                account_key: None,
             },
             Self::Model {
                 provider,
@@ -584,12 +526,14 @@ impl RequestedRoute {
                 model: Some(model),
                 effort,
                 account_label: None,
+                account_key: None,
             },
             Self::Named { effort, .. } | Self::Review { effort, .. } => crate::RouteFact {
                 provider: None,
                 model: None,
                 effort,
                 account_label: None,
+                account_key: None,
             },
         }
     }
@@ -617,6 +561,15 @@ impl RouteRecord {
         source: &str,
     ) -> Self {
         Self {
+            extra: route
+                .extra
+                .get("effort_warning")
+                .map(|warning| {
+                    [("effort_warning".into(), warning.clone())]
+                        .into_iter()
+                        .collect()
+                })
+                .unwrap_or_default(),
             provider: Some(route.adapter.clone()),
             model: Some(format!("{}/{}", route.adapter, route.model)),
             effort: route.effort.clone(),
@@ -635,6 +588,7 @@ impl From<RouteRecord> for crate::RouteFact {
             model: r.model,
             effort: r.effort,
             account_label: r.account_label,
+            account_key: r.account_key,
         }
     }
 }
@@ -667,36 +621,6 @@ impl From<UsageRecord> for crate::Usage {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Closure {
-    Open,
-    Closing,
-    Closed,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RunRecord {
-    #[serde(flatten)]
-    pub extra: crate::ExtraFields,
-    pub schema_version: u64,
-    pub run_id: RunId,
-    pub project_id: ProjectId,
-    pub actor_id: ActorId,
-    pub operation_id: OperationId,
-    pub request_digest: Digest,
-    pub task_ids: Vec<TaskId>,
-    /// Continuation target, independently of nested dispatch metadata.
-    pub parent: Option<AttemptId>,
-    /// Attempt that submitted this nested run; grants no cancellation authority.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_attempt: Option<AttemptId>,
-    pub children: Vec<RunId>,
-    pub revision: u64,
-    pub generation: u64,
-    pub created_at: WallTime,
-    pub closed_at: Option<WallTime>,
-    pub closure: Closure,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum OperationState {
     Prepared,
     Accepted,
@@ -724,7 +648,6 @@ pub struct OperationRecord {
     pub operation_id: OperationId,
     pub kind: OperationKind,
     pub request_digest: Digest,
-    pub run_id: RunId,
     pub state: OperationState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<String>,
@@ -738,7 +661,7 @@ pub struct OperationRecord {
     pub refused_at: Option<WallTime>,
     /// Chair bound at submission, retained for refusal notice recovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub refusal_chair: Option<ChairBinding>,
+    pub refusal_chair: Option<crate::custody::Chair>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -828,7 +751,6 @@ impl From<Outcome> for crate::AttemptOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalCause {
-    PreparationRefused,
     /// The pinned source view of an isolated lane could not be built.
     SourceViewRefused,
     AccountLoginRequired,
@@ -856,7 +778,7 @@ pub enum TerminalCause {
     FreePoolQuota,
     CommandUnavailable,
     HostNativeUnconfigured,
-    IdentityUnobserved,
+    IdentityMismatch,
     /// A writer declared unfinished work and its pinned head equals its base.
     StoppedNoWork,
     /// A writer finished without a final message.
@@ -864,6 +786,8 @@ pub enum TerminalCause {
     /// The host stopped a writer at its context handoff threshold so a fresh
     /// attempt continues from its handoff on the same worktree.
     ContextHandoff,
+    /// A writer's handoff says `blocked`; the stop carries its note.
+    Blocked,
     /// The lane's launch-time access token was revoked or expired mid-run
     /// while the account login stayed usable.
     LaneTokenLost,
@@ -873,12 +797,11 @@ impl TerminalCause {
     /// Bounded label for human status rows. Structured results use `detail`.
     pub fn reason(self) -> &'static str {
         match self {
-            Self::PreparationRefused => "preparation refused; provenant output ID",
             Self::SourceViewRefused => "source view refused; provenant output ID",
             Self::AccountLoginRequired => "login required; provenant output ID",
             Self::RouteResolutionRefused => "route refused; provenant output ID",
             Self::AccessPolicyRefused => "access policy refused; provenant output ID",
-            Self::DiskFloor => "disk below gc.free_floor; provenant output ID",
+            Self::DiskFloor => "disk below gc.critical_free; provenant output ID",
             Self::DiskObservationUnavailable => "disk probe unavailable; provenant output ID",
             Self::StoredPromptUnreadable => "stored prompt unreadable; provenant output ID",
             Self::CloudPlacementRemoved => "cloud placement removed; provenant output ID",
@@ -900,10 +823,11 @@ impl TerminalCause {
             Self::FreePoolQuota => "free-pool quota exhausted; provenant output ID",
             Self::CommandUnavailable => "command unavailable; provenant output ID",
             Self::HostNativeUnconfigured => "host-native unconfigured; provenant output ID",
-            Self::IdentityUnobserved => "provider identity unobserved; provenant output ID",
+            Self::IdentityMismatch => "provider identity mismatch; provenant output ID",
             Self::StoppedNoWork => "stopped with no work (no new commit); provenant output ID",
             Self::EmptyWriterResult => "empty final message; review writer commit",
             Self::ContextHandoff => "context handoff threshold; provenant output ID",
+            Self::Blocked => "blocked; provenant output ID",
             Self::LaneTokenLost => "lane token lost; provenant output ID",
         }
     }
@@ -914,9 +838,6 @@ impl TerminalCause {
             Self::AccountLoginRequired => {
                 crate::diagnostic::ProviderFailureFact::AuthRequired.reason()
             }
-            Self::PreparationRefused => {
-                "local launch preparation refused the lane; inspect route and account configuration and local launch evidence before retrying"
-            }
             Self::SourceViewRefused => {
                 "the pinned source view of the lane could not be built; the step and cause follow. Retry, or raise domains.run.source_view_seconds, source_view_entries or source_view_bytes when the cause names a limit"
             }
@@ -924,7 +845,7 @@ impl TerminalCause {
                 "route resolution refused the lane; check the model, effort, exclusions and availability with `provenant route resolve` and `provenant quota tick`"
             }
             Self::DiskFloor => {
-                "the host writer disk precheck refused launch below gc.free_floor; free disk space or run `provenant gc --apply` before retrying"
+                "the host writer disk precheck refused launch below gc.critical_free; free disk space or run `provenant gc --apply` before retrying"
             }
             Self::DiskObservationUnavailable => {
                 "the host writer disk precheck could not observe free space; restore the host disk observation before retrying"
@@ -982,8 +903,8 @@ impl TerminalCause {
             Self::HostNativeUnconfigured => {
                 "the requested host-native route is not configured in domains.fabric.host_native; select a configured route"
             }
-            Self::IdentityUnobserved => {
-                "provider identity was not observed; inspect the local session evidence"
+            Self::IdentityMismatch => {
+                "observed provider identity differs from the requested route; inspect the local session evidence"
             }
             Self::StoppedNoWork => {
                 "the writer stopped with no work: its branch has no new commit; acceptance remains unmet"
@@ -993,6 +914,9 @@ impl TerminalCause {
             }
             Self::ContextHandoff => {
                 "the host stopped the writer at lanes.context_handoff_tokens; a fresh attempt continues from its handoff on the same worktree"
+            }
+            Self::Blocked => {
+                "the writer declared itself blocked: an owner decision, a missing capability or an external change prevents progress; its handoff note says what"
             }
             Self::LaneTokenLost => {
                 "the lane's access token was revoked or expired mid-run while the account login stayed usable; a writer continues from its handoff on a new token"
@@ -1030,6 +954,20 @@ pub enum AttemptState {
         reason: Option<String>,
     },
 }
+impl AttemptState {
+    /// Read the sealed terminal decision without treating malformed evidence as
+    /// an absent stop. Record validation and every projection share this path.
+    pub fn stop(&self) -> Result<Option<crate::Stop>, serde_json::Error> {
+        match self {
+            Self::Terminal { extra, .. } => extra
+                .get("stop")
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose(),
+            _ => Ok(None),
+        }
+    }
+}
+
 /// A typed refusal made during local provider preparation, before custody.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1129,6 +1067,29 @@ impl SkippedRoute {
         Ok(())
     }
 
+    /// Describe a refused route for public output without provider or OS text.
+    pub fn describe(&self) -> String {
+        let diagnostic = self.diagnostic();
+        let mut reason = format!(
+            "{}: {}",
+            crate::diagnostic::safe_text(&self.route),
+            diagnostic
+                .detail
+                .as_deref()
+                .unwrap_or("the route was refused")
+        );
+        if let Some(next) = diagnostic.next {
+            reason.push_str("; ");
+            reason.push_str(&next);
+        }
+        let accounts = crate::SkippedAccount::read(&self.extra);
+        if !accounts.is_empty() {
+            reason.push_str("; accounts skipped: ");
+            reason.push_str(&crate::SkippedAccount::describe(&accounts));
+        }
+        reason
+    }
+
     /// Project typed facts only; `detail` may contain provider or OS text.
     pub fn diagnostic(&self) -> crate::diagnostic::Diagnostic {
         let mut diagnostic = self
@@ -1217,58 +1178,221 @@ pub enum TerminalEvidence {
     },
 }
 
-/// The closed reason an attempt reached its terminal state. The free-text
-/// reason on the state explains; this enum is what callers match on.
+/// Who owns a settlement cause, independently of any completed provider work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SettlementReason {
-    /// The provider finished and reported its results.
-    Completed,
-    /// The provider finished without a final handoff, so nothing was reported.
-    HandoffMissing,
-    /// The lane declared that work remains.
-    DeclaredStop,
-    /// The provider stopped for a reason other than a finished turn.
-    ProviderStop,
-    /// A writer left edits it did not commit.
-    UncommittedWork,
-    /// Refused before any process started.
-    PreLaunchRefusal,
-    Cancelled,
-    Lost,
-    Unsettled,
-    /// The provider ran and ended in a non-success outcome.
+pub enum CauseSource {
+    Provider,
+    Host,
+    Owner,
+    /// Retained terminal data did not carry a valid typed stop or reason.
+    Unavailable,
+}
+
+/// Whether a settled attempt may release its graph dependants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettlementNodeOutcome {
+    Succeeded,
     Failed,
 }
+
+/// The source and graph result for one settlement reason.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SettlementRule {
+    pub reason: SettlementReason,
+    pub source: CauseSource,
+    pub node_outcome: SettlementNodeOutcome,
+    pub terminal_outcome: SettlementTerminalOutcome,
+    pub stop_cause: Option<crate::stop::StopCause>,
+}
+
+/// How a settlement reason normalises a successful-looking provisional outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettlementTerminalOutcome {
+    Preserve,
+    Succeeded,
+    ReviewRequired,
+    Uncommitted,
+}
+
+impl SettlementTerminalOutcome {
+    fn apply(self, observed: Outcome) -> Outcome {
+        match self {
+            Self::Preserve => observed,
+            Self::Succeeded => Outcome::Succeeded,
+            Self::ReviewRequired if observed == Outcome::Succeeded => Outcome::ReviewRequired,
+            Self::ReviewRequired => observed,
+            Self::Uncommitted
+                if matches!(observed, Outcome::Succeeded | Outcome::ReviewRequired) =>
+            {
+                Outcome::Uncommitted
+            }
+            Self::Uncommitted => observed,
+        }
+    }
+}
+
+/// One declaration owns the durable reasons and their cross-cutting policy.
+/// Generated enum, ALL and table cannot drift apart.
+macro_rules! settlement_reasons {
+    ($($(#[$meta:meta])* $reason:ident { source: $source:ident, node: $node:ident, outcome: $outcome:ident, stop: $stop:expr }),+ $(,)?) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum SettlementReason {
+            $($(#[$meta])* $reason),+
+        }
+
+        impl SettlementReason {
+            pub const ALL: &'static [Self] = &[$(Self::$reason),+];
+
+            pub const fn rule(self) -> SettlementRule {
+                match self {
+                    $(Self::$reason => SettlementRule {
+                        reason: Self::$reason,
+                        source: CauseSource::$source,
+                        node_outcome: SettlementNodeOutcome::$node,
+                        terminal_outcome: SettlementTerminalOutcome::$outcome,
+                        stop_cause: $stop,
+                    }),+
+                }
+            }
+        }
+
+        pub const SETTLEMENT_TABLE: &[SettlementRule] = &[
+            $(SettlementRule {
+                reason: SettlementReason::$reason,
+                source: CauseSource::$source,
+                node_outcome: SettlementNodeOutcome::$node,
+                terminal_outcome: SettlementTerminalOutcome::$outcome,
+                stop_cause: $stop,
+            }),+
+        ];
+    };
+}
+
+settlement_reasons! {
+    /// The provider finished and reported its results.
+    Completed { source: Provider, node: Succeeded, outcome: Preserve, stop: None },
+    /// A complete handoff preceded the host token-budget stop.
+    CompletedBeforeBudget { source: Host, node: Succeeded, outcome: Succeeded, stop: Some(crate::stop::StopCause::TokenBudget) },
+    /// The provider finished without a final handoff, so nothing was reported.
+    HandoffMissing { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMissing) },
+    /// The writer exited without a final message.
+    EmptyResult { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::EmptyResult) },
+    /// The lane declared that work remains.
+    DeclaredStop { source: Provider, node: Failed, outcome: ReviewRequired, stop: None },
+    /// The provider stopped for a reason other than a finished turn.
+    ProviderStop { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::ProviderStop) },
+    /// A writer left edits it did not commit.
+    UncommittedWork { source: Provider, node: Failed, outcome: Uncommitted, stop: None },
+    /// Refused before any process started.
+    PreLaunchRefusal { source: Host, node: Failed, outcome: Preserve, stop: None },
+    Cancelled { source: Owner, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Cancelled) },
+    Lost { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Lost) },
+    Unsettled { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Unsettled) },
+    /// The provider ran and ended in a non-success outcome.
+    Failed { source: Provider, node: Failed, outcome: Preserve, stop: None },
+}
 impl SettlementReason {
-    /// Derive the reason from facts the terminal decision already holds.
+    /// Derive the reason from the complete terminal facts before any reader
+    /// interprets the outcome, stop or next step independently.
     pub fn derive(
         outcome: Outcome,
         evidence: Option<&TerminalEvidence>,
         partial: &[PartialSignal],
+        terminal_cause: Option<TerminalCause>,
+        handoff: Option<&crate::handoff::Handoff>,
     ) -> Self {
         match (evidence, outcome) {
-            // A lost or unsettled outcome may still carry a process exit: the
-            // process ran, but custody or reporting was not proven. The
-            // outcome names the reason, whatever evidence accompanied it.
             (_, Outcome::Lost) => Self::Lost,
             (_, Outcome::Unsettled) => Self::Unsettled,
             (Some(TerminalEvidence::Lost { .. }), _) => Self::Lost,
             (Some(TerminalEvidence::Unsettled { .. }), _) => Self::Unsettled,
             (_, Outcome::Cancelled) => Self::Cancelled,
             (Some(TerminalEvidence::PreLaunchRefusal), _) => Self::PreLaunchRefusal,
-            (_, Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted) => [
-                (PartialSignal::DeclaredStop, Self::DeclaredStop),
-                (PartialSignal::HandoffMissing, Self::HandoffMissing),
-                (PartialSignal::ProviderStop, Self::ProviderStop),
-                (PartialSignal::UncommittedWork, Self::UncommittedWork),
-            ]
-            .into_iter()
-            .find(|(signal, _)| partial.contains(signal))
-            .map_or(Self::Completed, |(_, reason)| reason),
-            _ => Self::Failed,
+            _ => match terminal_cause {
+                Some(TerminalCause::EmptyWriterResult) => Self::EmptyResult,
+                Some(TerminalCause::Blocked | TerminalCause::StoppedNoWork) => Self::DeclaredStop,
+                Some(TerminalCause::ProviderEarlyStop) => Self::ProviderStop,
+                _ if handoff.is_some_and(|handoff| handoff.unfinished()) => Self::DeclaredStop,
+                _ if partial.contains(&PartialSignal::DeclaredStop) => Self::DeclaredStop,
+                _ if partial.contains(&PartialSignal::HandoffMissing) => Self::HandoffMissing,
+                _ if partial.contains(&PartialSignal::ProviderStop) => Self::ProviderStop,
+                _ if partial.contains(&PartialSignal::UncommittedWork)
+                    || outcome == Outcome::Uncommitted =>
+                {
+                    Self::UncommittedWork
+                }
+                Some(TerminalCause::TokenBudget)
+                    if matches!(
+                        outcome,
+                        Outcome::Succeeded
+                            | Outcome::ReviewRequired
+                            | Outcome::Failed
+                            | Outcome::TimedOut
+                    ) && handoff.is_some_and(|handoff| {
+                        !handoff.unfinished() && handoff.validate().is_ok()
+                    }) =>
+                {
+                    Self::CompletedBeforeBudget
+                }
+                _ if matches!(outcome, Outcome::Succeeded | Outcome::ReviewRequired) => {
+                    Self::Completed
+                }
+                _ => Self::Failed,
+            },
         }
     }
+
+    /// A completed budget boundary retains its host stop without closing
+    /// dependants. Other typed stops keep dependants closed.
+    pub const fn node_outcome(self, stop: Option<crate::stop::StopCause>) -> SettlementNodeOutcome {
+        if stop.is_some()
+            && !matches!(
+                self.rule().terminal_outcome,
+                SettlementTerminalOutcome::Succeeded
+            )
+        {
+            SettlementNodeOutcome::Failed
+        } else {
+            self.rule().node_outcome
+        }
+    }
+
+    /// Derive the persisted reason, sealed stop, source and graph result from
+    /// the same complete terminal facts.
+    pub fn classify(
+        outcome: Outcome,
+        evidence: Option<&TerminalEvidence>,
+        partial: &[PartialSignal],
+        terminal_cause: Option<TerminalCause>,
+        handoff: Option<&crate::handoff::Handoff>,
+    ) -> Result<SettlementClassification, crate::stop::StopError> {
+        let reason = Self::derive(outcome, evidence, partial, terminal_cause, handoff);
+        let outcome = reason.rule().terminal_outcome.apply(outcome);
+        let stop = crate::stop::Stop::sealed(terminal_cause, outcome, reason, handoff.cloned())?;
+        let stop_cause = stop.as_ref().map(crate::stop::Stop::cause);
+        let source = stop_cause.map_or(reason.rule().source, crate::stop::StopCause::source);
+        let node_outcome = reason.node_outcome(stop_cause);
+        Ok(SettlementClassification {
+            outcome,
+            reason,
+            stop,
+            source,
+            node_outcome,
+        })
+    }
+}
+
+/// Complete terminal classification shared by persistence, graph transitions
+/// and route quality.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettlementClassification {
+    pub outcome: Outcome,
+    pub reason: SettlementReason,
+    pub stop: Option<crate::stop::Stop>,
+    pub source: CauseSource,
+    pub node_outcome: SettlementNodeOutcome,
 }
 
 /// Independently retried work after a terminal decision.
@@ -1316,7 +1440,6 @@ pub struct SettlementReceipts {
     pub git_import: EffectDisposition,
     pub manifest_conflict: EffectDisposition,
     pub cleanup_custody_release: EffectDisposition,
-    #[serde(default)]
     pub delivery: EffectDisposition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancellation: Option<CancellationDisposition>,
@@ -1337,26 +1460,44 @@ impl SettlementReceipts {
     }
 }
 
+fn decode_continuation<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    let value = Option::<String>::deserialize(deserializer)?;
+    if value.as_deref() == Some("automatic") {
+        return Err(serde::de::Error::custom(
+            "automatic continuation was removed",
+        ));
+    }
+    Ok(value)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<WorkContext>,
+    /// The attempt's work identity: graph, node and attempt number.
+    pub key: crate::WorkKey,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     /// Human-supplied task title, when provided at submission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// `fresh` when a resume could not use provider continuation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "decode_continuation"
+    )]
     pub continuation: Option<String>,
     #[serde(default, skip_serializing_if = "HarnessProfile::is_empty")]
     pub profile: HarnessProfile,
+    /// The limits resolved when the attempt was admitted to launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<crate::LaneLimits>,
     pub schema_version: u64,
     pub attempt_id: AttemptId,
-    pub run_id: RunId,
     pub project_id: ProjectId,
-    pub task_id: TaskId,
-    pub operation_id: OperationId,
     pub attempt_number: u64,
     pub revision: u64,
     pub generation: u64,
@@ -1371,7 +1512,6 @@ pub struct AttemptRecord {
     pub observed_route: Option<RouteRecord>,
     pub authority_digest: Digest,
     /// Project-relative write exceptions actually granted before launch.
-    #[serde(default)]
     pub read_only_writable: Vec<String>,
     /// Explicit write allowances from the plan handed to confinement.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1379,12 +1519,8 @@ pub struct AttemptRecord {
     /// Writers only; concrete Git paths stay out of the record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_grants_digest: Option<Digest>,
-    /// Compatibility with records from earlier development versions; never used as authority.
-    #[serde(default, skip_serializing)]
-    pub granted_tracking_ref: Option<String>,
     pub subject: Option<GitOid>,
     pub head: Option<GitOid>,
-    #[serde(default)]
     pub protected_paths: Vec<PathWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<WriterDeliveryReceipt>,
@@ -1409,11 +1545,7 @@ pub struct AttemptRecord {
     /// identity-checked. Used only for live coverage reporting.
     #[serde(skip)]
     pub process_observation_valid: Transient<bool>,
-    /// Whether the guardian reports a current disk pause or the host reports
-    /// a build-slot wait; either makes silence inapplicable.
-    #[serde(skip)]
-    pub provider_silence_suppressed: Transient<bool>,
-    /// Custody evidence. None in older records must never authorise a writer retry.
+    /// Custody evidence. Absence is an unknown launch state and never authorises a writer retry.
     #[serde(default)]
     pub provider_launched: Option<bool>,
     /// Confirmed pre-custody preparation refusal, sealed with its terminal row.
@@ -1452,13 +1584,36 @@ pub struct AttemptRecord {
     /// Fallback candidates that did not launch before this attempt did.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped_routes: Vec<SkippedRoute>,
-    /// Stamped when the attempt is created; a record without one decodes as
-    /// all unknown.
-    #[serde(default)]
+    /// Trace context stamped when the attempt is created.
     pub trace: crate::Trace,
 }
+
+/// Encode the public form of an attempt, retaining all public extra metadata.
+pub fn public_attempt_value(
+    record: &AttemptRecord,
+) -> Result<serde_json::Value, serde_json::Error> {
+    let mut value = serde_json::to_value(record)?;
+    let object = value.as_object_mut().ok_or_else(|| {
+        <serde_json::Error as serde::ser::Error>::custom("attempt record must be an object")
+    })?;
+    for field in PRIVATE_ATTEMPT_EXTRA_FIELDS {
+        object.remove(*field);
+    }
+    Ok(value)
+}
+
+/// Serialize an attempt for read-only owner and peer projections.
+pub fn serialize_public_attempt<S: serde::Serializer>(
+    record: &AttemptRecord,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    public_attempt_value(record)
+        .map_err(serde::ser::Error::custom)?
+        .serialize(serializer)
+}
+
 impl AttemptRecord {
-    /// Usage attributable to this attempt, excluding legacy Codex session totals.
+    /// Usage attributable to this attempt; unmarked Codex totals are session-wide.
     pub fn effective_usage(&self) -> UsageRecord {
         if self
             .applied_route
@@ -1477,43 +1632,67 @@ impl AttemptRecord {
         self.applied_route.as_ref()?.extra.get("user_skills")
     }
 
-    /// The recorded sandbox of a launched attempt: `{"sandboxed", "source"}`.
+    /// The recorded sandbox of a launched attempt: requested/effective/source.
     pub fn sandbox(&self) -> Option<&serde_json::Value> {
         self.applied_route.as_ref()?.extra.get(SANDBOX_ROUTE_FIELD)
     }
 
-    /// Whether a lane this attempt submits or admits must be sandboxed. It
-    /// must when this attempt was sandboxed by distrust: its route, its own
-    /// parent, the `lanes.sandbox` knob or the platform. A sandbox that only
-    /// enforces read-only access or a narrowed network does not pass on, so a
-    /// read-only planner's writers stay unsandboxed. A record that does not
-    /// say, such as one written before lanes could run unsandboxed, floors.
+    /// Whether this attempt carries a user-enabled sandbox admission floor.
+    /// Missing evidence does not enable sandboxing. Children use the selected
+    /// warn/off/strict policy rather than treating this as an authority grant.
     pub fn floors_children(&self) -> bool {
         sandbox_floors_children(self.sandbox())
     }
 }
 /// [`AttemptRecord::floors_children`] for a recorded sandbox mode.
 fn sandbox_floors_children(sandbox: Option<&serde_json::Value>) -> bool {
-    let Some(sandbox) = sandbox else {
-        return true;
-    };
-    match sandbox
-        .get("effective")
-        .or_else(|| sandbox.get("sandboxed"))
-        .and_then(serde_json::Value::as_bool)
-    {
-        Some(false) => false,
-        Some(true) => !matches!(
-            sandbox.get("source").and_then(serde_json::Value::as_str),
-            Some("read_only" | "network" | "default")
-        ),
-        None => true,
-    }
+    sandbox.is_some_and(|sandbox| {
+        sandbox
+            .get("effective")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+            && (sandbox
+                .get("requested")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+                || matches!(
+                    sandbox.get("source").and_then(serde_json::Value::as_str),
+                    Some("parent" | "route")
+                ))
+    })
 }
 /// The applied-route field that records an attempt's sandbox mode.
 pub const SANDBOX_ROUTE_FIELD: &str = "sandbox";
 /// The task field the host sets when the submitting lane was sandboxed.
 pub const PARENT_SANDBOXED_FIELD: &str = "parent_sandboxed";
+
+/// Sealed launch classification, shared by local, peer and recovered attempts.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchPolicy {
+    pub confidential: bool,
+    pub sources: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_config: Option<String>,
+}
+
+/// Profile key of the sealed repository classification; `launch_policy`
+/// holds the resolved policy-table strengths.
+pub const LAUNCH_POLICY_FIELD: &str = "repository_policy";
+
+/// The one sandbox admission floor. The parent fact comes from a host-sealed
+/// attempt, never from prompt text. This is advisory policy (boundary None),
+/// with warn as its default; strict is an explicit user override.
+pub fn admission_floor(
+    parent_sandboxed: bool,
+    sandbox: Option<&str>,
+    strength: &str,
+) -> (bool, bool) {
+    let applies = parent_sandboxed && sandbox != Some("on");
+    (
+        applies && strength == "strict",
+        applies && strength == "warn",
+    )
+}
 /// A live-only value that is deliberately absent from durable identity and
 /// equality. It can decorate a record read without making two reads of that
 /// record compare differently.
@@ -1537,6 +1716,8 @@ pub fn provider_silence_reason(silent_for_ms: u64) -> String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PartialSignal {
+    /// Identity evidence is incomplete; usage stays attributed to the requested account.
+    IdentityUnobserved,
     /// A successful final answer did not include a valid final handoff.
     HandoffMissing,
     /// The final answer ends with a valid `handoff` block whose status is
@@ -1550,6 +1731,7 @@ pub enum PartialSignal {
 impl PartialSignal {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::IdentityUnobserved => "identity_unobserved",
             Self::HandoffMissing => "handoff_missing",
             Self::DeclaredStop => "declared_stop",
             Self::ProviderStop => "provider_stop",
@@ -1600,7 +1782,6 @@ pub struct AdmissionTicket {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     pub schema_version: u64,
-    pub operation_id: OperationId,
     pub attempt_id: AttemptId,
     pub project_id: ProjectId,
     pub sequence: u64,
@@ -1609,19 +1790,12 @@ pub struct AdmissionTicket {
     pub active: bool,
     /// Advisory available-memory floor as basis points of installed memory.
     pub memory_floor_basis_points: u64,
-    pub disk_floor_bytes: u64,
     /// Spacing for this lane's class, fixed at submission.
     pub startup_spacing_ms: u64,
-    /// Absent on tickets from before lane classes, which decode as writers.
-    #[serde(default)]
     pub lane_class: LaneClass,
-    /// The owning run's batch concurrency, distinct from host admission caps.
-    pub run_concurrency: u64,
     pub quota_permit: Option<String>,
     pub admission_deadline: WallTime,
-    /// The provider's wall-clock allowance once it starts, in seconds. Absent
-    /// (zero) on tickets from before runtime deadlines were recorded.
-    #[serde(default)]
+    /// The provider's wall-clock allowance once it starts, in seconds.
     pub runtime_seconds: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1631,11 +1805,9 @@ pub struct RunEvent {
     pub schema_version: u64,
     pub sequence: u64,
     pub project_id: ProjectId,
-    pub run_id: RunId,
     pub attempt_id: AttemptId,
     pub revision: u64,
     pub change: AttemptState,
-    #[serde(default)]
     pub trace: crate::Trace,
 }
 #[cfg(test)]
@@ -1643,26 +1815,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_a_sandbox_forced_by_distrust_floors_children() {
-        let floors = |value: serde_json::Value| sandbox_floors_children(Some(&value));
-        for source in ["route", "parent", "knob", "platform", "unknown"] {
-            assert!(
-                floors(serde_json::json!({"sandboxed":true,"source":source})),
-                "{source}"
-            );
+    fn only_a_user_enabled_sandbox_floors_children() -> Result<(), Box<dyn std::error::Error>> {
+        let project = ProjectId::from_bytes([1; 16]);
+        let mut record: AttemptRecord = serde_json::from_value(serde_json::json!({
+            "schema_version":1, "key":crate::WorkKey::new(project, "sandbox-test", "lane", 1)?,
+            "attempt_id":AttemptId::from_bytes([2; 16]), "project_id":project,
+            "attempt_number":1, "revision":1, "generation":1,
+            "requested_route":{"kind":"named","name":"fixture"},
+            "authority_digest":Digest::from_bytes([3; 32]), "queued_at":WallTime::from_micros(1)?,
+            "state":{"state":"queued"}, "usage":{}, "trace":{},
+            "read_only_writable":[], "protected_paths":[],
+            "prompt":{"path":{"encoding":"utf8","path":"prompt"},
+                "digest":CanonicalV1::file_digest(b"fixture"),"bytes":7,"complete":true,"redacted":false}
+        }))?;
+        assert!(!record.floors_children());
+        let mut floors = |value: serde_json::Value| {
+            record.applied_route = Some(RouteRecord {
+                extra: [(SANDBOX_ROUTE_FIELD.into(), value)].into(),
+                ..Default::default()
+            });
+            record.floors_children()
+        };
+        for source in [
+            "route", "parent", "knob", "platform", "network", "default", "unknown",
+        ] {
+            for requested in [false, true] {
+                for effective in [false, true] {
+                    let expected = effective && (requested || matches!(source, "route" | "parent"));
+                    assert_eq!(
+                        floors(serde_json::json!({"effective":effective,
+                        "requested":requested,"source":source})),
+                        expected
+                    );
+                }
+            }
         }
-        for source in ["read_only", "network"] {
-            assert!(
-                !floors(serde_json::json!({"sandboxed":true,"source":source})),
-                "{source}"
-            );
-        }
-        assert!(!floors(
-            serde_json::json!({"sandboxed":false,"source":"default"})
-        ));
-        assert!(floors(serde_json::json!({"sandboxed":true})));
-        assert!(floors(serde_json::json!({})));
-        assert!(sandbox_floors_children(None));
+        assert!(!floors(serde_json::json!({})));
+        Ok(())
     }
 
     #[test]
@@ -1738,77 +1927,6 @@ mod tests {
     }
 
     #[test]
-    fn request_without_lane_metadata_retains_its_sealed_digest()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let original = serde_json::json!({
-            "schema_version": 1, "tasks": [], "concurrency": 1, "parent": null
-        });
-        let digest = CanonicalV1::record_digest("run-request", 1, &original)?;
-        let request: CanonicalRequest = serde_json::from_value(original.clone())?;
-        assert_eq!(request.digest()?, digest);
-        assert_eq!(serde_json::to_value(request)?, original);
-        Ok(())
-    }
-
-    #[test]
-    fn request_with_a_removed_task_class_retains_its_sealed_digest()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let request = CanonicalRequest {
-            extra: Default::default(),
-            child_attempt_id_version: None,
-            chair: None,
-            fresh_continuation: None,
-            schema_version: 1,
-            tasks: vec![TaskRequest {
-                context: None,
-                extra: Default::default(),
-                build_heavy: false,
-                title: None,
-                profile: HarnessProfile {
-                    name: "rigorous".into(),
-                    ..HarnessProfile::default()
-                },
-                task_id: TaskId::from_bytes([3; 16]),
-                prompt_digest: CanonicalV1::file_digest(b"prompt"),
-                base: None,
-                head: None,
-                source_head: None,
-                base_ref: None,
-                route: RequestedRoute::Named {
-                    extra: Default::default(),
-                    name: "senior".into(),
-                    effort: None,
-                },
-                account: None,
-                authority_digest: Digest::from_bytes([5; 32]),
-                writer: None,
-                deliver: None,
-                provider_timeout_seconds: 60,
-                delivery_id: None,
-                access: LaneAccess::default(),
-            }],
-            concurrency: 1,
-            parent: None,
-            lane_depth: None,
-            parent_attempt: None,
-        };
-        let mut sealed = serde_json::to_value(&request)?;
-        assert!(sealed["tasks"][0].get("title").is_none());
-        assert!(sealed["tasks"][0].get("fallback").is_none());
-        let legacy: CanonicalRequest = serde_json::from_value(sealed.clone())?;
-        assert_eq!(serde_json::to_value(&legacy)?, sealed);
-        assert_eq!(legacy.digest()?, request.digest()?);
-        for task_class in [serde_json::Value::Null, serde_json::json!("mechanical")] {
-            sealed["tasks"][0]["profile"]["task_class"] = task_class;
-            let digest = CanonicalV1::record_digest("run-request", 1, &sealed)?;
-            let parsed: CanonicalRequest = serde_json::from_value(sealed.clone())?;
-            assert_eq!(parsed.digest()?, digest);
-            assert_eq!(serde_json::to_value(parsed)?, sealed);
-        }
-        Ok(())
-    }
-
-    #[test]
     fn new_profile_omits_task_class() -> Result<(), Box<dyn std::error::Error>> {
         let profile = HarnessProfile {
             name: "rigorous".into(),
@@ -1832,11 +1950,11 @@ mod tests {
             },
         ] {
             assert_eq!(
-                SettlementReason::derive(Outcome::Lost, Some(&evidence), &[]),
+                SettlementReason::derive(Outcome::Lost, Some(&evidence), &[], None, None),
                 SettlementReason::Lost
             );
             assert_eq!(
-                SettlementReason::derive(Outcome::Unsettled, Some(&evidence), &[]),
+                SettlementReason::derive(Outcome::Unsettled, Some(&evidence), &[], None, None),
                 SettlementReason::Unsettled
             );
         }
@@ -1851,9 +1969,9 @@ mod tests {
     }
 
     #[test]
-    fn database_ipc_is_explicit_and_round_trips() {
-        let old: LaneAccess = serde_json::from_str("{}").expect("old access");
-        assert!(!old.database_ipc);
+    fn default_access_denies_database_ipc_and_explicit_access_round_trips() {
+        let defaults = LaneAccess::default();
+        assert!(!defaults.database_ipc);
         let access = LaneAccess {
             database_ipc: true,
             ..Default::default()

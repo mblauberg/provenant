@@ -4,14 +4,17 @@ use crate::{
     *,
 };
 use provenant_confinement::valid_read_only_writable;
-use provenant_core::{ActorId, AttemptId, OperationId, ProjectId, RunId, TaskId, WallTime};
+use provenant_core::{ActorId, AttemptId, OperationId, ProjectId, WallTime};
 use provenant_records::{AttemptFact, AttemptFile, OutputRef, ReviewerFact, ReviewerProvenance};
 use rusqlite::{OptionalExtension, params};
 use std::collections::VecDeque;
 
+type AttemptIndexKey = (String, String, u32);
+type AttemptIndexRow = (Vec<u8>, i64, i64, bool, AttemptIndexKey);
+
 #[cfg(test)]
 thread_local! {
-    /// Runs once on the next `record_with_run`, after the attempt row is read
+    /// Runs once on the next `record_row`, after the attempt row is read
     /// and before the rest of the record: a commit landing mid-read.
     pub(crate) static AFTER_ATTEMPT_ROW: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
@@ -27,20 +30,14 @@ pub(super) fn process_observation_fresh(observed: WallTime, now: WallTime) -> bo
             <= PROCESS_OBSERVATION_MAX_AGE_MICROS
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct AttemptFilter {
-    pub run_id: Option<RunId>,
-    pub task_id: Option<TaskId>,
-}
 pub trait AttemptReader {
     fn attempt(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptFact>;
-    fn attempts<'a>(&'a self, filter: AttemptFilter, call: &'a Request<'a>)
-    -> Result<Attempts<'a>>;
+    /// Every settled attempt of the project, oldest first.
+    fn attempts<'a>(&'a self, call: &'a Request<'a>) -> Result<Attempts<'a>>;
 }
 pub struct Attempts<'a> {
     store: &'a RunStore,
     call: &'a Request<'a>,
-    filter: AttemptFilter,
     after: i64,
     through: i64,
     page: VecDeque<(i64, String)>,
@@ -48,14 +45,12 @@ pub struct Attempts<'a> {
 }
 impl Attempts<'_> {
     fn page(&self) -> Result<VecDeque<(i64, String)>> {
-        let mut statement = self.store.db.prepare("SELECT sequence,id FROM attempts WHERE project=?1 AND terminal=1 AND sequence>?2 AND sequence<=?3 AND (?4 IS NULL OR run=?4) AND (?5 IS NULL OR task=?5) ORDER BY sequence LIMIT 64")?;
+        let mut statement = self.store.db.prepare("SELECT sequence,id FROM attempts WHERE project=?1 AND terminal=1 AND refused=0 AND sequence>?2 AND sequence<=?3 ORDER BY sequence LIMIT 64")?;
         let rows = statement.query_map(
             params![
                 self.store.context.project_id.to_string(),
                 self.after,
-                self.through,
-                self.filter.run_id.map(|id| id.to_string()),
-                self.filter.task_id.map(|id| id.to_string())
+                self.through
             ],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
@@ -147,6 +142,15 @@ fn slot_wait_ms(queued_at: WallTime, started_at: Option<WallTime>) -> Option<u64
 /// The published fact for a terminal record. A record read from a peer takes the
 /// same path as one read here.
 pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
+    let stop = r
+        .state
+        .stop()
+        .map_err(|_| RunError::Validation("terminal stop evidence"))?;
+    let account_identity = usage_identity(
+        r.resolved_route.as_ref(),
+        r.applied_route.as_ref(),
+        r.observed_route.as_ref(),
+    );
     let usage = r.effective_usage().into();
     let AttemptState::Terminal {
         outcome,
@@ -176,14 +180,23 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
         .map(|(adapter, session)| provenant_records::TranscriptRef { adapter, session });
     let (tier, template, parent_node) = graph_labels(r.context.as_ref());
     let slot_wait_ms = slot_wait_ms(r.queued_at, r.started_at);
+    let cause_source = match stop {
+        Some(stop) => stop.cause().source(),
+        None => r
+            .settlement_reason
+            .map(|reason| reason.rule().source)
+            .unwrap_or(provenant_records::run::CauseSource::Unavailable),
+    };
     Ok(AttemptFact {
         context: r.context,
         attempt_id: r.attempt_id,
-        task_id: r.task_id,
+        key: r.key,
         attempt_number: r.attempt_number,
-        operation_id: r.operation_id,
         project_id: r.project_id,
         terminal_state: outcome.into(),
+        cause_source,
+        settlement_reason: r.settlement_reason,
+        account_identity,
         exit_code,
         queued_at: r.queued_at,
         started_at: r.started_at,
@@ -215,9 +228,9 @@ impl RunStore {
     /// opened it. The usage backfill reads each one through its own context.
     pub fn terminal_projects(&self, call: &Request<'_>) -> Result<Vec<ProjectId>> {
         call.check()?;
-        let mut statement = self
-            .db
-            .prepare("SELECT DISTINCT project FROM attempts WHERE terminal=1 ORDER BY project")?;
+        let mut statement = self.db.prepare(
+            "SELECT DISTINCT project FROM attempts WHERE terminal=1 AND refused=0 ORDER BY project",
+        )?;
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
         rows.map(|row| {
             ProjectId::parse(&row?).map_err(|_| RunError::Validation("attempt project ID"))
@@ -229,11 +242,7 @@ impl AttemptReader for RunStore {
     fn attempt(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptFact> {
         fact(self.record(id, call)?)
     }
-    fn attempts<'a>(
-        &'a self,
-        filter: AttemptFilter,
-        call: &'a Request<'a>,
-    ) -> Result<Attempts<'a>> {
+    fn attempts<'a>(&'a self, call: &'a Request<'a>) -> Result<Attempts<'a>> {
         let through = {
             self.db.query_row(
                 "SELECT COALESCE(MAX(sequence),0) FROM attempts WHERE project=?1",
@@ -244,7 +253,6 @@ impl AttemptReader for RunStore {
         Ok(Attempts {
             store: self,
             call,
-            filter,
             after: 0,
             through,
             page: VecDeque::new(),
@@ -287,21 +295,14 @@ pub struct OutputChunk {
     pub encoding: &'static str,
     pub digest: provenant_records::FileDigest,
 }
-/// Exact lane selectors; task and attempt narrow a run.
-#[derive(Clone, Copy, Debug)]
-pub struct LaneTarget {
-    pub run: RunId,
-    pub task: Option<TaskId>,
-    pub attempt: Option<AttemptId>,
-}
 /// Optional lane filters: the submitting actor, and terminal lanes already seen.
-const UNSEEN_OWNED: &str = " AND (?5 IS NULL OR run IN (SELECT run FROM operations WHERE project=?1 AND actor=?5)) AND (?6 IS NULL OR terminal=0 OR EXISTS(SELECT 1 FROM events WHERE attempt=attempts.id AND sequence>?6))";
-const UNSEEN_TARGET: &str = " AND (?7 IS NULL OR terminal=0 OR EXISTS(SELECT 1 FROM events WHERE attempt=attempts.id AND sequence>?7))";
+const UNSEEN_OWNED: &str = " AND (?5 IS NULL OR actor=?5) AND (?6 IS NULL OR terminal=0 OR EXISTS(SELECT 1 FROM events WHERE attempt=attempts.id AND sequence>?6))";
+const UNSEEN_TARGET: &str = " AND (?5 IS NULL OR terminal=0 OR EXISTS(SELECT 1 FROM events WHERE attempt=attempts.id AND sequence>?5))";
 #[derive(Clone, Debug)]
 pub struct LaneQuery {
     /// Exact selections include terminal lanes. Without them the page holds
     /// active lanes, or every retained lane when `all` is set.
-    pub targets: Vec<LaneTarget>,
+    pub targets: Vec<AttemptId>,
     pub all: bool,
     pub limit: u64,
     /// Exclusive attempt-sequence cursor.
@@ -346,35 +347,48 @@ impl RunStore {
             }
         };
         artifact
-            .map(|artifact| self.artifact_bytes(record.run_id, artifact, limit))
+            .map(|artifact| self.artifact_bytes(artifact, limit))
             .transpose()
     }
 
+    /// The operation record for a caller's operation ID. An admitted
+    /// operation reads as terminal once its attempt is.
     pub fn operation(
         &self,
         id: &OperationId,
         call: &Request<'_>,
     ) -> Result<Option<OperationRecord>> {
         call.check()?;
-        let raw: Option<Vec<u8>> = self
-            .db
+        self.operation_on(&self.db, id)
+    }
+    pub(crate) fn operation_on(
+        &self,
+        db: &rusqlite::Connection,
+        id: &OperationId,
+    ) -> Result<Option<OperationRecord>> {
+        let row: Option<(Vec<u8>, bool)> = db
             .query_row(
-                "SELECT record FROM operations WHERE project=?1 AND actor=?2 AND operation=?3",
+                "SELECT operation_record, NOT EXISTS(SELECT 1 FROM attempts p WHERE p.project=a.project \
+                 AND p.actor=a.actor AND p.operation=a.operation AND p.terminal=0) \
+                 FROM attempts a WHERE project=?1 AND actor=?2 AND operation=?3 ORDER BY sequence LIMIT 1",
                 params![
                     self.context.project_id.to_string(),
                     self.context.actor_id.to_string(),
                     id.as_str()
                 ],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        raw.map(|raw| {
-            let op: OperationRecord = decode(&raw)?;
+        row.map(|(raw, settled)| {
+            let mut op: OperationRecord = decode(&raw)?;
             if op.project_id != self.context.project_id
                 || op.actor_id != self.context.actor_id
                 || op.operation_id != *id
             {
                 return Err(RunError::Validation("operation index identity"));
+            }
+            if settled && op.state != OperationState::Refused {
+                op.state = OperationState::Terminal;
             }
             Ok(op)
         })
@@ -382,14 +396,15 @@ impl RunStore {
     }
 
     /// Read the submitting actor's recent refused operations, newest first.
-    /// A refusal has no attempt row and therefore cannot appear in lane queries.
+    /// A refusal is a terminal attempt row with no attempt record, so it never
+    /// appears in lane queries.
     pub fn recent_refusals(&self, limit: u64, call: &Request<'_>) -> Result<Vec<OperationRecord>> {
         call.check()?;
         if !(1..=100).contains(&limit) {
             return Err(RunError::Validation("refusal page limit"));
         }
         let mut statement = self.db.prepare(
-            "SELECT operation,record FROM operations WHERE project=?1 AND actor=?2 AND json_extract(CAST(record AS TEXT),'$.state')='refused' ORDER BY rowid DESC LIMIT ?3",
+            "SELECT operation,operation_record FROM attempts WHERE project=?1 AND actor=?2 AND refused=1 ORDER BY sequence DESC LIMIT ?3",
         )?;
         let rows = statement.query_map(
             params![
@@ -431,7 +446,7 @@ impl RunStore {
             .collect())
     }
 
-    /// Page by the immutable SQLite row ID, so failed notices cannot starve later rows.
+    /// Page by the immutable attempt sequence, so failed notices cannot starve later rows.
     pub fn pending_refusal_notices_after(
         &self,
         limit: u64,
@@ -443,7 +458,7 @@ impl RunStore {
             return Err(RunError::Validation("refusal page limit"));
         }
         let mut statement = self.db.prepare(
-            "SELECT rowid,operation,record FROM operations WHERE project=?1 AND actor=?2 AND CASE WHEN json_valid(CAST(record AS TEXT)) THEN json_extract(CAST(record AS TEXT),'$.state')='refused' AND json_type(CAST(record AS TEXT),'$.refusal_chair')='object' AND COALESCE(json_extract(CAST(record AS TEXT),'$.refusal_notice_done'),0) != 1 ELSE 0 END AND rowid > ?4 ORDER BY rowid LIMIT ?3",
+            "SELECT sequence,operation,operation_record FROM attempts WHERE project=?1 AND actor=?2 AND refused=1 AND CASE WHEN json_valid(CAST(operation_record AS TEXT)) THEN json_type(CAST(operation_record AS TEXT),'$.refusal_chair')='object' AND COALESCE(json_extract(CAST(operation_record AS TEXT),'$.refusal_notice_done'),0) != 1 ELSE 0 END AND sequence > ?4 ORDER BY sequence LIMIT ?3",
         )?;
         let mut records = Vec::new();
         let mut cursor = after;
@@ -471,7 +486,7 @@ impl RunStore {
                 cursor = rowid;
                 scanned += 1;
                 // Corrupt evidence cannot produce a notice. Advance by its raw
-                // row ID so a full page of it cannot hide later valid notices.
+                // sequence so a full page of it cannot hide later valid notices.
                 let Ok(id) = OperationId::parse(&operation) else {
                     continue;
                 };
@@ -498,74 +513,119 @@ impl RunStore {
             }
         }
     }
-    /// Whether the store holds any run record.
+    /// Whether the store holds any admitted attempt.
     pub fn has_runs(&self, call: &Request<'_>) -> Result<bool> {
         call.check()?;
-        Ok(self
-            .db
-            .query_row("SELECT EXISTS(SELECT 1 FROM runs)", [], |row| row.get(0))?)
+        Ok(self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attempts WHERE refused=0)",
+            [],
+            |row| row.get(0),
+        )?)
     }
-    pub fn run(&self, id: RunId, call: &Request<'_>) -> Result<RunRecord> {
+    /// The attempt an operation admitted. A refused operation admitted none.
+    pub fn operation_attempt(&self, id: &OperationId, call: &Request<'_>) -> Result<AttemptId> {
         call.check()?;
-        let run = self.run_on(&self.db, id)?;
-        Ok(run)
-    }
-    pub(crate) fn run_on(&self, db: &rusqlite::Connection, id: RunId) -> Result<RunRecord> {
-        let raw: Vec<u8> = db
+        let found: String = self
+            .db
             .query_row(
-                "SELECT record FROM runs WHERE id=?1 AND project=?2",
-                params![id.to_string(), self.context.project_id.to_string()],
-                |r| r.get(0),
+                "SELECT id FROM attempts WHERE project=?1 AND actor=?2 AND operation=?3 AND refused=0 \
+                 ORDER BY sequence LIMIT 1",
+                params![
+                    self.context.project_id.to_string(),
+                    self.context.actor_id.to_string(),
+                    id.as_str()
+                ],
+                |row| row.get(0),
             )
             .optional()?
             .ok_or(RunError::NotFound)?;
-        let run: RunRecord = decode(&raw)?;
-        if run.run_id != id || run.project_id != self.context.project_id {
-            return Err(RunError::Validation("run index identity"));
+        AttemptId::parse(&found).map_err(|_| RunError::Validation("attempt index ID"))
+    }
+    /// The operation that admitted an attempt: its submitting actor, request
+    /// digest and nested parent.
+    pub fn attempt_operation(&self, id: AttemptId, call: &Request<'_>) -> Result<OperationRecord> {
+        call.check()?;
+        Self::attempt_operation_in(&self.db, self.context.project_id, id)
+    }
+    pub(crate) fn attempt_operation_in(
+        db: &rusqlite::Connection,
+        project: ProjectId,
+        id: AttemptId,
+    ) -> Result<OperationRecord> {
+        let raw: Vec<u8> = db
+            .query_row(
+                "SELECT operation_record FROM attempts WHERE id=?1 AND project=?2 AND refused=0",
+                params![id.to_string(), project.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(RunError::NotFound)?;
+        let operation: OperationRecord = decode(&raw)?;
+        if operation.project_id != project {
+            return Err(RunError::Validation("operation index identity"));
         }
-        Ok(run)
-    }
-    /// Every settled attempt of a run, oldest first.
-    pub fn terminal_attempts(&self, run: RunId, call: &Request<'_>) -> Result<Vec<AttemptRecord>> {
-        let ids: Vec<String> = {
-            let mut query = self.db.prepare("SELECT id FROM attempts WHERE run=?1 AND project=?2 AND terminal=1 ORDER BY sequence")?;
-            let rows = query.query_map(
-                params![run.to_string(), self.context.project_id.to_string()],
-                |row| row.get(0),
-            )?;
-            rows.collect::<std::result::Result<_, _>>()?
-        };
-        ids.into_iter()
-            .map(|id| {
-                let id =
-                    AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
-                self.record(id, call)
-            })
-            .collect()
-    }
-    /// Read nonterminal attempts for a run in submission order.
-    pub fn pending_attempts(&self, run: RunId, call: &Request<'_>) -> Result<Vec<AttemptRecord>> {
-        let ids: Vec<String> = {
-            let mut query = self.db.prepare("SELECT id FROM attempts WHERE run=?1 AND project=?2 AND terminal=0 ORDER BY sequence")?;
-            let rows = query.query_map(
-                params![run.to_string(), self.context.project_id.to_string()],
-                |row| row.get(0),
-            )?;
-            rows.collect::<std::result::Result<_, _>>()?
-        };
-        ids.into_iter()
-            .map(|id| {
-                let id =
-                    AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
-                self.record(id, call)
-            })
-            .collect()
+        Ok(operation)
     }
     /// The record read used before a mutation or recovery decision. It makes
     /// the process checkpoint durable, so a failed sync surfaces instead of
     /// feeding the checkpoint observation into a write.
     pub fn record(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptRecord> {
         self.read_record(id, call, RecordRead::Durable)
+    }
+    /// The admitted attempt recorded under a work key. A refused admission
+    /// under the key reads as its recorded refusal.
+    pub fn attempt_by_key(
+        &self,
+        key: &provenant_records::WorkKey,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        call.check()?;
+        if key.project() != self.context.project_id {
+            return Err(RunError::NotFound);
+        }
+        let (id, refused, operation): (String, bool, Vec<u8>) = self
+            .db
+            .query_row(
+                "SELECT id,refused,operation_record FROM attempts \
+                 WHERE project=?1 AND graph=?2 AND node=?3 AND attempt=?4",
+                params![
+                    key.project().to_string(),
+                    key.graph(),
+                    key.node(),
+                    key.attempt()
+                ],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?
+            .ok_or(RunError::NotFound)?;
+        if refused {
+            let op: OperationRecord = decode(&operation)?;
+            return Err(RunError::RecordedRefusal(Box::new(
+                op.refusal
+                    .ok_or(RunError::Validation("refusal diagnostic missing"))?,
+            )));
+        }
+        let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
+        self.read_record(id, call, RecordRead::Observed)
+    }
+    /// The work key of an attempt row, admitted or refused, by its internal ID.
+    pub fn work_key(
+        &self,
+        id: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<provenant_records::WorkKey> {
+        call.check()?;
+        let (graph, node, attempt): (String, String, u32) = self
+            .db
+            .query_row(
+                "SELECT graph,node,attempt FROM attempts WHERE id=?1 AND project=?2",
+                params![id.to_string(), self.context.project_id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?
+            .ok_or(RunError::NotFound)?;
+        provenant_records::WorkKey::new(self.context.project_id, graph, node, attempt)
+            .map_err(|_| RunError::Validation("attempt work key"))
     }
     /// Resolve a worktree owner by its globally unique attempt ID. The owner
     /// can belong to another project scope; only its state is used for lineage.
@@ -589,9 +649,9 @@ impl RunStore {
             AttemptState::Terminal { .. }
         ))
     }
-    /// Whether lanes the attempt `id`, from any project, submits or admits
-    /// must be sandboxed ([`AttemptRecord::floors_children`]). A record that
-    /// cannot be read floors.
+    /// Whether attempt `id`, from any project, carries a user-enabled
+    /// sandbox floor ([`AttemptRecord::floors_children`]).
+    /// Missing evidence does not enable the optional sandbox policy.
     pub fn attempt_floors_children(&self, id: AttemptId, call: &Request<'_>) -> bool {
         let read = || -> Result<bool> {
             call.check()?;
@@ -611,7 +671,7 @@ impl RunStore {
                 .record(id, call)?
                 .floors_children())
         };
-        read().unwrap_or(true)
+        read().unwrap_or(false)
     }
     /// The record read for view paths. It reports the published checkpoint
     /// without syncing it, so status, lane listings and output paging do not
@@ -629,8 +689,7 @@ impl RunStore {
         call: &Request<'_>,
         read: RecordRead,
     ) -> Result<AttemptRecord> {
-        let (_, record) = self.record_with_run(id, call, read)?;
-        Ok(record)
+        self.record_row(id, call, read)
     }
     /// A terminal row may precede the guardian releasing writer custody.
     pub fn custody_released(&self, record: &AttemptRecord, call: &Request<'_>) -> Result<bool> {
@@ -638,14 +697,14 @@ impl RunStore {
         use provenant_os::fs::LockMode;
         if record.project_id != self.context.project_id {
             return Err(RunError::unsafe_path(
-                format!("runs/{}/attempts/{}", record.run_id, record.attempt_id),
+                format!("attempts/{}", record.attempt_id),
                 PathCheck::Containment,
             ));
         }
         if !matches!(record.state, AttemptState::Terminal { .. }) {
             return Ok(false);
         }
-        let directory = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let directory = self.attempt_dir(record.attempt_id, false)?;
         let _custody = match directory.try_lock_existing(
             std::ffi::OsStr::new(AttemptFile::CustodyLock.name()),
             LockMode::Exclusive,
@@ -658,8 +717,7 @@ impl RunStore {
         // Custody has one location: the reader's attempt or the writer's
         // persisted worktree slot. Inventorying every slot here made each
         // terminal row pay for the host's entire retained writer history.
-        let writer =
-            self.attempt_writer_slot(record.run_id, record.task_id, record.project_id, call)?;
+        let writer = self.attempt_writer_slot(record.attempt_id, call)?;
         // An inaccessible own slot or reservation cannot prove release, so it
         // remains a fence rather than failing the caller. The supervisor owns
         // the layout; predecessor and sibling slots are not evidence about
@@ -673,17 +731,33 @@ impl RunStore {
         } else {
             directory
         };
-        Ok(matches!(
-            provenant_supervisor::custody::reservation_present(&slot, Self::scope(record)),
-            Ok(false)
-        ))
+        let scope = Self::scope(record);
+        match provenant_supervisor::custody::reservation_present(&slot, scope) {
+            Ok(false) => Ok(true),
+            Ok(true) => {
+                // WorkKey restart resolves this retained attempt first. It uses
+                // the same scoped decision as worktree admission and observation.
+                let decision = provenant_supervisor::custody::attempt_evidence(&slot, scope)
+                    .ok()
+                    .and_then(|evidence| {
+                        provenant_supervisor::custody::retained_import_decision(&evidence, scope)
+                            .ok()
+                            .flatten()
+                    });
+                Ok(matches!(
+                    decision,
+                    Some(provenant_supervisor::custody::CustodyDecision::Settled(_))
+                ))
+            }
+            Err(_) => Ok(false),
+        }
     }
-    fn record_with_run(
+    fn record_row(
         &self,
         id: AttemptId,
         call: &Request<'_>,
         read: RecordRead,
-    ) -> Result<(RunRecord, AttemptRecord)> {
+    ) -> Result<AttemptRecord> {
         call.check()?;
         // One read snapshot for every row below. Terminal publication writes
         // the attempt and its settlement receipt in one transaction, so reading
@@ -698,41 +772,47 @@ impl RunStore {
         } else {
             None
         };
-        let (raw, run_id, task_id, number, revision, terminal): (Vec<u8>, String, String, i64, i64, bool) = self.db.query_row("SELECT record,run,task,number,revision,terminal FROM attempts WHERE id=?1 AND project=?2", params![id.to_string(), self.context.project_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).optional()?.ok_or(RunError::NotFound)?;
+        let (raw, number, revision, terminal, key): AttemptIndexRow = self.db.query_row("SELECT record,number,revision,terminal,graph,node,attempt FROM attempts WHERE id=?1 AND project=?2 AND refused=0", params![id.to_string(), self.context.project_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, (r.get(4)?, r.get(5)?, r.get(6)?)))).optional()?.ok_or(RunError::NotFound)?;
         #[cfg(test)]
         if let Some(hook) = AFTER_ATTEMPT_ROW.with(|hook| hook.borrow_mut().take()) {
             hook();
         }
         let mut record: AttemptRecord = crate::db::decode_attempt(&raw)?;
+        let index_key =
+            provenant_records::WorkKey::new(self.context.project_id, key.0, key.1, key.2)
+                .map_err(|_| RunError::Validation("attempt work key"))?;
         if record.attempt_id != id
             || record.project_id != self.context.project_id
-            || record.run_id.to_string() != run_id
-            || record.task_id.to_string() != task_id
             || sql_int(record.attempt_number)? != number
             || sql_int(record.revision)? != revision
             || matches!(record.state, AttemptState::Terminal { .. }) != terminal
+            || record.key != index_key
         {
             return Err(RunError::Validation("attempt index identity"));
         }
-        let run = self.run_on(&self.db, record.run_id)?;
-        if run.operation_id != record.operation_id || !run.task_ids.contains(&record.task_id) {
-            return Err(RunError::Validation("attempt run association"));
-        }
         validate_attempt(&record)?;
-        let version: i64 = self
+        // A budget wrap-up is one run-internal same-session successor. Graph
+        // observations already follow this field and wait on the successor.
+        record.superseded_by = self
             .db
-            .pragma_query_value(None, "user_version", |row| row.get(0))?;
-        let receipt: Option<(i64, Vec<u8>)> = if version >= 7 {
-            self.db
-                .query_row(
-                    "SELECT generation,record FROM settlement_receipts WHERE attempt=?1",
-                    [id.to_string()],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()?
-        } else {
-            None
-        };
+            .query_row(
+                "SELECT id FROM attempts WHERE continues=?1 AND operation=?2 AND refused=0",
+                params![id.to_string(), format!("budget-wrap-up-{id}")],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|id| {
+                AttemptId::parse(&id).map_err(|_| RunError::Validation("wrap-up successor ID"))
+            })
+            .transpose()?;
+        let receipt: Option<(i64, Vec<u8>)> = self
+            .db
+            .query_row(
+                "SELECT generation,record FROM settlement_receipts WHERE attempt=?1",
+                [id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
         drop(snapshot);
         if let Some((generation, raw)) = receipt {
             if generation != sql_int(record.generation)?
@@ -740,7 +820,7 @@ impl RunStore {
             {
                 return Err(RunError::Conflict);
             }
-            record.settlement_receipts = Some(crate::db::decode_unversioned(&raw)?);
+            record.settlement_receipts = Some(crate::db::decode_column(&raw)?);
         }
         if matches!(
             record.state,
@@ -748,7 +828,7 @@ impl RunStore {
                 outcome: Outcome::Succeeded,
                 ..
             }
-        ) && let Ok(attempt) = self.attempt_dir(record.run_id, id, false)
+        ) && let Ok(attempt) = self.attempt_dir(id, false)
             && let Some(raw) = match read {
                 RecordRead::Durable => {
                     crate::artifacts::read_sealed(&attempt, "delivery.json", RECORD_LIMIT)?
@@ -764,7 +844,45 @@ impl RunStore {
                 record.delivery = Some(delivery);
             }
         }
-        let (checkpoint, checkpoint_readable) = match self.attempt_dir(record.run_id, id, false) {
+        if let Ok(attempt) = self.attempt_dir(id, false)
+            && let Some(raw) = crate::artifacts::read_sealed_observed(
+                &attempt,
+                provenant_records::AttemptFile::BudgetOverrun.name(),
+                RECORD_LIMIT,
+            )?
+        {
+            let overrun = crate::db::decode::<serde_json::Value>(&raw)?;
+            record
+                .extra
+                .insert("budget_overrun".into(), overrun.clone());
+            if let Some(limit) = record
+                .limits
+                .as_mut()
+                .and_then(|limits| limits.token_budget.as_mut())
+            {
+                limit.extra.insert("overrun".into(), overrun);
+            }
+        }
+        if let Ok(attempt) = self.attempt_dir(id, false)
+            && let Some(raw) = crate::artifacts::read_sealed_observed(
+                &attempt,
+                provenant_records::AttemptFile::BudgetWrapUpRefused.name(),
+                RECORD_LIMIT,
+            )?
+        {
+            let refusal = crate::db::decode::<serde_json::Value>(&raw)?;
+            record
+                .extra
+                .insert("budget_wrap_up_refused".into(), refusal.clone());
+            if let Some(limit) = record
+                .limits
+                .as_mut()
+                .and_then(|limits| limits.token_budget.as_mut())
+            {
+                limit.extra.insert("wrap_up_refused".into(), refusal);
+            }
+        }
+        let (checkpoint, checkpoint_readable) = match self.attempt_dir(id, false) {
             Ok(directory) => {
                 let read_checkpoint = match read {
                     RecordRead::Durable => crate::artifacts::read_sealed(
@@ -807,15 +925,12 @@ impl RunStore {
                 silent: bool,
                 #[serde(default)]
                 silent_for_ms: Option<u64>,
-                #[serde(default)]
-                disk_paused: bool,
             }
             let parsed = serde_json::from_slice::<ProcessCheckpoint>(&bytes);
             let scoped = parsed.as_ref().is_ok_and(|observation| {
                 observation.schema_version == 1
                     && observation.scope
                         == (provenant_supervisor::custody::Scope {
-                            run: record.run_id,
                             attempt: record.attempt_id,
                             generation: record.generation,
                         })
@@ -834,7 +949,6 @@ impl RunStore {
                 record.process_observation_valid.0 = true;
                 record.last_output_at = observation.last_output_at;
                 record.priority = observation.priority;
-                record.provider_silence_suppressed.0 = observation.disk_paused;
                 let fresh = observation
                     .observed_at
                     .zip(call.clock.wall_now().ok())
@@ -847,7 +961,7 @@ impl RunStore {
                 }
             }
         }
-        Ok((run, record))
+        Ok(record)
     }
     pub fn read_output(
         &self,
@@ -878,7 +992,7 @@ impl RunStore {
         };
         let (bytes, complete, digest) = match part {
             ArtifactPart::Stderr => {
-                let dir = self.attempt_dir(record.run_id, id, false)?;
+                let dir = self.attempt_dir(id, false)?;
                 let (bytes, complete) = match crate::artifacts::read_sealed_observed(
                     &dir,
                     AttemptFile::Stderr.name(),
@@ -900,7 +1014,7 @@ impl RunStore {
             }
             ArtifactPart::Transcript => {
                 let session = record.session.as_deref().ok_or(RunError::NotFound)?;
-                let dir = self.attempt_dir(record.run_id, id, false)?;
+                let dir = self.attempt_dir(id, false)?;
                 let (dir, name, _) = crate::transcript::find(&dir, session, &record.write_grants)
                     .ok_or(RunError::NotFound)?;
                 let (bytes, complete) = crate::transcript::tail(&dir, &name).ok_or_else(|| {
@@ -924,7 +1038,7 @@ impl RunStore {
                     ArtifactPart::Prompt => (&record.prompt, RECORD_LIMIT),
                     _ => (record.result.as_ref().ok_or(missing_output)?, RESULT_LIMIT),
                 };
-                let bytes = self.artifact_bytes(record.run_id, artifact, limit)?;
+                let bytes = self.artifact_bytes(artifact, limit)?;
                 if std::str::from_utf8(&bytes).is_err() {
                     return Err(RunError::Validation("prompt/result is not UTF-8"));
                 }
@@ -1023,9 +1137,9 @@ impl RunStore {
             let mut found = Vec::new();
             if query.targets.is_empty() {
                 let sql = if query.newest_first {
-                    "SELECT sequence,id FROM attempts WHERE project=?1 AND (?2=0 OR sequence<?2) AND (?3 OR terminal=0)".to_owned() + UNSEEN_OWNED + " ORDER BY sequence DESC LIMIT ?4"
+                    "SELECT sequence,id FROM attempts WHERE project=?1 AND refused=0 AND (?2=0 OR sequence<?2) AND (?3 OR terminal=0)".to_owned() + UNSEEN_OWNED + " ORDER BY sequence DESC LIMIT ?4"
                 } else {
-                    "SELECT sequence,id FROM attempts WHERE project=?1 AND sequence>?2 AND (?3 OR terminal=0)".to_owned() + UNSEEN_OWNED + " ORDER BY sequence LIMIT ?4"
+                    "SELECT sequence,id FROM attempts WHERE project=?1 AND refused=0 AND sequence>?2 AND (?3 OR terminal=0)".to_owned() + UNSEEN_OWNED + " ORDER BY sequence LIMIT ?4"
                 };
                 let mut statement = self.db.prepare(&sql)?;
                 let page = statement.query_map(
@@ -1038,21 +1152,13 @@ impl RunStore {
             }
             for target in &query.targets {
                 let sql = if query.newest_first {
-                    "SELECT sequence,id FROM attempts WHERE project=?1 AND (?2=0 OR sequence<?2) AND run=?3 AND (?4 IS NULL OR task=?4) AND (?5 IS NULL OR id=?5)".to_owned() + UNSEEN_TARGET + " ORDER BY sequence DESC LIMIT ?6"
+                    "SELECT sequence,id FROM attempts WHERE project=?1 AND refused=0 AND (?2=0 OR sequence<?2) AND id=?3".to_owned() + UNSEEN_TARGET + " ORDER BY sequence DESC LIMIT ?4"
                 } else {
-                    "SELECT sequence,id FROM attempts WHERE project=?1 AND sequence>?2 AND run=?3 AND (?4 IS NULL OR task=?4) AND (?5 IS NULL OR id=?5)".to_owned() + UNSEEN_TARGET + " ORDER BY sequence LIMIT ?6"
+                    "SELECT sequence,id FROM attempts WHERE project=?1 AND refused=0 AND sequence>?2 AND id=?3".to_owned() + UNSEEN_TARGET + " ORDER BY sequence LIMIT ?4"
                 };
                 let mut statement = self.db.prepare(&sql)?;
                 let page = statement.query_map(
-                    params![
-                        project,
-                        after,
-                        target.run.to_string(),
-                        target.task.map(|t| t.to_string()),
-                        target.attempt.map(|a| a.to_string()),
-                        fetch,
-                        unseen
-                    ],
+                    params![project, after, target.to_string(), fetch, unseen],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )?;
                 for row in page {
@@ -1188,6 +1294,9 @@ pub(crate) fn valid_write_grants(grants: &[WriteGrantRecord]) -> bool {
 }
 
 pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
+    r.state
+        .stop()
+        .map_err(|_| RunError::Validation("terminal stop evidence"))?;
     if r.preparation_failure.is_some()
         && (r.provider_launched != Some(false)
             || !matches!(
@@ -1306,12 +1415,19 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
                 .result
                 .as_ref()
                 .is_none_or(|result| !result.complete || result.bytes == 0)
-                || exit_code != Some(0)
-                || !verified_route(
+                || (exit_code != Some(0)
+                    && !r.settlement_reason.is_some_and(|reason| {
+                        matches!(
+                            reason.rule().terminal_outcome,
+                            provenant_records::run::SettlementTerminalOutcome::Succeeded
+                        )
+                    }))
+                || !route_identity(
                     r.resolved_route.as_ref(),
                     r.applied_route.as_ref(),
                     r.observed_route.as_ref(),
-                ))
+                )
+                .permits_success(&r.partial_signals))
         {
             return Err(RunError::Validation("invalid stored success"));
         }
@@ -1319,40 +1435,153 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
     Ok(())
 }
 
-/// Success must refer to the same exact provider/model at all three stages.
-/// Unknown effort/account observations remain absent, never inferred.
-pub(crate) fn verified_route(
+/// Missing observations are advice; only contradictory observations hold success.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RouteIdentity {
+    Observed,
+    Unobserved,
+    Mismatch,
+}
+impl RouteIdentity {
+    pub(crate) fn permits_success(self, signals: &[PartialSignal]) -> bool {
+        match self {
+            Self::Observed => true,
+            Self::Unobserved => signals.contains(&PartialSignal::IdentityUnobserved),
+            Self::Mismatch => false,
+        }
+    }
+}
+
+pub(crate) fn route_identity(
     resolved: Option<&RouteRecord>,
     applied: Option<&RouteRecord>,
     observed: Option<&RouteRecord>,
-) -> bool {
-    match (resolved, applied, observed) {
-        (Some(r), Some(a), Some(o)) => {
-            r.provider.as_ref().is_some_and(|v| !v.is_empty())
-                && (r.model.as_ref().is_some_and(|v| !v.is_empty())
-                    || (r.model.is_none()
-                        && r.effort.is_none()
-                        && a.effort.is_none()
-                        && o.effort.is_none()
-                        && r.provider
-                            .as_deref()
-                            .and_then(provenant_records::AdapterSpec::get)
-                            .is_some_and(|spec| !spec.launch.model)))
-                && r.provider == a.provider
-                && a.provider == o.provider
-                && r.model == a.model
-                && a.model == o.model
-                && a.effort
-                    .as_ref()
-                    .is_none_or(|effort| Some(effort) == o.effort.as_ref())
-        }
-        _ => false,
+) -> RouteIdentity {
+    let (Some(r), Some(a)) = (resolved, applied) else {
+        return RouteIdentity::Mismatch;
+    };
+    let valid_model = r.model.as_ref().is_some_and(|v| !v.is_empty())
+        || (r.model.is_none()
+            && r.effort.is_none()
+            && r.provider
+                .as_deref()
+                .and_then(provenant_records::AdapterSpec::get)
+                .is_some_and(|spec| !spec.launch.model));
+    if !r.provider.as_ref().is_some_and(|v| !v.is_empty())
+        || !valid_model
+        || r.provider != a.provider
+        || r.model != a.model
+        || r.effort != a.effort
+        || r.account_key != a.account_key
+    {
+        return RouteIdentity::Mismatch;
     }
+    let Some(o) = observed else {
+        return RouteIdentity::Unobserved;
+    };
+    // Missing fields are not a contradiction. Present fields must agree with
+    // the authorised launch, including the account when it was selected.
+    if o.provider
+        .as_ref()
+        .is_some_and(|v| Some(v) != a.provider.as_ref())
+        || o.model
+            .as_ref()
+            .is_some_and(|v| Some(v) != a.model.as_ref())
+        || (a.effort.is_some()
+            && o.effort
+                .as_ref()
+                .is_some_and(|v| Some(v) != a.effort.as_ref()))
+        || (a.account_key.is_some()
+            && o.account_key
+                .as_ref()
+                .is_some_and(|v| Some(v) != a.account_key.as_ref()))
+    {
+        return RouteIdentity::Mismatch;
+    }
+    if o.provider.is_none()
+        || (a.model.is_some() && o.model.is_none())
+        || (a.effort.is_some() && o.effort.is_none())
+        || (a.account_key.is_some() && o.account_key.is_none())
+    {
+        RouteIdentity::Unobserved
+    } else {
+        RouteIdentity::Observed
+    }
+}
+
+fn usage_identity(
+    resolved: Option<&RouteRecord>,
+    applied: Option<&RouteRecord>,
+    observed: Option<&RouteRecord>,
+) -> provenant_records::AccountIdentity {
+    use provenant_records::AccountIdentity;
+
+    if route_identity(resolved, applied, observed) != RouteIdentity::Observed {
+        return AccountIdentity::unknown();
+    }
+    let Some(applied) = applied else {
+        return AccountIdentity::unknown();
+    };
+    let Some(observed) = observed else {
+        return AccountIdentity::unknown();
+    };
+    let (Some(provider), Some(account_key)) =
+        (applied.provider.as_deref(), applied.account_key.as_deref())
+    else {
+        return AccountIdentity::unknown();
+    };
+    if observed.account_key.as_deref() != Some(account_key) {
+        return AccountIdentity::unknown();
+    }
+    let Some(spec) = provenant_records::AdapterSpec::get(provider) else {
+        return AccountIdentity::unknown();
+    };
+    if !spec.registered_account || spec.is_unregistered_local(account_key) {
+        return AccountIdentity::unknown();
+    }
+    AccountIdentity::provider_observation(provider, account_key)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_identity_requires_a_verified_registered_applied_and_observed_key() {
+        use provenant_records::{AccountIdentity, run::RouteRecord};
+
+        let route = RouteRecord {
+            provider: Some("claude".into()),
+            model: Some("claude/sonnet".into()),
+            account_key: Some("verified-key".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            usage_identity(Some(&route), Some(&route), Some(&route)),
+            AccountIdentity::provider_observation("claude", "verified-key")
+        );
+
+        let requested_only = usage_identity(Some(&route), None, Some(&route));
+        assert_eq!(requested_only, AccountIdentity::unknown());
+
+        let mut mismatch = route.clone();
+        mismatch.account_key = Some("other-key".into());
+        assert_eq!(
+            usage_identity(Some(&route), Some(&route), Some(&mismatch)),
+            AccountIdentity::unknown()
+        );
+
+        let local = RouteRecord {
+            provider: Some("agy".into()),
+            model: Some("agy/gemini".into()),
+            account_key: Some("local".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            usage_identity(Some(&local), Some(&local), Some(&local)),
+            AccountIdentity::unknown()
+        );
+    }
 
     #[test]
     fn slot_wait_is_queue_to_start_and_absent_until_started() {

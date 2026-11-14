@@ -2,8 +2,267 @@
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
 };
+
+/// Retention policy routing. Owners alone interpret eligibility and remove bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetentionTrigger {
+    Custody,
+    Gc,
+    FullGc,
+    Settlement,
+    MergeObservation,
+    Install,
+    Append,
+    Never,
+}
+
+/// Whether the current owner has declared the conditions for removing a class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetentionEligibility {
+    Declared,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ByteObservation {
+    Measured {
+        bytes: u64,
+    },
+    /// Observed bytes cover only part of the class or are best-effort.
+    Partial {
+        bytes: u64,
+    },
+    Unknown,
+}
+
+/// A retention operation which could not observe or remove its named path.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetentionIssue {
+    pub path: PathBuf,
+    pub operation: String,
+    pub cause: String,
+}
+
+/// A GC byte observation with explicit completeness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetentionBytes {
+    pub class: RetentionKind,
+    pub observation: ByteObservation,
+}
+
+/// Byte accounting is part of the class contract, shared by preview and apply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetentionMeasurement {
+    AllocatedTree,
+    OwnerDefined,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RetentionClass {
+    pub class: RetentionKind,
+    pub owner: &'static str,
+    pub measurement: RetentionMeasurement,
+    pub eligibility: RetentionEligibility,
+    pub eligibility_detail: &'static str,
+    /// Effective config keys, interpreted by the owner.
+    pub settings: &'static [&'static str],
+    pub triggers: &'static [RetentionTrigger],
+}
+
+const GC: &[RetentionTrigger] = &[RetentionTrigger::Gc];
+const FULL_GC: &[RetentionTrigger] = &[RetentionTrigger::FullGc];
+const GC_SETTLEMENT: &[RetentionTrigger] = &[RetentionTrigger::Gc, RetentionTrigger::Settlement];
+const GC_SETTLEMENT_MERGE: &[RetentionTrigger] = &[
+    RetentionTrigger::Gc,
+    RetentionTrigger::Settlement,
+    RetentionTrigger::MergeObservation,
+];
+const INSTALL: &[RetentionTrigger] = &[RetentionTrigger::Install];
+const APPEND: &[RetentionTrigger] = &[RetentionTrigger::Append];
+const NEVER: &[RetentionTrigger] = &[RetentionTrigger::Never];
+
+macro_rules! retention_classes {
+    ($($kind:ident => {
+        owner: $owner:literal,
+        measure: $measure:ident,
+        eligibility: $eligibility:ident,
+        detail: $detail:literal,
+        settings: [$($setting:literal),* $(,)?],
+        triggers: $triggers:ident
+    }),+ $(,)?) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum RetentionKind { $($kind),+ }
+
+        /// The single declaration of every retained byte class, owner and effective policy.
+        pub const RETENTION_CLASSES: &[RetentionClass] = &[
+            $(RetentionClass {
+                class: RetentionKind::$kind,
+                owner: $owner,
+                measurement: RetentionMeasurement::$measure,
+                eligibility: RetentionEligibility::$eligibility,
+                eligibility_detail: $detail,
+                settings: &[$($setting),*],
+                triggers: $triggers,
+            }),+
+        ];
+    };
+}
+
+retention_classes! {
+    LaneCargoCaches => {
+        owner: "confinement/cache",
+        measure: AllocatedTree,
+        eligibility: Declared,
+        detail: "settled lane; verified cache owner and free writer custody",
+        settings: ["gc.idle_days", "gc.lane_cargo_cache_max"],
+        triggers: GC_SETTLEMENT
+    },
+    ObservationLedgers => {
+        owner: "telemetry/ledger",
+        measure: OwnerDefined,
+        eligibility: Declared,
+        detail: "permanent attempt evidence",
+        settings: [],
+        triggers: NEVER
+    },
+    RetirementRecords => {
+        owner: "fabric-store/custody",
+        eligibility: Declared,
+        detail: "durable retirement intent and step outcomes for audit and recovery",
+        settings: [],
+        triggers: NEVER
+    },
+    RefGenerationSequences => {
+        owner: "confinement/worktrees/ref-ledger",
+        eligibility: Declared,
+        detail: "permanent repository ref generation high-water marks",
+        settings: [],
+        triggers: NEVER
+    },
+    Staging => {
+        owner: "staging_gc",
+        measure: OwnerDefined,
+        eligibility: Declared,
+        detail: "free ingest/install item lock and idle age",
+        settings: ["gc.idle_days"],
+        triggers: GC
+    },
+    ProviderState => {
+        owner: "run/retention",
+        measure: OwnerDefined,
+        eligibility: Declared,
+        detail: "terminal; free publication/writer custody; no retained private Git",
+        settings: ["retention.provider_state_days", "retention.logs_days"],
+        triggers: GC
+    },
+    ChairLogs => {
+        owner: "workflow/log",
+        measure: OwnerDefined,
+        eligibility: Declared,
+        detail: "owner transaction after replay horizon",
+        settings: ["retention.chair_log_days", "retention.chair_log_replay_days", "retention.chair_log_entries", "retention.chair_log_bytes"],
+        triggers: FULL_GC
+    },
+    TargetSeeds => {
+        owner: "run/target_seed_gc",
+        measure: AllocatedTree,
+        eligibility: Declared,
+        detail: "free store/clone and staging build locks",
+        settings: ["domains.fabric.lanes.cargo_seed.max_generations", "domains.fabric.lanes.cargo_seed.max_bytes"],
+        triggers: GC
+    },
+    BuildDirectories => {
+        owner: "run/build_dir_gc",
+        measure: AllocatedTree,
+        eligibility: Declared,
+        detail: "GC boundary and free Cargo profile locks",
+        settings: ["domains.fabric.lanes.build_dir_max_bytes", "domains.fabric.lanes.build_dir_grace_seconds", "gc.free_floor"],
+        triggers: GC
+    },
+    GitWorktrees => {
+        owner: "confinement/worktrees + custody/retirement",
+        measure: AllocatedTree,
+        eligibility: Declared,
+        detail: "free custody and census; clean Git; subsumed tip or idle retirement",
+        settings: ["gc.idle_days", "gc.regenerable", "gc.keep", "gc.foreign_worktrees", "gc.integration_branches", "gc.keep_paths", "gc.remote_branches", "gc.remote_min_tip_age_days"],
+        triggers: GC_SETTLEMENT_MERGE
+    },
+    QuotaHistory => {
+        owner: "cli/quota_history",
+        measure: OwnerDefined,
+        eligibility: Declared,
+        detail: "whole-line append and atomic rotation",
+        settings: [],
+        triggers: APPEND
+    },
+    Usage => {
+        owner: "telemetry/usage",
+        measure: OwnerDefined,
+        eligibility: Declared,
+        detail: "whole-line append and atomic rotation",
+        settings: [],
+        triggers: APPEND
+    },
+    GraphCheckpoints => {
+        owner: "fabric-runtime/graph/journal",
+        measure: OwnerDefined,
+        eligibility: Declared,
+        detail: "terminal checkpoint older than configured retention",
+        settings: ["gc.graph_checkpoint_days"],
+        triggers: FULL_GC
+    },
+    ManagedReleases => {
+        owner: "install",
+        measure: OwnerDefined,
+        eligibility: Declared,
+        detail: "inactive managed release not in use",
+        settings: [],
+        triggers: INSTALL
+    },
+    PayloadCap => {
+        owner: "run/retention",
+        measure: OwnerDefined,
+        eligibility: Declared,
+        detail: "unpinned payload above the configured cap",
+        settings: ["retention.payload_cap_bytes"],
+        triggers: GC
+    },
+    AttemptScratch => {
+        owner: "run/retention",
+        measure: OwnerDefined,
+        eligibility: Declared,
+        detail: "settled attempt; evidence captured and private Git import complete",
+        settings: ["retention.provider_state_days"],
+        triggers: GC_SETTLEMENT
+    },
+    DiscardArchives => {
+        owner: "confinement/worktrees/archive",
+        measure: AllocatedTree,
+        eligibility: Declared,
+        detail: "published discard archive older than the configured recovery window",
+        settings: ["gc.discard_archive_days"],
+        triggers: GC
+    },
+}
+
+/// One scheduler for retention adapters. Full GC includes regular GC classes;
+/// pressure GC excludes full-only history and checkpoints. Never ages custody fences.
+pub fn retention_schedule(
+    trigger: RetentionTrigger,
+) -> impl Iterator<Item = &'static RetentionClass> {
+    RETENTION_CLASSES.iter().filter(move |class| {
+        class.triggers.contains(&trigger)
+            || (trigger == RetentionTrigger::FullGc
+                && class.triggers.contains(&RetentionTrigger::Gc))
+    })
+}
 
 /// Kernel pressure level at which new lanes wait. The memory floor is advisory.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +305,7 @@ pub struct LaneBuildSettings {
     #[serde(default, deserialize_with = "deserialize_auto")]
     pub max_concurrent_builds: Option<u64>,
     #[serde(default, deserialize_with = "deserialize_auto")]
+    /// Compiler jobs per lane; at most two by default to bound memory on laptops.
     pub cargo_build_jobs: Option<u64>,
     /// Most lanes of any class live at once across the host.
     #[serde(default, deserialize_with = "deserialize_auto")]
@@ -59,9 +319,6 @@ pub struct LaneBuildSettings {
     /// Most writer lanes live at once for one project.
     #[serde(default, deserialize_with = "deserialize_auto")]
     pub max_project_writer_lanes: Option<u64>,
-    /// Minutes a build waits for a build slot or a Cargo lock before giving up.
-    #[serde(default, deserialize_with = "deserialize_auto")]
-    pub build_wait_minutes: Option<u64>,
     /// First port of the range split into per-writer-lane blocks.
     #[serde(default, deserialize_with = "deserialize_auto")]
     pub lane_port_base: Option<u64>,
@@ -75,6 +332,8 @@ pub struct LaneBuildSettings {
     pub cargo_incremental: Option<bool>,
     /// `CARGO_PROFILE_DEV_DEBUG` for lanes; `line-tables-only` unless set.
     pub cargo_debug: Option<String>,
+    /// Allow dependency downloads and source updates in the host Cargo home.
+    pub cargo_source_writes: Option<bool>,
     /// Cap on the allocated bytes of all lane Cargo profile directories, idle
     /// and busy. Collection removes idle ones, least recently used first; when
     /// busy directories alone exceed the cap it removes every eligible idle
@@ -87,15 +346,9 @@ pub struct LaneBuildSettings {
     /// grace without writing is unprotected unless a Cargo lock is held. 15
     /// minutes unless set.
     pub build_dir_grace_seconds: Option<u64>,
-    /// Seconds between walks of the lane caches by settlement-triggered
-    /// collection. Within it, a settlement skips the walk unless free space is
-    /// below the floor or the last walk found the total near the cap. 5
-    /// minutes unless set.
-    pub build_dir_survey_interval_seconds: Option<u64>,
 }
 /// Longest configurable gap between lane starts: ten minutes.
 pub const MAX_START_SPACING_MS: u64 = 600_000;
-pub const DEFAULT_BUILD_WAIT_MINUTES: u64 = 30;
 /// Default lane port space: 64 blocks of 16 ports from 30000, below the
 /// ephemeral ranges of macOS and Linux and one block per possible writer lane.
 pub const DEFAULT_LANE_PORT_BASE: u64 = 30000;
@@ -104,7 +357,7 @@ pub const DEFAULT_LANE_PORT_BLOCKS: u64 = 64;
 /// Hard ceilings on the configurable lane caps.
 pub const WRITER_LANES_CEILING: u64 = 64;
 pub const PROJECT_WRITER_LANES_CEILING: u64 = 32;
-/// Cargo's accepted `debug` levels, including the legacy numeric and boolean forms.
+/// Cargo's accepted `debug` levels, including current numeric and boolean forms.
 const CARGO_DEBUG_LEVELS: [&str; 10] = [
     "none",
     "line-directives-only",
@@ -121,9 +374,6 @@ const CARGO_DEBUG_LEVELS: [&str; 10] = [
 pub const DEFAULT_BUILD_DIR_MAX_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 /// Recency grace for lane build output when `build_dir_grace_seconds` is unset.
 pub const DEFAULT_BUILD_DIR_GRACE_SECONDS: u64 = 15 * 60;
-/// Interval between settlement-triggered walks when
-/// `build_dir_survey_interval_seconds` is unset.
-pub const DEFAULT_BUILD_DIR_SURVEY_INTERVAL_SECONDS: u64 = 5 * 60;
 /// The asset's -1 sentinel selects the host-dependent default.
 pub fn deserialize_auto<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -193,9 +443,6 @@ impl LaneBuildSettings {
         {
             invalid.push("max_project_writer_lanes");
         }
-        if !in_range(self.build_wait_minutes, 1440) {
-            invalid.push("build_wait_minutes");
-        }
         if self
             .lane_port_base
             .is_some_and(|n| !(1024..=65535).contains(&n))
@@ -252,13 +499,9 @@ impl LaneBuildSettings {
         self.build_dir_grace_seconds
             .unwrap_or(DEFAULT_BUILD_DIR_GRACE_SECONDS)
     }
-    pub fn build_dir_survey_interval_seconds(&self) -> u64 {
-        self.build_dir_survey_interval_seconds
-            .unwrap_or(DEFAULT_BUILD_DIR_SURVEY_INTERVAL_SECONDS)
-    }
     /// Concurrent cargo builds the host allows: the setting (clamped to 1..=64)
     /// or max(1, min(cores / cargo_build_jobs, total GiB / 6)), so a 10-core
-    /// 16 GiB host with 5 jobs gets 2.
+    /// 16 GiB host with the default 2 jobs gets 2.
     pub fn build_limit(&self, total_bytes: u64) -> u64 {
         if let Some(limit) = self.max_concurrent_builds {
             return limit.clamp(1, 64);
@@ -298,17 +541,10 @@ impl LaneBuildSettings {
             .unwrap_or(u64::MAX)
             .min(self.writer_lanes())
     }
-    pub fn build_wait(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(
-            60 * self
-                .build_wait_minutes
-                .unwrap_or(DEFAULT_BUILD_WAIT_MINUTES)
-                .clamp(1, 1440),
-        )
-    }
+
     pub fn jobs(&self) -> u64 {
         self.cargo_build_jobs.unwrap_or_else(|| {
-            std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1) as u64)
+            std::thread::available_parallelism().map_or(1, |n| n.get().clamp(1, 2) as u64)
         })
     }
 }
@@ -350,7 +586,10 @@ pub struct GcSettings {
     pub schedule: bool,
     pub idle_days: u64,
     pub graph_checkpoint_days: u64,
+    pub discard_archive_days: u64,
     pub free_floor: Option<String>,
+    /// Only this small critical threshold may stop new builds; free_floor warns.
+    pub critical_free: Option<String>,
     /// Total lane Cargo cache cap; defaults to 32 GiB.
     pub lane_cargo_cache_max: Option<String>,
     pub alert_below: Option<String>,
@@ -363,7 +602,9 @@ impl Default for GcSettings {
             schedule: true,
             idle_days: 7,
             graph_checkpoint_days: 90,
+            discard_archive_days: 90,
             free_floor: None,
+            critical_free: None,
             lane_cargo_cache_max: None,
             alert_below: None,
             projects: BTreeMap::new(),
@@ -371,7 +612,66 @@ impl Default for GcSettings {
     }
 }
 
+/// Resolved once by the host and shared by dispatch and new builds.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct DiskLimits {
+    pub free_floor: u64,
+    pub free_floor_source: provenant_records::diagnostic::SettingSource,
+    pub critical_free: u64,
+    pub critical_free_source: provenant_records::diagnostic::SettingSource,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiskLevel {
+    Ready,
+    Warning,
+    Critical,
+}
+impl DiskLimits {
+    pub fn level(&self, free: u64) -> DiskLevel {
+        if free < self.critical_free {
+            DiskLevel::Critical
+        } else if free < self.free_floor {
+            DiskLevel::Warning
+        } else {
+            DiskLevel::Ready
+        }
+    }
+    pub fn detail(&self, free: u64) -> String {
+        format!(
+            "{free} bytes available; gc.free_floor is {} bytes (source: {}); gc.critical_free is {} bytes (source: {})",
+            self.free_floor,
+            self.free_floor_source.description(),
+            self.critical_free,
+            self.critical_free_source.description()
+        )
+    }
+}
+
 impl GcSettings {
+    pub fn disk_limits(&self, state: &Path) -> std::io::Result<DiskLimits> {
+        use provenant_records::diagnostic::SettingSource::{Configuration, ShippedDefault};
+        Ok(DiskLimits {
+            free_floor: self.free_floor_bytes(state)?,
+            free_floor_source: if self.free_floor.is_some() {
+                Configuration
+            } else {
+                ShippedDefault
+            },
+            critical_free: self
+                .critical_free
+                .as_deref()
+                .map(parse_cache_size)
+                .transpose()
+                .map_err(std::io::Error::other)?
+                .unwrap_or(2 * 1024_u64.pow(3)),
+            critical_free_source: if self.critical_free.is_some() {
+                Configuration
+            } else {
+                ShippedDefault
+            },
+        })
+    }
+
     /// Resolve a project's explicit settings, or its language-specific default.
     pub fn project_settings(&self, project: &str, root: &Path) -> ProjectGcSettings {
         self.projects.get(project).cloned().unwrap_or_else(|| {
@@ -389,7 +689,7 @@ impl GcSettings {
         crate::loader::read_settings(state, "gc", Self::validate)
     }
 
-    /// The configured floor, or 10% of the state volume with a 50 GiB minimum.
+    /// The configured floor, or 1% of the state volume capped at 5 GiB.
     /// Installation can render before the state directory has been created.
     pub fn free_floor_bytes(&self, state: &Path) -> std::io::Result<u64> {
         if let Some(size) = &self.free_floor {
@@ -407,16 +707,6 @@ impl GcSettings {
         }
     }
 
-    /// Resolve the floor using an already observed state volume capacity.
-    pub fn free_floor_for_total(&self, total: u64) -> std::io::Result<u64> {
-        self.free_floor
-            .as_deref()
-            .map(parse_cache_size)
-            .transpose()
-            .map(|floor| floor.unwrap_or_else(|| default_free_floor(total)))
-            .map_err(std::io::Error::other)
-    }
-
     /// Total bound includes busy caches, which remain protected even above it.
     pub fn lane_cargo_cache_max_bytes(&self) -> std::io::Result<u64> {
         self.lane_cargo_cache_max
@@ -431,10 +721,16 @@ impl GcSettings {
         if !(1..=3650).contains(&self.idle_days) {
             return Err("idle_days_range");
         }
+        if !(1..=3650).contains(&self.discard_archive_days) {
+            return Err("discard_archive_days_range");
+        }
         if !(1..=3650).contains(&self.graph_checkpoint_days) {
             return Err("graph_checkpoint_days_range");
         }
         if let Some(size) = &self.free_floor {
+            parse_cache_size(size)?;
+        }
+        if let Some(size) = &self.critical_free {
             parse_cache_size(size)?;
         }
         if let Some(size) = &self.lane_cargo_cache_max {
@@ -451,32 +747,68 @@ impl GcSettings {
 }
 
 fn default_free_floor(total_bytes: u64) -> u64 {
-    (total_bytes / 10).max(50 * 1024_u64.pow(3))
+    (total_bytes / 100).min(5 * 1024_u64.pow(3))
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProjectGcSettings {
     pub regenerable: Vec<String>,
     pub keep: Vec<String>,
     pub foreign_worktrees: ForeignWorktrees,
+    pub integration_branches: Vec<String>,
+    pub keep_paths: Vec<String>,
+    pub remote_branches: RemoteBranches,
+    pub remote_min_tip_age_days: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ForeignWorktrees {
-    #[default]
     Keep,
-    MergedClean,
+    #[default]
+    Collect,
+}
+
+/// Remote deletion is independent of local preservation evidence.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteBranches {
+    Never,
+    #[default]
+    Managed,
+}
+
+impl Default for ProjectGcSettings {
+    fn default() -> Self {
+        Self {
+            regenerable: Vec::new(),
+            keep: Vec::new(),
+            foreign_worktrees: ForeignWorktrees::Collect,
+            integration_branches: Vec::new(),
+            keep_paths: Vec::new(),
+            remote_branches: RemoteBranches::Managed,
+            remote_min_tip_age_days: None,
+        }
+    }
 }
 
 impl ProjectGcSettings {
+    pub fn remote_min_tip_age_days(&self) -> u64 {
+        self.remote_min_tip_age_days.unwrap_or(1)
+    }
+
     fn validate(&self) -> Result<(), &'static str> {
+        if self.remote_min_tip_age_days.is_some_and(|days| days > 3650) {
+            return Err("remote_min_tip_age_days_range");
+        }
+        let worktree_roots = crate::PortTable::builtin().worktree_layout.roots;
         for name in &self.regenerable {
+            let path = Path::new(name);
             if !safe_relative(name)
-                || Path::new(name).components().count() != 1
+                || path.components().count() != 1
                 || name == ".git"
-                || name == ".worktrees"
+                || worktree_roots.iter().any(|root| root.starts_with(path))
             {
                 return Err("regenerable_directory_name");
             }
@@ -519,6 +851,51 @@ pub fn parse_cache_size(text: &str) -> Result<u64, &'static str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retention_declarations_round_trip_and_each_gc_class_is_reachable() {
+        use super::*;
+        for class in RETENTION_CLASSES {
+            let encoded = serde_json::to_vec(&class.eligibility).unwrap();
+            let decoded: RetentionEligibility = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(decoded, class.eligibility);
+            let encoded = serde_json::to_vec(&class.class).unwrap();
+            let decoded: RetentionKind = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(decoded, class.class);
+            assert!(!class.owner.is_empty() && !class.eligibility_detail.is_empty());
+            for trigger in class.triggers {
+                let encoded = serde_json::to_vec(trigger).unwrap();
+                let decoded: RetentionTrigger = serde_json::from_slice(&encoded).unwrap();
+                assert_eq!(decoded, *trigger);
+                assert!(retention_schedule(*trigger).any(|entry| entry.class == class.class));
+            }
+            let bytes = RetentionBytes {
+                class: class.class,
+                observation: ByteObservation::Measured { bytes: 0 },
+            };
+            let encoded = serde_json::to_vec(&bytes).unwrap();
+            let decoded: RetentionBytes = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(decoded, bytes);
+        }
+        for kind in [RetentionKind::ObservationLedgers] {
+            assert!(!retention_schedule(RetentionTrigger::FullGc).any(|entry| entry.class == kind));
+        }
+        for class in retention_schedule(RetentionTrigger::Gc) {
+            assert!(
+                retention_schedule(RetentionTrigger::FullGc)
+                    .any(|entry| entry.class == class.class)
+            );
+        }
+        for observation in [
+            ByteObservation::Measured { bytes: 17 },
+            ByteObservation::Partial { bytes: 19 },
+            ByteObservation::Unknown,
+        ] {
+            let encoded = serde_json::to_vec(&observation).unwrap();
+            let decoded: ByteObservation = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(decoded, observation);
+        }
+    }
+
     #[test]
     fn start_spacing_above_the_ceiling_is_invalid() {
         let spacing = |ms| super::LaneBuildSettings {
@@ -644,13 +1021,10 @@ mod tests {
     #[test]
     fn foreign_collection_requires_the_explicit_merged_clean_value() {
         let defaults: super::ProjectGcSettings = serde_json::from_str("{}").unwrap();
-        assert_eq!(defaults.foreign_worktrees, super::ForeignWorktrees::Keep);
+        assert_eq!(defaults.foreign_worktrees, super::ForeignWorktrees::Collect);
         let opted: super::ProjectGcSettings =
-            serde_json::from_str(r#"{"foreign_worktrees":"merged-clean"}"#).unwrap();
-        assert_eq!(
-            opted.foreign_worktrees,
-            super::ForeignWorktrees::MergedClean
-        );
+            serde_json::from_str(r#"{"foreign_worktrees":"collect"}"#).unwrap();
+        assert_eq!(opted.foreign_worktrees, super::ForeignWorktrees::Collect);
         assert!(
             serde_json::from_str::<super::ProjectGcSettings>(r#"{"foreign_worktrees":"all"}"#)
                 .is_err()
@@ -712,35 +1086,6 @@ mod tests {
         let invalid: super::GcSettings =
             toml_edit::de::from_str("lane_cargo_cache_max = 'invalid'").unwrap();
         assert!(invalid.validate().is_err());
-    }
-
-    #[test]
-    fn free_floor_defaults_to_ten_percent_with_a_fifty_gib_minimum() {
-        let gib = 1024_u64.pow(3);
-        assert_eq!(super::default_free_floor(100 * gib), 50 * gib);
-        assert_eq!(super::default_free_floor(1000 * gib), 100 * gib);
-        let settings = super::GcSettings {
-            free_floor: Some("20G".into()),
-            ..Default::default()
-        };
-        assert_eq!(
-            settings
-                .free_floor_bytes(std::path::Path::new("/missing/state"))
-                .unwrap(),
-            20 * gib
-        );
-    }
-
-    #[test]
-    fn observed_default_floor_matches_dispatch_floor() -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let settings = super::GcSettings::read(temp.path())?;
-        let total = provenant_os::fs::Directory::open_anchor(temp.path())?.total_bytes()?;
-        assert_eq!(
-            settings.free_floor_for_total(total)?,
-            settings.free_floor_bytes(temp.path())?
-        );
-        Ok(())
     }
 
     #[test]
@@ -851,17 +1196,11 @@ mod build_tests {
         assert_eq!(defaults.writer_lanes(), u64::MAX);
         assert_eq!(defaults.project_writer_lanes(), u64::MAX);
         assert_eq!(defaults.start_spacing_ms.unwrap_or(0), 0);
-        let invalid: LaneBuildSettings = toml_edit::de::from_str(
-            "max_writer_lanes = 65\nmax_project_writer_lanes = 0\nbuild_wait_minutes = 0",
-        )
-        .unwrap();
+        let invalid: LaneBuildSettings =
+            toml_edit::de::from_str("max_writer_lanes = 65\nmax_project_writer_lanes = 0").unwrap();
         assert_eq!(
             invalid.invalid_keys(),
-            [
-                "max_writer_lanes",
-                "max_project_writer_lanes",
-                "build_wait_minutes"
-            ]
+            ["max_writer_lanes", "max_project_writer_lanes",]
         );
         let wider: LaneBuildSettings =
             toml_edit::de::from_str("max_writer_lanes = 8\nmax_project_writer_lanes = 9").unwrap();
@@ -901,6 +1240,7 @@ mod build_tests {
         };
         assert_eq!(settings.build_limit(1), 3);
         assert_eq!(settings.jobs(), 7);
+        assert!((1..=2).contains(&LaneBuildSettings::default().jobs()));
         assert!(LaneBuildSettings::default().build_limit(0) >= 1);
         // Out-of-range values are rejected at config load and clamped here.
         let wild = LaneBuildSettings {
@@ -944,5 +1284,58 @@ mod build_tests {
         assert!(settings.invalid_keys().is_empty());
         let invalid: LaneBuildSettings = toml_edit::de::from_str("cargo_debug = \"loud\"").unwrap();
         assert_eq!(invalid.invalid_keys(), ["cargo_debug"]);
+    }
+}
+
+#[cfg(test)]
+mod disk_limit_tests {
+    use super::*;
+    #[test]
+    fn disk_levels_follow_the_declared_thresholds_and_keep_their_sources() -> std::io::Result<()> {
+        let temp = tempfile::tempdir()?;
+        for (floor, critical) in [(100, 50), (100, 0), (50, 100)] {
+            let settings = GcSettings {
+                free_floor: Some(format!("{floor}B")),
+                critical_free: Some(format!("{critical}B")),
+                ..Default::default()
+            };
+            let limits = settings.disk_limits(temp.path())?;
+            for free in [0, 49, 50, 99, 100, u64::MAX] {
+                let expected = if free < critical {
+                    DiskLevel::Critical
+                } else if free < floor {
+                    DiskLevel::Warning
+                } else {
+                    DiskLevel::Ready
+                };
+                assert_eq!(limits.level(free), expected);
+            }
+            let detail = limits.detail(17);
+            for fact in [
+                "17 bytes",
+                &format!("gc.free_floor is {floor} bytes"),
+                &format!("gc.critical_free is {critical} bytes"),
+                limits.free_floor_source.description(),
+                limits.critical_free_source.description(),
+            ] {
+                assert!(detail.contains(fact));
+            }
+            let encoded = serde_json::to_vec(&limits)?;
+            let decoded: DiskLimits = serde_json::from_slice(&encoded)?;
+            assert_eq!(
+                decoded.free_floor_source,
+                provenant_records::diagnostic::SettingSource::Configuration
+            );
+            assert_eq!(
+                decoded.critical_free_source,
+                provenant_records::diagnostic::SettingSource::Configuration
+            );
+        }
+        let defaults = GcSettings::default().disk_limits(temp.path())?;
+        assert_eq!(
+            defaults.critical_free_source,
+            provenant_records::diagnostic::SettingSource::ShippedDefault
+        );
+        Ok(())
     }
 }

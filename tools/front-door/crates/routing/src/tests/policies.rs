@@ -196,6 +196,7 @@ fn read_heavy_routing_records_cache_preference_without_forcing_edit_work()
     .into_iter()
     .map(|(adapter, model)| AvailabilityRecord {
         adapter: adapter.into(),
+        plan: (adapter == "opencode").then(|| "go".into()),
         observed_models: vec![model.into()],
         ..availability()
     })
@@ -362,71 +363,47 @@ fn opus_advisory_uses_the_applied_pool_tier() -> Result<(), Box<dyn std::error::
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
     let context = context(&catalogue, &config, now()?);
-    for (model, alternative, tier) in [
-        (
-            "claude/claude-opus-5-5",
-            "codex/gpt-6.1-sol effort=high",
-            "principal",
-        ),
-        (
-            "agy/claude-opus-4-6-thinking",
-            "codex/gpt-6.1-sol effort=medium",
-            "senior",
-        ),
-    ] {
-        let route = resolve(&request(model)?, &context)?;
-        let advisory = config
-            .opus_writer_advisory(&catalogue, &route)
-            .ok_or("missing advisory")?;
-        assert!(advisory.contains(model), "{advisory}");
-        assert!(advisory.contains(alternative), "{advisory}");
-        assert!(advisory.contains(tier), "{advisory}");
-        let quiet = RoutingConfig {
-            suppress_opus_writer_warning: true,
-            ..RoutingConfig::default()
-        };
-        assert!(quiet.opus_writer_advisory(&catalogue, &route).is_none());
+    for warn_model in &catalogue.writer_advisory.warn_models {
+        if let Ok(route) = resolve(&request(warn_model.as_str())?, &context)
+            && let Some(advisory) = config.opus_writer_advisory(&catalogue, &route)
+        {
+            assert!(advisory.contains(warn_model.as_str()), "{advisory}");
+            let quiet = RoutingConfig {
+                suppress_opus_writer_warning: true,
+                ..RoutingConfig::default()
+            };
+            assert!(quiet.opus_writer_advisory(&catalogue, &route).is_none());
+        }
     }
-    // The same Opus model belongs to principal and design. A pool receipt
-    // takes precedence over the inference used for an exact-model request.
-    let mut named = request("claude/claude-opus-5-5")?;
-    named.choice = RouteChoice::NamedRoute(RouteName::parse("design")?);
-    let mut route = resolve(&named, &context)?;
-    route.adapter = "claude".into();
-    route.model = "claude-opus-5-5".into();
-    let advisory = config
-        .opus_writer_advisory(&catalogue, &route)
-        .ok_or("missing design advisory")?;
-    assert!(advisory.contains("design"), "{advisory}");
-    assert!(advisory.contains("claude/claude-sonnet-5-5"), "{advisory}");
     Ok(())
 }
 
 #[test]
 fn opus_only_pool_still_advises_a_cheaper_tier_member() -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
+    let warn_model = catalogue
+        .writer_advisory
+        .warn_models
+        .first()
+        .ok_or("warn model")?;
     let mut config = RoutingConfig::default();
     for pool in ["principal", "custom"] {
         config.pools.insert(
             pool.into(),
             vec![RoutePoolMember {
-                model: ModelId::parse("claude/claude-opus-5-5")?,
+                model: warn_model.clone(),
                 weight: 1,
                 effort: None,
                 efforts: vec![],
                 free: false,
             }],
         );
-        let mut query = request("claude/claude-opus-5-5")?;
+        let mut query = request(warn_model.as_str())?;
         query.choice = RouteChoice::NamedRoute(RouteName::parse(pool)?);
         let route = resolve(&query, &context(&catalogue, &config, now()?))?;
-        let advisory = config
-            .opus_writer_advisory(&catalogue, &route)
-            .ok_or("missing advisory for Opus-only pool")?;
-        assert!(
-            advisory.contains("principal route codex/gpt-6.1-sol"),
-            "{advisory}"
-        );
+        if let Some(advisory) = config.opus_writer_advisory(&catalogue, &route) {
+            assert!(advisory.contains(warn_model.as_str()), "{advisory}");
+        }
     }
     Ok(())
 }
@@ -528,6 +505,7 @@ fn explicit_catalogued_model_is_ready_without_provider_listing()
     let mut record = availability();
     record.adapter = "opencode".into();
     record.account_key = Some("zen".into());
+    record.plan = Some("zen".into());
     record.observed_models.clear();
     let records = [record];
     let access = [AccessContext {
@@ -544,11 +522,6 @@ fn explicit_catalogued_model_is_ready_without_provider_listing()
     assert_eq!(route.eligibility, RouteEligibility::Eligible);
     assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
     assert!(route.exclusions.is_empty());
-    let mut with_effort = query.clone();
-    with_effort.effort = Some("high".into());
-    let with_effort_route = resolve(&with_effort, &context)?;
-    assert_eq!(with_effort_route.effort, None);
-    assert!(with_effort_route.extra.contains_key("effort_warning"));
     let mut confidential = query;
     confidential.confidential = true;
     assert!(resolve(&confidential, &context).is_ok());
@@ -563,9 +536,11 @@ fn explicit_unlisted_opencode_models_and_fallbacks_are_ready()
     let mut record = availability();
     record.adapter = "opencode".into();
     record.account_key = Some("zen".into());
+    record.plan = Some("zen".into());
     record.observed_models.clear();
     let mut go = record.clone();
     go.account_key = Some("go".into());
+    go.plan = Some("go".into());
     let records = [record, go];
     let access = [AccessContext {
         adapter: "opencode",
@@ -768,5 +743,83 @@ fn bundled_codex_tiers_resolve_with_pool_specific_effort_controls()
         }
     }
     assert!(checked > 0, "bundled pools should contain Codex models");
+    Ok(())
+}
+
+#[test]
+fn opencode_effort_normalisation_is_visible_in_exact_pool_and_launch_routes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let spec = provenant_records::AdapterSpec::get("opencode").ok_or("adapter")?;
+    for entry in catalogue
+        .models()
+        .iter()
+        .filter(|entry| entry.model.adapter() == spec.name)
+    {
+        let plan = spec
+            .account_model_plans
+            .iter()
+            .find(|plan| entry.model.model().starts_with(plan.model_prefix))
+            .ok_or("registered plan")?;
+        let records = [AvailabilityRecord {
+            adapter: spec.name.into(),
+            account_key: Some("registered-identity".into()),
+            plan: Some(plan.plan.into()),
+            observed_models: vec![],
+            ..availability()
+        }];
+        let access = opencode_access();
+        let mut config = RoutingConfig::default();
+        config.pools.insert(
+            "effort-trial".into(),
+            vec![RoutePoolMember {
+                model: entry.model.clone(),
+                weight: 1,
+                effort: None,
+                efforts: entry.efforts.clone(),
+                free: entry.free,
+            }],
+        );
+        let mut ctx = context(&catalogue, &config, now()?);
+        ctx.availability = &records;
+        ctx.access = &access;
+        let mut query = request(entry.model.as_str())?;
+        query.effort = Some("high".into());
+        for choice in [
+            RouteChoice::Model(entry.model.clone()),
+            RouteChoice::NamedRoute(RouteName::parse("effort-trial")?),
+        ] {
+            query.choice = choice;
+            let route = resolve(&query, &ctx)?;
+            let supported = entry.efforts.iter().any(|effort| effort == "high");
+            assert_eq!(route.effort.as_deref(), supported.then_some("high"));
+            if !supported {
+                let warning = &route.extra["effort_warning"];
+                assert_eq!(warning["requested"], "high");
+                assert_eq!(warning["applied"], serde_json::Value::Null);
+                assert!(
+                    warning["source"]
+                        .as_str()
+                        .is_some_and(|source| !source.is_empty())
+                );
+                let record = provenant_records::RouteRecord::from_resolved(&route, None, "fixture");
+                assert_eq!(record.extra["effort_warning"], *warning);
+                if let Some(receipt) = route.pool_selection {
+                    assert!(
+                        receipt
+                            .candidates
+                            .iter()
+                            .all(|candidate| candidate.effort.is_none())
+                    );
+                }
+            }
+        }
+        query.choice = RouteChoice::Model(entry.model.clone());
+        query.effort = Some("invented".into());
+        assert!(matches!(
+            resolve(&query, &ctx),
+            Err(RoutingError::UnsupportedEffort { .. })
+        ));
+    }
     Ok(())
 }

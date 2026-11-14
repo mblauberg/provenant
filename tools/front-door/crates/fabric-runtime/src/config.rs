@@ -132,8 +132,12 @@ pub enum HostNativeConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GraphConfig {
-    /// Minimum allowance for one writer binding, independent of settlement wait.
-    pub writer_launch_seconds: u64,
+    /// Deadline for decide requests that omit a node-specific timeout.
+    pub decide_timeout_seconds: u64,
+    /// General command launch and read/wait allowance.
+    pub launch_wait_seconds: u64,
+    /// Allowance for one writer provisioning, independent of a reader wait.
+    pub writer_provision_seconds: u64,
     pub limits: GraphLimits,
     pub budget: GraphBudget,
     /// Backoff for pending CI observations; node overrides take precedence.
@@ -146,10 +150,16 @@ pub struct GraphConfig {
     pub land: GraphLand,
 }
 
+pub const DEFAULT_DECIDE_TIMEOUT_SECONDS: u64 = 300;
+/// The largest seconds value representable by the stored microsecond duration.
+pub const MAX_DECIDE_TIMEOUT_SECONDS: u64 = u64::MAX / 1_000_000;
+
 impl Default for GraphConfig {
     fn default() -> Self {
         Self {
-            writer_launch_seconds: 55,
+            decide_timeout_seconds: DEFAULT_DECIDE_TIMEOUT_SECONDS,
+            launch_wait_seconds: 55,
+            writer_provision_seconds: 55,
             limits: Default::default(),
             budget: Default::default(),
             ci_poll_backoff: Default::default(),
@@ -284,6 +294,7 @@ pub struct GraphLimits {
     pub graph_prompt_bytes: usize,
     pub expansion_depth: usize,
     pub fan_out_width: usize,
+    /// Advisory start threshold; policy decides whether an occupied cap warns or refuses.
     #[serde(
         deserialize_with = "deserialize_concurrency",
         serialize_with = "serialise_concurrency"
@@ -453,6 +464,8 @@ pub struct Lanes {
     pub memory_pressure_threshold: provenant_config::MemoryPressureThreshold,
     pub priority: LanePriority,
     pub cargo_seed: CargoSeed,
+    /// Source directories in host CARGO_HOME are read-only unless enabled.
+    pub cargo_source_writes: Option<bool>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub max_concurrent_builds: Option<u64>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
@@ -465,8 +478,6 @@ pub struct Lanes {
     pub max_writer_lanes: Option<u64>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub max_project_writer_lanes: Option<u64>,
-    #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
-    pub build_wait_minutes: Option<u64>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub lane_port_base: Option<u64>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
@@ -483,9 +494,6 @@ pub struct Lanes {
     /// Seconds after its newest write during which a profile directory is
     /// never removed; 15 minutes unless set.
     pub build_dir_grace_seconds: Option<u64>,
-    /// Seconds between settlement-triggered walks of the lane caches; 5
-    /// minutes unless set.
-    pub build_dir_survey_interval_seconds: Option<u64>,
     /// What a settled lane tells the chair that dispatched it.
     pub settlement: Settlement,
 }
@@ -519,16 +527,15 @@ impl Lanes {
             memory_pressure_threshold: Some(self.memory_pressure_threshold),
             max_concurrent_builds: self.max_concurrent_builds,
             cargo_build_jobs: self.cargo_build_jobs,
+            cargo_source_writes: self.cargo_source_writes,
             cargo_incremental: self.cargo_incremental,
             cargo_debug: self.cargo_debug.clone(),
             build_dir_max_bytes: self.build_dir_max_bytes,
             build_dir_grace_seconds: self.build_dir_grace_seconds,
-            build_dir_survey_interval_seconds: self.build_dir_survey_interval_seconds,
             max_lanes: self.max_lanes,
             max_project_lanes: self.max_project_lanes,
             max_writer_lanes: self.max_writer_lanes,
             max_project_writer_lanes: self.max_project_writer_lanes,
-            build_wait_minutes: self.build_wait_minutes,
             lane_port_base: self.lane_port_base,
             lane_port_block: self.lane_port_block,
             lane_port_blocks: self.lane_port_blocks,
@@ -644,7 +651,6 @@ pub struct Limits {
     pub output_lines: u64,
     pub output_bytes: u64,
     pub result_bytes: u64,
-    pub lease_seconds: u64,
     pub peer_seconds: u64,
     #[serde(default = "default_graph_timeout_seconds")]
     pub graph_timeout_seconds: u64,
@@ -767,7 +773,6 @@ impl DomainConfig for FabricConfig {
             ("output_lines", l.output_lines, 500),
             ("output_bytes", l.output_bytes, 65536),
             ("result_bytes", l.result_bytes, 1048576),
-            ("lease_seconds", l.lease_seconds, 3600),
             ("peer_seconds", l.peer_seconds, 30),
         ] {
             if value == 0 || value > cap {
@@ -809,8 +814,26 @@ impl DomainConfig for FabricConfig {
                 reject(format!("plan.auto.{name}"));
             }
         }
-        if !(1..=14_400).contains(&self.graph.writer_launch_seconds) {
-            reject("graph.writer_launch_seconds".into());
+        for (key, seconds, maximum) in [
+            (
+                "decide_timeout_seconds",
+                self.graph.decide_timeout_seconds,
+                MAX_DECIDE_TIMEOUT_SECONDS,
+            ),
+            (
+                "launch_wait_seconds",
+                self.graph.launch_wait_seconds,
+                14_400,
+            ),
+            (
+                "writer_provision_seconds",
+                self.graph.writer_provision_seconds,
+                14_400,
+            ),
+        ] {
+            if !(1..=maximum).contains(&seconds) {
+                reject(format!("graph.{key}"));
+            }
         }
         let limits = &self.graph.limits;
         for (name, value) in [
@@ -874,7 +897,13 @@ fn defaults(_profile: Profile) -> &'static str {
 /// boundary: recovery could raise a cap, lift a budget or swap a binary. Labels,
 /// peers' addresses and lane tuning recover to defaults.
 pub const FIELD_METADATA: &[FieldMetadata] = &[
-    FieldMetadata::int("graph.writer_launch_seconds", 1, 14_400),
+    FieldMetadata::int(
+        "graph.decide_timeout_seconds",
+        1,
+        MAX_DECIDE_TIMEOUT_SECONDS as i64,
+    ),
+    FieldMetadata::int("graph.launch_wait_seconds", 1, 14_400),
+    FieldMetadata::int("graph.writer_provision_seconds", 1, 14_400),
     FieldMetadata::enumeration(
         "lanes.memory_pressure_threshold",
         &["warning", "critical", "never"],
@@ -886,7 +915,6 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::int("lanes.max_project_lanes", 1, 32),
     FieldMetadata::int("lanes.max_writer_lanes", 1, 64),
     FieldMetadata::int("lanes.max_project_writer_lanes", 1, 32),
-    FieldMetadata::int("lanes.build_wait_minutes", 1, 1440),
     FieldMetadata::int("lanes.lane_port_base", 1024, 65535),
     FieldMetadata::int("lanes.lane_port_block", 1, 1024),
     FieldMetadata::int("lanes.lane_port_blocks", 0, 1024),
@@ -895,7 +923,7 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("home_hosts.{host}", "string"),
 ];
 fn boundary(error: &SectionError) -> bool {
-    if error.code == "retired.bundle_bytes" {
+    if error.code.starts_with("retired.") {
         return false;
     }
     if error.code == "unknown_key"
@@ -921,7 +949,9 @@ fn boundary_existing(error: &SectionError) -> bool {
     };
     [
         "limits",
-        "graph.writer_launch_seconds",
+        "graph.decide_timeout_seconds",
+        "graph.launch_wait_seconds",
+        "graph.writer_provision_seconds",
         "graph.limits",
         "graph.budget",
         "graph.allowed_read_roots",
@@ -943,19 +973,48 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn writer_launch_allowance_defaults_and_validates() {
+    fn decide_timeout_setting_must_fit_its_duration_representation() {
         let mut config = config();
-        assert_eq!(config.graph.writer_launch_seconds, 55);
-        for seconds in [0, 14_401] {
-            config.graph.writer_launch_seconds = seconds;
+        for seconds in [0, MAX_DECIDE_TIMEOUT_SECONDS + 1] {
+            config.graph.decide_timeout_seconds = seconds;
             assert!(
                 config
                     .validate()
                     .iter()
-                    .any(|e| e.field == "graph.writer_launch_seconds")
+                    .any(|error| { error.field == "graph.decide_timeout_seconds" })
             );
         }
-        config.graph.writer_launch_seconds = 2;
+        for seconds in [
+            1,
+            MAX_DECIDE_TIMEOUT_SECONDS,
+            DEFAULT_DECIDE_TIMEOUT_SECONDS,
+        ] {
+            config.graph.decide_timeout_seconds = seconds;
+            assert!(config.validate().is_empty());
+        }
+    }
+
+    #[test]
+    fn launch_allowances_validate_independently() {
+        let mut config = config();
+        for field in ["launch_wait_seconds", "writer_provision_seconds"] {
+            for seconds in [0, 14_401] {
+                config.graph = GraphConfig::default();
+                if field == "launch_wait_seconds" {
+                    config.graph.launch_wait_seconds = seconds;
+                } else {
+                    config.graph.writer_provision_seconds = seconds;
+                }
+                assert!(
+                    config
+                        .validate()
+                        .iter()
+                        .any(|error| error.field == format!("graph.{field}"))
+                );
+            }
+        }
+        config.graph.launch_wait_seconds = 2;
+        config.graph.writer_provision_seconds = 120;
         assert!(config.validate().is_empty());
     }
 
@@ -1036,6 +1095,17 @@ mod tests {
     }
 
     #[test]
+    fn cargo_source_write_setting_reaches_the_launch_settings() {
+        for setting in [None, Some(false), Some(true)] {
+            let value = setting
+                .map(|value| serde_json::json!({"cargo_source_writes": value}))
+                .unwrap_or_else(|| serde_json::json!({}));
+            let lanes: Lanes = serde_json::from_value(value).unwrap();
+            assert_eq!(lanes.build_settings().cargo_source_writes, setting);
+        }
+    }
+
+    #[test]
     fn lane_build_settings_validate_shared_bounds_and_auto() {
         let lanes: Lanes =
             serde_json::from_str(r#"{"max_concurrent_builds": -1, "cargo_build_jobs": -1}"#)
@@ -1049,7 +1119,6 @@ mod tests {
         config.lanes.max_project_lanes = Some(0);
         config.lanes.max_writer_lanes = Some(65);
         config.lanes.max_project_writer_lanes = Some(0);
-        config.lanes.build_wait_minutes = Some(0);
         let errors = config.validate();
         assert!(
             errors
@@ -1062,7 +1131,6 @@ mod tests {
             "max_project_lanes",
             "max_writer_lanes",
             "max_project_writer_lanes",
-            "build_wait_minutes",
         ] {
             assert!(errors.iter().any(|e| e.field == format!("lanes.{key}")));
         }
@@ -1157,7 +1225,6 @@ mod tests {
                 output_lines: 500,
                 output_bytes: 65536,
                 result_bytes: 1048576,
-                lease_seconds: 3600,
                 peer_seconds: 30,
                 graph_timeout_seconds: 14400,
                 store_busy_timeout_ms: 30_000,
@@ -1430,6 +1497,24 @@ mod tests {
         let loaded =
             provenant_config::load_with_domains(&roots, Some(&retired[..]), &sections).unwrap();
         assert!(format!("{:?}", loaded.warnings).contains("limit_ceiling"));
+        let retired = b"schema_version=1\n[domains.fabric.graph]\nwriter_launch_seconds=123\n";
+        let loaded =
+            provenant_config::load_with_domains(&roots, Some(&retired[..]), &sections).unwrap();
+        let warning = loaded
+            .warnings
+            .iter()
+            .find(|warning| warning.message.contains("writer_launch_seconds"))
+            .unwrap();
+        assert!(warning.message.contains("launch_wait_seconds"));
+        assert!(warning.message.contains("writer_provision_seconds"));
+        assert_eq!(
+            loaded.domains.fabric.graph.launch_wait_seconds,
+            config().graph.launch_wait_seconds
+        );
+        assert_eq!(
+            loaded.domains.fabric.graph.writer_provision_seconds,
+            config().graph.writer_provision_seconds
+        );
         let unknown =
             b"schema_version = 1\n[domains.fabric.graph.limits]\nunknown_limit = 1\nnodes = 10\n";
         let loaded =
@@ -1506,14 +1591,6 @@ mod tests {
                 "graph.budget.per_node.wall_time_seconds",
                 "rejected value: 0",
                 true,
-                "range",
-            ),
-            // Configuration may only lower a protocol cap.
-            (
-                "schema_version = 1\n[domains.fabric.limits]\nlease_seconds = 3601\n",
-                "limits.lease_seconds",
-                "3601",
-                false,
                 "range",
             ),
         ] {

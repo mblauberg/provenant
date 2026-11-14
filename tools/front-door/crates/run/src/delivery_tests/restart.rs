@@ -39,11 +39,11 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
         let call = tests::call(&clock, &cancel);
         let store = RunStore::open(&execution, &call)?;
         let mut input = tests::input();
-        input.request.tasks[0].writer = Some(fixture.writer.clone());
-        input.request.tasks[0].deliver = Some(fixture.request.clone());
+        input.request.task.writer = Some(fixture.writer.clone());
+        input.request.task.deliver = Some(fixture.request.clone());
         store.create(&input, &call)?;
-        let id = input.attempts[0].attempt_id;
-        let attempt = store.attempt_dir(input.run_id, id, false)?;
+        let id = input.attempt_id;
+        let attempt = store.attempt_dir(id, false)?;
         let scope = RunStore::scope(&store.record(id, &call)?);
         let mut driver =
             crate::settlement::Guard::claim(&attempt, scope, &clock)?.ok_or("driver")?;
@@ -171,7 +171,7 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                     &fixture.writer,
                     &fixture.request,
                     &attempt,
-                    &format!("Run {}\nAttempt {id}", input.run_id)
+                    &format!("Run {}\nAttempt {id}", input.attempt_id)
                 ),
                 Err(RunError::Delivery(WriterDeliveryStage::Push))
             ));
@@ -230,7 +230,7 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
         let store = RunStore::open(&execution, &call)?;
         assert_eq!(
             store
-                .pending_effect_attempts(input.run_id, &call)?
+                .pending_effect_attempts(input.attempt_id, &call)?
                 .contains(&id),
             !mode.ends_with("_legacy")
         );
@@ -322,9 +322,9 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                     reaction.ledger_done = true;
                     Ok(())
                 };
-                store.drain_reactions(input.run_id, &clock, &cancel, &mut react)?;
+                store.drain_reactions(input.attempt_id, &clock, &cancel, &mut react)?;
                 store.reconcile_terminal_effects(&store.record(id, &call)?, &call)?;
-                store.drain_reactions(input.run_id, &clock, &cancel, &mut react)?;
+                store.drain_reactions(input.attempt_id, &clock, &cancel, &mut react)?;
                 assert_eq!(calls.get(), (1, 1));
                 let pushes =
                     std::fs::read_to_string(fixture.root.join("pushes")).unwrap_or_default();
@@ -453,9 +453,9 @@ fn reconcile_settles_exhausted_writer_import_after_durable_exit()
     let call = tests::call(&clock, &cancel);
     let store = RunStore::open(&execution, &call)?;
     let mut input = tests::input();
-    input.request.tasks[0].writer = Some(fixture.writer.clone());
+    input.request.task.writer = Some(fixture.writer.clone());
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let record = store.mark_starting(
         &store.record(id, &call)?,
         &tests::route(),
@@ -465,7 +465,7 @@ fn reconcile_settles_exhausted_writer_import_after_durable_exit()
         &call,
     )?;
     let scope = RunStore::scope(&record);
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let mut launch = crate::prepare_writer(
         &fixture.writer,
         &store.writer_registry,
@@ -524,7 +524,7 @@ fn reconcile_settles_exhausted_writer_import_after_durable_exit()
         RECORD_LIMIT,
     )?;
     let found = store.reconcile_with_observer(
-        input.run_id,
+        input.attempt_id,
         &dispatch_tests::Fake::default(),
         &call,
         &provenant_supervisor::census::SystemProcessObserver,
@@ -584,16 +584,16 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
     let call = tests::call(&clock, &cancel);
     let store = RunStore::open(&execution, &call)?;
     let mut input = tests::input();
-    input.request.tasks[0].writer = Some(fixture.writer.clone());
+    input.request.task.writer = Some(fixture.writer.clone());
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let temporary = store.temporary_path(id, &call)?;
     let launch = crate::prepare_writer(
         &fixture.writer,
         execution.state_root.as_path(),
         execution.project_id,
     )?;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     store.mark_starting(
         &store.record(id, &call)?,
         &tests::route(),
@@ -638,7 +638,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
             ..
         }
     ));
-    assert!(store.open_runs(100, &call)?.contains(&input.run_id));
+    assert!(store.open_attempts(100, &call)?.contains(&input.attempt_id));
     std::fs::write(&marker, original)?;
 
     // A failed cleanup must retain its retry marker and the pin.
@@ -647,7 +647,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
     std::fs::rename(&common, &unavailable)?;
     let observer = provenant_supervisor::census::SystemProcessObserver;
     let result = store.reconcile_with_observer(
-        input.run_id,
+        input.attempt_id,
         &crate::dispatch_tests::Ready,
         &call,
         &observer,
@@ -657,7 +657,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
             .iter()
             .any(|(_, result)| matches!(result, crate::Reconciled::TemporaryRetained { .. }))
     );
-    assert!(store.open_runs(100, &call)?.contains(&input.run_id));
+    assert!(store.open_attempts(100, &call)?.contains(&input.attempt_id));
     let gc = store.gc_temporary(
         &Directory::open_anchor(execution.state_root.as_path())?,
         7,
@@ -685,7 +685,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
     assert!(spawned.get());
     std::fs::rename(&unavailable, &common)?;
     let second = store.reconcile_with_observer(
-        input.run_id,
+        input.attempt_id,
         &crate::dispatch_tests::Ready,
         &call,
         &observer,
@@ -722,16 +722,16 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
             prompt: &str,
             paths: &LaunchPaths,
             resume: Option<&AttemptRecord>,
-        ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
+        ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
             use provenant_confinement::permissions::{
                 AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions, ProviderProfile,
                 ProviderProfileSpec, WorktreeWriteAuthority,
             };
             let writer = crate::prepare_writer(&self.writer, &self.state, self.project)
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| crate::fixture_refusal(error.to_string()))?;
             let authority =
                 WorktreeWriteAuthority::for_worktree(&writer.worktree, &writer.branch, &self.home)
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| crate::fixture_refusal(error.to_string()))?;
             let grant = |path: std::path::PathBuf| PathGrant {
                 path,
                 scope: PathScope::Subtree,
@@ -758,7 +758,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
                         nested_confinement: false,
                     },
                 })
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| crate::fixture_refusal(error.to_string()))?;
             let mut prepared = crate::dispatch_tests::Ready.prepare(task, prompt, paths, resume)?;
             prepared.confinement = Some(crate::LaunchConfinement {
                 plan,
@@ -768,9 +768,17 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
                 },
                 writer: Some(writer),
                 home: self.home.clone(),
-                cargo_registry_seed: false,
+                cargo_home: provenant_confinement::cargo::CargoHome::resolve(&self.home, |_| None)
+                    .unwrap(),
+                cargo_target_seed: false,
                 state_root: self.state.clone(),
-                sandboxed: true,
+                sandbox: provenant_confinement::run_config::SandboxMode {
+                    requested: true,
+                    effective: true,
+                    source: provenant_confinement::run_config::SandboxSource::Knob,
+                    warning: None,
+                },
+                backend: None,
             });
             Ok(prepared)
         }
@@ -788,7 +796,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
     let execution = registered_landed_writer_fixture(&fixture)?;
     let store = RunStore::open(&execution, &call)?;
     let mut input = tests::input();
-    input.request.tasks[0].writer = Some(fixture.writer.clone());
+    input.request.task.writer = Some(fixture.writer.clone());
     store.create(&input, &call)?;
     let marker = fixture.writer.worktree.join(".git");
     let original = std::fs::read(&marker)?;
@@ -799,7 +807,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
         project: execution.project_id,
     };
     let result = store.start(
-        input.run_id,
+        input.attempt_id,
         &provider,
         &|_, _| {
             std::fs::write(&marker, b"gitdir: /nonexistent\n").map_err(RunError::Io)?;
@@ -825,14 +833,14 @@ fn terminal_outcomes_remove_the_launch_base_pin_and_interrupted_import_ref()
         let call = tests::call(&clock, &cancel);
         let store = RunStore::open(&execution, &call)?;
         let mut input = tests::input();
-        input.request.tasks[0].writer = Some(fixture.writer.clone());
+        input.request.task.writer = Some(fixture.writer.clone());
         store.create(&input, &call)?;
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         let mut exit = tests::exit();
         if outcome == Outcome::Cancelled {
             exit.cancel_delivered_before_exit = Some(true);
         }
-        let attempt = store.attempt_dir(input.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let launch = crate::prepare_writer(
             &fixture.writer,
             execution.state_root.as_path(),
@@ -878,17 +886,13 @@ fn terminal_verifies_private_objects_before_publication()
             let scratch = attempt_path.join("tmp/candidate-0");
             let objects = scratch.join("git-objects");
             std::fs::create_dir_all(objects.join("info"))?;
-            std::fs::write(
-                objects.join("info/alternates"),
-                format!(
-                    "{}\n",
-                    fixture.writer.project.join(".git/objects").display()
-                ),
-            )?;
             let executable = provenant_os::git::git_executable().ok_or("Git unavailable")?;
             let executor = SystemExecutor::new(1)?;
-            let runtime =
-                provenant_confinement::UtilityRuntime::new(&executable, fixture.root.join("home"))?;
+            let runtime = provenant_confinement::UtilityRuntime::new(
+                &executable,
+                fixture.root.join("home"),
+                fixture.root.join("state"),
+            )?;
             let repo = runtime.open_repo(
                 &executor,
                 &fixture.writer.project,
@@ -896,6 +900,11 @@ fn terminal_verifies_private_objects_before_publication()
                 &provenant_core::CancelToken::new(),
             )?;
             let worktree = provenant_confinement::verify_worktree(&repo, &fixture.writer.worktree)?;
+            let shared_objects = worktree.repo().common_git_dir().join("objects");
+            std::fs::write(
+                objects.join("info/alternates"),
+                format!("{}\n", crate::objects::quote_alternate(&shared_objects)),
+            )?;
             let base =
                 crate::objects::resolve_ref(&executable, worktree.repo(), "refs/heads/lane")?;
             crate::objects::prepare_refs(
@@ -918,6 +927,18 @@ fn terminal_verifies_private_objects_before_publication()
                     .chain(args.into_iter().map(Into::into))
                     .collect();
                 let mut environment = fixture.environment.clone();
+                environment.retain(|(key, _)| {
+                    !matches!(
+                        key.to_str(),
+                        Some(
+                            "GIT_OBJECT_DIRECTORY"
+                                | "GIT_COMMON_DIR"
+                                | "GIT_DIR"
+                                | "GIT_WORK_TREE"
+                                | "GIT_INDEX_FILE"
+                        )
+                    )
+                });
                 environment.push((
                     "GIT_OBJECT_DIRECTORY".into(),
                     objects.clone().into_os_string(),

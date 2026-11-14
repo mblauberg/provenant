@@ -98,7 +98,7 @@ pub(super) fn host_indexes_protected(
     [
         "fabric/fabric.sqlite3",
         "fabric/host.sqlite3",
-        run::WORK_INDEX_FILE,
+        "run.sqlite3",
     ]
     .iter()
     .flat_map(|file| {
@@ -226,14 +226,12 @@ pub(super) fn confinement_request(
             let mut inputs =
                 provenant_core::RootInputs::new(roots.home.to_owned(), roots.cwd.to_owned());
             inputs.state_dir = Some(roots.state.to_owned());
-            fixture_roots = inputs
-                .resolve(&provenant_os::fs::SystemPathResolver)
-                .map_err(|_| {
-                    provenant_confinement::permissions::PermissionError::AnchorMismatchAt {
-                        path: roots.state.to_owned(),
-                        stage: "host state root binding",
-                    }
-                })?;
+            fixture_roots = provenant_os::fs::bind_roots(&inputs).map_err(|_| {
+                provenant_confinement::permissions::PermissionError::AnchorMismatchAt {
+                    path: roots.state.to_owned(),
+                    stage: "host state root binding",
+                }
+            })?;
             &fixture_roots
         }
     };
@@ -255,9 +253,9 @@ pub(super) fn confinement_request(
                 policy
                     .optional()
                     .network_for(access.network(writer.is_some())),
-                writer.is_none(),
+                policy.optional(),
             )
-            .sandboxed
+            .effective
         }
     };
     let mut mandatory =
@@ -387,7 +385,7 @@ pub(super) fn confinement_request(
 /// Resolve the lane's sandbox from its route id (`adapter/model`), the
 /// sealed `lanes.sandbox` knob, the parent flag and the access the plan
 /// grants. The parent flag only narrows, so the host may set it on either the
-/// task or its profile. A knob value that is not a string sandboxes.
+/// task or its profile. Invalid optional knobs retain the default off.
 pub(super) fn sandbox_mode(
     host: &provenant_confinement::run_config::RunConfig,
     route: &str,
@@ -400,7 +398,11 @@ pub(super) fn sandbox_mode(
         route,
         task,
         permissions.network,
-        matches!(permissions.mode, AccessMode::ReadOnly),
+        permissions
+            .policy
+            .as_ref()
+            .map(|p| p.optional())
+            .unwrap_or(&Default::default()),
     );
     if let Some(warning) = &mode.warning {
         use std::io::Write as _;
@@ -414,37 +416,148 @@ fn sandbox_mode_for_access(
     route: &str,
     task: &run::TaskRequest,
     network: NetworkAccess,
-    read_only: bool,
+    policy: &provenant_confinement::permissions::OptionalPolicy,
 ) -> provenant_confinement::run_config::SandboxMode {
-    use provenant_confinement::run_config::SandboxInputs;
-    host.sandbox_for(SandboxInputs {
+    use provenant_confinement::run_config::{SandboxInputs, SandboxRestriction};
+    let sandbox = task
+        .profile
+        .knobs
+        .get("lanes.sandbox")
+        .and_then(serde_json::Value::as_str);
+    let strength = task
+        .profile
+        .knobs
+        .get("lanes.sandbox_floor")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("warn");
+    let parent = [&task.extra, &task.profile.extra].into_iter().any(|extra| {
+        extra
+            .get(provenant_records::run::PARENT_SANDBOXED_FIELD)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    });
+    let (floor, warn) = provenant_records::run::admission_floor(parent, sandbox, strength);
+    let restrictions = SandboxRestriction::for_policy(network, policy);
+    let mut mode = host.sandbox_for(SandboxInputs {
         route,
-        knob: task
-            .profile
-            .knobs
-            .get("lanes.sandbox")
-            .map(|value| value.as_str().unwrap_or("on")),
-        parent_sandboxed: [&task.extra, &task.profile.extra].into_iter().any(|extra| {
-            extra
-                .get(provenant_records::run::PARENT_SANDBOXED_FIELD)
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-        }),
-        network_narrowed: network != NetworkAccess::Open,
-        read_only,
+        knob: if floor { Some("on") } else { sandbox },
+        parent_sandboxed: floor,
+        restrictions: &restrictions,
         os_sandboxed: provenant_confinement::run_config::current_process_is_sandboxed(),
         platform_supported: cfg!(target_os = "macos"),
-    })
+    });
+    if floor && mode.effective {
+        mode.requested = sandbox == Some("on");
+        mode.source = provenant_confinement::run_config::SandboxSource::Parent;
+    }
+    if warn {
+        let source = task
+            .profile
+            .extra
+            .get(provenant_config::KNOB_SOURCES)
+            .and_then(|sources| sources.get("lanes.sandbox_floor"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("default");
+        let warning = format!(
+            "sandbox admission floor lowered; lanes.sandbox_floor=warn (source: {source}, boundary: none)"
+        );
+        mode.warning = Some(match mode.warning.take() {
+            Some(other) => format!("{other}; {warning}"),
+            None => warning,
+        });
+    }
+    mode
+}
+
+// Small: sealed public task/receipt round trips across every adapter candidate.
+#[cfg(test)]
+#[test]
+fn admission_policy_is_independent_of_primary_or_fallback_adapter()
+-> Result<(), Box<dyn std::error::Error>> {
+    let prepared = crate::run::tests::trace_run(
+        1,
+        provenant_core::AttemptId::from_bytes([9; 16]),
+        provenant_core::WallTime::from_micros(1)?,
+    )?;
+    for strength in ["off", "warn", "strict"] {
+        let mut task = prepared.request.task.clone();
+        task.profile.extra.insert(
+            provenant_records::run::PARENT_SANDBOXED_FIELD.into(),
+            true.into(),
+        );
+        task.profile
+            .knobs
+            .insert("lanes.sandbox".into(), "off".into());
+        task.profile
+            .knobs
+            .insert("lanes.sandbox_floor".into(), strength.into());
+        let task: run::TaskRequest = serde_json::from_value(serde_json::to_value(&task)?)?;
+        for route in [
+            "codex/gpt-6-luna",
+            "claude/claude-sonnet-5-5",
+            "command/fmt",
+        ] {
+            let mode = sandbox_mode_for_access(
+                &Default::default(),
+                route,
+                &task,
+                NetworkAccess::Open,
+                &Default::default(),
+            );
+            if !provenant_confinement::run_config::current_process_is_sandboxed() {
+                assert_eq!(mode.effective, strength == "strict");
+                assert_eq!(
+                    mode.warning.is_some(),
+                    strength == "warn" || (strength == "strict" && !cfg!(target_os = "macos"))
+                );
+            } else {
+                assert!(mode.effective);
+            }
+            let mut receipt = run::RouteRecord::default();
+            let mut environment = Vec::new();
+            apply_sandbox_mode(&task, mode, &mut environment, &mut receipt);
+            assert_eq!(receipt.extra["sandbox_admission"]["strength"], strength);
+            assert_eq!(receipt.extra["sandbox_admission"]["boundary"], "none");
+            assert_eq!(receipt.extra["sandbox_admission"]["source"], "default");
+        }
+    }
+    Ok(())
 }
 
 /// Tell the lane its mode (`PROVENANT_SANDBOX=on|off`) and record it, with
 /// its source, in the applied route that the receipt and `status` read.
 pub(super) fn apply_sandbox_mode(
+    task: &run::TaskRequest,
     mode: provenant_confinement::run_config::SandboxMode,
     environment: &mut Vec<(std::ffi::OsString, std::ffi::OsString)>,
     route: &mut provenant_records::run::RouteRecord,
 ) {
     use provenant_confinement::run_config::SANDBOX_ENV;
+    if let Some(policy) = task
+        .profile
+        .extra
+        .get(provenant_records::run::LAUNCH_POLICY_FIELD)
+    {
+        route.extra.insert(
+            provenant_records::run::LAUNCH_POLICY_FIELD.into(),
+            policy.clone(),
+        );
+    }
+    let parent = [&task.extra, &task.profile.extra].into_iter().any(|extra| {
+        extra
+            .get(provenant_records::run::PARENT_SANDBOXED_FIELD)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    });
+    route.extra.insert("sandbox_admission".into(), serde_json::json!({
+        "parent_sandboxed": parent,
+        "boundary": "none",
+        "strength": task.profile.knobs.get("lanes.sandbox_floor").and_then(serde_json::Value::as_str).unwrap_or("warn"),
+        "knob": "lanes.sandbox_floor",
+        "source": task.profile.extra.get(provenant_config::KNOB_SOURCES)
+            .and_then(|sources| sources.get("lanes.sandbox_floor"))
+            .and_then(serde_json::Value::as_str).unwrap_or("default"),
+    }));
     environment.retain(|(name, _)| name != SANDBOX_ENV);
     environment.push((SANDBOX_ENV.into(), mode.env_value().into()));
     route.extra.insert(
@@ -489,8 +602,9 @@ pub(super) fn protected_worktrees(
 ) -> Result<Vec<PathGrant>, String> {
     let roots = registry.roots.ok_or("routing context is unavailable")?;
     let utility_home = host_git_home(roots.state.as_path())?;
-    let utility = provenant_confinement::UtilityRuntime::new(git, utility_home.path())
-        .map_err(|error| error.to_string())?;
+    let utility =
+        provenant_confinement::UtilityRuntime::new(git, utility_home.path(), roots.state.as_path())
+            .map_err(|error| error.to_string())?;
     let executor = provenant_os::exec::SystemExecutor::new(1).map_err(|error| error.to_string())?;
     let budget = provenant_confinement::UtilityBudget::bounded(std::time::Duration::from_secs(5))
         .map_err(|error| error.to_string())?;
@@ -602,7 +716,8 @@ pub(super) fn host_provider_var(registry: &Registry<'_>, name: &str) -> Option<s
     if let Some(host) = registry.host
         && matches!(
             name,
-            "CODEX_HOME"
+            "CARGO_HOME"
+                | "CODEX_HOME"
                 | "CLAUDE_CONFIG_DIR"
                 | "GH_CONFIG_DIR"
                 | "XDG_CONFIG_HOME"
@@ -673,6 +788,14 @@ impl SourceCwdError {
     }
 }
 
+fn source_cwd_authority(message: String) -> SourceCwdError {
+    provenant_records::policy::Policy::default().boundary_error(
+        "CONFINEMENT_SOURCE_CWD_AUTHORITY",
+        provenant_records::policy::Facts::violation(&message),
+        SourceCwdError::Authority(message),
+    )
+}
+
 pub(super) fn source_cwd(
     registry: &Registry<'_>,
     task: &run::TaskRequest,
@@ -682,14 +805,14 @@ pub(super) fn source_cwd(
         .ok_or_else(|| SourceCwdError::Operational("working directory is unavailable".into()))?;
     let Some(source) = &task.access.source_root else {
         if task.access.source_identity.is_some() || task.access.source_live {
-            return Err(SourceCwdError::Authority(
+            return Err(source_cwd_authority(
                 "graph source identity has no checkout".into(),
             ));
         }
         return canonical(cwd).map_err(SourceCwdError::Operational);
     };
     if task.writer.is_some() || (!task.access.source_live && task.head.is_none()) {
-        return Err(SourceCwdError::Authority(
+        return Err(source_cwd_authority(
             "read-only source needs a pinned head and no writer".into(),
         ));
     }
@@ -699,7 +822,7 @@ pub(super) fn source_cwd(
     if !run::access_root_allowed(source, state, true)
         || provenant_confinement::refuses_lane_root(source, true, registry.home)
     {
-        return Err(SourceCwdError::Authority(
+        return Err(source_cwd_authority(
             "graph source checkout is not an allowed read root".into(),
         ));
     }
@@ -707,22 +830,22 @@ pub(super) fn source_cwd(
         // A live child may select another project, just as an ordinary CLI
         // launch can. The host sealed its canonical root and filesystem identity;
         // immutable review snapshots still require project registration below.
-        canonical(source).map_err(SourceCwdError::Authority)?
+        canonical(source).map_err(source_cwd_authority)?
     } else {
         run::resolve_reader_source(state, cwd, source).map_err(|_| {
-            SourceCwdError::Authority(
+            source_cwd_authority(
                 "graph source checkout is no longer registered with the project".into(),
             )
         })?
     };
     if verified != *source {
-        return Err(SourceCwdError::Authority(
+        return Err(source_cwd_authority(
             "graph source checkout changed location".into(),
         ));
     }
-    let identity = source_identity(&verified).map_err(SourceCwdError::Authority)?;
+    let identity = source_identity(&verified).map_err(source_cwd_authority)?;
     if task.access.source_identity.as_ref() != Some(&identity) {
-        return Err(SourceCwdError::Authority(
+        return Err(source_cwd_authority(
             "graph source checkout identity changed".into(),
         ));
     }
@@ -737,6 +860,14 @@ pub(super) enum SourceHeadError {
     Invalid,
     #[error("graph source checkout moved from pinned head {0}")]
     Moved(provenant_core::GitOid),
+}
+
+fn source_head_authority(error: SourceHeadError) -> SourceHeadError {
+    provenant_records::policy::Policy::default().boundary_error(
+        "CONFINEMENT_REQUIRE_SOURCE_HEAD_AUTHORITY",
+        provenant_records::policy::Facts::violation(error.to_string()),
+        error,
+    )
 }
 
 pub(super) fn source_head(
@@ -754,9 +885,9 @@ pub(super) fn require_source_head(
     observed: Option<provenant_core::GitOid>,
 ) -> Result<(), SourceHeadError> {
     if task.access.source_root.is_some() && !task.access.source_live {
-        let expected = source_head(task)?;
+        let expected = source_head(task).map_err(source_head_authority)?;
         if observed != Some(expected) {
-            return Err(SourceHeadError::Moved(expected));
+            return Err(source_head_authority(SourceHeadError::Moved(expected)));
         }
     }
     Ok(())
@@ -811,6 +942,18 @@ impl ReadOnlyPlanError {
     }
 }
 
+fn read_only_plan_authority(error: ReadOnlyPlanError) -> ReadOnlyPlanError {
+    if error.boundary_class() == provenant_records::diagnostic::BoundaryClass::Authority {
+        provenant_records::policy::Policy::default().boundary_error(
+            "CONFINEMENT_READ_ONLY_PLAN_AUTHORITY",
+            provenant_records::policy::Facts::violation(error.to_string()),
+            error,
+        )
+    } else {
+        error
+    }
+}
+
 #[test]
 fn read_only_plan_preserves_typed_authority_failures() {
     use provenant_records::diagnostic::BoundaryClass;
@@ -850,129 +993,135 @@ pub(super) fn read_only_plan(
     use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility};
     use provenant_os::exec::SystemExecutor;
 
-    // The host-pinned Git, the same one the lane receives as PROVENANT_GIT.
-    let utility_home = host_git_home(roots.state.as_path())?;
-    let utility =
-        UtilityRuntime::new(git, utility_home.path()).map_err(|error| error.to_string())?;
-    let executor = SystemExecutor::new(1).map_err(|error| error.to_string())?;
-    let budget = UtilityBudget::bounded(std::time::Duration::from_secs(5))
-        .map_err(|error| error.to_string())?;
-    let cancel = provenant_core::CancelToken::new();
-    // Find the root without opening a protected-history repo: read-only
-    // repositories may use native object alternates. A malformed Git marker
-    // must refuse, never fall through to a non-Git workspace.
-    let mut repository = None;
-    for ancestor in cwd.ancestors() {
-        let directory = Directory::open_anchor(ancestor).map_err(|error| error.to_string())?;
-        match directory.metadata_at(std::ffi::OsStr::new(".git"), false) {
-            Ok(_) => {
-                repository = Some(
-                    utility
-                        .open_read_repo(&executor, ancestor, budget, &cancel)
-                        .map_err(|error| error.to_string())?,
-                );
-                break;
+    let result = (|| {
+        // The host-pinned Git, the same one the lane receives as PROVENANT_GIT.
+        let utility_home = host_git_home(roots.state.as_path())?;
+        let utility = UtilityRuntime::new(git, utility_home.path(), roots.state.as_path())
+            .map_err(|error| error.to_string())?;
+        let executor = SystemExecutor::new(1).map_err(|error| error.to_string())?;
+        let budget = UtilityBudget::bounded(std::time::Duration::from_secs(5))
+            .map_err(|error| error.to_string())?;
+        let cancel = provenant_core::CancelToken::new();
+        // Find the root without opening a protected-history repo: read-only
+        // repositories may use native object alternates. A malformed Git marker
+        // must refuse, never fall through to a non-Git workspace.
+        let mut repository = None;
+        for ancestor in cwd.ancestors() {
+            let directory = Directory::open_anchor(ancestor).map_err(|error| error.to_string())?;
+            match directory.metadata_at(std::ffi::OsStr::new(".git"), false) {
+                Ok(_) => {
+                    repository = Some(
+                        utility
+                            .open_read_repo(&executor, ancestor, budget, &cancel)
+                            .map_err(|error| error.to_string())?,
+                    );
+                    break;
+                }
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error.to_string().into()),
             }
-            Err(error) if error.is_not_found() => {}
-            Err(error) => return Err(error.to_string().into()),
         }
-    }
-    let location = provenant_config::ProjectLocation::new(
-        repository
-            .as_ref()
-            .map_or(cwd, |repo| repo.common_git_dir()),
-    )
-    .map_err(|error| error.to_string())?;
-    let binding = if live {
-        // Graph attribution stays with the parent; the read plan belongs to
-        // the selected checkout, as it does for an ordinary host launch.
-        let binding =
-            provenant_config::bind_project(roots, location).map_err(|error| error.to_string())?;
-        request.scope = WorkScope::Project(binding.project_id());
-        binding
-    } else {
-        let binding = provenant_config::lookup_project(roots, &location)
-            .map_err(|error| error.to_string())?
-            .ok_or(ReadOnlyPlanError::MissingBinding)?;
-        if binding.project_id() != project {
-            return Err(ReadOnlyPlanError::BindingMismatch);
-        }
-        binding
-    };
-    match repository {
-        Some(repo) => {
-            if let Some(policy) = request.permissions.policy.as_mut() {
-                // A launch from a checkout subdirectory still protects the
-                // entire verified source; an isolated view also protects its
-                // original live checkout.
-                policy
-                    .mandatory_mut()
-                    .add_source_alias(PathGrant {
-                        path: repo.root_path().to_owned(),
-                        scope: PathScope::Subtree,
-                    })
-                    .map_err(|error| error.to_string())?;
-                for path in [repo.common_git_dir(), repo.private_git_dir()] {
+        let location = provenant_config::ProjectLocation::new(
+            repository
+                .as_ref()
+                .map_or(cwd, |repo| repo.common_git_dir()),
+        )
+        .map_err(|error| error.to_string())?;
+        let binding = if live {
+            // Graph attribution stays with the parent; the read plan belongs to
+            // the selected checkout, as it does for an ordinary host launch.
+            let binding = provenant_config::bind_project(roots, location)
+                .map_err(|error| error.to_string())?;
+            request.scope = WorkScope::Project(binding.project_id());
+            binding
+        } else {
+            let binding = provenant_config::lookup_project(roots, &location)
+                .map_err(|error| error.to_string())?
+                .ok_or(ReadOnlyPlanError::MissingBinding)?;
+            if binding.project_id() != project {
+                return Err(ReadOnlyPlanError::BindingMismatch);
+            }
+            binding
+        };
+        match repository {
+            Some(repo) => {
+                if let Some(policy) = request.permissions.policy.as_mut() {
+                    // A launch from a checkout subdirectory still protects the
+                    // entire verified source; an isolated view also protects its
+                    // original live checkout.
                     policy
                         .mandatory_mut()
-                        .add_git(PathGrant {
-                            path: path.to_owned(),
+                        .add_source_alias(PathGrant {
+                            path: repo.root_path().to_owned(),
                             scope: PathScope::Subtree,
                         })
                         .map_err(|error| error.to_string())?;
+                    for path in [repo.common_git_dir(), repo.private_git_dir()] {
+                        policy
+                            .mandatory_mut()
+                            .add_git(PathGrant {
+                                path: path.to_owned(),
+                                scope: PathScope::Subtree,
+                            })
+                            .map_err(|error| error.to_string())?;
+                    }
+                    for root in &request.permissions.write_roots {
+                        policy
+                            .mandatory()
+                            .validate_extra_write(root)
+                            .map_err(|error| error.to_string())?;
+                    }
                 }
-                for root in &request.permissions.write_roots {
-                    policy
-                        .mandatory()
-                        .validate_extra_write(root)
+                // The host's own read of the checkout HEAD is the only reviewed
+                // head a read-only lane can claim; an unreadable HEAD stays unproven.
+                let head = run_read_utility(
+                    &executor,
+                    GitRead::RevParseHead,
+                    &repo,
+                    &utility,
+                    budget,
+                    &cancel,
+                )
+                .ok()
+                .and_then(|out| String::from_utf8(out.stdout.bytes).ok())
+                .and_then(|text| provenant_core::GitOid::parse(text.trim()).ok());
+                let scratch = request.permissions.scratch.path.clone();
+                let plan = if live {
+                    run::live_read_only_plan(&repo, &binding, request)
+                } else if isolated {
+                    run::isolated_read_only_plan(&roots.state, &repo, &binding, request)
+                } else {
+                    run::read_only_plan(&roots.state, &repo, &binding, request)
+                };
+                let plan = plan.map_err(ReadOnlyPlanError::from)?;
+                let view_git = isolated.then(|| view.join(".git"));
+                let view_head = if let Some(path) = &view_git {
+                    let raw = std::fs::read_to_string(path.join("HEAD"))
                         .map_err(|error| error.to_string())?;
-                }
+                    Some(
+                        provenant_core::GitOid::parse(raw.trim())
+                            .map_err(|error| error.to_string())?,
+                    )
+                } else {
+                    head
+                };
+                run::prepare_read_only_git(git, &repo, &scratch, view_git.as_deref(), view_head)
+                    .map_err(ReadOnlyPlanError::from)?;
+                Ok((
+                    plan,
+                    head,
+                    provenant_records::AbsolutePath::new(repo.common_git_dir()).ok(),
+                    Some(repo.private_git_dir().to_owned()),
+                ))
             }
-            // The host's own read of the checkout HEAD is the only reviewed
-            // head a read-only lane can claim; an unreadable HEAD stays unproven.
-            let head = run_read_utility(
-                &executor,
-                GitRead::RevParseHead,
-                &repo,
-                &utility,
-                budget,
-                &cancel,
-            )
-            .ok()
-            .and_then(|out| String::from_utf8(out.stdout.bytes).ok())
-            .and_then(|text| provenant_core::GitOid::parse(text.trim()).ok());
-            let scratch = request.permissions.scratch.path.clone();
-            let plan = if live {
-                run::live_read_only_plan(&repo, &binding, request)
-            } else if isolated {
-                run::isolated_read_only_plan(&roots.state, &repo, &binding, request)
-            } else {
-                run::read_only_plan(&roots.state, &repo, &binding, request)
-            };
-            let plan = plan.map_err(ReadOnlyPlanError::from)?;
-            let view_git = isolated.then(|| view.join(".git"));
-            let view_head = if let Some(path) = &view_git {
-                let raw = std::fs::read_to_string(path.join("HEAD"))
-                    .map_err(|error| error.to_string())?;
-                Some(provenant_core::GitOid::parse(raw.trim()).map_err(|error| error.to_string())?)
-            } else {
-                head
-            };
-            run::prepare_read_only_git(git, &repo, &scratch, view_git.as_deref(), view_head)
-                .map_err(ReadOnlyPlanError::from)?;
-            Ok((
-                plan,
-                head,
-                provenant_records::AbsolutePath::new(repo.common_git_dir()).ok(),
-                Some(repo.private_git_dir().to_owned()),
-            ))
+            // Non-Git workspaces have no Git metadata or repository exceptions.
+            None if isolated => Err(ReadOnlyPlanError::PinnedSourceRequiresGit),
+            None => ConfinedPlan::new(request)
+                .map(|plan| (plan, None, None, None))
+                .map_err(ReadOnlyPlanError::from),
         }
-        // Non-Git workspaces have no Git metadata or repository exceptions.
-        None if isolated => Err(ReadOnlyPlanError::PinnedSourceRequiresGit),
-        None => ConfinedPlan::new(request)
-            .map(|plan| (plan, None, None, None))
-            .map_err(ReadOnlyPlanError::from),
-    }
+    })();
+    result.map_err(read_only_plan_authority)
 }
 
 /// Advisory freshness of the checkout a read-only lane reads, for the launch
@@ -984,7 +1133,7 @@ pub(in crate::run) fn read_only_checkout_warning(state: &Path, source: &Path) ->
 
     let git = provenant_os::git::git_executable()?;
     let utility_home = host_git_home(state).ok()?;
-    let utility = UtilityRuntime::new(&git, utility_home.path()).ok()?;
+    let utility = UtilityRuntime::new(&git, utility_home.path(), state).ok()?;
     let executor = SystemExecutor::new(1).ok()?;
     let budget = UtilityBudget::bounded(std::time::Duration::from_secs(5)).ok()?;
     let cancel = provenant_core::CancelToken::new();
@@ -1265,7 +1414,7 @@ pub(super) fn setup_parent<'a>(
     Ok((directory, name))
 }
 
-// Existing shared ancestors need only read access in a confined MCP.
+// Existing shared ancestors need only read access in a confined lane.
 pub(super) fn setup_directory(
     parent: &Directory,
     name: &std::ffi::OsStr,
@@ -1293,27 +1442,56 @@ pub(super) fn writer_source_context(
     writer: &run::WriterLaunch,
     task: &run::TaskRequest,
     git: &Path,
+    policy: &provenant_records::policy::Policy,
 ) -> Result<Option<String>, PrepareError> {
+    let boundary_error = |error: PrepareError| {
+        policy.boundary_error(
+            "CONFINEMENT_WRITER_SOURCE_CONTEXT_AUTHORITY",
+            provenant_records::policy::Facts::violation(error.to_string()),
+            error,
+        )
+    };
     let Some(source_head) = task.source_head.as_deref() else {
         if let Some(head) = task.head.as_deref() {
-            writer.require_source(head.parse().map_err(|_| "invalid pinned writer source")?)?;
+            let head = head.parse().map_err(|_| {
+                boundary_error(PrepareError::WriterContinuation(
+                    "invalid pinned writer source".into(),
+                ))
+            })?;
+            writer
+                .require_source(head)
+                .map_err(|error| boundary_error(error.into()))?;
         }
         return Ok(None);
     };
-    let uncommitted = writer
-        .uncommitted_paths(git)
-        .map_err(|error| format!("cannot inspect uncommitted predecessor edits: {error}"))?;
+    let uncommitted = writer.uncommitted_paths(git).map_err(|error| {
+        boundary_error(PrepareError::WriterContinuation(format!(
+            "cannot inspect uncommitted predecessor edits: {error}"
+        )))
+    })?;
     let predecessor = task
         .head
         .as_deref()
-        .ok_or("missing predecessor head for writer continuation")?
+        .ok_or_else(|| {
+            boundary_error(PrepareError::WriterContinuation(
+                "missing predecessor head for writer continuation".into(),
+            ))
+        })?
         .parse()
-        .map_err(|_| "invalid pinned writer predecessor head")?;
-    let source = source_head
-        .parse()
-        .map_err(|_| "invalid pinned writer source")?;
-    if let Err(error) = writer.require_continuation_source(git, source, predecessor) {
-        return Err(PrepareError::WriterContinuation(
+        .map_err(|_| {
+            boundary_error(PrepareError::WriterContinuation(
+                "invalid pinned writer predecessor head".into(),
+            ))
+        })?;
+    let source = source_head.parse().map_err(|_| {
+        boundary_error(PrepareError::WriterContinuation(
+            "invalid pinned writer source".into(),
+        ))
+    })?;
+    if let Err(error) =
+        writer.require_continuation_source_with_policy(git, source, predecessor, policy)
+    {
+        return Err(boundary_error(PrepareError::WriterContinuation(
             if uncommitted.is_empty() {
                 error.to_string()
             } else {
@@ -1322,7 +1500,7 @@ pub(super) fn writer_source_context(
                     uncommitted.join(", ")
                 )
             },
-        ));
+        )));
     }
     Ok((!uncommitted.is_empty()).then(|| {
         format!(
@@ -1338,7 +1516,7 @@ mod alias_tests {
 
     #[test]
     fn only_the_temporary_variables_move_to_the_alias() {
-        let scratch = Path::new("/state/runs/r/attempts/a/tmp/candidate-0");
+        let scratch = Path::new("/state/attempts/a/tmp/candidate-0");
         let alias = Path::new("/private/tmp/pv-0123/candidate-0");
         let os = std::ffi::OsString::from;
         let mut env = vec![

@@ -4,16 +4,17 @@ use super::{
     model::*,
     ports::{
         AlarmSink, Approval, Forge, GateRunner, MergeTree, PullRequestInfo, PullRequestState, Repo,
-        ReviewRecord, ReviewRecords, Reviews, StackMember, StackMembership,
+        ReviewRecord, ReviewRecordSource, Reviews, StackMember, StackMembership,
     },
 };
 use crate::pr::{
     RestPull, TimedOut, execute_with,
+    gh::REST_API_VERSION_HEADER,
     git::Git,
     git::plain_ref,
     merge_with,
     observer::{Check, ObserveError, Observer},
-    rest_pull, wait,
+    wait,
 };
 use provenant_cli::domains::MergeMethod;
 use provenant_os::exec::Termination;
@@ -42,7 +43,7 @@ pub(super) fn connect<'a>(
     Ok((
         Box::new(GhForge::new(project, state)),
         Box::new(GitRepo::with_follow_up(
-            project, globals, workers, tracking,
+            project, state, globals, workers, tracking,
         )?),
         Box::new(CheckGate::new(project, state)),
         Box::new(ChairAlarms::new(project)),
@@ -50,7 +51,14 @@ pub(super) fn connect<'a>(
 }
 
 fn failed(error: Box<dyn std::error::Error>) -> LandingError {
-    LandingError::Failed(error.to_string())
+    if error
+        .downcast_ref::<wait::Failure>()
+        .is_some_and(|failure| failure.code == "RATE_LIMITED")
+    {
+        LandingError::RateLimited(error.to_string())
+    } else {
+        LandingError::Failed(error.to_string())
+    }
 }
 /// A lost or slow mutation leaves the outcome unknown rather than failed.
 fn mutation_failed(error: Box<dyn std::error::Error>) -> LandingError {
@@ -151,9 +159,11 @@ pub struct GhForge {
     state: PathBuf,
     /// `owner/name`, read once.
     repository: Option<String>,
-    /// How old a shared CI answer may be: zero for a gate decision, the
-    /// observer's poll for a post-merge waiter.
-    max_age: Duration,
+    /// Adapter-owned cadence from the shared observer; caller settings remain
+    /// the fallback for forge implementations without an observer.
+    observation_interval: Option<Duration>,
+    /// Explicit resolved landing cadence wins over the observer's adaptive value.
+    poll_interval_override: Option<Duration>,
     budget: Duration,
     deadline: Option<std::time::Instant>,
 }
@@ -163,7 +173,8 @@ impl GhForge {
             project: project.to_owned(),
             state: state.to_owned(),
             repository: None,
-            max_age: Duration::ZERO,
+            observation_interval: None,
+            poll_interval_override: None,
             budget: Duration::from_secs(120),
             deadline: None,
         }
@@ -177,6 +188,65 @@ impl GhForge {
                 .unwrap_or_else(|| std::time::Instant::now() + self.budget),
             retry_command: "provenant land".into(),
         }
+    }
+    fn poll_interval(&self) -> Option<Duration> {
+        self.poll_interval_override.or(self.observation_interval)
+    }
+    fn repository_name(&mut self) -> Result<String, LandingError> {
+        if let Some(repository) = &self.repository {
+            return Ok(repository.clone());
+        }
+        let budget = self
+            .reader()
+            .deadline
+            .saturating_duration_since(std::time::Instant::now());
+        let repository =
+            crate::pr::observer::repository_for_project(&self.state, &self.project, budget)
+                .map_err(|error| match error {
+                    ObserveError::RateLimited { .. } => {
+                        LandingError::RateLimited(error.to_string())
+                    }
+                    _ => LandingError::Failed(error.to_string()),
+                })?;
+        self.repository = Some(repository.clone());
+        Ok(repository)
+    }
+    fn observed_resource(
+        &mut self,
+        path: &str,
+        budget: Duration,
+    ) -> Result<serde_json::Value, LandingError> {
+        let repository = self.repository_name()?;
+        let mut observer = Observer::open(&self.state, &self.project, &repository, budget)
+            .map_err(|error| match error {
+                ObserveError::RateLimited { .. } => LandingError::RateLimited(error.to_string()),
+                _ => LandingError::Failed(error.to_string()),
+            })?;
+        let resource =
+            observer
+                .resource(path, Duration::ZERO, budget)
+                .map_err(|error| match error {
+                    ObserveError::RateLimited { .. } => {
+                        LandingError::RateLimited(error.to_string())
+                    }
+                    _ => LandingError::Failed(error.to_string()),
+                })?;
+        self.observation_interval = Some(observer.fast_interval());
+        Ok(resource)
+    }
+    fn pull_request_with_budget(
+        &mut self,
+        number: u64,
+        budget: Duration,
+    ) -> Result<PullRequestInfo, LandingError> {
+        let pull: RestPull =
+            serde_json::from_value(self.observed_resource(&format!("pulls/{number}"), budget)?)
+                .map_err(|error| {
+                    LandingError::Failed(format!(
+                        "GitHub returned invalid pull request JSON: {error}"
+                    ))
+                })?;
+        Ok(pull_info(number, pull))
     }
     fn get(&self, args: &[&str]) -> Result<Vec<u8>, LandingError> {
         let mut argv = vec!["gh", "api"];
@@ -217,10 +287,11 @@ impl GhForge {
         method: MergeMethod,
     ) -> Result<String, LandingError> {
         object_id(head)?;
-        let membership = self
-            .pull_request(number)?
-            .stack
-            .ok_or(LandingError::PublicationUnknown)?;
+        let pull = self.pull_request(number)?;
+        let observation_interval = self
+            .poll_interval()
+            .ok_or_else(|| LandingError::Failed("forge observation cadence unavailable".into()))?;
+        let membership = pull.stack.ok_or(LandingError::PublicationUnknown)?;
         let members = self.stack_members(membership.number)?;
         let position = members
             .iter()
@@ -258,7 +329,7 @@ impl GhForge {
                     "PUT",
                     &endpoint,
                     "-H",
-                    "X-GitHub-Api-Version:2026-03-10",
+                    REST_API_VERSION_HEADER,
                     "-f",
                     &sha,
                     "-f",
@@ -278,8 +349,12 @@ impl GhForge {
             .map_err(|_| LandingError::PublicationUnknown)?;
         loop {
             if let Some(sha) = async_merge_result(&result)? {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    return Err(LandingError::PublicationUnknown);
+                }
                 let observed = self
-                    .pull_request(number)
+                    .pull_request_with_budget(number, left)
                     .map_err(|_| LandingError::PublicationUnknown)?;
                 if observed.state == PullRequestState::Merged
                     && observed.head == head
@@ -287,20 +362,20 @@ impl GhForge {
                 {
                     if let Some(upper) = upper {
                         loop {
+                            let left =
+                                deadline.saturating_duration_since(std::time::Instant::now());
+                            if left.is_zero() {
+                                return Err(LandingError::PublicationUnknown);
+                            }
                             let next = self
-                                .pull_request(upper)
+                                .pull_request_with_budget(upper, left)
                                 .map_err(|_| LandingError::PublicationUnknown)?;
                             if next.state != PullRequestState::Open
                                 || next.base_branch == membership.base_branch
                             {
                                 break;
                             }
-                            let left =
-                                deadline.saturating_duration_since(std::time::Instant::now());
-                            if left.is_zero() {
-                                return Err(LandingError::PublicationUnknown);
-                            }
-                            std::thread::sleep(Duration::from_secs(1).min(left));
+                            std::thread::sleep(observation_interval.min(left));
                         }
                     }
                     return Ok(sha);
@@ -324,16 +399,14 @@ impl GhForge {
             if left.is_zero() {
                 return Err(LandingError::PublicationUnknown);
             }
-            std::thread::sleep(Duration::from_secs(1).min(left));
-            let bytes = self
-                .get(&[
-                    &format!("{endpoint}/{uuid}"),
-                    "-H",
-                    "X-GitHub-Api-Version:2026-03-10",
-                ])
+            std::thread::sleep(observation_interval.min(left));
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return Err(LandingError::PublicationUnknown);
+            }
+            result = self
+                .observed_resource(&format!("pulls/{number}/merge-async/{uuid}"), left)
                 .map_err(|_| LandingError::PublicationUnknown)?;
-            result =
-                serde_json::from_slice(&bytes).map_err(|_| LandingError::PublicationUnknown)?;
         }
     }
 }
@@ -466,9 +539,56 @@ fn encode_branch(branch: &str) -> String {
 }
 
 impl Forge for GhForge {
+    fn capabilities(
+        &mut self,
+        target: &str,
+    ) -> Result<provenant_records::landing::Capabilities, LandingError> {
+        use provenant_records::landing::{Capabilities, CapabilityState, ForgeCapability};
+        let repository = self.repository_identity()?;
+        let metadata = self.json("repos/{owner}/{repo}")?;
+        let mut values = std::collections::BTreeMap::new();
+        if let Some(allowed) = metadata["allow_auto_merge"].as_bool() {
+            values.insert(
+                ForgeCapability::AutoMerge,
+                if allowed {
+                    CapabilityState::Available
+                } else {
+                    CapabilityState::Unavailable
+                },
+            );
+        }
+        // Rules are specific to the root target, including names with slashes.
+        let encoded = encode_branch(target);
+        if let Ok(rules) = self.json(&format!(
+            "repos/{{owner}}/{{repo}}/rules/branches/{encoded}"
+        )) && let Some(rules) = rules.as_array()
+        {
+            values.insert(
+                ForgeCapability::MergeQueue,
+                if rules.iter().any(|rule| rule["type"] == "merge_queue") {
+                    CapabilityState::Available
+                } else {
+                    CapabilityState::Unavailable
+                },
+            );
+        }
+        // A successful, typed stack listing is positive evidence for this repository.
+        // A forbidden or unavailable endpoint remains unknown, never assumed absent.
+        if let Ok(stacks) = self.json("repos/{owner}/{repo}/stacks")
+            && stacks["stacks"].is_array()
+        {
+            for capability in [ForgeCapability::AsyncMerge, ForgeCapability::Restack] {
+                values.insert(capability, CapabilityState::Available);
+            }
+        }
+        Ok(Capabilities {
+            repository: Some(repository),
+            values,
+        })
+    }
     fn stack_members(&mut self, number: u64) -> Result<Vec<StackMember>, LandingError> {
         let endpoint = format!("repos/{{owner}}/{{repo}}/stacks/{number}");
-        let bytes = self.get(&[&endpoint, "-H", "X-GitHub-Api-Version:2026-03-10"])?;
+        let bytes = self.get(&[&endpoint, "-H", REST_API_VERSION_HEADER])?;
         let response: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
             LandingError::Failed(format!("GitHub returned invalid stack JSON: {error}"))
         })?;
@@ -481,6 +601,11 @@ impl Forge for GhForge {
     }
     fn set_project_path(&mut self, path: &Path) {
         self.project = path.to_owned();
+        self.repository = None;
+        self.observation_interval = None;
+    }
+    fn set_poll_interval_override(&mut self, interval: Option<Duration>) {
+        self.poll_interval_override = interval;
     }
     fn repository_identity(&mut self) -> Result<String, LandingError> {
         let repository = self.json("repos/{owner}/{repo}")?;
@@ -505,9 +630,7 @@ impl Forge for GhForge {
     }
 
     fn pull_request(&mut self, number: u64) -> Result<PullRequestInfo, LandingError> {
-        let pull =
-            rest_pull(&|argv| self.reader().read(argv), &number.to_string()).map_err(failed)?;
-        Ok(pull_info(number, pull))
+        self.pull_request_with_budget(number, self.budget)
     }
     fn actor(&mut self) -> Result<String, LandingError> {
         self.json("user")?["login"]
@@ -551,35 +674,42 @@ impl Forge for GhForge {
         }
         Ok(latest.into_values().flatten().collect())
     }
+    fn observation_interval(&self) -> Option<Duration> {
+        self.poll_interval()
+    }
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError> {
         let commit = object_id(commit)?;
-        let repository = match &self.repository {
-            Some(repository) => repository.clone(),
-            None => {
-                let name = self.json("repos/{owner}/{repo}")?["full_name"]
-                    .as_str()
-                    .ok_or_else(|| LandingError::Failed("repository has no canonical name".into()))?
-                    .to_owned();
-                self.repository = Some(name.clone());
-                name
-            }
-        };
-        #[allow(clippy::disallowed_methods, reason = "forge read budget")]
-        let budget = self
-            .reader()
-            .deadline
-            .saturating_duration_since(std::time::Instant::now());
-        let runs = Observer::open(&self.state, &self.project, &repository, budget)
-            .and_then(|mut observer| observer.checks(commit, self.max_age, budget))
+        let repository = self.repository_name()?;
+        let deadline = self.reader().deadline;
+        #[allow(clippy::disallowed_methods, reason = "one forge observation deadline")]
+        let remaining = || deadline.saturating_duration_since(std::time::Instant::now());
+        let mut observer = Observer::open(&self.state, &self.project, &repository, remaining())
             .map_err(|error| match error {
                 ObserveError::RateLimited { .. } => LandingError::RateLimited(error.to_string()),
                 _ => LandingError::CiUnavailable(error.to_string()),
             })?;
-        let tree =
-            self.json(&format!("repos/{{owner}}/{{repo}}/git/commits/{commit}"))?["tree"]["sha"]
-                .as_str()
-                .ok_or_else(|| LandingError::Failed("commit has no tree".into()))?
-                .to_owned();
+        self.observation_interval = Some(observer.fast_interval());
+        let runs = observer
+            .checks(commit, Duration::ZERO, remaining())
+            .map_err(|error| match error {
+                ObserveError::RateLimited { .. } => LandingError::RateLimited(error.to_string()),
+                _ => LandingError::CiUnavailable(error.to_string()),
+            })?;
+        self.observation_interval = Some(observer.next_poll_interval());
+        let commit_resource = observer
+            .resource(
+                &format!("git/commits/{commit}"),
+                Duration::ZERO,
+                remaining(),
+            )
+            .map_err(|error| match error {
+                ObserveError::RateLimited { .. } => LandingError::RateLimited(error.to_string()),
+                _ => LandingError::CiUnavailable(error.to_string()),
+            })?;
+        let tree = commit_resource["tree"]["sha"]
+            .as_str()
+            .ok_or_else(|| LandingError::Failed("commit has no tree".into()))?
+            .to_owned();
         let (checks, result) = gate_checks(runs);
         Ok(vec![GateEvidence {
             commit: commit.to_owned(),
@@ -600,10 +730,8 @@ impl Forge for GhForge {
         timeout: Duration,
     ) -> Result<Vec<GateEvidence>, LandingError> {
         self.deadline = Some(std::time::Instant::now() + timeout);
-        self.max_age = crate::pr::observer::POLL;
         let result = self.checks(commit);
         self.deadline = None;
-        self.max_age = Duration::ZERO;
         result
     }
     fn merge(
@@ -737,6 +865,29 @@ impl Forge for GhForge {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommandResult {
+    Landed,
+    Refused,
+    Unknown,
+}
+
+fn command_result(
+    command: &provenant_records::landing::RepositoryCommand,
+    termination: Termination,
+    timed_out: bool,
+) -> CommandResult {
+    if timed_out {
+        return CommandResult::Unknown;
+    }
+    match termination {
+        Termination::Exit(0) => CommandResult::Landed,
+        Termination::Exit(code) if code == command.unknown_exit_code => CommandResult::Unknown,
+        Termination::Exit(_) => CommandResult::Refused,
+        _ => CommandResult::Unknown,
+    }
+}
+
 // ----- Repo --------------------------------------------------------------
 
 /// Git plumbing in the project checkout. Refs live on the remote the target tracks.
@@ -753,21 +904,22 @@ struct LocalFollowUp<'a> {
     tracking: std::collections::BTreeMap<u64, crate::pr::land::BatchTracking>,
 }
 impl<'a> GitRepo<'a> {
-    pub fn new(project: &Path) -> Result<Self, LandingError> {
+    pub fn new(project: &Path, host_state: &Path) -> Result<Self, LandingError> {
         Ok(Self {
             project: project.to_owned(),
-            git: Git::new().map_err(failed)?,
+            git: Git::new(host_state).map_err(failed)?,
             remote: None,
             local: None,
         })
     }
     fn with_follow_up(
         project: &Path,
+        host_state: &Path,
         globals: &provenant_cli::Globals,
         workers: &'a dyn provenant_confinement::worktrees::WorkerObserver,
         tracking: std::collections::BTreeMap<u64, crate::pr::land::BatchTracking>,
     ) -> Result<Self, LandingError> {
-        let mut repo = Self::new(project)?;
+        let mut repo = Self::new(project, host_state)?;
         repo.local = Some(LocalFollowUp {
             globals: provenant_cli::Globals {
                 json: globals.json,
@@ -870,6 +1022,50 @@ impl<'a> GitRepo<'a> {
 }
 
 impl Repo for GitRepo<'_> {
+    fn publish_command(
+        &mut self,
+        command: &provenant_records::landing::RepositoryCommand,
+        attempt: &PendingAttempt,
+    ) -> Result<PublishResult, LandingError> {
+        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor};
+        if !command.valid() {
+            return Err(LandingError::Refused("invalid repository publisher".into()));
+        }
+        let input = serde_json::to_vec(attempt)
+            .map_err(|error| LandingError::Refused(format!("encode command intent: {error}")))?;
+        let argv: Vec<std::ffi::OsString> = command.argv.iter().map(Into::into).collect();
+        let mut options = ExecOptions::new(
+            &argv,
+            &self.project,
+            Duration::from_secs(command.timeout_seconds),
+        );
+        options.stdin = Some(&input);
+        options.cleanup_process_group = true;
+        let executor = SystemExecutor::new(1).map_err(|error| {
+            LandingError::Refused(format!("prepare repository publisher: {error}"))
+        })?;
+        let outcome = executor
+            .execute(options)
+            .map_err(|_| LandingError::PublicationUnknown)?;
+        // Publisher output is diagnostic; only the declared exit protocol is evidence.
+        let _ = std::io::stderr().write_all(&outcome.stdout.bytes);
+        let _ = std::io::stderr().write_all(&outcome.stderr.bytes);
+        match command_result(command, outcome.termination, outcome.timed_out) {
+            CommandResult::Landed => Ok(PublishResult {
+                landed: attempt
+                    .candidate
+                    .steps
+                    .iter()
+                    .map(|step| step.commit.clone())
+                    .collect(),
+                alarms: Vec::new(),
+            }),
+            CommandResult::Unknown => Err(LandingError::PublicationUnknown),
+            CommandResult::Refused => Err(LandingError::Refused(
+                "repository publisher refused the intent".into(),
+            )),
+        }
+    }
     fn project_path(&self) -> Option<&Path> {
         self.local.as_ref().map(|_| self.project.as_path())
     }
@@ -1138,63 +1334,47 @@ impl Repo for GitRepo<'_> {
 
 // ----- ReviewRecords -----------------------------------------------------
 
-/// Accepted delivery receipts in the project's workflow state for pull
-/// requests of the forge repository. A receipt is accepted only once its
-/// review coverage passes, so its reviewers are independent of the authors.
-/// Each names the head its review read and the base it read that head
-/// against, both recorded by the edge from the forge.
-pub struct DeliveryReviews {
+/// Typed review-lane settlements in the registered project's graph journal.
+pub struct ProvenantReviews {
     root: provenant_core::StateRoot,
-    scope: Result<(provenant_core::ProjectId, provenant_core::RepoId), String>,
 }
-impl DeliveryReviews {
-    pub fn new(
-        root: provenant_core::StateRoot,
-        scope: Result<(provenant_core::ProjectId, provenant_core::RepoId), String>,
-    ) -> Self {
-        Self { root, scope }
+impl ProvenantReviews {
+    pub fn new(root: provenant_core::StateRoot) -> Self {
+        Self { root }
     }
 }
-impl ReviewRecords for DeliveryReviews {
-    fn reviews(&self, number: u64) -> Result<Reviews, LandingError> {
-        use provenant_records::workflow::{DecisionStatus, Subject};
-        let (project, repository) = self
-            .scope
-            .clone()
-            .map_err(|error| LandingError::Failed(format!("receipt approval: {error}")))?;
-        let found = provenant_workflow::store::pull_request_receipts(
-            &self.root, project, repository, number,
-        )
-        .map_err(|error| LandingError::Failed(format!("read review records: {error}")))?;
+impl ReviewRecordSource for ProvenantReviews {
+    fn reviews(
+        &self,
+        scope: &provenant_records::landing::ReviewScope,
+        _number: u64,
+        head: &str,
+    ) -> Result<Reviews, LandingError> {
+        let Some(project) = scope.project else {
+            return Ok(Reviews {
+                unusable: vec!["provenant_review needs a registered project".to_owned()],
+                ..Reviews::default()
+            });
+        };
+        let head = head
+            .parse::<provenant_core::GitOid>()
+            .map_err(|error| LandingError::Failed(error.to_string()))?;
+        let found = provenant_fabric_runtime::graph::landing_reviews(&self.root, project, head)
+            .map_err(|error| LandingError::Failed(format!("read review records: {error}")))?;
         Ok(Reviews {
             records: found
-                .receipts
-                .iter()
-                .filter(|receipt| receipt.decision().status() == DecisionStatus::Accepted)
-                .filter_map(|receipt| {
-                    let Subject::Pr { head, base, .. } = receipt.subject() else {
-                        return None;
-                    };
-                    Some(ReviewRecord {
-                        reference: format!("delivery {} at {head}", receipt.delivery_id()),
-                        reviewer: receipt.decision().actor_id()?.to_string(),
-                        head: head.to_string(),
-                        base: base.to_string(),
-                    })
+                .into_iter()
+                .map(|record| ReviewRecord {
+                    reference: record.attempt_id.to_string(),
+                    reviewer: record.attempt_id.to_string(),
+                    head: record.head.to_string(),
+                    verdict: record.verdict,
+                    independent: record.independent,
                 })
                 .collect(),
-            unusable: found.retired.iter().map(ToString::to_string).collect(),
+            unusable: Vec::new(),
         })
     }
-}
-
-/// The subject repository ID of the forge repository a lander drives.
-pub fn repository_id(forge: &mut dyn Forge) -> Result<provenant_core::RepoId, LandingError> {
-    let identity = forge.repository_identity()?;
-    identity
-        .get(..32)
-        .and_then(|prefix| provenant_core::RepoId::parse(prefix).ok())
-        .ok_or_else(|| LandingError::Failed("repository identity is not a digest".into()))
 }
 
 // ----- GateRunner --------------------------------------------------------
@@ -1293,8 +1473,18 @@ pub(super) fn observe_checks(
     sleep: &mut dyn FnMut(Duration),
 ) -> Result<GateEvidence, LandingError> {
     observe_checks_with(candidate, definition, poll_seconds, sleep, &mut || {
-        forge.checks(&candidate.commit)
+        let checks = forge.checks(&candidate.commit);
+        let next_interval = forge.observation_interval();
+        CheckObservation {
+            checks,
+            next_interval,
+        }
     })
+}
+
+struct CheckObservation {
+    checks: Result<Vec<GateEvidence>, LandingError>,
+    next_interval: Option<Duration>,
 }
 
 fn observe_checks_with(
@@ -1302,29 +1492,52 @@ fn observe_checks_with(
     definition: &GateDefinition,
     poll_seconds: u64,
     sleep: &mut dyn FnMut(Duration),
-    read: &mut dyn FnMut() -> Result<Vec<GateEvidence>, LandingError>,
+    read: &mut dyn FnMut() -> CheckObservation,
 ) -> Result<GateEvidence, LandingError> {
-    let poll = poll_seconds.max(1);
-    let mut elapsed = 0;
+    let fallback = Duration::from_secs(poll_seconds);
+    let timeout = Duration::from_secs(definition.timeout_seconds);
+    let mut elapsed = Duration::ZERO;
     loop {
-        let observed = read()?
+        let observation = read();
+        let poll = observation.next_interval.unwrap_or(fallback);
+        let observed = match observation.checks {
+            // A rate limit skips this poll; the bound still ends the wait.
+            Err(LandingError::RateLimited(message)) if elapsed < timeout => {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: candidate {} check read skipped: {message}",
+                    candidate.commit
+                );
+                let pause = poll.min(timeout.saturating_sub(elapsed));
+                sleep(pause);
+                elapsed += pause;
+                continue;
+            }
+            observed => observed?,
+        };
+        let observed = observed
             .into_iter()
             .next()
             .ok_or_else(|| LandingError::Failed("forge returned no check evidence".into()))?;
         let mut evidence = bind_evidence(candidate, definition, &observed)?;
-        evidence.duration_seconds = Some(elapsed);
+        evidence.duration_seconds = Some(elapsed.as_secs());
         let settled = !matches!(evidence.result, GateResult::Pending | GateResult::Missing);
-        if settled || elapsed >= definition.timeout_seconds {
+        if settled || elapsed >= timeout {
             return Ok(evidence);
         }
-        sleep(Duration::from_secs(poll));
-        elapsed += poll;
+        let pause = poll.min(timeout.saturating_sub(elapsed));
+        sleep(pause);
+        elapsed += pause;
     }
 }
 impl GateRunner for CheckGate {
     fn set_project_path(&mut self, path: &Path) {
         self.project = path.to_owned();
-        self.forge.project = path.to_owned();
+        self.forge.set_project_path(path);
+    }
+    fn set_poll_interval_override(&mut self, interval: Option<Duration>) {
+        self.forge.set_poll_interval_override(interval);
     }
     #[allow(clippy::disallowed_methods)]
     fn gate(
@@ -1429,7 +1642,66 @@ fn deliver_alarm(
     reason = "custom worktree harness includes tests without the test runner"
 )]
 mod tests {
+    #[test]
+    fn repository_command_exit_protocol_preserves_uncertainty() {
+        use provenant_records::landing::RepositoryCommand;
+        for unknown_exit_code in [17, 75, 255] {
+            let command = RepositoryCommand {
+                argv: vec!["publisher".into()],
+                unknown_exit_code,
+                timeout_seconds: 30,
+            };
+            for code in [0, 1, unknown_exit_code] {
+                let result = super::command_result(&command, Termination::Exit(code), false);
+                assert_eq!(
+                    result,
+                    if code == 0 {
+                        super::CommandResult::Landed
+                    } else if code == unknown_exit_code {
+                        super::CommandResult::Unknown
+                    } else {
+                        super::CommandResult::Refused
+                    }
+                );
+                assert_eq!(
+                    super::command_result(&command, Termination::Exit(code), true),
+                    super::CommandResult::Unknown
+                );
+            }
+            assert_eq!(
+                super::command_result(&command, Termination::Signal(9), false),
+                super::CommandResult::Unknown
+            );
+        }
+    }
+
     use super::*;
+
+    #[test]
+    fn explicit_poll_override_precedes_adaptive_interval_and_gate_forwards_it() {
+        let adaptive = Duration::from_secs(5);
+        let fixed = Duration::from_secs(30);
+        let mut forge = GhForge::new(Path::new("project"), Path::new("state"));
+        forge.observation_interval = Some(adaptive);
+        assert_eq!(Forge::observation_interval(&forge), Some(adaptive));
+        Forge::set_poll_interval_override(&mut forge, Some(fixed));
+        assert_eq!(Forge::observation_interval(&forge), Some(fixed));
+        Forge::set_project_path(&mut forge, Path::new("candidate-worktree"));
+        assert_eq!(Forge::observation_interval(&forge), Some(fixed));
+        forge.observation_interval = Some(adaptive);
+        Forge::set_poll_interval_override(&mut forge, None);
+        assert_eq!(Forge::observation_interval(&forge), Some(adaptive));
+
+        let mut gate = CheckGate::new(Path::new("project"), Path::new("state"));
+        gate.forge.observation_interval = Some(adaptive);
+        GateRunner::set_poll_interval_override(&mut gate, Some(fixed));
+        assert_eq!(Forge::observation_interval(&gate.forge), Some(fixed));
+        GateRunner::set_project_path(&mut gate, Path::new("candidate-worktree"));
+        assert_eq!(Forge::observation_interval(&gate.forge), Some(fixed));
+        gate.forge.observation_interval = Some(adaptive);
+        GateRunner::set_poll_interval_override(&mut gate, None);
+        assert_eq!(Forge::observation_interval(&gate.forge), Some(adaptive));
+    }
 
     #[test]
     fn async_stack_result_distinguishes_merged_pending_and_unknown() {
@@ -1642,7 +1914,9 @@ esac
         git(&work, &["remote", "add", "origin", bare.to_str().unwrap()]);
         commit_file(&work, "a", "a\n");
         git(&work, &["push", "-q", "origin", "main"]);
-        let repo = GitRepo::new(&work).unwrap();
+        let state = dir.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        let repo = GitRepo::new(&work, &state).unwrap();
         Rig {
             _dir: dir,
             work,
@@ -1715,7 +1989,7 @@ esac
                 "{landing_calls}pr list --head branch\n"
             )));
             assert!(calls.contains(&format!("sha={HEAD}")), "{calls}");
-            assert!(calls.contains("X-GitHub-Api-Version:2026-03-10"), "{calls}");
+            assert!(calls.contains(REST_API_VERSION_HEADER), "{calls}");
             assert_eq!(
                 calls
                     .lines()
@@ -1819,6 +2093,7 @@ esac
                 &mut gate,
                 &mut FakeAlarms::default(),
                 driver::Request {
+                    pins: &Default::default(),
                     numbers: &[7],
                     target: "main",
                     settings: &settings,
@@ -2274,13 +2549,43 @@ esac
             &definition(&["ci"], None),
             3,
             &mut |pause| pauses.push(pause),
-            &mut || Ok(vec![samples.pop_front().unwrap()]),
+            &mut || CheckObservation {
+                checks: Ok(vec![samples.pop_front().unwrap()]),
+                next_interval: None,
+            },
         )
         .unwrap();
         assert_eq!(result.result, GateResult::Passed);
         assert_eq!(result.duration_seconds, Some(3));
         assert_eq!(pauses, [Duration::from_secs(3)]);
         assert_eq!(result.pool.as_deref(), Some("app"));
+    }
+
+    #[test]
+    fn pending_check_uses_the_adapter_interval_before_the_next_read() {
+        let settings = provenant_cli::wait::Settings {
+            pr_interval_ms: 37,
+            ..Default::default()
+        };
+        let fast = Duration::from_millis(settings.pr_interval_ms);
+        let mut samples = std::collections::VecDeque::from([
+            observed(&[("ci", Some("app"), GateResult::Pending)]),
+            observed(&[("ci", Some("app"), GateResult::Passed)]),
+        ]);
+        let mut pauses = Vec::new();
+        let result = observe_checks_with(
+            &candidate(),
+            &definition(&["ci"], None),
+            3,
+            &mut |pause| pauses.push(pause),
+            &mut || CheckObservation {
+                checks: Ok(vec![samples.pop_front().unwrap()]),
+                next_interval: Some(fast),
+            },
+        )
+        .unwrap();
+        assert_eq!(result.result, GateResult::Passed);
+        assert_eq!(pauses, [fast]);
     }
 
     #[test]

@@ -3,19 +3,7 @@ use super::*;
 /// Usage and cost over this project's terminal attempts, priced from the
 /// reviewed table shipped with the product.
 pub fn stats(command: Stats, edge: &Edge<'_>) -> Reply {
-    reply("telemetry stats", stats_inner(command, edge, None))
-}
-
-/// Stats grouped by the host's merged pull request snapshot and contribution store.
-pub fn stats_by_pr(
-    command: Stats,
-    edge: &Edge<'_>,
-    merged_prs: Vec<provenant_run::PullRequest>,
-) -> Reply {
-    reply(
-        "telemetry stats",
-        stats_inner(command, edge, Some(merged_prs)),
-    )
+    reply("telemetry stats", stats_inner(command, edge))
 }
 
 pub(super) fn cache_kpi_rows(
@@ -50,11 +38,10 @@ pub(super) fn cache_kpi_rows(
     json!({"scope": "project terminal attempts", "routes": routes, "lanes": lanes})
 }
 
-/// Attempts still queued or running in the project, or in one run. The window
-/// cannot count them: they have no finish time yet.
+/// Attempts still queued or running in the project. The window cannot count
+/// them: they have no finish time yet.
 pub(super) fn unfinished_attempts(
     store: Option<&run::RunStore>,
-    run_id: Option<RunId>,
     call: &run::Request<'_>,
 ) -> Result<u64, Fail> {
     let Some(store) = store else {
@@ -65,15 +52,7 @@ pub(super) fn unfinished_attempts(
     loop {
         let page = store.lanes(
             &run::LaneQuery {
-                targets: run_id
-                    .map(|run| {
-                        vec![run::LaneTarget {
-                            run,
-                            task: None,
-                            attempt: None,
-                        }]
-                    })
-                    .unwrap_or_default(),
+                targets: Vec::new(),
                 all: false,
                 limit: 100,
                 after,
@@ -83,7 +62,6 @@ pub(super) fn unfinished_attempts(
             },
             call,
         )?;
-        // A run selection also returns its terminal lanes, so filter on state.
         count += page
             .lanes
             .iter()
@@ -132,11 +110,7 @@ pub(super) fn price_table(assets: &Path) -> Result<provenant_telemetry::PriceTab
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Prices, error))
 }
 
-pub(super) fn stats_inner(
-    command: Stats,
-    edge: &Edge<'_>,
-    merged_prs: Option<Vec<provenant_run::PullRequest>>,
-) -> Result<(Value, String), Fail> {
+pub(super) fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
     use run::AttemptReader;
     let prices = price_table(edge.assets)?;
     let instant = |time: Option<jiff::Timestamp>| {
@@ -148,34 +122,19 @@ pub(super) fn stats_inner(
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
     let (context, store) = open_read_only(edge, &call)?;
-    let selected_run = command
-        .run_id
-        .as_ref()
-        .map(|target| targets::run_id(edge, target))
-        .transpose()?;
     let window = provenant_telemetry::Window {
         since: instant(command.since)?,
         until: instant(command.until)?,
         project: Some(context.project_id),
-        detail: command.detail,
+        detail: false,
     };
     let facts = store
         .as_ref()
-        .map(|store| {
-            store
-                .attempts(
-                    run::AttemptFilter {
-                        run_id: selected_run,
-                        task_id: None,
-                    },
-                    &call,
-                )?
-                .collect::<Result<Vec<_>, _>>()
-        })
+        .map(|store| store.attempts(&call)?.collect::<Result<Vec<_>, _>>())
         .transpose()?
         .unwrap_or_default();
-    let unfinished = unfinished_attempts(store.as_ref(), selected_run, &call)?;
-    let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
+    let unfinished = unfinished_attempts(store.as_ref(), &call)?;
+    let config = crate::config_reads::read_for(edge.roots, "telemetry")
         .map_err(|error| Fail::config(Status::Invalid, error))?;
     let selected: Vec<_> = facts
         .iter()
@@ -201,13 +160,9 @@ pub(super) fn stats_inner(
         let access = record.as_ref().and_then(|record| {
             let store = store.as_ref()?;
             let request = requests
-                .entry(record.run_id)
-                .or_insert_with(|| store.request(record.run_id, &call).ok());
-            let task = request
-                .as_ref()?
-                .tasks
-                .iter()
-                .find(|task| task.task_id == fact.task_id)?;
+                .entry(record.attempt_id)
+                .or_insert_with(|| store.request(record.attempt_id, &call).ok());
+            let task = &request.as_ref()?.task;
             Some(
                 if task.writer.is_some() {
                     "worktree-write"
@@ -230,9 +185,11 @@ pub(super) fn stats_inner(
             access,
             pool,
             // Missing evidence cannot certify a complete success.
-            partial: record
-                .as_ref()
-                .is_none_or(|record| !record.partial_signals.is_empty()),
+            partial: record.as_ref().is_none_or(|record| {
+                provenant_telemetry::route_outcomes::provider_work_incomplete(
+                    &record.partial_signals,
+                )
+            }),
         });
     }
     let route_outcomes = provenant_telemetry::route_outcomes::report(route_evidence)
@@ -249,25 +206,26 @@ pub(super) fn stats_inner(
             clock: call.clock,
             cancel: call.cancel,
         };
-        let runs: std::collections::BTreeSet<_> =
-            selected.iter().filter_map(|fact| fact.trace.run).collect();
-        for run in runs {
-            if let Ok(Some(binding)) = index.read(context.project_id, run, &index_call)
-                && let Some(session) = binding.chair.and_then(|chair| chair.session)
+        let mut graphs = std::collections::BTreeSet::new();
+        if let Some(store) = store.as_ref() {
+            for fact in &selected {
+                graphs.insert(store.work_key(fact.attempt_id, &call)?.graph().to_owned());
+            }
+        }
+        for graph in graphs {
+            if let Ok(Some(binding)) = index.read(context.project_id, &graph, &index_call)
+                && let Some(session) = binding
+                    .holder
+                    .chair()
+                    .and_then(|chair| chair.session.clone())
             {
-                chair_bindings.insert(run, session);
+                chair_bindings.insert(graph, session);
             }
         }
     }
     let attempt_context = provenant_telemetry::context::report(&selected, &chair_bindings, &prices)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
     let task_context = super::telemetry_context::report(&selected, &graph_quality, edge)?;
-    let decision_ids = command.detail.then(|| {
-        selected
-            .iter()
-            .map(|fact| fact.attempt_id)
-            .collect::<Vec<_>>()
-    });
     let cache_kpis = cache_kpi_rows(
         &selected,
         &config.domains,
@@ -304,112 +262,12 @@ pub(super) fn stats_inner(
         Ok(chairs) => (chairs, None),
         Err(error) => (Vec::new(), Some(error.to_string())),
     };
-    let by = command.by;
-    let mut unknown_pr_weights = 0u64;
-    let mut merged_pr_count = 0u64;
-    let external_labels = if by == Some(crate::StatsBy::Pr) {
-        let merged_prs = merged_prs.ok_or_else(|| {
-            Fail::new(
-                Status::Invalid,
-                ErrorKind::Unsupported,
-                "--by pr requires merged PR state",
-            )
-        })?;
-        merged_pr_count = merged_prs.len() as u64;
-        let contributions =
-            provenant_run::Contributions::open_read_only(edge.roots.state.as_path(), &call)?;
-        let mut labels =
-            BTreeMap::<provenant_core::AttemptId, Vec<provenant_telemetry::ExternalGroup>>::new();
-        let mut contribution_count = 0u64;
-        if let Some(contributions) = contributions {
-            for pr in merged_prs {
-                for contribution in contributions.for_pr(&pr, &call)? {
-                    contribution_count += 1;
-                    if contribution_count > provenant_telemetry::MAX_ATTEMPTS {
-                        return Err(Fail::new(
-                            Status::Invalid,
-                            ErrorKind::Invalid,
-                            "PR contributions exceed 100,000 rows; narrow the time window",
-                        ));
-                    }
-                    if contribution.weight_millionths.is_none() {
-                        unknown_pr_weights += 1;
-                    }
-                    labels.entry(contribution.attempt).or_default().push(
-                        provenant_telemetry::ExternalGroup {
-                            value: format!("{}#{}", pr.repository, pr.number),
-                            weight_millionths: contribution.weight_millionths,
-                        },
-                    );
-                }
-            }
-        }
-        Some(labels)
-    } else {
-        None
-    };
-    let by_name = match by {
-        Some(crate::StatsBy::Route) => "route",
-        Some(crate::StatsBy::Pr) => "pr",
-        Some(crate::StatsBy::Issue) => "issue",
-        Some(crate::StatsBy::Graph) => "graph",
-        Some(crate::StatsBy::Node) => "node",
-        Some(crate::StatsBy::Pattern) => "pattern",
-        Some(crate::StatsBy::Preset) => "preset",
-        Some(crate::StatsBy::Role) => "role",
-        None => "all",
-    };
-    let report = if by == Some(crate::StatsBy::Pr) {
-        let labels = external_labels.as_ref().ok_or_else(|| {
-            Fail::new(
-                Status::Invalid,
-                ErrorKind::Unsupported,
-                "missing PR contribution labels",
-            )
-        })?;
-        provenant_telemetry::stats_by_external_key(facts, &prices, window, labels)
-    } else if let Some(by) = by {
-        let key = match by {
-            crate::StatsBy::Route => provenant_telemetry::ContextKey::Route,
-            crate::StatsBy::Issue => provenant_telemetry::ContextKey::Issue,
-            crate::StatsBy::Graph => provenant_telemetry::ContextKey::GraphId,
-            crate::StatsBy::Node => provenant_telemetry::ContextKey::NodeId,
-            crate::StatsBy::Pattern => provenant_telemetry::ContextKey::Pattern,
-            crate::StatsBy::Preset => provenant_telemetry::ContextKey::Preset,
-            crate::StatsBy::Role => provenant_telemetry::ContextKey::Role,
-            crate::StatsBy::Pr => unreachable!("handled above"),
-        };
-        provenant_telemetry::stats_by_context(facts, &prices, window, key)
-    } else {
-        provenant_telemetry::stats_with_chair(facts, chairs, &prices, window)
-    }
-    .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
+    let report = provenant_telemetry::stats_with_chair(facts, chairs, &prices, window)
+        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
     let mut human = stats_scope_line(context.project_id, unfinished);
     human.push_str(&stats_summary(&report));
     if let Some(line) = reasoning_line(&report.totals) {
         human.push_str(&line);
-    }
-    if let Some(groups) = &report.context_groups {
-        human.push_str(&format!("by {by_name}: {} groups\n", groups.len()));
-        for group in groups {
-            let label = group.value.as_deref().unwrap_or("unattributed");
-            let input = grouped_token_count(
-                &group.totals.usage.uncached_input,
-                &group.totals.usage.cache_read,
-                &group.totals.usage.cache_write,
-            );
-            let output = grouped_token_count(
-                &group.totals.usage.output_excluding_reasoning,
-                &group.totals.usage.reasoning,
-                &provenant_telemetry::TokenTotal::default(),
-            );
-            human.push_str(&format!(
-                "{}  input={input} output={output}  {} attempts\n",
-                plain_text(label, 256),
-                group.totals.attempts
-            ));
-        }
-        human.push_str("next: inspect group totals with --json\n");
     }
     for graph in &graph_quality {
         if graph["checkpoint"] == "read" {
@@ -436,7 +294,7 @@ pub(super) fn stats_inner(
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
     data["attempt_context"] = json!(attempt_context);
     data["task_context"] = task_context;
-    human.push_str("context coverage: inspect attempt_context and task_context with --detail --json; missing observations remain unknown\n");
+    human.push_str("context coverage: inspect attempt_context and task_context with --json; missing observations remain unknown\n");
     human.push_str("comparability: release, harness experiments, task difficulty and user activity cannot be separated when observations are missing or change together\n");
     human.push_str(&format!(
         "accepted outcomes: {} (distinct delivery IDs with recorded accepted workflow receipts among selected attempts)\n",
@@ -455,7 +313,7 @@ pub(super) fn stats_inner(
     }
     // Native rows are a host-wide breakdown of chair usage already included
     // above; expose the attribution without adding it to totals a second time.
-    if selected_run.is_none() {
+    {
         let native = provenant_telemetry::native_attempts::read(edge.roots);
         let mut rows = provenant_telemetry::ingest::read_rows(
             edge.roots,
@@ -533,29 +391,6 @@ pub(super) fn stats_inner(
                 let native = provenant_telemetry::native_attempts::report(attempts, &rows);
                 if !native.attempts.is_empty() || !native.unlinked.is_empty() {
                     human.push_str("native sub-agent usage (host; may overlap chair usage):\n");
-                    if !command.detail {
-                        human.push_str(&format!(
-                            "  {} attempts; per-attempt rows with --detail\n",
-                            native.attempts.len()
-                        ));
-                    }
-                    for item in native.attempts.iter().filter(|_| command.detail) {
-                        if item.models.is_empty() {
-                            human.push_str(&format!(
-                                "  {} {}: no linked messages\n",
-                                item.attempt.alias, item.attempt.model
-                            ));
-                        }
-                        for (model, buckets) in &item.models {
-                            human.push_str(&format!(
-                                "  {} {}: input={} output={}\n",
-                                item.attempt.alias,
-                                model,
-                                buckets[..4].iter().copied().fold(0u64, u64::saturating_add),
-                                buckets[4]
-                            ));
-                        }
-                    }
                     for item in &native.unlinked {
                         human.push_str(&format!(
                             "  unlinked {}: {} messages, input={} output={}\n",
@@ -583,22 +418,6 @@ pub(super) fn stats_inner(
                 data["reply_context_error"] = json!(error.to_string());
             }
         }
-    }
-    if let Some(ids) = decision_ids {
-        let mut decisions = Vec::new();
-        if let Some(store) = store.as_ref() {
-            for id in ids {
-                let record = store.record(id, &call)?;
-                if let Some(route) = record.resolved_route {
-                    decisions.push(route_decision(id, &route));
-                }
-            }
-        }
-        human.push_str(&format!(
-            "route decisions: {} attempts; inspect receipts with --json\n",
-            decisions.len()
-        ));
-        data["route_decisions"] = json!(decisions);
     }
     data["cache_read_share"] = cache_kpis;
     data["cache_read_share"]["overall"] = json!(total_share);
@@ -651,13 +470,6 @@ pub(super) fn stats_inner(
         data["pipeline"] = pipeline;
     }
     attach_freshness(&prices, &mut data, &mut human)?;
-    if by == Some(crate::StatsBy::Pr) {
-        data["pr_attribution"] = json!({
-            "merged_prs_read": merged_pr_count,
-            "unknown_allocation_weights": unknown_pr_weights,
-            "allocation": "contribution_weight_millionths",
-        });
-    }
     if let Some(error) = chair_error {
         human.push_str(&format!(
             "chair sessions not read: {}\n",
@@ -667,9 +479,7 @@ pub(super) fn stats_inner(
     }
     // Cost has one producer: `telemetry cost` reads it from the usage ledger.
     strip_cost(&mut data);
-    if !command.detail {
-        omit_per_attempt_rows(&mut data);
-    }
+    omit_per_attempt_rows(&mut data);
     Ok((data, human))
 }
 
@@ -690,17 +500,7 @@ pub(crate) fn accepted_attempts(edge: &Edge<'_>, since: i64) -> Result<AcceptedA
     let (context, store) = open_read_only(edge, &call)?;
     let facts = store
         .as_ref()
-        .map(|store| {
-            store
-                .attempts(
-                    run::AttemptFilter {
-                        run_id: None,
-                        task_id: None,
-                    },
-                    &call,
-                )?
-                .collect::<Result<Vec<_>, _>>()
-        })
+        .map(|store| store.attempts(&call)?.collect::<Result<Vec<_>, _>>())
         .transpose()?
         .unwrap_or_default();
     let selected: Vec<_> = facts
@@ -730,10 +530,9 @@ fn strip_cost(value: &mut Value) {
     }
 }
 
-/// The rows that grow with every attempt. A result carries them only with
-/// `--detail`; otherwise each array is replaced by its length under
-/// `<name>_omitted`, so the default is the same summary the human view shows
-/// and does not outgrow the result limit as history does.
+/// The rows that grow with every attempt: each array is replaced by its length
+/// under `<name>_omitted`, so the result is the same summary the human view
+/// shows and does not outgrow the result limit as history does.
 fn omit_per_attempt_rows(data: &mut Value) {
     for (section, rows) in [
         ("attempt_context", "attempts"),
@@ -977,45 +776,4 @@ pub(super) fn pipeline_node_model(facts: &[provenant_records::AttemptFact]) -> O
     (models.len() == 1)
         .then(|| models.into_iter().next())
         .flatten()
-}
-
-/// Project only decision evidence into per-attempt telemetry.
-fn route_decision(id: provenant_core::AttemptId, route: &run::RouteRecord) -> Value {
-    json!({
-        "attempt_id": id,
-        "model": route.model,
-        "effort": route.effort,
-        "account_label": route.account_label,
-        "source": route.source,
-        "account_source": route.extra.get("account_source"),
-        "pool_selection": route.pool_selection,
-    })
-}
-
-#[cfg(test)]
-mod receipt_tests {
-    use super::*;
-
-    #[test]
-    fn detail_projects_only_route_decision_fields() -> Result<(), Box<dyn std::error::Error>> {
-        let mut route = run::RouteRecord {
-            model: Some("codex/example".into()),
-            effort: Some("high".into()),
-            source: Some("pool".into()),
-            pool_selection: Some(serde_json::from_value(json!({
-                "pool": "fixture", "candidates": [], "roll": 0, "total_weight": 0, "pick": "codex/example"
-            }))?),
-            ..Default::default()
-        };
-        route
-            .extra
-            .insert("unrelated".into(), "fixture-marker".into());
-        route.account_key = Some("fixture-account-key".into());
-        let value = route_decision(provenant_core::AttemptId::from_bytes([1; 16]), &route);
-        assert_eq!(value["pool_selection"]["pool"], "fixture");
-        let text = serde_json::to_string(&value)?;
-        assert!(!text.contains("fixture-marker"));
-        assert!(!text.contains("fixture-account-key"));
-        Ok(())
-    }
 }

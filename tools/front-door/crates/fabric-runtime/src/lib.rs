@@ -3,7 +3,7 @@
 pub mod chairs;
 pub mod config;
 pub mod coordination;
-pub mod fetch;
+pub mod custody;
 pub mod git_transport;
 pub mod graph;
 pub mod handoff;
@@ -13,9 +13,8 @@ pub mod identity;
 pub mod inbox;
 pub mod peer_agent;
 pub mod read_roots;
+pub mod relay;
 pub use provenant_records::result_capture;
-#[cfg(test)]
-mod forward_compatibility;
 pub mod runs;
 #[cfg(test)]
 mod test_support;

@@ -8,7 +8,6 @@
 mod process_os;
 pub use process_os::profile::{ProfileFile, ProfileIdentity};
 
-mod build_pause;
 pub mod census;
 pub mod custody;
 #[cfg(feature = "fixture")]

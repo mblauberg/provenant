@@ -2,6 +2,7 @@
 
 use crate::permissions::{PermissionError, validate_absolute};
 use crate::worktrees::Occupancy;
+use provenant_config::RetentionIssue;
 use provenant_os::fs::{Directory, FileKind, FsError, LockGuard, PayloadTree};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -77,6 +78,7 @@ pub struct CacheGcReport {
     /// Caches kept because ownership or writer state prevents removal.
     pub kept: Vec<CacheGcEntry>,
     pub bytes_freed: u64,
+    pub errors: Vec<RetentionIssue>,
     /// Preview measurements stopped at the shared entry or time bound.
     pub bytes_estimated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -99,19 +101,19 @@ pub struct CacheGcError {
     pub source: Box<PermissionError>,
 }
 
-/// Preview accounting is deliberately a lower bound. An incomplete newest-write
-/// observation is MAX, so it can never authorise idle eviction.
+/// One full allocated-tree walk for preview and apply. Neither follows links.
+/// APFS clones and hard links can share physical blocks: allocated bytes are an
+/// observation, not a promise about the change in volume free space.
 struct MeasureBudget {
     remaining: usize,
     started: Option<std::time::Instant>,
     limited: bool,
 }
 impl MeasureBudget {
-    #[allow(clippy::disallowed_methods)] // Wall-clock bound on read-only preview work.
-    fn new(preview: bool) -> Self {
+    fn new(_preview: bool) -> Self {
         Self {
-            remaining: if preview { 20_000 } else { usize::MAX },
-            started: preview.then(std::time::Instant::now),
+            remaining: usize::MAX,
+            started: None,
             limited: false,
         }
     }
@@ -135,7 +137,10 @@ pub fn prune_orphaned_worktree_cargo_caches(home: &Path) -> Result<usize, CacheG
 /// Remove only the cache derived from a worktree before its removal. The caller
 /// holds that worktree's writer lock until this returns. Other orphaned caches
 /// and interrupted GC tombstones are left for `provenant gc`.
-pub(crate) fn prune_worktree_cargo_cache(home: &Path, cache: &Path) -> Result<(), PermissionError> {
+pub(crate) fn prune_worktree_cargo_cache(
+    home: &Path,
+    cache: &Path,
+) -> Result<u64, PermissionError> {
     validate_absolute(home)?;
     let cache_root = home.join("Library/Caches/provenant-lane-cargo");
     if cache.parent() != Some(cache_root.as_path()) {
@@ -148,18 +153,61 @@ pub(crate) fn prune_worktree_cargo_cache(home: &Path, cache: &Path) -> Result<()
         return Err(PermissionError::InvalidPath(cache.to_owned()));
     }
     let Some(root) = open_cache_root(&cache_root)? else {
-        return Ok(());
+        return Ok(0);
     };
+    let mut report = CacheGcReport::default();
     prune_worktree_cache(
         &root,
         &cache_root,
         name,
         &CacheGcPolicy::default(),
-        &mut CacheGcReport::default(),
+        &mut report,
         &mut |path| Err(missing_custody(path)),
         false,
         &mut MeasureBudget::new(false),
-    )
+    )?;
+    Ok(report.bytes_freed)
+}
+
+/// Observe the private cache which an eligible worktree removal will orphan.
+/// The caller holds worktree custody; the same allocated-tree measure is used
+/// after removal. Shared Cargo download links are never followed.
+pub(crate) fn preview_worktree_cargo_cache(
+    home: &Path,
+    worktree: &crate::repo::VerifiedWorktree,
+) -> Result<Option<CacheGcEntry>, PermissionError> {
+    let grant = crate::permissions::worktree_cargo_cache(home, worktree)?;
+    let cache_root = home.join("Library/Caches/provenant-lane-cargo");
+    let Some(root) = open_cache_root(&cache_root)? else {
+        return Ok(None);
+    };
+    let name = grant
+        .path
+        .file_name()
+        .ok_or(PermissionError::AnchorMismatch)?;
+    let directory = match root.open_verified_directory(name) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(cache_fs_error("open private cache", &grant.path)(error)),
+    };
+    verify_cache_metadata(
+        &directory
+            .metadata()
+            .map_err(cache_fs_error("stat private cache", &grant.path))?,
+    )?;
+    let Some(owner) = read_cache_owner(&directory, &grant.path)? else {
+        return Ok(None);
+    };
+    let identity = worktree.identity();
+    if owner.path != worktree.path() || owner.identity != (identity.device, identity.inode) {
+        return Err(PermissionError::AnchorMismatch);
+    }
+    let (bytes, _) = measure_cache(&directory, &grant.path, 0, &mut MeasureBudget::new(true))?;
+    Ok(Some(CacheGcEntry {
+        path: grant.path,
+        bytes,
+        reason: CacheGcReason::Orphaned,
+    }))
 }
 
 /// Sweep the lane cache root: orphaned caches always, idle ones when the policy
@@ -349,10 +397,28 @@ fn gc_caches_with_free_space(
     report.bytes_estimated = measurement.limited;
     match sweep {
         Ok(()) => Ok(report),
-        Err(source) => Err(CacheGcError {
-            report,
-            source: Box::new(source),
-        }),
+        Err(source) => {
+            if report.errors.is_empty() {
+                let root = home.join("Library/Caches/provenant-lane-cargo");
+                let (path, operation, cause) = match &source {
+                    PermissionError::CacheSweepFilesystem {
+                        operation,
+                        path,
+                        source,
+                    } => (root.join(path), (*operation).to_owned(), source.to_string()),
+                    error => (root, "collect cache class".into(), error.to_string()),
+                };
+                report.errors.push(RetentionIssue {
+                    path,
+                    operation,
+                    cause,
+                });
+            }
+            Err(CacheGcError {
+                report,
+                source: Box::new(source),
+            })
+        }
     }
 }
 
@@ -518,6 +584,29 @@ fn sweep_cache_root(
         ) {
             failures.push((Some(name), error));
         }
+    }
+    for (name, error) in &failures {
+        let (path, operation, cause) = match error {
+            PermissionError::CacheSweepFilesystem {
+                operation,
+                path,
+                source,
+            } => (
+                cache_root.join(path),
+                (*operation).to_owned(),
+                source.to_string(),
+            ),
+            error => (
+                cache_root.join(name.as_deref().unwrap_or(OsStr::new("."))),
+                "collect cache".into(),
+                error.to_string(),
+            ),
+        };
+        report.errors.push(RetentionIssue {
+            path,
+            operation,
+            cause,
+        });
     }
     if !failures.is_empty() {
         return Err(PermissionError::CacheSweepIo(std::io::Error::other(
@@ -791,9 +880,7 @@ fn prune_worktree_cache(
                     "unlink",
                     &Path::new(removal_name).join(marker_name),
                 ))?;
-                report.bytes_freed = report
-                    .bytes_freed
-                    .saturating_add(marker.allocated.max(marker.size));
+                report.bytes_freed = report.bytes_freed.saturating_add(marker.allocated);
             }
             Err(error) if error.is_not_found() => {}
             Err(error) => {
@@ -807,6 +894,7 @@ fn prune_worktree_cache(
             root.rmdir(removal_name)
         })
         .map_err(cache_fs_error("rmdir", Path::new(removal_name)))?;
+        report.bytes_freed = report.bytes_freed.saturating_add(opened.allocated);
     }
     report.removed.push(CacheGcEntry {
         path: cache_root.join(name),
@@ -1019,7 +1107,14 @@ fn measure_cache(
     if budget.exhausted() {
         return Ok((0, i128::MAX));
     }
-    let mut bytes = 0_u64;
+    let mut bytes = if depth == 0 {
+        directory
+            .metadata()
+            .map_err(cache_fs_error("fstat", relative))?
+            .allocated
+    } else {
+        0
+    };
     let mut newest = directory
         .metadata()
         .map_err(cache_fs_error("fstat", relative))?
@@ -1037,7 +1132,7 @@ fn measure_cache(
             directory.metadata_at(&name, false)
         })
         .map_err(cache_fs_error("stat", &path))?;
-        bytes = bytes.saturating_add(metadata.allocated.max(metadata.size));
+        bytes = bytes.saturating_add(metadata.allocated);
         newest = newest.max(metadata.modified_ns);
         if metadata.kind == FileKind::Directory {
             let child = cache_gc_operation("open verified", &relative.join(&name), || {
@@ -1088,6 +1183,9 @@ fn remove_cache_contents_at(
     if depth >= MAX_CACHE_SWEEP_DEPTH {
         return Err(PermissionError::CacheSweepDepth);
     }
+    directory
+        .make_writable()
+        .map_err(cache_fs_error("make cache writable", relative))?;
     let names = cache_gc_entries(directory.directory(), relative)
         .map_err(cache_fs_error("readdir", relative))?
         .take(MAX_CACHE_DIRECTORY_ENTRIES + 1)
@@ -1112,6 +1210,10 @@ fn remove_cache_contents_at(
         })
         .map_err(cache_fs_error("stat", &path))?;
         if metadata.kind == FileKind::Directory {
+            directory
+                .directory()
+                .make_owner_accessible_at(&name)
+                .map_err(cache_fs_error("make cache directory accessible", &path))?;
             let child = cache_gc_operation("open verified", &relative.join(&name), || {
                 directory.child(&name)
             })
@@ -1124,7 +1226,7 @@ fn remove_cache_contents_at(
             cache_gc_operation("unlink", &relative.join(&name), || directory.unlink(&name))
                 .map_err(cache_fs_error("unlink", &path))?;
         }
-        *bytes_freed = bytes_freed.saturating_add(metadata.allocated.max(metadata.size));
+        *bytes_freed = bytes_freed.saturating_add(metadata.allocated);
     }
     Ok(())
 }
@@ -1463,6 +1565,40 @@ mod tests {
         }
 
         #[test]
+        fn nested_tree_preview_and_apply_use_the_same_allocated_bytes()
+        -> Result<(), Box<dyn std::error::Error>> {
+            let home = tempfile::tempdir()?;
+            let owner = home.path().join("missing-owner");
+            let path = cache(home.path(), &"a".repeat(64), &owner)?;
+            std::fs::create_dir_all(path.join("nested/deeper"))?;
+            std::fs::write(path.join("nested/deeper/payload"), vec![0; 128 * 1024])?;
+            fn whole_tree(path: &Path) -> std::io::Result<u64> {
+                use std::os::unix::fs::MetadataExt;
+                let metadata = std::fs::symlink_metadata(path)?;
+                let mut bytes = metadata.blocks() * 512;
+                if metadata.is_dir() {
+                    for entry in std::fs::read_dir(path)? {
+                        bytes = bytes.saturating_add(whole_tree(&entry?.path())?);
+                    }
+                }
+                Ok(bytes)
+            }
+            let expected = whole_tree(&path)?;
+            let preview = gc_worktree_cargo_caches(
+                home.path(),
+                &CacheGcPolicy {
+                    dry_run: true,
+                    ..Default::default()
+                },
+            )?;
+            let apply = gc_worktree_cargo_caches(home.path(), &CacheGcPolicy::default())?;
+            assert_eq!(preview.bytes_freed, expected);
+            assert_eq!(preview.bytes_freed, apply.bytes_freed);
+            assert!(!path.exists());
+            Ok(())
+        }
+
+        #[test]
         fn free_floor_collects_oldest_first_and_keeps_live_reserved_and_foreign()
         -> Result<(), Box<dyn std::error::Error>> {
             for (dry_run, floor) in [(true, 1), (false, 100), (true, u64::MAX), (false, u64::MAX)] {
@@ -1691,7 +1827,7 @@ mod tests {
         }
 
         #[test]
-        fn lane_cache_gc_removes_large_cargo_registry_tree()
+        fn lane_cache_gc_removes_large_private_payload_tree()
         -> Result<(), Box<dyn std::error::Error>> {
             let temporary = tempfile::tempdir()?;
             let home = temporary.path();
@@ -1701,7 +1837,7 @@ mod tests {
             std::fs::write(outside.join("keep"), b"must survive")?;
             std::os::unix::fs::symlink(&outside, path.join("outside.lock"))?;
             std::fs::create_dir(path.join("directory.lock"))?;
-            let registry = path.join("cargo-home/registry/src/index.crates.io-example");
+            let registry = path.join("private-config/packages");
             let target = path.join("target/debug");
             std::fs::create_dir_all(&target)?;
             for index in 0..2048 {
@@ -1852,7 +1988,7 @@ mod tests {
         #[test]
         fn gc_idle_releases_writer_lock_before_tombstone_cleanup_and_writer_retries()
         -> Result<(), Box<dyn std::error::Error>> {
-            use provenant_core::{AttemptId, GitOid, RunId};
+            use provenant_core::{AttemptId, GitOid};
             use provenant_os::clock::SystemClock;
             use provenant_os::fs::Directory;
             use provenant_supervisor::custody::{self, CustodyError, Scope, WriterBinding};
@@ -1891,7 +2027,6 @@ mod tests {
                         custody::acquire_writer(
                             Directory::open_anchor(&writer_home.join("writer-state"))?,
                             Scope {
-                                run: RunId::from_bytes([1; 16]),
                                 attempt: AttemptId::from_bytes([2; 16]),
                                 generation: 1,
                             },

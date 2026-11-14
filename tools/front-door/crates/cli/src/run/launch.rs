@@ -1,28 +1,13 @@
 use super::*;
 
-pub(super) fn operation_reply(reply: &mut Reply, id: &OperationId) {
-    if reply.result.data.is_null() {
-        reply.result.data = json!({});
-    }
-    reply.result.data["operation_id"] = json!(id);
-    if let Some(error) = &mut reply.result.error {
-        error.message.push_str(&format!("; operation {id}"));
-        // The same operation replays its request, so a retry cannot admit twice.
-        if error.code == ErrorKind::Contention.code() {
-            error.repair = Some(format!("retry the same command with --operation-id {id}"));
-        }
-    } else {
-        reply.human = format!("operation {id}\n{}", reply.human);
-    }
-}
-
 pub fn preview_project_id(roots: &Roots, cwd: &Path) -> Option<provenant_core::ProjectId> {
     if crate::fabric::in_lane() {
         let gitdir = std::env::var_os("PROVENANT_WORKTREE_GITDIR").map(PathBuf::from)?;
         return project_id_for_lane_gitdir(roots, &gitdir);
     }
     let git = provenant_os::git::git_executable()?;
-    let runtime = provenant_confinement::UtilityRuntime::read_only(git).ok()?;
+    let runtime =
+        provenant_confinement::UtilityRuntime::read_only(git, roots.state.as_path()).ok()?;
     let executor = provenant_os::exec::SystemExecutor::new(1).ok()?;
     let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5)).ok()?;
     let location = runtime
@@ -59,7 +44,7 @@ pub(super) fn project_id_for_lane_gitdir(
 pub fn nested_dispatch_context(roots: &Roots) -> Result<(u64, Option<AttemptId>), Fail> {
     let parent_depth = environment_text(run::LANE_DEPTH_ENV)?;
     let parent_attempt = environment_text(run::PARENT_ATTEMPT_ENV)?;
-    let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+    let config = crate::config_reads::read_for(roots, "knobs")
         .map_err(|error| Fail::config(Status::Error, error))?;
     let max_depth = config
         .knobs
@@ -168,20 +153,32 @@ pub(super) fn lane_dispatch_values(
     Ok((lane_depth, parent_attempt))
 }
 
-/// Hand every queued attempt of `run` to its own guardian. Fabric's facade
+/// Hand the queued attempt to its own guardian. Fabric's facade
 /// shares this path with the CLI leaves.
 pub fn launch(
     session: &Session,
-    run: RunId,
+    attempt: AttemptId,
     edge: &Edge<'_>,
     call: &run::Request<'_>,
 ) -> Result<Vec<run::Started>, Fail> {
-    launch_prepared(session, run, edge, call, None)
+    launch_prepared(session, attempt, edge, call, None)
+}
+
+/// Launch the holder-admitted budget continuation with its original host
+/// executable authority, after predecessor custody has been released.
+pub fn launch_budget_wrap_up(
+    session: &Session,
+    attempt: AttemptId,
+    edge: &Edge<'_>,
+    call: &run::Request<'_>,
+    host: &run::HostLaunchContext,
+) -> Result<Vec<run::Started>, Fail> {
+    launch_on_host_with_wait(session, attempt, edge, call, Some(host), None, None)
 }
 
 /// The detached launcher's entry point. It reopens the admitted run and uses
 /// the ordinary host launch path, including writer custody and guardian handoff.
-pub fn launch_worker(id: RunId, provider_lease_wait: Option<u64>, edge: &Edge<'_>) -> Reply {
+pub fn launch_worker(id: AttemptId, provider_lease_wait: Option<u64>, edge: &Edge<'_>) -> Reply {
     let outcome = (|| {
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
@@ -198,7 +195,7 @@ pub fn launch_worker(id: RunId, provider_lease_wait: Option<u64>, edge: &Edge<'_
 /// cannot drop a writer lease while preparation is still in progress.
 pub(super) fn launch_with_deadline(
     session: &Session,
-    record: &run::RunRecord,
+    record: &run::AttemptRecord,
     edge: &Edge<'_>,
     call: &run::Request<'_>,
     wait: Duration,
@@ -211,23 +208,21 @@ pub(super) fn launch_with_deadline(
         edge.roots.state.as_path().as_os_str().into(),
         "internal".into(),
         "launch".into(),
-        record.run_id.to_string().into(),
+        record.attempt_id.to_string().into(),
         // The caller's wait also bounds a wait for an updating provider.
         "--provider-lease-wait".into(),
         wait.as_secs().max(1).to_string().into(),
     ];
-    // Process startup and each admitted task need a usable receipt window
-    // even when the requested observation wait is very short.
-    let task_seconds = u64::try_from(record.task_ids.len()).unwrap_or(u64::MAX);
-    let preparation_budget =
-        Duration::from_secs(5_u64.saturating_add(task_seconds.saturating_sub(1)));
+    // Process startup needs a usable receipt window even when the requested
+    // observation wait is very short.
+    let preparation_budget = Duration::from_secs(5);
     let result =
         provenant_os::exec::detached_receipt(&argv, edge.cwd, wait.max(preparation_budget));
     // Unit tests run inside a test harness, which cannot re-execute itself as
     // the CLI. End-to-end tests exercise the actual worker process.
     #[cfg(any(test, feature = "fixture"))]
     if matches!(result, Err(provenant_os::exec::ExecError::TestHarness)) {
-        return launch_prepared(session, record.run_id, edge, call, None);
+        return launch_prepared(session, record.attempt_id, edge, call, None);
     }
     let _ = (session, call);
     let receipt =
@@ -237,8 +232,8 @@ pub(super) fn launch_with_deadline(
             Status::Error,
             ErrorKind::LaunchUnknown,
             format!(
-                "launch preparation: outcome unknown; rerun with --operation-id {} to recover the receipt",
-                record.operation_id
+                "launch preparation: outcome unknown; run `provenant status {}` to recover the receipt",
+                record.key
             ),
         )
     };
@@ -275,17 +270,17 @@ pub(super) fn launch_with_deadline(
 
 pub(super) fn launch_prepared(
     session: &Session,
-    run: RunId,
+    attempt: AttemptId,
     edge: &Edge<'_>,
     call: &run::Request<'_>,
     ready: Option<&run::PreparedStart>,
 ) -> Result<Vec<run::Started>, Fail> {
-    launch_prepared_with_wait(session, run, edge, call, ready, None)
+    launch_prepared_with_wait(session, attempt, edge, call, ready, None)
 }
 
 pub(super) fn launch_prepared_with_wait(
     session: &Session,
-    run: RunId,
+    attempt: AttemptId,
     edge: &Edge<'_>,
     call: &run::Request<'_>,
     ready: Option<&run::PreparedStart>,
@@ -296,7 +291,15 @@ pub(super) fn launch_prepared_with_wait(
     if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some() {
         return Ok(Vec::new());
     }
-    launch_on_host_with_wait(session, run, edge, call, None, ready, provider_lease_wait)
+    launch_on_host_with_wait(
+        session,
+        attempt,
+        edge,
+        call,
+        None,
+        ready,
+        provider_lease_wait,
+    )
 }
 
 pub(super) struct PreparedProvider<'a> {
@@ -305,20 +308,55 @@ pub(super) struct PreparedProvider<'a> {
     provider_lease_wait: Option<u64>,
 }
 
-impl run::Providers for PreparedProvider<'_> {
-    fn write_grant_limit(&self) -> run::WriteGrantLimit {
-        self.fallback.write_grant_limit()
+impl PreparedProvider<'_> {
+    fn identity_refusal(&self, task: &run::TaskRequest, detail: &str) -> Box<run::PrepareRefusal> {
+        let project = task
+            .profile
+            .extra
+            .get("policy_project")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| self.fallback.project_id.map(|project| project.to_string()))
+            .unwrap_or_default();
+        let state = self
+            .fallback
+            .roots
+            .map(|roots| roots.state.as_path())
+            .or(self.fallback.state_root);
+        let policy = state.map_or_else(provenant_records::policy::Policy::default, |state| {
+            run::launch_policy(state, &project, task)
+        });
+        let code = "DISPATCH_PREPAREDPROVIDER_CHECK_POLICY_AUTHORITY";
+        let mut refusal = policy.boundary_error(
+            code,
+            provenant_records::policy::Facts::violation(detail),
+            run::PrepareRefusal::boxed(
+                provenant_records::run::TerminalCause::HandoffRefused,
+                detail,
+            ),
+        );
+        refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+        refusal.policy_code = Some(code.to_owned());
+        refusal
     }
-    fn runtime_cap(&self, provider: &str) -> Option<u64> {
-        self.fallback.runtime_cap(provider)
+}
+
+impl run::Providers for PreparedProvider<'_> {
+    fn write_grant_limit(
+        &self,
+        policy: &provenant_records::policy::Policy,
+    ) -> run::WriteGrantLimit {
+        self.fallback.write_grant_limit(policy)
     }
     fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
         self.fallback.priority(task)
     }
-    fn check_policy(&self, task: &run::TaskRequest) -> Result<(), run::PrepareRefusal> {
+    fn check_policy(&self, task: &run::TaskRequest) -> Result<(), Box<run::PrepareRefusal>> {
         if let Some(ready) = self.ready {
             if ready.task != *task {
-                return Err("prepared continuation task changed".into());
+                return Err(
+                    self.identity_refusal(&ready.task, "prepared continuation task changed")
+                );
             }
             return Ok(());
         }
@@ -330,16 +368,16 @@ impl run::Providers for PreparedProvider<'_> {
         prompt: &str,
         paths: &run::LaunchPaths,
         resume: Option<&run::AttemptRecord>,
-    ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
+    ) -> Result<run::PreparedLaunch, Box<run::PrepareRefusal>> {
         if let Some(ready) = self.ready {
             if ready.attempt != paths.attempt_id || ready.task != *task || resume.is_some() {
-                return Err("prepared continuation identity changed".into());
+                return Err(
+                    self.identity_refusal(&ready.task, "prepared continuation identity changed")
+                );
             }
-            return ready
-                .plan
-                .borrow_mut()
-                .take()
-                .ok_or_else(|| "prepared continuation consumed".into());
+            return ready.plan.borrow_mut().take().ok_or_else(|| {
+                self.identity_refusal(&ready.task, "prepared continuation consumed")
+            });
         }
         self.fallback
             .prepare_with_wait(task, prompt, paths, resume, self.provider_lease_wait)
@@ -406,13 +444,20 @@ pub(super) fn with_chair_index<T>(
         })
 }
 
+fn graph_for_attempt(
+    session: &Session,
+    attempt: AttemptId,
+    call: &run::Request<'_>,
+) -> Result<String, Fail> {
+    Ok(session.store.work_key(attempt, call)?.graph().to_owned())
+}
+
 pub(super) fn seal_launch_task(
     request_digest: provenant_core::Digest,
     task: &run::TaskRequest,
 ) -> run::SealedTask {
     run::SealedTask {
         request_digest,
-        task_id: task.task_id,
         effective_network: task.access.network(task.writer.is_some()),
         effective_database_ipc: task.access.database_ipc,
     }
@@ -421,35 +466,12 @@ pub(super) fn seal_launch_task(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn launch_on_host_with_wait(
     session: &Session,
-    run: RunId,
+    attempt: AttemptId,
     edge: &Edge<'_>,
     call: &run::Request<'_>,
     host: Option<&run::HostLaunchContext>,
     ready: Option<&run::PreparedStart>,
     provider_lease_wait: Option<u64>,
-) -> Result<Vec<run::Started>, Fail> {
-    launch_with_authority(
-        session,
-        run,
-        edge,
-        call,
-        host,
-        ready,
-        provider_lease_wait,
-        None,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn launch_with_authority(
-    session: &Session,
-    run: RunId,
-    edge: &Edge<'_>,
-    call: &run::Request<'_>,
-    host: Option<&run::HostLaunchContext>,
-    ready: Option<&run::PreparedStart>,
-    provider_lease_wait: Option<u64>,
-    sealed: Option<&run::SealedTask>,
 ) -> Result<Vec<run::Started>, Fail> {
     let inherited_host = host.is_some();
     let host = match host {
@@ -477,59 +499,146 @@ fn launch_with_authority(
             fixture_state_write: false,
         },
     };
-    if session.context.state_root != edge.roots.state && sealed.is_none() {
+    if session.context.state_root != edge.roots.state {
         return Err(Fail::new(
             Status::Refused,
             ErrorKind::Refused,
             "launch requires the host run store",
         ));
     }
-    let read = session.store.request(run, call)?;
+    let read = session.store.request(attempt, call)?;
     let request = &read;
     let request_digest = request.digest().map_err(run::RunError::from)?;
-    if sealed.is_some_and(|sealed| sealed.request_digest != request_digest) {
-        return Err(run::RunError::Validation("request changed after launch validation").into());
-    }
 
-    {
-        let operation = match request.parent {
-            Some(_) => Some(session.store.run(run, call)?.operation_id),
-            None => None,
+    // Direct host submissions need an observed chair even when their request
+    // names none. The canonical request stays unchanged; custody owns identity.
+    if request.chair.is_none() && request.parent.is_none() && !crate::fabric::in_lane() {
+        let bind = || -> Result<(), Box<dyn std::error::Error>> {
+            let context = crate::fabric::Context::open(edge.roots.clone(), edge.home, edge.cwd)?;
+            if context.identity.project != session.context.project_id
+                || crate::workflow::session_actor(&context, None).map_err(std::io::Error::other)?
+                    != session.context.actor_id
+            {
+                return Err("direct run custody identity could not be verified".into());
+            }
+            let graph = graph_for_attempt(session, attempt, call)
+                .map_err(|fail| std::io::Error::other(fail.message))?;
+            let index_call = provenant_fabric_store::Request {
+                clock: call.clock,
+                cancel: call.cancel,
+            };
+            let ledger = provenant_fabric_store::HostStore::open(&edge.roots.state, &index_call)?;
+            let subject = provenant_records::custody::Subject::new(
+                provenant_records::custody::SubjectKind::Graph,
+                graph,
+            );
+            let change = ledger.acquire_custody(
+                session.context.project_id,
+                &subject,
+                &provenant_records::custody::Holder::Chair {
+                    chair: crate::fabric::current_chair(&context),
+                },
+                provenant_records::custody::Origin::Provenant,
+                &index_call,
+            )?;
+            provenant_fabric_runtime::custody::warn(std::slice::from_ref(&change));
+            ledger.seal_custody_provenance(
+                session.context.project_id,
+                &subject,
+                request_digest,
+                &index_call,
+            )?;
+            Ok(())
         };
+        if let Err(error) = bind() {
+            provenant_fabric_runtime::custody::warning(format_args!(
+                "direct run custody pending: {error}"
+            ));
+        }
+    }
+    {
+        let graph = graph_for_attempt(session, attempt, call)?;
         with_chair_index(edge.roots, call, |index, index_call| {
             if let Some(prior) = request.parent {
-                let parent = session.store.record(prior, call).map_err(|_| {
-                    provenant_fabric_runtime::chairs::Error::Invalid("continuation parent")
+                // The parent's graph comes from the host store, never the lane.
+                let parent_graph = graph_for_attempt(session, prior, call).map_err(|_| {
+                    provenant_fabric_runtime::chairs::Error::Invalid("continuation work key")
                 })?;
-                let original = session.store.request(parent.run_id, call).map_err(|_| {
-                    provenant_fabric_runtime::chairs::Error::Invalid("continuation request")
-                })?;
-                let operation =
-                    operation
-                        .as_ref()
-                        .ok_or(provenant_fabric_runtime::chairs::Error::Invalid(
-                            "continuation operation",
-                        ))?;
                 index.inherit(
                     session.context.project_id,
-                    (parent.run_id, original.digest()?),
-                    run,
-                    provenant_fabric_runtime::chairs::Admission::HostRoot(operation),
+                    &parent_graph,
+                    &graph,
                     request,
                     index_call,
                 )
             } else {
-                match index.read(session.context.project_id, run, index_call)? {
-                    Some(value) if value.request_digest != request_digest => {
-                        Err(provenant_fabric_runtime::chairs::Error::Conflict)
-                    }
-                    // Only the host root's immutable request may repair an
-                    // interrupted submission, including owned-worktree replay.
-                    None => index.submit(session.context.project_id, run, request, index_call),
-                    _ => Ok(()),
-                }
+                // The host's immutable request seals or resolves the graph's
+                // binding, including an interrupted submission's replay.
+                index.submit(session.context.project_id, &graph, request, index_call)
             }
         })?;
+    }
+    {
+        use provenant_records::custody::{Holder, Subject, SubjectKind};
+        let graph = graph_for_attempt(session, attempt, call)?;
+        let index_call = provenant_fabric_store::Request {
+            clock: call.clock,
+            cancel: call.cancel,
+        };
+        let chair =
+            provenant_fabric_runtime::chairs::ChairIndex::open(&edge.roots.state, &index_call)
+                .and_then(|index| index.read(session.context.project_id, &graph, &index_call))
+                .map_err(|error| Fail::new(Status::Error, ErrorKind::Fabric, error.to_string()))?
+                .and_then(|record| record.holder.chair().cloned());
+        let holder = Holder::Attempt {
+            attempt,
+            chair: chair.clone(),
+        };
+        let mut subjects = vec![Subject::new(SubjectKind::Attempt, attempt.to_string())];
+        if chair.is_none() {
+            subjects.push(Subject::new(SubjectKind::Graph, graph));
+        }
+        if let Some(writer) = &request.task.writer {
+            subjects.push(Subject::new(
+                SubjectKind::Worktree,
+                writer.worktree.to_string_lossy(),
+            ));
+            match crate::fabric::checkout_branch(&writer.worktree) {
+                Ok(Some(branch)) => subjects.push(Subject::new(SubjectKind::Branch, branch)),
+                Ok(None) => {}
+                Err(error) => provenant_fabric_runtime::custody::warning(format_args!(
+                    "branch custody observation unavailable: {error}"
+                )),
+            }
+        }
+        match provenant_fabric_runtime::custody::acquire(
+            &edge.roots.state,
+            session.context.project_id,
+            &holder,
+            &subjects,
+            provenant_records::custody::Origin::Provenant,
+            &index_call,
+        ) {
+            Ok(changes) => provenant_fabric_runtime::custody::warn(&changes),
+            Err(error) => provenant_fabric_runtime::custody::warning(format_args!(
+                "run custody acquisition pending: {error}"
+            )),
+        }
+        if let Ok(ledger) = provenant_fabric_store::HostStore::open(&edge.roots.state, &index_call)
+            && let Err(error) = ledger.seal_custody_provenance(
+                session.context.project_id,
+                &Subject::new(
+                    SubjectKind::Graph,
+                    graph_for_attempt(session, attempt, call)?,
+                ),
+                request_digest,
+                &index_call,
+            )
+        {
+            provenant_fabric_runtime::custody::warning(format_args!(
+                "graph custody provenance pending: {error}"
+            ));
+        }
     }
     let seed = run::RootSeed {
         home: edge.home.into(),
@@ -537,13 +646,8 @@ fn launch_with_authority(
         state_root: session.context.state_root.as_path().into(),
     };
     let holder = |attempt: &run::AttemptRecord, requester| {
-        let task = request
-            .tasks
-            .iter()
-            .find(|task| task.task_id == attempt.task_id)
-            .ok_or(run::RunError::Validation(
-                "attempt task missing from request",
-            ))?;
+        let task = &request.task;
+        let operation = session.store.attempt_operation(attempt.attempt_id, call)?;
         let mut host = host.clone();
         if !inherited_host {
             // Called after preparation, while its selected provider lease is held.
@@ -554,12 +658,7 @@ fn launch_with_authority(
                 }
             }
         }
-        if let Some(writer) = request
-            .tasks
-            .iter()
-            .find(|task| task.task_id == attempt.task_id)
-            .and_then(|task| task.writer.as_ref())
-        {
+        if let Some(writer) = task.writer.as_ref() {
             host.cwd = writer.worktree.clone();
             provenant_confinement::worktrees::with_context(
                 edge.roots,
@@ -573,12 +672,12 @@ fn launch_with_authority(
                         provenant_confinement::verify_worktree(context.repo, &writer.worktree)?;
                     if let Some(mut owner) = worktrees::load_owner(&tree)?
                         && owner.origin == worktrees::WorktreeOrigin::Lane
-                        && (owner.operation_id.as_ref() == Some(&attempt.operation_id)
+                        && (owner.operation_id.as_ref() == Some(&operation.operation_id)
                             || owner.attempt_id.is_some() && owner.attempt_id == attempt.retry_of)
                     {
                         let expected = owner.clone();
                         owner.attempt_id = Some(attempt.attempt_id);
-                        owner.operation_id = Some(attempt.operation_id.clone());
+                        owner.operation_id = Some(operation.operation_id.clone());
                         worktrees::update_owner_when_unchanged(
                             context,
                             &tree,
@@ -597,13 +696,10 @@ fn launch_with_authority(
             roots: seed.clone(),
             project_id: attempt.project_id,
             actor_id: requester,
-            run_id: attempt.run_id,
             attempt_id: attempt.attempt_id,
-            host_delivery: request
-                .tasks
-                .iter()
-                .find(|task| task.task_id == attempt.task_id)
-                .and_then(|task| task.deliver.as_ref())
+            host_delivery: task
+                .deliver
+                .as_ref()
                 .map(|_| run::HostDeliveryContext::capture()),
             launch: Some(host),
             sealed: Some(seal_launch_task(
@@ -636,7 +732,7 @@ fn launch_with_authority(
     #[cfg(feature = "fixture")]
     if host.fixture_state_write {
         let started = session.store.start_with_writer_lease(
-            run,
+            attempt,
             &providers,
             &holder,
             &|directory, scope, binding| {
@@ -657,7 +753,7 @@ fn launch_with_authority(
     }
     let started = session
         .service()
-        .start(run, &providers, &holder, request, call)?;
+        .start(attempt, &providers, &holder, request, call)?;
     check_launch_policy(&started)?;
     Ok(started)
 }
@@ -704,21 +800,15 @@ pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> 
     {
         return Ok(());
     }
-    if let Some((run, attempt, worktree)) = started.iter().find_map(|started| match started {
+    if let Some((fence, worktree)) = started.iter().find_map(|started| match started {
         run::Started::Refused {
-            kind:
-                run::RefusalKind::RetainedImport {
-                    run,
-                    attempt,
-                    worktree,
-                },
+            kind: run::RefusalKind::RetainedImport { fence, worktree },
             ..
-        } => Some((*run, *attempt, worktree.clone())),
+        } => Some((fence.clone(), worktree.clone())),
         _ => None,
     }) {
         return Err(run::RunError::RetainedWriterImport {
-            run,
-            attempt,
+            fence: Box::new(fence),
             worktree,
         }
         .into());
@@ -743,44 +833,5 @@ pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> 
         }
         return Err(fail);
     }
-    Ok(())
-}
-
-/// Drive queued successors using host-owned launch inputs after custody release.
-pub fn launch_successors(
-    execution: run::ExecutionContext,
-    roots: &Roots,
-    home: &Path,
-    assets: &Path,
-    host: &run::HostLaunchContext,
-    run: RunId,
-    sealed: Option<&run::SealedTask>,
-) -> Result<(), Fail> {
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let call = request(&clock, &cancel)?;
-    let mut store =
-        run::RunStore::open(&execution, &call)?.with_writer_registry(roots.state.as_path());
-    if let Some(sealed) = sealed {
-        store = store.with_sealed_parent_network(sealed.effective_network);
-    }
-    if !store
-        .pending_attempts(run, &call)?
-        .iter()
-        .any(|attempt| attempt.continuation.as_deref() == Some("automatic"))
-    {
-        return Ok(());
-    }
-    let session = Session {
-        context: execution,
-        store,
-    };
-    let edge = Edge {
-        roots,
-        home,
-        assets,
-        cwd: &host.cwd,
-    };
-    launch_with_authority(&session, run, &edge, &call, Some(host), None, None, sealed)?;
     Ok(())
 }

@@ -6,7 +6,11 @@ thread_local! {
     static TEST_LOCAL_HANDOFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-fn typed_local(phase: &str, error: &RunError) -> HandOff {
+fn typed_local(
+    policy: &provenant_records::policy::Policy,
+    phase: &str,
+    error: &RunError,
+) -> HandOff {
     if let RunError::Admission(error) = error
         && let Some(fact) = error.resource_fact()
     {
@@ -38,6 +42,28 @@ fn typed_local(phase: &str, error: &RunError) -> HandOff {
     let message = format!("{phase}: {error}");
     let class = error.boundary_class();
     if class != provenant_records::diagnostic::BoundaryClass::None {
+        let code = match class {
+            provenant_records::diagnostic::BoundaryClass::Credentials => {
+                "PREPARATION_PREPARE_WITH_CREDENTIALS"
+            }
+            provenant_records::diagnostic::BoundaryClass::LaneGit => {
+                "HAND_OFF_RUNSTORE_HAND_OFF_GIT_ISOLATION"
+            }
+            provenant_records::diagnostic::BoundaryClass::Integrity => {
+                "ARTIFACTS_RUNSTORE_ARTIFACT_BYTES_DATA_INTEGRITY"
+            }
+            provenant_records::diagnostic::BoundaryClass::Authority => {
+                "HAND_OFF_RUNSTORE_HAND_OFF_AUTHORITY"
+            }
+            provenant_records::diagnostic::BoundaryClass::None => {
+                return HandOff::Local(message);
+            }
+        };
+        let message = policy.boundary_error(
+            code,
+            provenant_records::policy::Facts::violation(&message),
+            message,
+        );
         HandOff::Boundary {
             message,
             class,
@@ -50,71 +76,47 @@ fn typed_local(phase: &str, error: &RunError) -> HandOff {
     }
 }
 
-#[test]
-fn confinement_limit_handoffs_project_setting_and_source() {
-    use provenant_confinement::permissions::PermissionError;
-    use provenant_records::diagnostic::SettingSource;
-    for (error, setting) in [
-        (
-            PermissionError::GrantLimitExceeded {
-                family: "fixture",
-                limit: 3,
-            },
-            "domains.run.grant_limit",
-        ),
-        (
-            PermissionError::ProfileTooLarge { bytes: 5, limit: 4 },
-            "domains.run.profile_limit_bytes",
-        ),
-    ] {
-        let error = RunError::Confinement(PermissionError::ConfigOrigin {
-            source: Box::new(error),
-            origin: SettingSource::Configuration,
-        });
-        let HandOff::Resource { fact, .. } = typed_local("confinement", &error) else {
-            panic!("missing typed resource fact")
-        };
-        let kind = RefusalKind::HandoffResource(fact);
-        let diagnostic = kind.diagnostic().expect("diagnostic");
-        assert_eq!(diagnostic.code, ErrorKind::from(&error).code());
-        let detail = diagnostic.detail.expect("detail");
-        assert!(detail.contains(setting));
-        assert!(detail.contains("host configuration"));
-        let inventory = include_str!("../../assets/launch-guards.toml")
-            .parse::<toml_edit::DocumentMut>()
-            .unwrap();
-        assert!(
-            inventory["guard"]
-                .as_array_of_tables()
-                .unwrap()
-                .iter()
-                .any(|row| {
-                    row.get("boundary").and_then(|v| v.as_str()) == Some("configurable_default")
-                        && row.get("setting").and_then(|v| v.as_str()) == Some(setting)
-                        && row.get("code").and_then(|v| v.as_str())
-                            == Some(diagnostic.code.as_str())
-                })
-        );
+fn boundary_handoff(
+    policy: &provenant_records::policy::Policy,
+    code: &str,
+    message: String,
+    class: provenant_records::diagnostic::BoundaryClass,
+) -> HandOff {
+    let message = policy.boundary_error(
+        code,
+        provenant_records::policy::Facts::violation(&message),
+        message,
+    );
+    HandOff::Boundary {
+        message,
+        class,
+        cause: None,
     }
 }
 
-fn custody_local(phase: &str, error: &custody::CustodyError) -> HandOff {
+fn custody_local(
+    policy: &provenant_records::policy::Policy,
+    phase: &str,
+    error: &custody::CustodyError,
+) -> HandOff {
     let message = format!("{phase}: {error}");
     match error {
         custody::CustodyError::Fenced
         | custody::CustodyError::UnknownIdentity
         | custody::CustodyError::InvalidRecord
         | custody::CustodyError::HandoffUnknown
-        | custody::CustodyError::ProfileHandoffUnknown => HandOff::Boundary {
+        | custody::CustodyError::ProfileHandoffUnknown => boundary_handoff(
+            policy,
+            "HAND_OFF_RUNSTORE_HAND_OFF_AUTHORITY",
             message,
-            class: provenant_records::diagnostic::BoundaryClass::Authority,
-            cause: None,
-        },
+            provenant_records::diagnostic::BoundaryClass::Authority,
+        ),
         _ => HandOff::Local(message),
     }
 }
 
 fn custody_refusal(
+    policy: &provenant_records::policy::Policy,
     e: crate::writer::WriterCustodyError,
     writer_path: Option<std::path::PathBuf>,
 ) -> HandOff {
@@ -124,17 +126,17 @@ fn custody_refusal(
             custody::CustodyError::ReservationRetained(error),
         ) => HandOff::Protected(format!("custody reservation: {error}")),
         crate::writer::WriterCustodyError::Admission(custody::CustodyError::ImportRetained {
-            run,
-            attempt,
+            fence,
         }) => HandOff::RetainedImport {
-            run,
-            attempt,
+            fence,
             worktree: writer_path.unwrap_or_default(),
         },
         crate::writer::WriterCustodyError::Admission(custody::CustodyError::Admission(error)) => {
-            typed_local("custody", &RunError::Admission(error))
+            typed_local(policy, "custody", &RunError::Admission(error))
         }
-        crate::writer::WriterCustodyError::Admission(error) => custody_local("custody", &error),
+        crate::writer::WriterCustodyError::Admission(error) => {
+            custody_local(policy, "custody", &error)
+        }
         crate::writer::WriterCustodyError::Withdrawal { admission, release } => HandOff::Protected(
             format!("custody admission: {admission}; custody withdrawal: {release}"),
         ),
@@ -158,7 +160,7 @@ impl RunStore {
             custody::WriterBinding,
         ) -> custody::Result<custody::CustodyLease>,
         record: &AttemptRecord,
-        runtime_seconds: u64,
+        limits: &provenant_records::LaneLimits,
         call: &Request<'_>,
     ) -> std::result::Result<(), HandOff> {
         // Each failure names its phase, so the refusal says what was not ready.
@@ -166,45 +168,49 @@ impl RunStore {
             HandOff::Local(format!("{phase}: {error}"))
         };
         let id = record.attempt_id;
+        let policy =
+            crate::launch_policy(&self.writer_registry, &record.project_id.to_string(), task);
         let scope = Scope {
-            run: record.run_id,
             attempt: id,
             generation: record.generation,
         };
         let directory = || {
-            self.attempt_dir(record.run_id, id, false)
-                .map_err(|e| typed_local("attempt directory", &e))
+            self.attempt_dir(id, false)
+                .map_err(|e| typed_local(&policy, "attempt directory", &e))
         };
         let mut holder_context =
-            context(record, requester).map_err(|e| typed_local("launch context", &e))?;
+            context(record, requester).map_err(|e| typed_local(&policy, "launch context", &e))?;
         let reservation = PublicationReservation::prepare(
             directory()?,
             call.lock_budget(),
             call.cancel,
             call.clock,
         )
-        .map_err(|e| custody_local("publication reservation", &e))?;
+        .map_err(|e| custody_local(&policy, "publication reservation", &e))?;
         let writer = plan.confinement.as_mut().and_then(|c| c.writer.as_mut());
         if task.writer.as_ref().map(|w| w.worktree.as_path())
             != writer.as_ref().map(|w| w.worktree.path())
         {
-            return Err(HandOff::Boundary {
-                message: "writer confinement: does not match the task".into(),
-                class: provenant_records::diagnostic::BoundaryClass::Authority,
-                cause: None,
-            });
+            return Err(boundary_handoff(
+                &policy,
+                "HAND_OFF_RUNSTORE_HAND_OFF_AUTHORITY",
+                "writer confinement: does not match the task".into(),
+                provenant_records::diagnostic::BoundaryClass::Authority,
+            ));
         }
         let writer_path = writer
             .as_ref()
             .map(|writer| writer.worktree.path().to_path_buf());
         let mut lease = match writer {
             Some(writer) => {
-                let (directory, binding) =
-                    writer.custody.take().ok_or_else(|| HandOff::Boundary {
-                        message: "writer custody: missing".into(),
-                        class: provenant_records::diagnostic::BoundaryClass::Authority,
-                        cause: None,
-                    })?;
+                let (directory, binding) = writer.custody.take().ok_or_else(|| {
+                    boundary_handoff(
+                        &policy,
+                        "HAND_OFF_RUNSTORE_HAND_OFF_AUTHORITY",
+                        "writer custody: missing".into(),
+                        provenant_records::diagnostic::BoundaryClass::Authority,
+                    )
+                })?;
                 self.acquire_writer_fenced(directory, scope, binding, acquire_writer, call)
             }
             // Readers take the same injected acquisition as writers, so a
@@ -212,7 +218,7 @@ impl RunStore {
             None => acquire_writer(directory()?, scope, custody::WriterBinding::read_only())
                 .map_err(crate::writer::WriterCustodyError::Admission),
         }
-        .map_err(|error| custody_refusal(error, writer_path))?;
+        .map_err(|error| custody_refusal(&policy, error, writer_path))?;
         // Simulate a lost guardian acknowledgement after custody was reserved.
         #[cfg(test)]
         if TEST_UNCERTAIN_HANDOFF.with(|fault| fault.replace(false)) {
@@ -254,13 +260,14 @@ impl RunStore {
                 self.check_launch_writer_lineage(record, task, &writer.worktree, call)
         {
             let refusal = if matches!(error, RunError::Nonterminal) {
-                HandOff::Boundary {
-                    message: format!("writer lineage: {error}"),
-                    class: provenant_records::diagnostic::BoundaryClass::Authority,
-                    cause: None,
-                }
+                boundary_handoff(
+                    &policy,
+                    "CONTROLS_RUNSTORE_CHECK_WRITER_LINEAGE_AUTHORITY",
+                    format!("writer lineage: {error}"),
+                    provenant_records::diagnostic::BoundaryClass::Authority,
+                )
             } else {
-                typed_local("writer lineage", &error)
+                typed_local(&policy, "writer lineage", &error)
             };
             local_or_withdraw!(Err::<(), _>(refusal));
         }
@@ -268,17 +275,18 @@ impl RunStore {
         match self.record(id, call) {
             Ok(now)
                 if now.revision == record.revision
-                    && now.run_id == record.run_id
-                    && now.task_id == record.task_id => {}
+                    && now.attempt_id == record.attempt_id
+                    && now.key == record.key => {}
             Ok(_) => {
-                local_or_withdraw!(Err::<(), _>(HandOff::Boundary {
-                    message: "attempt: changed before handoff".into(),
-                    class: provenant_records::diagnostic::BoundaryClass::Authority,
-                    cause: None,
-                }));
+                local_or_withdraw!(Err::<(), _>(boundary_handoff(
+                    &policy,
+                    "HAND_OFF_RUNSTORE_HAND_OFF_AUTHORITY_2",
+                    "attempt: changed before handoff".into(),
+                    provenant_records::diagnostic::BoundaryClass::Authority,
+                )));
             }
             Err(error) => {
-                local_or_withdraw!(Err::<(), _>(typed_local("attempt record", &error)));
+                local_or_withdraw!(Err::<(), _>(typed_local(&policy, "attempt record", &error)));
             }
         }
         let setup_cancel = provenant_core::CancelToken::new();
@@ -303,14 +311,14 @@ impl RunStore {
                     .with_repo_facts(self.repo_facts())
                     .cancellable(&setup_cancel)
                     .prepare(writer, deliver)?;
-                host.seal_launch_binding(&self.attempt_dir(record.run_id, id, false)?, scope)?;
+                host.seal_launch_binding(&self.attempt_dir(id, false)?, scope)?;
                 holder.host_delivery = Some(host);
                 holder.encode()
             };
             match prepare() {
                 Ok(context) => holder_context = context,
                 Err(error) => {
-                    local_or_withdraw!(Err::<(), _>(typed_local("delivery", &error)));
+                    local_or_withdraw!(Err::<(), _>(typed_local(&policy, "delivery", &error)));
                 }
             }
         }
@@ -328,24 +336,21 @@ impl RunStore {
                 lease.withdraw_unlaunched().map_err(|release| {
                     HandOff::Protected(format!("Git setup: {error}; custody withdrawal: {release}"))
                 })?;
-                return Err(typed_local("Git setup", &error));
+                return Err(typed_local(&policy, "Git setup", &error));
             }
             // Git setup has finished; cache seeding needs no repository lock.
             let seed_attempt = local_or_withdraw!(directory());
             // A lock, not an assertion: observers stop reporting this phase if
             // the launcher dies. Failing to take it only loses the report.
             let seeding = seed_attempt
-                .lock(
+                .try_lock(
                     std::ffi::OsStr::new(crate::writer::SEED_WAIT_LOCK),
                     provenant_os::fs::LockMode::Exclusive,
-                    call.lock_budget(),
-                    &setup_cancel,
-                    call.clock,
                 )
                 .ok();
             #[cfg(feature = "fixture")]
             hold_seed_for_fixture(&setup_cancel);
-            confinement.seed_cargo(&plan.environment, &seed_attempt, &setup_cancel);
+            confinement.seed_cargo(&mut plan.environment, &seed_attempt, &setup_cancel);
             drop(seeding);
             if setup_cancel.is_cancelled() || local_or_withdraw!(cancel_requested()) {
                 local_or_withdraw!(Err::<(), _>(local("launch", &CANCELLED_BEFORE_LAUNCH)));
@@ -367,23 +372,32 @@ impl RunStore {
                     writer.snapshot(self.context.state_root.as_path(), &writer_attempt, scope)
                 })
             {
-                local_or_withdraw!(Err::<(), _>(typed_local("lane Git objects", &error)));
+                local_or_withdraw!(Err::<(), _>(typed_local(
+                    &policy,
+                    "lane Git objects",
+                    &error
+                )));
             }
-            if confinement.sandboxed {
-                match confinement.command(&plan.argv, &id, call.cancel) {
+            if confinement.backend.is_some() {
+                match confinement.command(&plan.argv, &id) {
                     Ok(command) => {
                         plan.argv = command.argv;
                         profile_file = Some(command.profile);
                     }
                     Err(error) => {
                         local_or_withdraw!(Err::<(), _>(typed_local(
+                            &policy,
                             "confinement command",
                             &error
                         )));
                     }
                 }
             } else if let Err(error) = confinement.prepare_writer_directories() {
-                local_or_withdraw!(Err::<(), _>(typed_local("writer directories", &error)));
+                local_or_withdraw!(Err::<(), _>(typed_local(
+                    &policy,
+                    "writer directories",
+                    &error
+                )));
             }
         }
         strip_hosted_credentials(&mut plan.environment);
@@ -399,13 +413,15 @@ impl RunStore {
             .confinement
             .as_ref()
             .filter(|c| c.writer.is_some())
-            .and_then(|c| lane_port_plan_or_warn(&c.state_root));
+            .and_then(|c| lane_port_plan_or_warn(&c.state_root, &policy));
+        let key = record.key.clone();
         let command = ProviderCommand {
+            policy: policy.clone(),
             profile_file,
             lane_ports,
             resolved_route: route,
             permission_plan_digest: task.authority_digest,
-            task: task.task_id,
+            key,
             requester,
             protected_commands: vec![],
             // OpenCode stores answering-model evidence in its shared XDG data
@@ -428,17 +444,7 @@ impl RunStore {
                     .ok_or_else(|| local("lane priority", &"missing"))
             ),
         };
-        let capture = capture_plan(
-            task,
-            runtime_seconds,
-            crate::launch::token_budget(
-                task,
-                self.context.state_root.as_path(),
-                &record.project_id.to_string(),
-            )
-            .tokens,
-            provider,
-        );
+        let capture = capture_plan(task, limits);
         if local_or_withdraw!(cancel_requested()) {
             local_or_withdraw!(Err::<(), _>(local("launch", &CANCELLED_BEFORE_LAUNCH)));
         }
@@ -632,106 +638,8 @@ mod tests {
     use crate::tests::{call, clock, context, input, route};
     use provenant_core::CancelToken;
 
-    #[test]
-    fn custody_resource_refusals_keep_typed_facts_and_inventoried_sources() {
-        use provenant_records::diagnostic::{
-            LaneLimit, PressureLevel, PressureThreshold, SettingSource,
-        };
-        let inventory = include_str!("../../assets/launch-guards.toml")
-            .parse::<toml_edit::DocumentMut>()
-            .unwrap();
-        let guards = inventory["guard"].as_array_of_tables().unwrap();
-        let cases = [
-            (
-                "DISK_FLOOR",
-                AdmissionError::Disk {
-                    free: 1,
-                    floor: 2,
-                    origin: SettingSource::Configuration,
-                },
-            ),
-            (
-                "MEMORY_PRESSURE",
-                AdmissionError::MemoryPressure {
-                    level: PressureLevel::Critical,
-                    threshold: PressureThreshold::Warning,
-                    origin: SettingSource::ShippedDefault,
-                },
-            ),
-            (
-                "HOST_PROCESSES",
-                AdmissionError::Processes { used: 3, limit: 4 },
-            ),
-            (
-                "LANE_CAP",
-                AdmissionError::LaneCap {
-                    active: 5,
-                    limit: 5,
-                    kind: LaneLimit::ProjectWriters,
-                    origin: SettingSource::Configuration,
-                },
-            ),
-            (
-                "LANE_CAP",
-                AdmissionError::LaneCap {
-                    active: 5,
-                    limit: 5,
-                    kind: LaneLimit::HostWriters,
-                    origin: SettingSource::ShippedDefault,
-                },
-            ),
-            (
-                "LANE_CAP",
-                AdmissionError::LaneCap {
-                    active: 5,
-                    limit: 5,
-                    kind: LaneLimit::HostTotal,
-                    origin: SettingSource::Configuration,
-                },
-            ),
-            (
-                "LANE_CAP",
-                AdmissionError::LaneCap {
-                    active: 5,
-                    limit: 5,
-                    kind: LaneLimit::ProjectTotal,
-                    origin: SettingSource::ShippedDefault,
-                },
-            ),
-        ];
-        for (code, cause) in cases {
-            let handoff = custody_refusal(
-                crate::writer::WriterCustodyError::Admission(custody::CustodyError::Admission(
-                    cause,
-                )),
-                None,
-            );
-            let HandOff::Resource { fact, .. } = handoff else {
-                panic!("resource refusal lost its fact")
-            };
-            let kind = RefusalKind::HandoffResource(fact);
-            let diagnostic = kind.diagnostic().expect("resource diagnostic");
-            assert_eq!(diagnostic.code, code);
-            let detail = diagnostic.detail.as_deref().unwrap();
-            assert!(diagnostic.next.is_some());
-            assert!(detail.contains("source:") || detail.contains("shipped"));
-            assert!(guards.iter().any(|guard| {
-                guard.get("site").and_then(|value| value.as_str())
-                    == Some("run/src/launch/hand_off.rs#custody_refusal")
-                    && guard.get("code").and_then(|value| value.as_str()) == Some(code)
-                    && guard.get("boundary").and_then(|value| value.as_str())
-                        == Some("configurable_default")
-                    && guard
-                        .get("setting")
-                        .and_then(|value| value.as_str())
-                        .is_some_and(|setting| detail.contains(setting))
-            }));
-            assert_eq!(
-                serde_json::from_value::<RefusalKind>(serde_json::to_value(&kind).unwrap())
-                    .unwrap(),
-                kind
-            );
-        }
+    fn test_policy() -> provenant_records::policy::Policy {
+        provenant_records::policy::Policy::default()
     }
 
     #[test]
@@ -745,14 +653,14 @@ mod tests {
             custody::CustodyError::HandoffUnknown,
         ] {
             assert!(matches!(
-                custody_local("publication reservation", &error),
+                custody_local(&test_policy(), "publication reservation", &error),
                 HandOff::Boundary {
                     class: BoundaryClass::Authority,
                     ..
                 }
             ));
             assert!(matches!(
-                custody_refusal(WriterCustodyError::Admission(error), None),
+                custody_refusal(&test_policy(), WriterCustodyError::Admission(error), None),
                 HandOff::Boundary {
                     class: BoundaryClass::Authority,
                     ..
@@ -761,6 +669,7 @@ mod tests {
         }
         assert!(matches!(
             custody_refusal(
+                &test_policy(),
                 WriterCustodyError::Admission(custody::CustodyError::Busy),
                 None
             ),
@@ -768,6 +677,7 @@ mod tests {
         ));
         assert!(matches!(
             custody_refusal(
+                &test_policy(),
                 WriterCustodyError::Admission(custody::CustodyError::Cancelled),
                 None
             ),
@@ -794,7 +704,7 @@ mod tests {
         };
         assert!(matches!(error, custody::CustodyError::Fenced));
         assert!(matches!(
-            custody_local("publication reservation", &error),
+            custody_local(&test_policy(), "publication reservation", &error),
             HandOff::Boundary {
                 class: provenant_records::diagnostic::BoundaryClass::Authority,
                 ..
@@ -811,7 +721,7 @@ mod tests {
             AvailabilityReason::UnsupportedPlatform,
         ));
         assert!(matches!(
-            typed_local("confinement command", &error),
+            typed_local(&test_policy(), "confinement command", &error),
             HandOff::Boundary {
                 class: BoundaryClass::Authority,
                 cause: Some(TerminalCause::UnsupportedPlatform),
@@ -819,12 +729,12 @@ mod tests {
             }
         ));
         assert!(matches!(
-            typed_local("Git", &RunError::GitUnavailable),
+            typed_local(&test_policy(), "Git", &RunError::GitUnavailable),
             HandOff::Local(_)
         ));
         let credential = RunError::Confinement(PermissionError::CredentialRoot);
         assert!(matches!(
-            typed_local("Git setup", &credential),
+            typed_local(&test_policy(), "Git setup", &credential),
             HandOff::Boundary {
                 class: BoundaryClass::Credentials,
                 cause: None,
@@ -832,12 +742,24 @@ mod tests {
             }
         ));
         let retained = RunError::RetainedWriterImport {
-            run: provenant_core::RunId::from_bytes([3; 16]),
-            attempt: provenant_core::AttemptId::from_bytes([4; 16]),
+            fence: Box::new(custody::PendingImport {
+                scope: custody::Scope {
+                    attempt: provenant_core::AttemptId::from_bytes([4; 16]),
+                    generation: 1,
+                },
+                fence: "/tmp/custody/reservation.json".into(),
+                lane: provenant_records::WorkKey::new(
+                    provenant_core::ProjectId::from_bytes([1; 16]),
+                    "build",
+                    "writer",
+                    1,
+                )
+                .expect("key"),
+            }),
             worktree: "/tmp/writer".into(),
         };
         assert!(matches!(
-            typed_local("lane Git objects", &retained),
+            typed_local(&test_policy(), "lane Git objects", &retained),
             HandOff::Boundary {
                 class: BoundaryClass::LaneGit,
                 cause: None,
@@ -845,7 +767,11 @@ mod tests {
             }
         ));
         assert!(matches!(
-            typed_local("lane Git objects", &RunError::WriterHeadNotLaneBranch),
+            typed_local(
+                &test_policy(),
+                "lane Git objects",
+                &RunError::WriterHeadNotLaneBranch
+            ),
             HandOff::Boundary {
                 class: BoundaryClass::LaneGit,
                 cause: None,
@@ -863,14 +789,15 @@ mod tests {
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let request = input();
         store.create(&request, &call)?;
-        let record = store.record(request.attempts[0].attempt_id, &call)?;
-        let mut task = request.request.tasks[0].clone();
+        let record = store.record(request.attempt_id, &call)?;
+        let mut task = request.request.task.clone();
         task.writer = Some(provenant_records::run::WriterRequest {
-            extra: Default::default(),
+            extra: crate::tests::writer_extra(),
             project: temp.path().into(),
             worktree: temp.path().join("writer"),
         });
         let plan = PreparedLaunch {
+            limits: Default::default(),
             argv: vec!["fixture".into()],
             environment: Vec::new(),
             stdin: Vec::new(),
@@ -889,7 +816,7 @@ mod tests {
             &|_, _| Ok(Vec::new()),
             &|_, _, _| panic!("must not acquire custody"),
             &record,
-            60,
+            &crate::limits::deadline_only(60),
             &call,
         );
         assert!(
@@ -907,7 +834,7 @@ mod tests {
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let request = input();
         store.create(&request, &call)?;
-        let id = request.attempts[0].attempt_id;
+        let id = request.attempt_id;
         store.mark_starting(
             &store.record(id, &call)?,
             &route(),
@@ -918,7 +845,7 @@ mod tests {
         )?;
         let record = store.record(id, &call)?;
         let scope = RunStore::scope(&record);
-        let directory = store.attempt_dir(request.run_id, id, false)?;
+        let directory = store.attempt_dir(id, false)?;
         // The launcher's setup token must not fire without a request.
         let setup = CancelToken::new();
         let watch = CancelWatch::start(directory.try_clone()?, scope, &setup, &cancel);
@@ -965,7 +892,7 @@ mod tests {
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let request = input();
         store.create(&request, &call)?;
-        let id = request.attempts[0].attempt_id;
+        let id = request.attempt_id;
         store.mark_starting(
             &store.record(id, &call)?,
             &route(),
@@ -977,6 +904,7 @@ mod tests {
         let record = store.claim(id, &clock, &call)?.ok_or("claim")?;
         assert!(record.requested_priority.is_none());
         let plan = || PreparedLaunch {
+            limits: Default::default(),
             argv: vec!["fixture".into()],
             environment: Vec::new(),
             stdin: Vec::new(),
@@ -999,13 +927,13 @@ mod tests {
             )
         };
         let result = store.hand_off(
-            &request.request.tasks[0],
+            &request.request.task,
             plan(),
             provenant_core::ActorId::from_bytes([2; 16]),
             &|_, _| Ok(Vec::new()),
             &acquire,
             &record,
-            60,
+            &crate::limits::deadline_only(60),
             &call,
         );
         match result {
@@ -1027,7 +955,7 @@ mod tests {
             Err(HandOff::Protected(reason)) => panic!("protected: {reason}"),
             Ok(()) => panic!("unexpected launch"),
         }
-        let directory = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let directory = store.attempt_dir(record.attempt_id, false)?;
         let lease = custody::acquire_reader(
             directory,
             RunStore::scope(&record),
@@ -1039,16 +967,16 @@ mod tests {
         // Each handoff reserves a fresh publication file; these calls exercise
         // separate failure paths against the same attempt fixture.
         store
-            .attempt_dir(record.run_id, id, false)?
+            .attempt_dir(id, false)?
             .unlink(std::ffi::OsStr::new("reserve"))?;
         let result = store.hand_off(
-            &request.request.tasks[0],
+            &request.request.task,
             plan(),
             provenant_core::ActorId::from_bytes([2; 16]),
             &|_, _| Ok(Vec::new()),
             &|_, _, _| Err(custody::CustodyError::ReservationRetained("fixture".into())),
             &record,
-            60,
+            &crate::limits::deadline_only(60),
             &call,
         );
         match result {
@@ -1071,10 +999,10 @@ mod tests {
             Ok(()) => panic!("unexpected launch"),
         }
         store
-            .attempt_dir(record.run_id, id, false)?
+            .attempt_dir(id, false)?
             .unlink(std::ffi::OsStr::new("reserve"))?;
         let result = store.hand_off(
-            &request.request.tasks[0],
+            &request.request.task,
             plan(),
             provenant_core::ActorId::from_bytes([2; 16]),
             &|_, _| Ok(Vec::new()),
@@ -1088,7 +1016,7 @@ mod tests {
                 Ok(lease)
             },
             &record,
-            60,
+            &crate::limits::deadline_only(60),
             &call,
         );
         match result {
@@ -1113,7 +1041,7 @@ mod tests {
             Ok(()) => panic!("unexpected launch"),
         }
         assert!(custody::reservation_present(
-            &store.attempt_dir(record.run_id, id, false)?,
+            &store.attempt_dir(id, false)?,
             RunStore::scope(&record),
         )?);
         Ok(())
@@ -1143,7 +1071,7 @@ mod tests {
         TEST_UNCERTAIN_HANDOFF.with(|fault| fault.set(true));
         let start = || {
             store.start_inner(
-                request.run_id,
+                request.attempt_id,
                 &crate::dispatch_tests::Ready,
                 &|_, _| Ok(Vec::new()),
                 &acquire,
@@ -1152,20 +1080,20 @@ mod tests {
             )
         };
         assert!(
-            matches!(start()?.as_slice(), [Started::Unknown { attempt, error }] if *attempt == request.attempts[0].attempt_id && error.contains("lost acknowledgement"))
+            matches!(start()?.as_slice(), [Started::Unknown { attempt, error }] if *attempt == request.attempt_id && error.contains("lost acknowledgement"))
         );
         let operation = store
             .operation(&request.operation_id, &call)?
             .ok_or("operation")?;
         assert_eq!(operation.state, OperationState::LaunchUnknown);
-        let record = store.record(request.attempts[0].attempt_id, &call)?;
+        let record = store.record(request.attempt_id, &call)?;
         assert!(matches!(record.state, AttemptState::Starting { .. }));
         let recorded_route = record.resolved_route.as_ref().ok_or("resolved route")?;
         assert_eq!(recorded_route.provider, route().provider);
         assert_eq!(recorded_route.model, route().model);
         assert_eq!(recorded_route.effort, route().effort);
         assert!(custody::reservation_present(
-            &store.attempt_dir(request.run_id, record.attempt_id, false)?,
+            &store.attempt_dir(record.attempt_id, false)?,
             RunStore::scope(&record)
         )?);
         assert!(start()?.is_empty());
@@ -1200,7 +1128,7 @@ mod tests {
         };
         TEST_LOCAL_HANDOFF.with(|fault| fault.set(true));
         let result = store.start_inner(
-            request.run_id,
+            request.attempt_id,
             &crate::dispatch_tests::Ready,
             &|_, _| Ok(Vec::new()),
             &acquire,
@@ -1232,7 +1160,7 @@ mod tests {
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let request = input();
         store.create(&request, &call)?;
-        let id = request.attempts[0].attempt_id;
+        let id = request.attempt_id;
         let record = store.mark_starting(
             &store.record(id, &call)?,
             &route(),
@@ -1241,7 +1169,7 @@ mod tests {
             None,
             &call,
         )?;
-        let directory = store.attempt_dir(record.run_id, id, false)?;
+        let directory = store.attempt_dir(id, false)?;
         let scope = RunStore::scope(&record);
         let lease = custody::acquire_writer(
             directory.try_clone()?,
@@ -1277,7 +1205,7 @@ mod tests {
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let request = input();
         store.create(&request, &call)?;
-        let id = request.attempts[0].attempt_id;
+        let id = request.attempt_id;
         store.mark_starting(
             &store.record(id, &call)?,
             &route(),
@@ -1288,7 +1216,7 @@ mod tests {
         )?;
         let record = store.claim(id, &clock, &call)?.ok_or("claim")?;
         let scope = RunStore::scope(&record);
-        let directory = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let directory = store.attempt_dir(record.attempt_id, false)?;
         let lease = custody::acquire_writer(
             directory.try_clone()?,
             scope,
@@ -1300,15 +1228,15 @@ mod tests {
         let prior = store
             .operation(&request.operation_id, &call)?
             .ok_or("operation")?;
-        store.db.execute_batch("CREATE TEMP TRIGGER fail_unknown BEFORE UPDATE ON operations BEGIN SELECT RAISE(ABORT, 'fixture unknown write'); END;")?;
+        store.db.execute_batch("CREATE TEMP TRIGGER fail_unknown BEFORE UPDATE OF operation_record ON attempts BEGIN SELECT RAISE(ABORT, 'fixture unknown write'); END;")?;
         assert!(matches!(
-            store.launch_unknown(request.run_id, &call),
+            store.launch_unknown(request.attempt_id, &call),
             Err(RunError::Sqlite(_))
         ));
         assert_eq!(store.operation(&request.operation_id, &call)?, Some(prior));
         assert!(custody::reservation_present(&directory, scope)?);
         store.db.execute_batch("DROP TRIGGER fail_unknown")?;
-        store.launch_unknown(request.run_id, &call)?;
+        store.launch_unknown(request.attempt_id, &call)?;
         assert_eq!(
             store
                 .operation(&request.operation_id, &call)?
@@ -1361,13 +1289,13 @@ mod tests {
                     })
                     .expect("change attempt before handoff");
                 if fail_save {
-                    store.db.execute_batch("CREATE TEMP TRIGGER fail_blocked BEFORE UPDATE ON operations BEGIN SELECT RAISE(ABORT, 'fixture blocked write'); END;").expect("inject write failure");
+                    store.db.execute_batch("CREATE TEMP TRIGGER fail_blocked BEFORE UPDATE OF operation_record ON attempts BEGIN SELECT RAISE(ABORT, 'fixture blocked write'); END;").expect("inject write failure");
                 }
                 Ok(lease)
             };
             let launch = || {
                 store.start_inner(
-                    request.run_id,
+                    request.attempt_id,
                     &crate::dispatch_tests::Ready,
                     &|_, _| Ok(Vec::new()),
                     &acquire,
@@ -1403,9 +1331,9 @@ mod tests {
                 reopened.operation(&request.operation_id, &call)?,
                 Some(operation)
             );
-            let record = store.record(request.attempts[0].attempt_id, &call)?;
+            let record = store.record(request.attempt_id, &call)?;
             assert!(custody::reservation_present(
-                &store.attempt_dir(request.run_id, record.attempt_id, false)?,
+                &store.attempt_dir(record.attempt_id, false)?,
                 RunStore::scope(&record)
             )?);
             assert!(launch()?.is_empty());

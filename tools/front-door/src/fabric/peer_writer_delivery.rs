@@ -148,8 +148,11 @@ fn resumed_lane_settlement_ignores_terminal_graph()
     }))?;
     let mut journal = graph::FileJournal::open(&fixture.roots.state, fixture.settled.project_id,
         "terminal-unrelated", WaitBudget::cli(clock.mono_now(), 10)?, &cancel, &clock)?;
-    journal.bind(graph::GraphExecution { review_base: None, extra: Default::default(), integration_base: None,
-        directory: fixture.rig.project.clone(), document })?;
+    journal.bind(graph::GraphExecution {
+        bases: None,
+        directory: fixture.rig.project.clone(),
+        document,
+    })?;
     journal.save(&checkpoint)?;
     drop(journal);
     graph::take_checkpoint_read_ids();
@@ -172,8 +175,6 @@ fn resumed_lane_settlement_ignores_terminal_graph()
         fixture
             .rig
             .state
-            .join("runs")
-            .join(fixture.settled.run_id.to_string())
             .join("attempts")
             .join(fixture.settled.attempt_id.to_string())
             .join("worktree-settlement.json")
@@ -225,8 +226,6 @@ fn resumed_lane_settlement_defers_cleanup_and_records_its_receipt()
         fixture
             .rig
             .state
-            .join("runs")
-            .join(fixture.settled.run_id.to_string())
             .join("attempts")
             .join(fixture.settled.attempt_id.to_string())
             .join("worktree-settlement.json")
@@ -462,7 +461,7 @@ fn typed_run_errors_keep_their_codes() {
             provenant_run::RunError::ProviderStateExpired,
             "provider_state_expired",
         ),
-        // The CLI and MCP share one categorisation.
+        // The CLI and relay share one categorisation.
         (
             provenant_run::RunError::Validation("input"),
             "invalid_input",

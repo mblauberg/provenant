@@ -21,7 +21,7 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     let home = root.join("home");
     let state = root.join("state");
     let xdg = root.join("xdg");
-    let provider_state = state.join("runs/r/attempts/a/provider-state/candidate-0");
+    let provider_state = state.join("attempts/a/provider-state/candidate-0");
     for path in [&home, &state, &xdg, &provider_state] {
         std::fs::create_dir_all(path)?;
     }
@@ -57,7 +57,7 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         &authority,
         &provenant_os::fs::canonicalize(&fixture.home)?,
     )?;
-    let scratch = state.join("runs/r/attempts/a/tmp/candidate-0");
+    let scratch = state.join("attempts/a/tmp/candidate-0");
     std::fs::create_dir_all(&scratch)?;
     #[cfg(unix)]
     {
@@ -219,8 +219,8 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
             scope: PathScope::Subtree,
         })?;
     }
-    let prompt = state.join("runs/r/attempts/a/prompt");
-    let skills = state.join("runs/r/attempts/a/tmp/candidate-0-skills-snapshot");
+    let prompt = state.join("attempts/a/prompt");
+    let skills = state.join("attempts/a/tmp/candidate-0-skills-snapshot");
     let release = state.join("releases/fixture-digest");
     std::fs::write(&prompt, "#!/bin/sh\nexit 0\n")?;
     {
@@ -348,6 +348,7 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     let backend = MacOsSandboxBackend {
         ready: true,
         limits: ProfileLimits::default(),
+        policy: provenant_records::policy::Policy::default(),
     };
     // Existing hard links in the scratch, the worktree and its ignored
     // build and dependency trees do not refuse the launch: the sandbox
@@ -824,10 +825,7 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
             }
         }
     }
-    for relative in [
-        "host-index",
-        "runs/other/attempts/other/provider-state/secret",
-    ] {
+    for relative in ["host-index", "attempts/other/provider-state/secret"] {
         let path = state.join(relative);
         std::fs::create_dir_all(path.parent().ok_or("state file parent")?)?;
         std::fs::write(&path, "host-private")?;

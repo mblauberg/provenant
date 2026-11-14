@@ -20,14 +20,37 @@ use provenant_routing::{
 };
 #[cfg(feature = "fixture")]
 pub use resolution::fixture_resolve_dispatch;
-pub use resolution::resolve_review_family;
 use resolution::*;
 pub(crate) use resolution::{
     DispatchError, check_dispatch_candidate, recorded_model_readiness,
-    resolve_dispatch_rejecting_family,
+    resolve_dispatch_rejecting_family, selection_evidence,
 };
+pub use resolution::{depletion_facts, resolve_review_family};
 use serde::Serialize;
 use std::{collections::BTreeSet, io, str::FromStr};
+
+/// The same effective catalogue and derived account set used by routing.
+/// This read never probes a provider or filters on quota/readiness.
+pub fn provider_check_routes(
+    roots: &Roots,
+) -> Result<
+    (
+        Box<provenant_routing::RouteList>,
+        provenant_providers::accounts::Settings,
+    ),
+    String,
+> {
+    config::list_data_and_accounts(
+        roots,
+        &RouteListRequest {
+            valid: false,
+            adapter: None,
+            pool: None,
+        },
+    )
+    .map(|(routes, accounts)| (routes, accounts.unique_accounts()))
+    .map_err(|error| error.to_string())
+}
 
 #[derive(Debug, Subcommand)]
 pub enum Route {
@@ -109,14 +132,14 @@ pub struct OverrideSet {
     #[arg(long)]
     pub all: bool,
     /// Pacing policy while the override is active.
-    #[arg(long, required_unless_present = "model")]
+    #[arg(long, catalog_required_unless = "model")]
     pub policy: Option<PacingChoice>,
     /// Exact preferred model for a risk/task stratum.
-    #[arg(long, conflicts_with_all = ["account", "provider", "all", "policy", "starts", "window", "tz"], requires_all = ["risk_tier", "task_kind", "until"])]
+    #[arg(long, conflicts_with_all = ["account", "provider", "all", "policy", "starts", "window", "tz"], catalog_requires_all = ["risk_tier", "task_kind", "until"])]
     pub model: Option<Model>,
-    #[arg(long, requires = "model")]
+    #[arg(long, catalog_requires = "model")]
     pub risk_tier: Option<String>,
-    #[arg(long, requires = "model")]
+    #[arg(long, catalog_requires = "model")]
     pub task_kind: Option<String>,
     /// First active instant: an RFC 3339 timestamp or a duration from now (e.g. 30m).
     #[arg(long)]
@@ -142,9 +165,9 @@ pub struct OverrideClear {
     #[arg(long, conflicts_with = "account")]
     pub provider: Option<String>,
     /// Revoke the model preference for a risk and task stratum.
-    #[arg(long, requires = "task_kind", conflicts_with_all = ["account", "provider"])]
+    #[arg(long, catalog_requires = "task_kind", conflicts_with_all = ["account", "provider"])]
     pub risk_tier: Option<String>,
-    #[arg(long, requires = "risk_tier", conflicts_with_all = ["account", "provider"])]
+    #[arg(long, catalog_requires = "risk_tier", conflicts_with_all = ["account", "provider"])]
     pub task_kind: Option<String>,
 }
 #[derive(Debug, Args)]
@@ -314,7 +337,7 @@ pub(crate) fn exclusion_rules(
     if texts.is_empty() {
         return Ok(Vec::new());
     }
-    let settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
+    let settings = crate::config_reads::read_for(roots, "route")?
         .domains
         .accounts;
     let models: Vec<ModelId> = Catalogue::bundled()?
@@ -412,8 +435,7 @@ pub(crate) fn effective_exclusion_rules(
             serde_json::Value::from(flags.to_vec())
         )]
     };
-    let profile = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
-        .dispatch_profile(&overrides)?;
+    let profile = crate::config_reads::read_for(roots, "route")?.dispatch_profile(&overrides)?;
     task_exclusion_rules(&profile, roots)
 }
 /// Refuse a selector that is none of the valid forms, for callers that carry
@@ -586,7 +608,7 @@ pub(crate) enum EdgeError {
     #[error("{0}")]
     Pacing(&'static str),
     #[error("{0}")]
-    GoAllowance(String),
+    Admission(String),
     #[error("{message}")]
     AccountProfile {
         kind: AccountProfileError,

@@ -1,4 +1,3 @@
-
 #[test]
 fn retained_state_copy_leaves_nothing_when_refused() -> Result<(), Box<dyn std::error::Error>> {
     const LIMIT: u64 = 1 << 20;
@@ -215,10 +214,7 @@ fn launch_policy_binds_mandatory_aliases_and_all_network_ceilings()
     for path in [&home, &source, &state, &relocated, &gh, &credential_target] {
         std::fs::create_dir(path)?;
     }
-    std::fs::set_permissions(
-        &state,
-        std::os::unix::fs::PermissionsExt::from_mode(0o700),
-    )?;
+    std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
     std::os::unix::fs::symlink(&credential_target, home.join(".ssh"))?;
     let subtree = |path: &Path| PathGrant {
         path: path.to_owned(),
@@ -331,8 +327,14 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
         "/usr/bin/git".into(),
     );
     host.credential_roots = vec![
-        PathGrant { path: root.join("relocated-xdg/opencode"), scope: PathScope::Subtree },
-        PathGrant { path: root.join("agent/socket"), scope: PathScope::Exact },
+        PathGrant {
+            path: root.join("relocated-xdg/opencode"),
+            scope: PathScope::Subtree,
+        },
+        PathGrant {
+            path: root.join("agent/socket"),
+            scope: PathScope::Exact,
+        },
     ];
     host.default_account_directories = [("codex".into(), root.join("default-codex"))].into();
     host.provider_path_environment = [(
@@ -348,8 +350,15 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
         ..Default::default()
     };
     let inventory = credential_roots(&registry, &home, &settings)?;
-    assert!(inventory.contains(&PathGrant { path: root.join("agent/socket"), scope: PathScope::Exact }));
-    assert!(!inventory.iter().any(|entry| entry.path == root.join("agent")));
+    assert!(inventory.contains(&PathGrant {
+        path: root.join("agent/socket"),
+        scope: PathScope::Exact
+    }));
+    assert!(
+        !inventory
+            .iter()
+            .any(|entry| entry.path == root.join("agent"))
+    );
     for path in [
         root.join("registered"),
         root.join("other-registration"),
@@ -371,11 +380,26 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
     let sibling_target = root.join("outside-claude-profile");
     std::fs::File::create(&sibling_target)?;
     std::os::unix::fs::symlink(&sibling_target, &sibling)?;
-    let mandatory = provenant_confinement::permissions::MandatoryRoots::for_host(&roots, &home, &root.join("source"), &inventory, &[], &[])?;
+    let mandatory = provenant_confinement::permissions::MandatoryRoots::for_host(
+        &roots,
+        &home,
+        &root.join("source"),
+        &inventory,
+        &[],
+        &[],
+    )?;
     for path in [sibling, sibling_target, root.join("other-claude.json")] {
-        assert!(mandatory.credentials().contains(&PathGrant { path, scope: PathScope::Exact }));
+        assert!(mandatory.credentials().contains(&PathGrant {
+            path,
+            scope: PathScope::Exact
+        }));
     }
-    assert!(mandatory.credentials().iter().any(|entry| entry.path == home.join(".agy-unselected")));
+    assert!(
+        mandatory
+            .credentials()
+            .iter()
+            .any(|entry| entry.path == home.join(".agy-unselected"))
+    );
 
     Ok(())
 }
@@ -391,73 +415,173 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
     let state = root.join("state");
     let foreign_common = root.join("other-project/.git");
     let foreign = root.join("external-owned-checkout");
-    for path in [&home, &source, &state, &foreign, &foreign_common.join("objects")] {
+    for path in [
+        &home,
+        &source,
+        &state,
+        &foreign,
+        &foreign_common.join("objects"),
+    ] {
         std::fs::create_dir_all(path)?;
     }
-    std::fs::set_permissions(
-        &state,
-        std::os::unix::fs::PermissionsExt::from_mode(0o700),
-    )?;
+    std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
     std::fs::write(foreign_common.join("HEAD"), "ref: refs/heads/main\n")?;
     let mut inputs = provenant_core::RootInputs::new(home.clone(), source.clone());
     inputs.state_dir = Some(state.clone());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(&foreign_common)?)?;
+    provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(&foreign_common)?,
+    )?;
     let registration = foreign_common.join("worktrees/external");
     std::fs::create_dir_all(&registration)?;
     let owner = WorktreeOwner {
-        attempt_id: None, operation_id: None, branch: "other-lane".into(),
-        base: "1".repeat(40), host: provenant_core::HostId::from_bytes([7; 16]),
+        attempt_id: None,
+        operation_id: None,
+        branch: "other-lane".into(),
+        base: "1".repeat(40),
+        host: provenant_core::HostId::from_bytes([7; 16]),
         created_at: provenant_core::WallTime::from_micros(1)?,
-        origin: WorktreeOrigin::Adopted, label: None,
+        origin: WorktreeOrigin::Adopted,
+        label: None,
         reference: None,
     };
-    std::fs::write(registration.join("provenant-owner.json"), serde_json::to_vec(&owner)?)?;
-    std::fs::write(registration.join("gitdir"), format!("{}\n", foreign.join(".git").display()))?;
+    std::fs::write(
+        registration.join("provenant-owner.json"),
+        serde_json::to_vec(&owner)?,
+    )?;
+    std::fs::write(
+        registration.join("gitdir"),
+        format!("{}\n", foreign.join(".git").display()),
+    )?;
     // An unowned sibling's name is not an extra mandatory source boundary.
     let unowned = foreign_common.join("worktrees/unowned");
     std::fs::create_dir(&unowned)?;
-    std::fs::write(unowned.join("gitdir"), format!("{}\n", root.join("unowned/.git").display()))?;
-    let registry = Registry { roots: Some(&roots), ..Default::default() };
+    std::fs::write(
+        unowned.join("gitdir"),
+        format!("{}\n", root.join("unowned/.git").display()),
+    )?;
+    let registry = Registry {
+        roots: Some(&roots),
+        ..Default::default()
+    };
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
     let selected = protected_worktrees(&registry, &source, &git)?;
-    let inventory_for = |source: &Path| provenant_confinement::permissions::MandatoryRoots::for_host(&roots, &home, source, &[], &[], &selected);
+    let inventory_for = |source: &Path| {
+        provenant_confinement::permissions::MandatoryRoots::for_host(
+            &roots,
+            &home,
+            source,
+            &[],
+            &[],
+            &selected,
+        )
+    };
     let inventory = inventory_for(&source)?;
     let protected = inventory.protected().to_vec();
     assert!(protected.iter().any(|root| root.path == foreign));
     assert!(protected.iter().any(|root| root.path == foreign_common));
-    assert!(!protected.iter().any(|entry| entry.path == root.join("unowned")));
+    assert!(
+        !protected
+            .iter()
+            .any(|entry| entry.path == root.join("unowned"))
+    );
     // A human checkout with active/retained writer custody is protected even
     // when it has no lane-provenance marker. Empty retired slots grant none.
-    let custody_slot = PathBuf::from(provenant_confinement::worktrees::state_dir_name(&root.join("unowned")));
-    assert!(provenant_confinement::worktrees::owned_worktree_paths(&foreign_common, &[custody_slot])?.contains(&root.join("unowned")));
-    assert!(!inventory_for(&foreign)?.protected().iter().any(|entry| entry.path == foreign));
+    let custody_slot = PathBuf::from(provenant_confinement::worktrees::state_dir_name(
+        &root.join("unowned"),
+    ));
+    assert!(
+        provenant_confinement::worktrees::owned_worktree_paths(&foreign_common, &[custody_slot])?
+            .contains(&root.join("unowned"))
+    );
+    assert!(
+        !inventory_for(&foreign)?
+            .protected()
+            .iter()
+            .any(|entry| entry.path == foreign)
+    );
     let request = confinement_request(
         ProjectId::from_bytes([8; 16]),
         ConfinementRoots {
             host_roots: None,
-            cwd: &source, home: &home, state: &state, credential_roots: &[], github_roots: &[],
-            protected_worktrees: &protected, scratch: &root.join("scratch"),
-            private_state: &root.join("private"), assets: &root.join("assets"), prompt_file: None,
+            cwd: &source,
+            home: &home,
+            state: &state,
+            credential_roots: &[],
+            github_roots: &[],
+            protected_worktrees: &protected,
+            scratch: &root.join("scratch"),
+            private_state: &root.join("private"),
+            assets: &root.join("assets"),
+            prompt_file: None,
         },
-        None, &run::LaneAccess::default(), &Default::default(), "command", false,
+        None,
+        &run::LaneAccess::default(),
+        &Default::default(),
+        "command",
+        false,
         InventoryContext::Sandboxed,
     )?;
-    let mandatory = request.permissions.policy.as_ref().ok_or("policy")?.mandatory();
-    for path in [&foreign, &foreign_common, &foreign.join("nested"), &foreign_common.join("refs")] {
-        assert!(matches!(mandatory.validate_extra_write(&PathGrant { path: path.clone(), scope: PathScope::Subtree }), Err(provenant_confinement::permissions::PermissionError::ProtectedOverlap)));
+    let mandatory = request
+        .permissions
+        .policy
+        .as_ref()
+        .ok_or("policy")?
+        .mandatory();
+    for path in [
+        &foreign,
+        &foreign_common,
+        &foreign.join("nested"),
+        &foreign_common.join("refs"),
+    ] {
+        assert!(matches!(
+            mandatory.validate_extra_write(&PathGrant {
+                path: path.clone(),
+                scope: PathScope::Subtree
+            }),
+            Err(provenant_confinement::permissions::PermissionError::ProtectedOverlap)
+        ));
     }
-    assert!(mandatory.validate_extra_write(&PathGrant { path: root.join("external-owned-checkout-other"), scope: PathScope::Subtree }).is_ok());
+    assert!(
+        mandatory
+            .validate_extra_write(&PathGrant {
+                path: root.join("external-owned-checkout-other"),
+                scope: PathScope::Subtree
+            })
+            .is_ok()
+    );
     // A checkout pruned after ownership was recorded is still denied by name.
     std::fs::remove_dir(&foreign)?;
-    assert!(inventory_for(&source)?.protected().iter().any(|root| root.path == foreign));
+    assert!(
+        inventory_for(&source)?
+            .protected()
+            .iter()
+            .any(|root| root.path == foreign)
+    );
     Ok(())
 }
 
 #[test]
 fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_providers::Adapter;
-    let image = PathBuf::from("/outside/shot.png");
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let home = root.join("home");
+    let cwd = root.join("project");
+    let state = root.join("state");
+    let scratch = root.join("scratch");
+    let private_state = state.join("attempt/provider-state");
+    let assets = root.join("release/active");
+    for path in [&home, &cwd, &scratch, &assets] {
+        std::fs::create_dir_all(path)?;
+    }
+    provenant_os::fixture::private_state_dir(&state)?;
+    std::fs::create_dir_all(&private_state)?;
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), cwd.clone());
+    inputs.state_dir = Some(state.clone());
+    let host_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let image = root.join("outside/shot.png");
     let access = run::LaneAccess {
         attachments: vec![image.clone()],
         ..Default::default()
@@ -465,16 +589,16 @@ fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error:
     let plan = ConfinedPlan::new(confinement_request(
         ProjectId::parse("0123456789abcdef0123456789abcdef")?,
         ConfinementRoots {
-            host_roots: None,
-            cwd: Path::new("/project"),
-            home: Path::new("/home/user"),
-            state: Path::new("/fixture-host-state"),
+            host_roots: Some(&host_roots),
+            cwd: &cwd,
+            home: &home,
+            state: &state,
             credential_roots: &[],
             github_roots: &[],
             protected_worktrees: &[],
-            scratch: Path::new("/tmp/scratch"),
-            private_state: Path::new("/state/private"),
-            assets: Path::new("/release"),
+            scratch: &scratch,
+            private_state: &private_state,
+            assets: &assets,
             prompt_file: None,
         },
         None,
@@ -507,8 +631,10 @@ fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error:
         pool_selection: None,
     };
     let prompt = Prompt::new("describe".into());
+    let launch_policy = provenant_records::policy::Policy::default();
     let launch = provenant_providers::codex::Codex.prepare(PrepareInput {
         images: &access.attachments,
+        policy: &launch_policy,
         command: None,
         route: &route,
         confined: &plan,
@@ -516,38 +642,54 @@ fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error:
         continuation: None,
         grant_digest: "fixture",
         executable: Path::new("/opt/homebrew/Cellar/codex/fixture/bin/codex"),
-        home: Path::new("/home/user"),
+        home: &home,
         user: "fixture".as_ref(),
         host_var: &|_| None,
         skill_stage_max_bytes: 0,
         account: None,
         token: None,
-        cwd: Path::new("/project"),
+        cwd: &cwd,
         git_context: false,
         nonce: [0; 16],
         provenant: LaneRuntime {
             executable: Path::new("/fixture/provenant/bin/provenant"),
             git: Path::new("/usr/bin/git"),
-            state: Path::new("/state"),
-            home: Path::new("/home/user"),
+            state: &state,
+            home: &home,
             depth: 1,
             attempt: provenant_core::AttemptId::from_bytes([7; 16]),
-            assets: Path::new("/release"),
-            fabric_mcp: true,
+            assets: &assets,
         },
     })?;
+    let image_argument = image.to_str().ok_or("image path")?;
     assert!(
         launch
             .argv
             .windows(2)
-            .any(|pair| pair == ["--image", "/outside/shot.png"])
+            .any(|pair| pair == ["--image", image_argument])
     );
     Ok(())
 }
 
 #[test]
 fn attachment_read_grant_is_exact() -> Result<(), Box<dyn std::error::Error>> {
-    let image = PathBuf::from("/outside/image.png");
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let home = root.join("home");
+    let cwd = root.join("project");
+    let state = root.join("state");
+    let scratch = root.join("scratch");
+    let private_state = state.join("attempt/provider-state");
+    let assets = root.join("release/active");
+    for path in [&home, &cwd, &scratch, &assets] {
+        std::fs::create_dir_all(path)?;
+    }
+    provenant_os::fixture::private_state_dir(&state)?;
+    std::fs::create_dir_all(&private_state)?;
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), cwd.clone());
+    inputs.state_dir = Some(state.clone());
+    let host_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let image = root.join("outside/image.png");
     let access = run::LaneAccess {
         attachments: vec![image.clone()],
         ..Default::default()
@@ -555,16 +697,16 @@ fn attachment_read_grant_is_exact() -> Result<(), Box<dyn std::error::Error>> {
     let request = confinement_request(
         ProjectId::parse("0123456789abcdef0123456789abcdef")?,
         ConfinementRoots {
-            host_roots: None,
-            cwd: Path::new("/project"),
-            home: Path::new("/home/user"),
-            state: Path::new("/fixture-host-state"),
+            host_roots: Some(&host_roots),
+            cwd: &cwd,
+            home: &home,
+            state: &state,
             credential_roots: &[],
             github_roots: &[],
             protected_worktrees: &[],
-            scratch: Path::new("/tmp/scratch"),
-            private_state: Path::new("/state/private"),
-            assets: Path::new("/release"),
+            scratch: &scratch,
+            private_state: &private_state,
+            assets: &assets,
             prompt_file: None,
         },
         None,
@@ -575,7 +717,7 @@ fn attachment_read_grant_is_exact() -> Result<(), Box<dyn std::error::Error>> {
         InventoryContext::Sandboxed,
     )?;
     assert!(request.permissions.read_roots.contains(&PathGrant {
-        path: image,
+        path: image.clone(),
         scope: PathScope::Exact
     }));
     assert!(
@@ -583,34 +725,45 @@ fn attachment_read_grant_is_exact() -> Result<(), Box<dyn std::error::Error>> {
             .permissions
             .read_roots
             .iter()
-            .any(|grant| grant.path == Path::new("/outside"))
+            .any(|grant| grant.path == image.parent().expect("image parent"))
     );
     Ok(())
 }
 
 #[test]
 fn lane_plan_reads_the_active_release_root() -> Result<(), Box<dyn std::error::Error>> {
-    let cwd = Path::new("/project");
-    let assets = Path::new("/release/sha256:active");
-    let home = Path::new("/home/user");
-    let scratch = Path::new("/tmp/lane-scratch");
-    let private_state = Path::new("/state/attempt/provider-state");
-    let prompt = Path::new("/state/attempt/prompt.md");
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let home = root.join("home");
+    let cwd = root.join("project");
+    let state = root.join("state");
+    let scratch = root.join("scratch");
+    let private_state = state.join("attempt/provider-state");
+    let assets = root.join("release/active");
+    for path in [&home, &cwd, &scratch, &assets] {
+        std::fs::create_dir_all(path)?;
+    }
+    provenant_os::fixture::private_state_dir(&state)?;
+    std::fs::create_dir_all(&private_state)?;
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), cwd.clone());
+    inputs.state_dir = Some(state.clone());
+    let host_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let prompt = state.join("attempt/prompt.md");
     for entry in REGISTRY {
         let request = confinement_request(
             ProjectId::parse("0123456789abcdef0123456789abcdef")?,
             ConfinementRoots {
-                host_roots: None,
-                cwd,
-                home,
-                state: Path::new("/fixture-host-state"),
+                host_roots: Some(&host_roots),
+                cwd: &cwd,
+                home: &home,
+                state: &state,
                 credential_roots: &[],
                 github_roots: &[],
                 protected_worktrees: &[],
-                scratch,
-                private_state,
-                assets,
-                prompt_file: Some(prompt),
+                scratch: &scratch,
+                private_state: &private_state,
+                assets: &assets,
+                prompt_file: Some(&prompt),
             },
             None,
             &run::LaneAccess::default(),
@@ -620,7 +773,7 @@ fn lane_plan_reads_the_active_release_root() -> Result<(), Box<dyn std::error::E
             InventoryContext::Sandboxed,
         )?;
         assert!(request.permissions.read_roots.contains(&PathGrant {
-            path: assets.to_owned(),
+            path: assets.clone(),
             scope: PathScope::Subtree,
         }));
         let plan = ConfinedPlan::new(request)?;
@@ -766,17 +919,17 @@ fn setup_stays_below_run_owned_roots_without_following_links()
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         apply_setup(
             &[
-                SetupStep::CreateDir(scratch.join("cargo-home/nested")),
-                SetupStep::CreateDir(scratch.join("cargo-home/nested")),
+                SetupStep::CreateDir(scratch.join("private-config/nested")),
+                SetupStep::CreateDir(scratch.join("private-config/nested")),
                 SetupStep::Symlink {
-                    link: scratch.join("cargo-home/registry"),
+                    link: scratch.join("private-config/packages"),
                     target: outside.clone(),
                 },
             ],
             &roots,
             None,
         )?;
-        assert!(scratch.join("cargo-home/nested").is_dir());
+        assert!(scratch.join("private-config/nested").is_dir());
         apply_setup(
             &[SetupStep::CreateDir(outside.join("projects/session"))],
             &roots,
@@ -809,7 +962,7 @@ fn setup_stays_below_run_owned_roots_without_following_links()
             SetupStep::CreateDir(scratch.clone()),
             SetupStep::CreateDir(scratch.join("escape/x")),
             SetupStep::Symlink {
-                link: scratch.join("cargo-home/registry/x"),
+                link: scratch.join("private-config/packages/x"),
                 target: outside.clone(),
             },
         ] {
@@ -980,6 +1133,10 @@ fn prelaunch_login_failures_keep_auth_when_availability_is_absent()
         AccountObservationError::Other(_)
     ));
     assert!(matches!(
+        account_observation_error(&entries[0], &ProviderError::RefreshDeferred),
+        AccountObservationError::Other(_)
+    ));
+    assert!(matches!(
         account_observation_error(&entries[0], &ProviderError::CredentialUnavailable),
         AccountObservationError::AuthRequired(_)
     ));
@@ -1071,14 +1228,27 @@ fn live_child_source_uses_its_selected_directory_and_rechecks_authority()
     let state = base.join("state");
     let project = base.join("parent");
     let scratch = base.join("scratch");
-    for path in [&home, &state, &project, &scratch] { std::fs::create_dir(path)?; }
+    for path in [&home, &state, &project, &scratch] {
+        std::fs::create_dir(path)?;
+    }
     let registry = Registry {
-        roots: None, home: Some(&home), assets: None, cwd: Some(&project),
-        state_root: Some(&state), project_id: None, host: None, cancel: None,
+        roots: None,
+        home: Some(&home),
+        assets: None,
+        cwd: Some(&project),
+        state_root: Some(&state),
+        project_id: None,
+        host: None,
+        cancel: None,
         repo_facts: Default::default(),
     };
-    let mut task = super::super::tests::trace_run(50, AttemptId::from_bytes([51; 16]), WallTime::from_micros(100)?)?
-        .request.tasks.remove(0);
+    let mut task = super::super::tests::trace_run(
+        50,
+        AttemptId::from_bytes([51; 16]),
+        WallTime::from_micros(100)?,
+    )?
+    .request
+    .task;
     task.writer = None;
     task.head = None;
     task.access.source_root = Some(scratch.clone());
@@ -1086,7 +1256,12 @@ fn live_child_source_uses_its_selected_directory_and_rechecks_authority()
     task.access.source_live = true;
     assert_eq!(source_cwd(&registry, &task)?, scratch);
     let mut changed_identity = task.clone();
-    changed_identity.access.source_identity.as_mut().ok_or("identity")?.inode ^= 1;
+    changed_identity
+        .access
+        .source_identity
+        .as_mut()
+        .ok_or("identity")?
+        .inode ^= 1;
     assert!(source_cwd(&registry, &changed_identity).is_err());
     for root in [&state, &home.join(".codex")] {
         std::fs::create_dir_all(root)?;
@@ -1101,7 +1276,7 @@ fn live_child_source_uses_its_selected_directory_and_rechecks_authority()
 #[test]
 fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_core::{AttemptId, OperationId, RunId, WallTime};
+    use provenant_core::{AttemptId, OperationId, WallTime};
     use provenant_os::exec::{ExecOptions, Executor, Termination};
     use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
@@ -1166,7 +1341,11 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         ..provenant_core::RootInputs::new(home.clone(), project.clone())
     }
     .resolve(&provenant_os::fs::SystemPathResolver)?;
-    let utility = provenant_confinement::UtilityRuntime::new(&git, &git_home)?;
+    let utility = provenant_confinement::UtilityRuntime::new(
+        &git,
+        &git_home,
+        roots.state.as_path(),
+    )?;
     let budget = provenant_confinement::UtilityBudget::bounded(std::time::Duration::from_secs(5))?;
     let cancel = provenant_core::CancelToken::new();
     let repo = utility.open_repo(&executor, &project, budget, &cancel)?;
@@ -1191,8 +1370,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         WallTime::from_micros(100)?,
     )?
     .request
-    .tasks
-    .remove(0);
+    .task;
     task.head = Some(head.clone());
     task.base = Some(head.clone());
     task.access.source_root = Some(source.clone());
@@ -1207,7 +1385,6 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         operation_id: OperationId::parse("source-test")?,
         task_index: 0,
         lane_depth: 1,
-        run_id: RunId::from_bytes([53; 16]),
         deadline_unix_ms: u64::MAX,
         scratch: base.join("scratch"),
         provider_state: base.join("provider-state"),
@@ -1296,11 +1473,27 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
     live.access.source_identity = Some(source_identity(&foreign)?);
     live.access.source_live = true;
     assert_eq!(source_cwd(&registry, &live)?, foreign);
-    let prepared_live = prepare_command(&registry, &live, &paths, None,
-        &|_| Ok(fake.clone()), "command", "fake")?;
+    let prepared_live = prepare_command(
+        &registry,
+        &live,
+        &paths,
+        None,
+        &|_| Ok(fake.clone()),
+        "command",
+        "fake",
+    )?;
     assert_eq!(prepared_live.cwd, foreign);
-    assert!(prepared_live.confinement.as_ref().ok_or("live confinement")?.plan
-        .permissions().protected_roots.iter().any(|root| root.path == foreign));
+    assert!(
+        prepared_live
+            .confinement
+            .as_ref()
+            .ok_or("live confinement")?
+            .plan
+            .permissions()
+            .protected_roots
+            .iter()
+            .any(|root| root.path == foreign)
+    );
     let launch = prepare_command(
         &registry,
         &task,
@@ -1548,7 +1741,8 @@ fn write_grant_limit_reports_configured_value_and_origin() -> Result<(), Box<dyn
         roots: Some(&roots),
         ..Registry::default()
     };
-    let default = registry.write_grant_limit();
+    let policy = provenant_records::policy::Policy::default();
+    let default = registry.write_grant_limit(&policy);
     assert_eq!(default.bytes, provenant_records::run::MAX_WRITE_GRANT_BYTES);
     assert_eq!(
         default.origin,
@@ -1558,7 +1752,7 @@ fn write_grant_limit_reports_configured_value_and_origin() -> Result<(), Box<dyn
         state.join("config.toml"),
         "schema_version=1\n[domains.run]\nwrite_grant_limit_bytes=1048576\n",
     )?;
-    let configured = registry.write_grant_limit();
+    let configured = registry.write_grant_limit(&policy);
     assert_eq!(configured.bytes, 1048576);
     assert_eq!(
         configured.origin,

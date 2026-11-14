@@ -80,6 +80,12 @@ pub enum AgentError {
     Path(PathBuf),
     #[error("launchctl {0} failed: {1}")]
     Launchctl(&'static str, String),
+    #[error("service {service} is {state:?}; stop it by hand: {command}")]
+    Quiescence {
+        service: String,
+        state: ServiceState,
+        command: String,
+    },
     #[error("systemctl {0} failed: {1}")]
     Systemctl(&'static str, String),
     #[error(transparent)]
@@ -99,6 +105,7 @@ impl AgentError {
             Self::Path(_) => "path",
             Self::Launchctl(..) => "launchctl",
             Self::Systemctl(..) => "systemctl",
+            Self::Quiescence { .. } => "quiescence",
             Self::Exec(_) => "exec",
             Self::Io(_) => "io",
         }
@@ -598,7 +605,7 @@ pub fn owns_default_state(state: &Path, home: &Path) -> bool {
         .ok()
         .flatten()
         .and_then(|account| fs::canonicalize(PathBuf::from(account.home)).ok());
-    account_home.as_deref() == Some(home) && state == home.join(".local/share/provenant/v1")
+    account_home.as_deref() == Some(home) && provenant_core::default_state_home(state) == Some(home)
 }
 
 pub fn install(state: &Path, home: &Path, changed: bool) -> Installed {
@@ -644,6 +651,8 @@ struct Projects {
     common_dirs: Vec<PathBuf>,
     /// The `<state>/worktrees/<project>` registry directories.
     registries: Vec<PathBuf>,
+    /// Worktree layout roots read from registered project declarations.
+    worktree_roots: Vec<PathBuf>,
     /// The worktree owner's registry entry name for a canonical worktree.
     registry_name: RegistryName,
 }
@@ -654,30 +663,43 @@ pub type RegistryName = fn(&Path) -> OsString;
 
 impl Projects {
     #[allow(clippy::print_stderr)]
-    fn registered(roots: &Roots, registry_name: RegistryName) -> Self {
-        let common_dirs = match provenant_config::registered_projects(roots) {
-            Ok(bindings) => bindings
-                .iter()
-                .map(|binding| binding.common_dir().to_path_buf())
-                .collect(),
+    fn registered(roots: &Roots, registry_name: RegistryName) -> Result<Self, AgentError> {
+        let mut common_dirs = Vec::new();
+        let mut worktree_roots = Vec::new();
+        match provenant_config::registered_projects(roots) {
+            Ok(bindings) => {
+                for binding in bindings {
+                    let common = binding.common_dir();
+                    common_dirs.push(common.to_path_buf());
+                    if common.file_name() == Some(OsStr::new(".git"))
+                        && let Some(project) = common.parent()
+                    {
+                        let ports = provenant_config::PortTable::read_for(
+                            Some(project),
+                            roots.state.as_path(),
+                        )?;
+                        worktree_roots.extend(ports.worktree_roots_under(project));
+                    }
+                }
+            }
             Err(error) => {
                 eprintln!(
                     "note: peer agent PATH skips only Provenant worktrees: project bindings are unreadable: {error}"
                 );
-                Vec::new()
             }
-        };
+        }
         let registries = fs::read_dir(roots.state.as_path().join("worktrees"))
             .into_iter()
             .flatten()
             .flatten()
             .map(|entry| entry.path())
             .collect();
-        Self {
+        Ok(Self {
             common_dirs,
             registries,
+            worktree_roots,
             registry_name,
-        }
+        })
     }
 
     /// Whether the worktree at `top`, with Git common directory `common` when
@@ -688,9 +710,7 @@ impl Projects {
             common == Some(dir.as_path())
                 || *dir == top.join(".git")
                 || (dir.file_name() == Some(OsStr::new(".git"))
-                    && dir
-                        .parent()
-                        .is_some_and(|root| top.starts_with(root.join(".worktrees"))))
+                    && self.worktree_roots.iter().any(|root| top.starts_with(root)))
         }) || self
             .registries
             .iter()
@@ -776,7 +796,7 @@ pub fn scheduler_path(
     registry_name: RegistryName,
 ) -> Result<OsString, AgentError> {
     let search = std::env::var_os("PATH").unwrap_or_default();
-    let projects = Projects::registered(roots, registry_name);
+    let projects = Projects::registered(roots, registry_name)?;
     let mut executables = scheduler_executables(&search, &projects);
     executables.extend(provenant_os::git::git_executable());
     let bin = program
@@ -805,7 +825,7 @@ pub fn install_plist(
 ) -> Result<Vec<u8>, AgentError> {
     let state = roots.state.as_path();
     let search = std::env::var_os("PATH").unwrap_or_default();
-    let projects = Projects::registered(roots, registry_name);
+    let projects = Projects::registered(roots, registry_name)?;
     let mut executables = provider_executables(&search, &projects);
     executables.extend(provenant_os::git::git_executable());
     let bin = program
@@ -814,65 +834,93 @@ pub fn install_plist(
     Ok(render(program, state, &sanitised_path(bin, &executables)?)?.into_bytes())
 }
 
-fn historical_plist(bytes: &[u8], program: &Path, state: &Path) -> Option<Vec<u8>> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    let (_, value) = text.split_once("<key>PATH</key>\n    <string>")?;
-    let (path, _) = value.split_once("</string>")?;
-    let path = path
-        .replace("&gt;", ">")
-        .replace("&lt;", "<")
-        .replace("&amp;", "&");
-    (render(program, state, OsStr::new(&path)).ok()?.as_bytes() == bytes).then(|| bytes.to_vec())
-}
-
-/// Recognise only the historical template for the validated installed binary
-/// and this state root. Read through held no-follow directory capabilities.
-pub fn previous_plist(
-    program: &Path,
-    state: &Path,
-    home: &Path,
-) -> Result<Option<Vec<u8>>, AgentError> {
-    let path = plist(home);
-    let parent = path
-        .parent()
-        .ok_or_else(|| AgentError::Path(path.clone()))?;
-    let dir = match provenant_config::private_directory(parent, false) {
-        Ok(dir) => dir,
-        Err(provenant_config::InstallError::Fs(error)) if error.is_not_found() => return Ok(None),
-        Err(error) => return Err(io::Error::other(error).into()),
-    };
-    let file = match dir.open_read(OsStr::new("dev.provenant.peer.plist")) {
-        Ok(file) => file,
-        Err(error) if error.is_not_found() => return Ok(None),
-        Err(error) => return Err(io::Error::other(error).into()),
-    };
-    let mut bytes = Vec::new();
-    file.take(64 * 1024 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > 64 * 1024 {
-        return Ok(None);
-    }
-    Ok(historical_plist(&bytes, program, state))
-}
-
 /// The managed-file owner calls this for an exact plist match or a missing
 /// recorded plist, under its install lock. A missing service needs no bootout;
 /// a failure keeps the receipt for retry.
-pub fn stop(home: &Path) -> Result<(), AgentError> {
+pub fn stop(home: &Path) -> Result<bool, AgentError> {
     stop_with(home, launchctl)
 }
 
 fn stop_with(
     home: &Path,
     mut run: impl FnMut(&[&OsStr], &Path) -> Result<(bool, String), AgentError>,
-) -> Result<(), AgentError> {
-    let service = format!("gui/{}/{LABEL}", provenant_os::fs::effective_uid());
-    if run(&["print".as_ref(), service.as_ref()], home)?.0 {
-        let (ok, error) = run(&["bootout".as_ref(), service.as_ref()], home)?;
-        if !ok {
-            return Err(AgentError::Launchctl("bootout", error));
+) -> Result<bool, AgentError> {
+    stop_service_with(home, LABEL, &mut run)
+}
+
+/// Loaded jobs count as running even between scheduled invocations: launchd can
+/// start them again. Only an explicit missing-service response proves absence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServiceState {
+    Running,
+    Absent,
+    Indeterminate,
+}
+
+pub fn service_state_with(
+    home: &Path,
+    service: &str,
+    mut run: impl FnMut(&[&OsStr], &Path) -> Result<(bool, String), AgentError>,
+) -> ServiceState {
+    match run(&["print".as_ref(), service.as_ref()], home) {
+        Ok((true, output))
+            if output.lines().any(|line| {
+                line.trim().strip_prefix("state = ").is_some_and(|state| {
+                    matches!(
+                        state,
+                        "running" | "waiting" | "not running" | "spawn scheduled" | "exited"
+                    )
+                })
+            }) =>
+        {
+            ServiceState::Running
         }
+        Ok((false, error))
+            if error.starts_with("exit 113:")
+                && error.lines().any(|line| {
+                    let label = service.rsplit('/').next().unwrap_or(service);
+                    line.trim()
+                        .starts_with(&format!("Could not find service \"{label}\" in domain "))
+                        || line.trim().starts_with(&format!(
+                            "exit 113: Could not find service \"{label}\" in domain "
+                        ))
+                }) =>
+        {
+            ServiceState::Absent
+        }
+        _ => ServiceState::Indeterminate,
     }
-    Ok(())
+}
+
+/// Shared launchctl stop boundary for current and retired agents. A successful
+/// bootout is not proof of quiescence; query again before allowing reset/unlink.
+pub fn stop_service_with(
+    home: &Path,
+    label: &str,
+    mut run: impl FnMut(&[&OsStr], &Path) -> Result<(bool, String), AgentError>,
+) -> Result<bool, AgentError> {
+    let service = format!("gui/{}/{label}", provenant_os::fs::effective_uid());
+    let state = service_state_with(home, &service, &mut run);
+    if state == ServiceState::Absent {
+        return Ok(false);
+    }
+    let state = if state == ServiceState::Running {
+        // Even a failed bootout may have unloaded the job. The query is the
+        // authority, including when the process edge returns an error.
+        let _ = run(&["bootout".as_ref(), service.as_ref()], home);
+        service_state_with(home, &service, &mut run)
+    } else {
+        state
+    };
+    if state == ServiceState::Absent {
+        Ok(true)
+    } else {
+        Err(AgentError::Quiescence {
+            command: format!("launchctl bootout {service}"),
+            service,
+            state,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -1141,69 +1189,6 @@ mod tests {
     }
 
     #[test]
-    fn historical_plist_recognises_current_release_golden_bytes() {
-        // A plist written by the released installer, with only HOME rewritten.
-        // Keep these bytes independent of render(), including the final newline.
-        let bytes = br#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>dev.provenant.peer</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/Users/example/.local/bin/provenant</string>
-    <string>fabric</string>
-    <string>peer-agent</string>
-  </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key>
-    <string>/Users/example/.local/bin:/Users/example/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/Applications/Obsidian.app/Contents/MacOS</string>
-    <key>PROVENANT_STATE_DIR</key>
-    <string>/Users/example/.local/share/provenant/v1</string>
-  </dict>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>AbandonProcessGroup</key>
-  <true/>
-  <key>StandardErrorPath</key>
-  <string>/Users/example/.local/share/provenant/v1/peer-agent/agent.log</string>
-</dict>
-</plist>
-"#;
-        assert_eq!(
-            super::historical_plist(
-                bytes,
-                std::path::Path::new("/Users/example/.local/bin/provenant"),
-                std::path::Path::new("/Users/example/.local/share/provenant/v1"),
-            ),
-            Some(bytes.to_vec())
-        );
-    }
-
-    #[test]
-    fn historical_plist_requires_the_exact_template_and_known_binary_and_state() {
-        use super::*;
-        let program = Path::new("/home/test/.local/bin/provenant");
-        let state = Path::new("/home/test/.local/share/provenant/v1");
-        let rendered = render(program, state, OsStr::new(":relative:/a&b:/c<d:/e>f")).unwrap();
-        assert_eq!(
-            historical_plist(rendered.as_bytes(), program, state),
-            Some(rendered.as_bytes().to_vec())
-        );
-        assert!(historical_plist(format!("{rendered}\n").as_bytes(), program, state).is_none());
-        assert!(
-            historical_plist(rendered.as_bytes(), Path::new("/foreign/provenant"), state).is_none()
-        );
-        assert!(
-            historical_plist(rendered.as_bytes(), program, Path::new("/foreign/state")).is_none()
-        );
-    }
-
-    #[test]
     fn provider_path_preserves_a_symlinked_command_name_and_drops_other_search_entries() {
         use super::*;
         let root = tempfile::tempdir().unwrap();
@@ -1221,6 +1206,7 @@ mod tests {
         let projects = Projects {
             common_dirs: Vec::new(),
             registries: Vec::new(),
+            worktree_roots: Vec::new(),
             registry_name: name,
         };
         let tools = provider_executables(&search, &projects);
@@ -1288,7 +1274,7 @@ mod tests {
             github.clone(),
         ])
         .unwrap();
-        let projects = Projects::registered(&roots, name);
+        let projects = Projects::registered(&roots, name).unwrap();
         let executables = scheduler_executables(&search, &projects);
         assert_eq!(
             executables,
@@ -1321,7 +1307,7 @@ mod tests {
         ] {
             provider(&path);
         }
-        let projects = Projects::registered(&roots, name);
+        let projects = Projects::registered(&roots, name).unwrap();
         assert_eq!(
             project_worktree(&project.join("bin"), &projects),
             Some(project.clone())
@@ -1349,7 +1335,7 @@ mod tests {
         fs::create_dir_all(nvm.join(".git")).unwrap();
         fs::create_dir_all(home.join(".git")).unwrap();
         provider(&bin.join("codex"));
-        let projects = Projects::registered(&roots, name);
+        let projects = Projects::registered(&roots, name).unwrap();
         assert_eq!(project_worktree(&bin, &projects), None);
         let search = std::env::join_paths([&bin]).unwrap();
         assert_eq!(
@@ -1359,6 +1345,7 @@ mod tests {
         let unreadable = Projects {
             common_dirs: Vec::new(),
             registries: Vec::new(),
+            worktree_roots: Vec::new(),
             registry_name: name,
         };
         assert_eq!(
@@ -1372,9 +1359,18 @@ mod tests {
         use super::*;
         let (_temp, base, roots) = project_roots();
         let project = base.join("project");
-        let worktree = project.join(".worktrees/feat-x");
+        let worktree = project.join("trees/feat-x");
         let private = project.join(".git/worktrees/feat-x");
         bind(&roots, &project);
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.worktree_layout.roots = vec![PathBuf::from("trees")];
+        ports.worktree_layout.default = PathBuf::from("trees/<branch>");
+        fs::create_dir_all(project.join(".provenant")).unwrap();
+        fs::write(
+            project.join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&ports).unwrap(),
+        )
+        .unwrap();
         fs::create_dir_all(&private).unwrap();
         fs::write(private.join("commondir"), b"../..\n").unwrap();
         fs::create_dir_all(&worktree).unwrap();
@@ -1384,7 +1380,7 @@ mod tests {
         )
         .unwrap();
         provider(&worktree.join("bin/claude"));
-        let projects = Projects::registered(&roots, name);
+        let projects = Projects::registered(&roots, name).unwrap();
         assert_eq!(
             provenant_os::git::repository_marker(&worktree)
                 .and_then(|marker| marker.common_dir)
@@ -1397,14 +1393,19 @@ mod tests {
         );
         let search = std::env::join_paths([worktree.join("bin")]).unwrap();
         assert!(provider_executables(&search, &projects).is_empty());
-        // Without a resolvable marker, the `.worktrees` location or a
-        // registry entry still identifies a Provenant worktree.
+        // Without a resolvable marker, the declared location or a registry
+        // entry still identifies a Provenant worktree.
         assert!(projects.own(&worktree, None));
+        assert!(!projects.own(&project.join(".worktrees/feat-x"), None));
         let elsewhere = base.join("elsewhere");
         assert!(!projects.own(&elsewhere, None));
         let registry = roots.state.as_path().join("worktrees/project");
         fs::create_dir_all(registry.join(name(&elsewhere))).unwrap();
-        assert!(Projects::registered(&roots, name).own(&elsewhere, None));
+        assert!(
+            Projects::registered(&roots, name)
+                .unwrap()
+                .own(&elsewhere, None)
+        );
     }
 
     #[test]
@@ -1445,43 +1446,87 @@ mod tests {
     }
 
     #[test]
-    fn uninstall_boots_out_a_loaded_agent_and_reports_failure() {
+    fn uninstall_boots_out_a_loaded_agent_and_requires_confirmed_absence() {
         use super::*;
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
-        assert!(!plist(home).exists());
-        let mut calls = Vec::new();
-        stop_with(home, |args, cwd| {
+        let mut unloaded = false;
+        assert!(stop_with(home, |args, cwd| {
             assert_eq!(cwd, home);
-            calls.push(
-                args.iter()
-                    .map(|arg| arg.to_os_string())
-                    .collect::<Vec<_>>(),
-            );
-            Ok((true, String::new()))
-        })
-        .unwrap();
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0][0], "print");
-        assert_eq!(calls[1][0], "bootout");
-        assert!(
-            calls[1][1]
-                .to_string_lossy()
-                .ends_with("/dev.provenant.peer")
-        );
-        let mut calls = 0;
-        stop_with(home, |_, _| {
-            calls += 1;
-            Ok((false, String::new()))
-        })
-        .unwrap();
-        assert_eq!(calls, 1);
+            if args[0] == "bootout" {
+                unloaded = true;
+                return Ok((true, String::new()));
+            }
+            Ok(if unloaded {
+                (false, "exit 113: Could not find service \"dev.provenant.peer\" in domain for user gui: 501".into())
+            } else {
+                (true, "state = running".into())
+            })
+        }).unwrap());
+        assert!(unloaded);
         assert!(matches!(
-            stop_with(home, |args, _| {
-                Ok((args[0] == OsStr::new("print"), "denied".into()))
-            }),
-            Err(AgentError::Launchctl("bootout", _))
+            stop_with(home, |_, _| Ok((true, "state = running".into()))),
+            Err(AgentError::Quiescence {
+                state: ServiceState::Running,
+                ..
+            })
         ));
+    }
+
+    #[test]
+    fn service_query_distinguishes_absence_from_failed_or_malformed_queries() {
+        use super::*;
+        let service = "gui/501/dev.provenant.peer";
+        for (ok, output, expected) in [
+            (true, "state = running", ServiceState::Running),
+            (true, "state = not running", ServiceState::Running),
+            (true, "state = waiting", ServiceState::Running),
+            (true, "state = malformed", ServiceState::Indeterminate),
+            (true, "", ServiceState::Indeterminate),
+            (true, "state = ", ServiceState::Indeterminate),
+            (false, "timed out after 10s", ServiceState::Indeterminate),
+            (
+                false,
+                "exit 5: permission denied",
+                ServiceState::Indeterminate,
+            ),
+            (false, "exit 113: Bad request.", ServiceState::Indeterminate),
+            (
+                false,
+                "exit 113: Could not find service \"other\" in domain for user gui: 501",
+                ServiceState::Indeterminate,
+            ),
+            (
+                false,
+                "exit 113: Bad request.\nCould not find service \"dev.provenant.peer\" in domain for user gui: 501",
+                ServiceState::Absent,
+            ),
+        ] {
+            assert_eq!(
+                service_state_with(Path::new("/"), service, |_, _| Ok((ok, output.into()))),
+                expected
+            );
+        }
+        assert_eq!(
+            service_state_with(Path::new("/"), service, |_, _| Err(io::Error::other(
+                "spawn failed"
+            )
+            .into())),
+            ServiceState::Indeterminate
+        );
+        // A timed-out process can carry an otherwise valid missing-service diagnostic.
+        let runner = LaunchctlRunner {
+            termination: Termination::Exit(113),
+            timed_out: true,
+            stdout: "",
+            stderr: "Could not find service \"dev.provenant.peer\" in domain for user gui: 501",
+        };
+        assert_eq!(
+            service_state_with(Path::new("/"), service, |args, home| launchctl_with(
+                args, home, &runner
+            )),
+            ServiceState::Indeterminate
+        );
     }
 
     #[test]
@@ -1646,7 +1691,7 @@ mod tests {
         use super::*;
         let plist = render(
             Path::new("/Users/a&b/.local/bin/provenant"),
-            Path::new("/Users/a&b/.local/share/provenant/v1"),
+            Path::new("/Users/a&b/.local/share/provenant/v2"),
             OsStr::new("/opt/homebrew/bin:/usr/bin"),
         )
         .unwrap();
@@ -1685,14 +1730,14 @@ mod tests {
             );
             assert_eq!(
                 value["EnvironmentVariables"]["PROVENANT_STATE_DIR"],
-                "/Users/a&b/.local/share/provenant/v1"
+                "/Users/a&b/.local/share/provenant/v2"
             );
             assert_eq!(value["RunAtLoad"], true);
             assert_eq!(value["KeepAlive"], true);
             assert_eq!(value["AbandonProcessGroup"], true);
             assert_eq!(
                 value["StandardErrorPath"],
-                "/Users/a&b/.local/share/provenant/v1/peer-agent/agent.log"
+                "/Users/a&b/.local/share/provenant/v2/peer-agent/agent.log"
             );
         }
         #[cfg(not(target_os = "macos"))]

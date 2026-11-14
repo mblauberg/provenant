@@ -38,6 +38,7 @@ struct FakeOwner {
     quota_redraw: bool,
     retry_limit: Option<u8>,
     input_cap_source: Option<InputCapSource>,
+    admission_policy: Option<provenant_records::policy::Policy>,
     retry_budgets: Vec<Option<u8>>,
     deliveries: usize,
     delivery_effects: usize,
@@ -49,6 +50,7 @@ struct FakeOwner {
     fast_forward_only: Vec<bool>,
     observations: VecDeque<AttemptObservation>,
     calls: Vec<(AttemptKey, GraphRoute)>,
+    attempt_numbers: Vec<Option<u32>>,
     titles: Vec<String>,
     prompts: Vec<String>,
     permissions: Vec<(AccessMode, Option<String>)>,
@@ -97,8 +99,11 @@ struct FakeOwner {
     deadlines: Vec<Option<u64>>,
     families: std::collections::BTreeMap<String, String>,
     answers: std::collections::BTreeMap<String, AskReply>,
+    fail_node_ask_once: bool,
     now: Option<provenant_core::WallTime>,
     asked: Vec<String>,
+    /// Every request filed, in order; a repeat files nothing.
+    filed: Vec<AskRequest>,
     closed_asks: Vec<String>,
     owner_notifications: Vec<String>,
     file_requests: Vec<Vec<InputRequest>>,
@@ -123,6 +128,12 @@ fn reply(option: Option<&str>, text: Option<&str>) -> AskReply {
 
 impl AttemptOwner for FakeOwner {
     type Error = NoObservation;
+    fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+        provenant_config::PortTable::builtin().worktree_layout
+    }
+    fn graph_admission_policy(&self) -> provenant_records::policy::Policy {
+        self.admission_policy.clone().unwrap_or_default()
+    }
     fn detect_repair_growth(&mut self, _: &str, _: &str) -> Result<bool, String> {
         self.repair_growth_calls += 1;
         Ok(self.repair_growth)
@@ -253,6 +264,7 @@ impl AttemptOwner for FakeOwner {
             alias: None,
             effort: None,
             account: None,
+            tier: None,
         }))
     }
     fn attempt_models(&mut self, attempts: &[String]) -> Result<Vec<String>, Self::Error> {
@@ -271,12 +283,28 @@ impl AttemptOwner for FakeOwner {
     fn actor(&self) -> String {
         self.actor.clone()
     }
+    fn file_ask(&mut self, filing: AskFiling<'_>) -> Result<AskFiled, Self::Error> {
+        let id = &filing.ask.ask_id;
+        let first = self.filed.iter().find(|ask| &ask.ask_id == id);
+        let deadline = first.map_or(filing.ask.wake_at, |ask| ask.wake_at);
+        if first.is_none() {
+            self.filed.push(filing.ask.clone());
+        }
+        Ok(AskFiled {
+            request: id.clone(),
+            deadline,
+            closed: self.closed_asks.contains(id),
+        })
+    }
     fn node_ask(&mut self, scope: AskScope<'_>) -> Result<Option<AskReply>, Self::Error> {
         self.asked.push(scope.ask.ask_id.clone());
+        if std::mem::take(&mut self.fail_node_ask_once) {
+            return Err(NoObservation);
+        }
         Ok(self.answers.get(&scope.ask.ask_id).cloned())
     }
-    fn notify_owner(&mut self, scope: AskScope<'_>) -> Result<bool, Self::Error> {
-        self.owner_notifications.push(scope.ask.ask_id.clone());
+    fn notify_owner(&mut self, filing: AskFiling<'_>) -> Result<bool, Self::Error> {
+        self.owner_notifications.push(filing.ask.ask_id.clone());
         Ok(true)
     }
     fn close_node_ask(&mut self, scope: AskScope<'_>) -> Result<(), Self::Error> {
@@ -397,6 +425,7 @@ impl AttemptOwner for FakeOwner {
         self.stored_refs.push(replay.stored_ref.map(str::to_owned));
         self.retry_budgets.push(node.settlement_retries);
         self.launch_actors.push(replay.launch_actor.to_owned());
+        self.attempt_numbers.push(node.context.attempt);
         self.calls.push((key.clone(), route.clone()));
         self.permissions.push((access, worktree.map(str::to_owned)));
         if !self.family_pool.is_empty() {
@@ -444,6 +473,7 @@ fn route(adapter: &str) -> GraphRoute {
         model: Some(format!("{adapter}/model")),
         alias: None,
         effort: None,
+        tier: None,
     }
 }
 
@@ -458,13 +488,14 @@ fn pool_route(alias: &str) -> GraphRoute {
 
 fn node(id: &str, route: GraphRoute) -> GraphNode {
     GraphNode {
-        auto_continue_no_work: None,
+        on_stop: Default::default(),
         attempt: None,
         attachments: Vec::new(),
         family_group: None,
         context: None,
         extra: Default::default(),
         composite_members: Vec::new(),
+        when: Vec::new(),
         topology_present: Default::default(),
         distinct_from: None,
         distinct_strength: None,
@@ -545,6 +576,8 @@ fn done_as(reference: &str) -> AttemptObservation {
         result_path: None,
         branch: None,
         commit: None,
+        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        stop: None,
     }
 }
 
@@ -612,9 +645,11 @@ fn entry(extra: &str) -> String {
 /// `lens-c` is unavailable. `verify` reads the lens group.
 fn partial_review(minimum: usize) -> (GraphDocument, FakeOwner) {
     let ok = "LENS-A-OK\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"low\",\"file\":\"a.rs\",\"line\":1,\"summary\":\"note\",\"status\":\"open\"}]}\n```";
+    // A fixed route makes unavailable members final; an alias authorises
+    // stop-policy redraw and would consume a consumer's fixture observation.
     let lens = |id: &str| {
         serde_json::json!({"id":id,"access":"read_only","prompt":id,
-            "require_findings":true,"route":{"alias":"fixture"}})
+            "require_findings":true,"route":{"adapter":"fixture","model":"fixture/lens"}})
     };
     let exports: Vec<_> = ["lens-a", "lens-b", "lens-c"]
         .map(|id| serde_json::json!({"node":id,"outputs":["result","findings"]}))
@@ -697,6 +732,8 @@ fn terminal(outcome: AttemptOutcome) -> AttemptObservation {
         result_path: None,
         branch: None,
         commit: None,
+        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        stop: None,
     }
 }
 
@@ -710,6 +747,8 @@ fn preparation_refusal(reference: &str, outcome: AttemptOutcome) -> AttemptObser
         result_path: None,
         branch: None,
         commit: None,
+        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        stop: None,
     }
 }
 
@@ -723,6 +762,8 @@ fn terminal_with_result(outcome: AttemptOutcome, result: &str) -> AttemptObserva
         result_path: None,
         branch: None,
         commit: None,
+        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        stop: None,
     }
 }
 
@@ -765,7 +806,7 @@ fn capture(text: &str) -> crate::result_capture::CapturedResult {
     capture.push(text.as_bytes());
     // The sealed handoff a settled attempt carries, as the fixture text declares it.
     let mut result = capture.finish();
-    result.handoff = provenant_records::handoff::Handoff::from_result(text);
+    result.handoff = provenant_records::handoff::Handoff::from_turns(text, &[]);
     result
 }
 
@@ -793,6 +834,8 @@ fn check_fallback(
                 result_path: None,
                 branch: None,
                 commit: None,
+                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                stop: None,
             },
             terminal(AttemptOutcome::Succeeded),
         ]),
@@ -800,7 +843,21 @@ fn check_fallback(
     };
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(owner.calls.len(), if expected { 2 } else { 1 }, "{case}");
+    // A launched node changes route through a graph stop-policy restart,
+    // keeping the settled attempt in history rather than inline fallback.
+    let restarted = !expected
+        && launched
+        && matches!(
+            outcome,
+            AttemptOutcome::AuthRequired
+                | AttemptOutcome::UsageLimited
+                | AttemptOutcome::AdapterUnavailable
+        );
+    assert_eq!(
+        owner.calls.len(),
+        if expected || restarted { 2 } else { 1 },
+        "{case}"
+    );
     assert_eq!(
         run.checkpoint.nodes[0].attempts.len(),
         if expected { 2 } else { 1 },
@@ -816,28 +873,28 @@ fn check_fallback(
         "{case}"
     );
 
+    let successful_outcome = outcome == AttemptOutcome::ReviewRequired;
     assert_eq!(
         run.checkpoint.nodes[0].state,
-        if expected {
+        if expected || restarted || successful_outcome {
             NodeState::Succeeded
         } else {
             NodeState::Failed
         },
         "{case}"
     );
-    if access == AccessMode::WorktreeWrite
-        && launched
-        && matches!(
-            outcome,
-            AttemptOutcome::AuthRequired | AttemptOutcome::UsageLimited
-        )
-    {
-        assert_eq!(
-            run.checkpoint.nodes[0].advance_error_code.as_deref(),
-            Some("fallback_launched_writer"),
-            "{case}"
-        );
-    }
+    assert_eq!(
+        run.checkpoint
+            .expansions
+            .iter()
+            .filter(|expansion| expansion
+                .patch
+                .as_ref()
+                .is_some_and(|record| record.restart.is_some()))
+            .count(),
+        usize::from(restarted),
+        "{case}"
+    );
     assert_eq!(
         run.checkpoint.nodes[0].worktree.as_deref(),
         (access == AccessMode::WorktreeWrite).then_some("/private/tmp/writer"),
@@ -856,9 +913,11 @@ mod loop_tests {
 }
 mod plan_tests {
     include!("plan_tests.rs");
+    include!("planner_implement_invariants.rs");
 }
 mod relay_tests {
     include!("relay_tests.rs");
+    include!("relay_implement_invariants.rs");
 }
 mod envelope_tests {
     include!("envelope_tests.rs");
@@ -889,6 +948,9 @@ struct ErrorLauncher {
 
 impl AttemptOwner for ErrorLauncher {
     type Error = crate::coordination::facade::FacadeError;
+    fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+        provenant_config::PortTable::builtin().worktree_layout
+    }
 
     fn actor(&self) -> String {
         "actor".into()

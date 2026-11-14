@@ -1,7 +1,7 @@
 //! Guardian channels and persistent writer reservations. A PID is never a handle.
 use crate::census::{ProcessIdentity, ProcessObservation, ProcessObserver, SystemProcessObserver};
 use crate::machine::StopReason;
-use provenant_core::{ActorId, AttemptId, CancelToken, Clock, Digest, GitOid, RunId, WaitBudget};
+use provenant_core::{ActorId, AttemptId, CancelToken, Clock, Digest, GitOid, WaitBudget};
 use provenant_os::{
     exec::{CapturedStream, Termination},
     fs::{Directory, FsError, LockGuard, LockMode, Metadata, Publication, PublishMode},
@@ -18,9 +18,43 @@ pub(crate) const RECORD_LIMIT: u64 = 1024 * 1024;
 pub(crate) const EXIT_LIMIT: u64 = 16 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Scope {
-    pub run: RunId,
     pub attempt: AttemptId,
     pub generation: u64,
+}
+
+/// Run seals this beside the reservation when private Git must be retained.
+/// The run directory is verified against the reservation's device and inode.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ImportFence {
+    pub schema_version: u64,
+    pub scope: Scope,
+    pub lane: provenant_records::WorkKey,
+    pub run_attempt: PathBuf,
+}
+
+/// A recovery target, carried intact from custody admission to the CLI.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingImport {
+    pub scope: Scope,
+    pub fence: PathBuf,
+    pub lane: provenant_records::WorkKey,
+}
+impl PendingImport {
+    pub fn reconcile(&self) -> String {
+        format!("provenant reconcile {}", self.lane)
+    }
+    pub fn abandon(&self) -> String {
+        format!(
+            "provenant reconcile --abandon {} --reason 'recover retained work manually'",
+            self.lane
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CustodyDecision {
+    Pending(PendingImport),
+    Settled(Scope),
 }
 #[derive(Debug, Error)]
 pub enum CustodyError {
@@ -30,8 +64,8 @@ pub enum CustodyError {
     ObservationGate(String),
     #[error("writer reservation requires recovery")]
     Fenced,
-    #[error("writer import retained for run {run}, attempt {attempt}")]
-    ImportRetained { run: RunId, attempt: AttemptId },
+    #[error("writer import retained for lane {} at {}; run `{}` or `{}`", fence.lane, fence.fence.display(), fence.reconcile(), fence.abandon())]
+    ImportRetained { fence: Box<PendingImport> },
     #[error("custody identity is unknown")]
     UnknownIdentity,
     #[error("record is invalid or belongs to another generation")]
@@ -71,7 +105,7 @@ pub enum AdmissionError {
     GuardianIdentity,
     /// Numeric host observations are safe to publish as the lane's refusal.
     #[error(
-        "insufficient disk space: {free} bytes available, gc.free_floor {floor} bytes (source: {source_label}); run `provenant gc --apply`",
+        "insufficient disk space: {free} bytes available, gc.critical_free {floor} bytes (source: {source_label}); run `provenant gc --apply`",
         source_label = .origin.description()
     )]
     Disk {
@@ -272,13 +306,6 @@ pub(crate) struct Reservation {
     pub extra: std::collections::BTreeMap<String, serde_json::Value>,
 }
 impl Reservation {
-    fn original_reservation_device(&self) -> u64 {
-        self.extra
-            .get("slot_original_device")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(self.reservation_device)
-    }
-
     pub(crate) fn validate(&self) -> Result<()> {
         self.binding.validate()?;
         if self.attempt_device.is_some() != self.attempt_inode.is_some() {
@@ -480,7 +507,6 @@ pub(crate) fn acquire_writer_with_observer(
             other => other,
         })?;
     let lock_directory = directory;
-    carry_forward_slot_reservation(&lock_directory)?;
     ensure_no_exclusive_reservation(&lock_directory)?;
     let directory = create_attempt_evidence(&lock_directory, scope)?;
     match directory.metadata_at(OsStr::new("reservation.json"), false) {
@@ -507,15 +533,13 @@ pub(crate) fn acquire_writer_with_observer(
             let settled: SettlementJournal =
                 read_record(&directory, "settlement.json", RECORD_LIMIT)
                     .map_err(|_| CustodyError::Fenced)?;
-            // A settled owner no longer holds this path, so a new run may bind
-            // a worktree recreated there. Only the attempt that settled may be
-            // readmitted, and a run keeps the worktree it held.
+            // A settled owner no longer holds this path, so a new attempt may
+            // bind a worktree recreated there. Only the attempt that settled
+            // may be readmitted, and it keeps the worktree it held.
             let same_custody = previous.binding.same_custody(&binding.0);
             if previous.schema_version != 1
                 || settled.schema_version != 1
-                || (settled.scope.run != previous.scope.run
-                    || settled.scope.generation < previous.scope.generation)
-                || (scope.run == previous.scope.run && !same_custody)
+                || settled.scope != previous.scope
                 || (scope.generation > 1
                     && (scope.attempt != settled.scope.attempt || !same_custody))
             {
@@ -589,144 +613,91 @@ pub fn attempt_evidence(
 ) -> provenant_os::fs::Result<Directory> {
     directory.open_verified_directory(OsStr::new(&scope.attempt.to_string()))
 }
-/// Carry retained slot evidence forward while holding the writer lock.
-/// Publish the attempt record durably before removing the slot fence. A crash
-/// between those writes is replayed only when the two records agree exactly.
-fn carry_forward_slot_reservation(directory: &Directory) -> Result<()> {
-    carry_forward_slot_reservation_with(directory, |child| {
-        child.open_read(OsStr::new("reservation.json"))?.sync()?;
-        child.sync()?;
-        Ok(())
-    })
+
+/// Classify a retained import without changing its evidence. Only a matching
+/// settlement journal AND Run's inode-bound release attestations retire a
+/// reservation left behind by an interrupted removal. Uncertain proof retains
+/// custody; a historical marker without a reservation grants no custody.
+pub fn retained_import_decision(
+    evidence: &Directory,
+    expected: Scope,
+) -> Result<Option<CustodyDecision>> {
+    let reservation: Reservation = match read_record(evidence, "reservation.json", RECORD_LIMIT) {
+        Ok(record) => record,
+        Err(CustodyError::Filesystem(error)) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    validate_anchor(evidence, &reservation)?;
+    if reservation.scope != expected
+        || evidence.current_path()?.file_name() != Some(OsStr::new(&expected.attempt.to_string()))
+    {
+        return Err(CustodyError::InvalidRecord);
+    }
+    let marker: ImportFence = match read_record(evidence, "import-retained.json", RECORD_LIMIT) {
+        Ok(record) => record,
+        Err(CustodyError::Filesystem(error)) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if marker.schema_version != 1 || marker.scope != expected {
+        return Err(CustodyError::InvalidRecord);
+    }
+    let pending = CustodyDecision::Pending(PendingImport {
+        scope: expected,
+        fence: evidence.current_path()?.join("reservation.json"),
+        lane: marker.lane,
+    });
+    let settled = (|| -> Result<()> {
+        let journal: SettlementJournal = read_record(evidence, "settlement.json", RECORD_LIMIT)?;
+        if journal.schema_version != 1 || journal.scope != expected {
+            return Err(CustodyError::InvalidRecord);
+        }
+        let attempt = Directory::open_anchor(&marker.run_attempt)?;
+        let metadata = attempt.metadata()?;
+        if reservation.attempt_device != Some(metadata.device)
+            || reservation.attempt_inode != Some(metadata.inode)
+        {
+            return Err(CustodyError::InvalidRecord);
+        }
+        let quarantine = attempt.open_verified_directory(OsStr::new("quarantine"))?;
+        verify_release(expected, &attempt, &attempt, &quarantine)
+    })();
+    Ok(Some(if settled.is_ok() {
+        CustodyDecision::Settled(expected)
+    } else {
+        pending
+    }))
 }
 
-fn carry_forward_slot_reservation_with(
-    directory: &Directory,
-    sync_evidence: impl FnOnce(&Directory) -> Result<()>,
-) -> Result<()> {
-    match directory.metadata_at(OsStr::new("reservation.json"), false) {
-        Ok(_) => {}
-        Err(error) if error.is_not_found() => return Ok(()),
-        Err(error) => return Err(error.into()),
-    }
-    let mut value: serde_json::Value = read_record(directory, "reservation.json", RECORD_LIMIT)
-        .map_err(|_| CustodyError::Fenced)?;
-    let record: Reservation =
-        serde_json::from_value(value.clone()).map_err(|_| CustodyError::Fenced)?;
-    record.validate().map_err(|_| CustodyError::Fenced)?;
-    let slot = directory.metadata()?;
-    let child = create_attempt_evidence(directory, record.scope)?;
-    let anchor = child.metadata()?;
-    let device_matches = record.reservation_device == slot.device
-        || record.attempt_device.is_some_and(|old_attempt| {
-            same_device_rebinding(
-                record.reservation_device,
-                old_attempt,
-                slot.device,
-                anchor.device,
-            )
-        });
-    if record.reservation_inode != slot.inode || !device_matches {
-        return Err(CustodyError::Fenced);
-    }
-    let object = value.as_object_mut().ok_or(CustodyError::Fenced)?;
-    // Do not overwrite future fields in retained evidence. These names are
-    // introduced by the cutover and are never expected in a slot record.
-    if object.contains_key("slot_exclusive") || object.contains_key("slot_original_device") {
-        return Err(CustodyError::Fenced);
-    }
-    // A carried reservation may still have a live provider that lost its lock.
-    // Keep excluding all writers until that reservation is settled.
-    object.insert("slot_exclusive".into(), true.into());
-    object.insert(
-        "slot_original_device".into(),
-        record.reservation_device.into(),
-    );
-    object.insert("reservation_device".into(), anchor.device.into());
-    object.insert("reservation_inode".into(), anchor.inode.into());
-    match child.metadata_at(OsStr::new("reservation.json"), false) {
-        Ok(_) => {
-            let existing: serde_json::Value = read_record(&child, "reservation.json", RECORD_LIMIT)
-                .map_err(|_| CustodyError::Fenced)?;
-            if existing != value {
-                return Err(CustodyError::Fenced);
-            }
-        }
-        Err(error) if error.is_not_found() => {
-            Publication::require_durable(write_record(
-                &child,
-                "reservation.json",
-                &value,
-                PublishMode::NoReplace,
-            )?)?;
-        }
-        Err(error) => return Err(error.into()),
-    }
-    // An identical record can be left by a publication whose final directory
-    // sync failed. Reconfirm durability on replay before removing its source.
-    sync_evidence(&child)?;
-    // The attempt directory itself may also be a visible, unsynced creation
-    // from an earlier failed cutover.
-    directory.sync()?;
-    directory.unlink(OsStr::new("reservation.json"))?;
-    directory.sync()?;
-    Ok(())
-}
-
-/// Carry slot-root reservations forward at the recovery boundary. A busy or
-/// unreadable slot stays in place and is reported by the subsequent listing.
-pub fn cutover_writer_reservations(
-    directory: &Directory,
-    cancel: &CancelToken,
-    clock: &dyn Clock,
-) -> Result<()> {
-    let mut storage_error = None;
-    for (index, name) in directory.entries()?.enumerate() {
+/// Supervisor owns the format-2 slot scan. Root-slot records are not attempt
+/// evidence. Callers retain writer exclusion when using this for mutation.
+pub fn pending_import(slot: &Directory) -> Result<Option<PendingImport>> {
+    for (index, name) in slot.entries()?.enumerate() {
         if index >= 10_000 {
             return Err(CustodyError::InvalidRecord);
         }
         let name = name?;
-        let migrate = || -> Result<()> {
-            if directory.metadata_at(&name, false)?.kind != provenant_os::fs::FileKind::Directory {
-                return Ok(());
-            }
-            let slot = directory.open_verified_directory(&name)?;
-            match slot.metadata_at(OsStr::new("reservation.json"), false) {
-                Ok(_) => {}
-                Err(error) if error.is_not_found() => return Ok(()),
-                Err(error) => return Err(error.into()),
-            }
-            let _lease = lock_writer_exclusion(
-                &slot,
-                WaitBudget::nonblocking(clock.mono_now()),
-                cancel,
-                clock,
-            )?;
-            carry_forward_slot_reservation(&slot)
+        let Some(attempt) = name.to_str().and_then(|name| AttemptId::parse(name).ok()) else {
+            continue;
         };
-        // Malformed and busy slots remain visible in the read-only listing.
-        // A failed write must reach the caller, after carrying any other slots.
-        match migrate() {
-            Ok(())
-            | Err(CustodyError::Fenced | CustodyError::Busy)
-            | Err(CustodyError::Filesystem(FsError::LockTimeout { .. })) => {}
-            Err(error) => {
-                if storage_error.is_none() {
-                    storage_error = Some(error);
-                }
-            }
+        let evidence = slot.open_verified_directory(&name)?;
+        let reservation: Reservation =
+            match read_record(&evidence, "reservation.json", RECORD_LIMIT) {
+                Ok(record) => record,
+                Err(CustodyError::Filesystem(error)) if error.is_not_found() => continue,
+                Err(error) => return Err(error),
+            };
+        if reservation.scope.attempt != attempt {
+            return Err(CustodyError::InvalidRecord);
         }
-        if cancel.is_cancelled() {
-            return Err(CustodyError::Cancelled);
+        if let Some(CustodyDecision::Pending(fence)) =
+            retained_import_decision(&evidence, reservation.scope)?
+        {
+            return Ok(Some(fence));
         }
     }
-    match storage_error {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
+    Ok(None)
 }
-
-/// Unresolved launches and carried fences exclude new attempts until recovery.
+/// Unresolved attempt launches exclude new attempts until recovery.
 fn ensure_no_exclusive_reservation(directory: &Directory) -> Result<()> {
     for (index, name) in directory.entries()?.enumerate() {
         if index >= 10_000 {
@@ -753,6 +724,22 @@ fn ensure_no_exclusive_reservation(directory: &Directory) -> Result<()> {
         if name != OsStr::new(&reservation.scope.attempt.to_string()) {
             return Err(CustodyError::Fenced);
         }
+        match retained_import_decision(&child, reservation.scope)
+            .map_err(|_| CustodyError::Fenced)?
+        {
+            Some(CustodyDecision::Pending(fence)) => {
+                return Err(CustodyError::ImportRetained {
+                    fence: Box::new(fence),
+                });
+            }
+            Some(CustodyDecision::Settled(scope)) => {
+                // The writer lease is held. Finish only the verified interrupted
+                // removal; retain private Git, markers and the run's evidence.
+                clear_reservation(&child, scope)?;
+                continue;
+            }
+            None => {}
+        }
         // Providers no longer inherit writer.lock. After guardian loss the
         // durable unresolved launch must exclude every new attempt, not just
         // readmission of its original attempt, even with a free flock. Prepared
@@ -765,21 +752,11 @@ fn ensure_no_exclusive_reservation(directory: &Directory) -> Result<()> {
         {
             return Err(CustodyError::Fenced);
         }
-        match value.get("slot_exclusive") {
-            None | Some(serde_json::Value::Bool(false)) => {}
-            _ => return Err(CustodyError::Fenced),
-        }
     }
     Ok(())
 }
 
-/// An uncarried slot-root record is a fence for all attempts until the slot is opened.
 pub fn reservation_present(directory: &Directory, scope: Scope) -> provenant_os::fs::Result<bool> {
-    match directory.metadata_at(OsStr::new("reservation.json"), false) {
-        Ok(_) => return Ok(true),
-        Err(error) if error.is_not_found() => {}
-        Err(error) => return Err(error),
-    }
     let evidence = match attempt_evidence(directory, scope) {
         Ok(directory) => directory,
         Err(error) if error.is_not_found() => return Ok(false),
@@ -897,13 +874,15 @@ impl PublicationReservation {
 /// Ephemeral launch input. Environment and prompt bytes travel only on a pipe.
 #[derive(Debug)]
 pub struct ProviderCommand {
+    pub policy: provenant_records::policy::Policy,
     /// Immutable, anonymous profile retained through both exec handoffs.
     pub profile_file: Option<crate::ProfileFile>,
     /// Nice value inherited by the provider and its descendants.
     pub priority: u8,
     pub resolved_route: String,
     pub permission_plan_digest: Digest,
-    pub task: provenant_core::TaskId,
+    /// The attempt's work identity; the guardian names the launch by it.
+    pub key: provenant_records::WorkKey,
     pub requester: ActorId,
     /// Native diagnostic command names that must be spared during cleanup.
     pub protected_commands: Vec<String>,
@@ -962,19 +941,14 @@ pub struct CapturePlan {
     /// it runs. 0 is no budget.
     #[serde(default)]
     pub token_budget: u64,
+    /// The resolved budget action; warnings never authorise a stop.
+    #[serde(default)]
+    pub budget_action: provenant_records::BudgetAction,
     /// Context size, in tokens one provider call sent, at which a writer is
     /// stopped so a fresh attempt continues from its handoff. 0 is off; a
     /// provider that reports no context figure is never stopped for it.
     #[serde(default)]
     pub context_handoff: u64,
-    /// The most time spent queued for a build slot that is kept off the wall
-    /// deadline, in total.
-    #[serde(default = "default_slot_wait_ms")]
-    pub slot_wait_ms: u64,
-}
-/// Registry default for lanes.slot_wait_seconds, in milliseconds.
-pub fn default_slot_wait_ms() -> u64 {
-    7_200_000
 }
 // Registry default for lanes.silence_seconds, expressed in milliseconds.
 fn default_silence_ms() -> u64 {
@@ -994,8 +968,8 @@ impl Default for CapturePlan {
             root_flush_ms: crate::machine::DEFAULT_ROOT_FLUSH_MS,
             silence_ms: default_silence_ms(),
             token_budget: 0,
+            budget_action: provenant_records::BudgetAction::default(),
             context_handoff: 0,
-            slot_wait_ms: default_slot_wait_ms(),
         }
     }
 }
@@ -1005,14 +979,9 @@ impl CapturePlan {
         now_ms.saturating_sub(last_progress_ms.unwrap_or(0)) >= self.silence_ms
     }
 
-    /// Silence is inapplicable while the guardian has paused disk work.
-    pub fn silent_for_ms(
-        &self,
-        now_ms: u64,
-        last_progress_ms: Option<u64>,
-        disk_paused: bool,
-    ) -> Option<u64> {
-        (!disk_paused && self.silent(now_ms, last_progress_ms))
+    /// Elapsed silence since the last observed progress.
+    pub fn silent_for_ms(&self, now_ms: u64, last_progress_ms: Option<u64>) -> Option<u64> {
+        self.silent(now_ms, last_progress_ms)
             .then(|| now_ms.saturating_sub(last_progress_ms.unwrap_or(0)))
     }
 
@@ -1023,7 +992,6 @@ impl CapturePlan {
             || self.silence_ms > 3_600_000
             || self.wall_ms == 0
             || self.wall_ms > 86400000
-            || self.slot_wait_ms > 86400000
             || self.descendant_grace_ms > 60000
             || self.root_flush_ms > 60000
         {
@@ -1065,7 +1033,7 @@ impl CustodyHandle {
 }
 #[derive(Debug)]
 pub struct LaunchFailure {
-    pub error: CustodyError,
+    pub error: Box<CustodyError>,
     pub custody: PublicationReservation,
     pending_exit: Option<Box<ProcessExit>>,
 }
@@ -1136,7 +1104,7 @@ pub fn launch(
     publication: PublicationReservation,
 ) -> std::result::Result<CustodyHandle, LaunchFailure> {
     let failure = |error, custody| LaunchFailure {
-        error,
+        error: Box::new(error),
         custody,
         pending_exit: None,
     };
@@ -1184,7 +1152,7 @@ pub fn launch(
             Ok(()) => CustodyError::InvalidRecord,
         };
         return Err(LaunchFailure {
-            error,
+            error: Box::new(error),
             custody: publication,
             pending_exit: Some(Box::new(record)),
         });
@@ -1249,8 +1217,8 @@ pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
         schema_version: 1,
         scope: handle.scope,
         request_id: provenant_core::OperationId::parse(&format!(
-            "{}.{}.{}.cancel",
-            handle.scope.run, handle.scope.attempt, handle.scope.generation
+            "{}.{}.cancel",
+            handle.scope.attempt, handle.scope.generation
         ))
         .map_err(|_| CustodyError::InvalidRecord)?,
         requester: handle.requester,
@@ -1274,7 +1242,6 @@ pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
                 // so a later generation beside it can only be forged.
                 Ok(previous)
                     if !handle.held
-                        && previous.scope.run == request.scope.run
                         && previous.scope.attempt == request.scope.attempt
                         && previous.scope.generation > request.scope.generation =>
                 {
@@ -1341,8 +1308,7 @@ pub struct ProcessExit {
     pub termination: Option<Termination>,
     pub never_spawned: bool,
     pub stop_reason: Option<StopReason>,
-    /// Whether cancellation was delivered to the provider before its exit was observed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Whether cancellation was delivered before exit; null means ordering was not observed.
     pub cancel_delivered_before_exit: Option<bool>,
     pub delivered_signals: Vec<i64>,
     pub reaped: Vec<ProcessIdentity>,
@@ -1478,14 +1444,14 @@ impl From<&CapturedStream> for CaptureTotals {
         }
     }
 }
-// Read-only storage DTO permits added fields within v1.
+// Current storage DTO permits future additive fields.
 #[derive(Deserialize)]
 struct StoredExit {
     scope: Scope,
     termination: Option<Termination>,
     never_spawned: bool,
     stop_reason: Option<StopReason>,
-    #[serde(default)]
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
     cancel_delivered_before_exit: Option<bool>,
     delivered_signals: Vec<i64>,
     reaped: Vec<ProcessIdentity>,
@@ -1498,9 +1464,7 @@ struct StoredExit {
     omitted_warnings: u64,
     terminal_observed: bool,
     unresolved_cleanup: bool,
-    #[serde(default)]
     unresolved_pids: Vec<i64>,
-    #[serde(default)]
     settlement_evidence: SettlementEvidence,
     stdout: CaptureTotals,
     stderr: CaptureTotals,
@@ -1512,7 +1476,7 @@ pub struct ExitObservation {
     pub termination: Option<Termination>,
     pub never_spawned: bool,
     pub stop_reason: Option<StopReason>,
-    /// None means an older exit record did not capture delivery ordering.
+    /// None means this current observation could not establish delivery ordering.
     pub cancel_delivered_before_exit: Option<bool>,
     pub delivered_signals: Vec<i64>,
     pub reaped: Vec<ProcessIdentity>,
@@ -1545,7 +1509,6 @@ struct StoredObservation {
     guardian: Option<ProcessIdentity>,
     #[serde(default)]
     provider: Option<ProcessIdentity>,
-    #[serde(default)]
     publication_pending: bool,
 }
 
@@ -1618,7 +1581,6 @@ pub fn observe(
     cancel: &CancelToken,
     clock: &dyn Clock,
 ) -> Result<Observation> {
-    resume_orphaned_builds(&handle.directory, handle.scope)?;
     let remaining = Duration::from_micros(budget.remaining(clock.mono_now()).as_micros());
     let deadline = Instant::now()
         .checked_add(remaining)
@@ -1706,7 +1668,7 @@ thread_local! {
 
 /// Acquire writer exclusion without keeping the observation gate while another
 /// writer owns the lease. Every attempt revalidates both stable lock inodes.
-/// A nonblocking writer budget still allows the separate brief observer wait.
+/// Observation gates always try once; only actual writer custody may use the caller budget.
 #[allow(clippy::disallowed_methods)] // The bounded wait must expire even with a stopped caller clock.
 pub fn lock_writer_exclusion(
     directory: &Directory,
@@ -1723,43 +1685,9 @@ pub fn lock_writer_exclusion(
         if cancel.is_cancelled() {
             return Err(FsError::Cancelled { path }.into());
         }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let gate_wait = if timeout.is_zero() {
-            Duration::from_secs(5)
-        } else {
-            remaining.min(Duration::from_secs(5))
-        };
-        let observation = match directory.lock(
-            OsStr::new("writer-probe.lock"),
-            LockMode::Exclusive,
-            WaitBudget::up_to(
-                clock.mono_now(),
-                provenant_core::DurationMicros::from_micros(
-                    u64::try_from(gate_wait.as_micros())
-                        .map_err(|_| CustodyError::InvalidRecord)?,
-                ),
-            ),
-            cancel,
-            clock,
-        ) {
-            Ok(observation) => observation,
-            Err(FsError::LockTimeout { .. })
-                if !timeout.is_zero() && (Instant::now() >= deadline || gate_wait == remaining) =>
-            {
-                if cancel.is_cancelled() {
-                    return Err(FsError::Cancelled { path }.into());
-                }
-                if Instant::now() >= deadline {
-                    return Err(FsError::LockTimeout { path, timeout }.into());
-                }
-                // The gate budget is rounded down to microseconds. Retry any
-                // fraction left before the caller's deadline rather than
-                // reporting a distinct observation failure for budget expiry.
-                continue;
-            }
-            Err(error @ FsError::Cancelled { .. }) => return Err(error.into()),
-            Err(error) => return Err(CustodyError::ObservationGate(error.to_string())),
-        };
+        // An observation is not writer custody: contention here is busy,
+        // regardless of the caller's permitted wait for the actual writer.
+        let observation = writer_admission_guard(directory)?;
         let attempt = directory.lock(
             OsStr::new("writer.lock"),
             LockMode::Exclusive,
@@ -1795,34 +1723,25 @@ pub fn prepare_writer_observation(directory: &Directory) -> Result<()> {
     Ok(())
 }
 
-/// Serialise admission with a brief read-only lock probe. This wait is separate
-/// from the writer Busy budget: an observer never owns writer custody.
+/// Try admission once. An observer is busy evidence, never a reason to wait.
 pub fn writer_admission_guard(directory: &Directory) -> Result<LockGuard> {
-    let clock = provenant_os::clock::SystemClock::new();
     directory
-        .lock(
-            OsStr::new("writer-probe.lock"),
-            LockMode::Exclusive,
-            WaitBudget::cli(clock.mono_now(), 5).map_err(|_| CustodyError::InvalidRecord)?,
-            &CancelToken::new(),
-            &clock,
-        )
-        .map_err(|error| CustodyError::ObservationGate(error.to_string()))
+        .try_lock(OsStr::new("writer-probe.lock"), LockMode::Exclusive)
+        .map_err(observation_error)
 }
 
-/// A read-only observer holds this only until its writer-lock probe is dropped.
-/// Missing legacy gates remain uncertainty until registry mutation upgrades them.
+/// Probe an existing gate once without creating state during observation.
 pub fn writer_observation_guard(directory: &Directory) -> Result<LockGuard> {
-    let clock = provenant_os::clock::SystemClock::new();
     directory
-        .lock_existing(
-            OsStr::new("writer-probe.lock"),
-            LockMode::Exclusive,
-            WaitBudget::cli(clock.mono_now(), 5).map_err(|_| CustodyError::InvalidRecord)?,
-            &CancelToken::new(),
-            &clock,
-        )
-        .map_err(|error| CustodyError::ObservationGate(error.to_string()))
+        .try_lock_existing(OsStr::new("writer-probe.lock"), LockMode::Exclusive)
+        .map_err(observation_error)
+}
+
+fn observation_error(error: FsError) -> CustodyError {
+    match error {
+        FsError::LockTimeout { .. } => CustodyError::Busy,
+        error => CustodyError::ObservationGate(error.to_string()),
+    }
 }
 
 /// Recovery carries a verified reservation and optional writer exclusion.
@@ -1869,13 +1788,12 @@ pub fn acquire_recovery(
 ) -> Result<Recovery> {
     let lease = lock_writer_exclusion(&directory, budget, cancel, clock)?;
     let lock_directory = directory;
-    carry_forward_slot_reservation(&lock_directory)?;
     let directory = recovery_evidence(&lock_directory, scope)?;
     let reservation: Reservation = read_record(&directory, "reservation.json", RECORD_LIMIT)?;
     validate_anchor(&directory, &reservation)?;
     // Callers may inspect a retained generation before deciding whether to
     // settle it; recovery evidence belongs to this run and attempt.
-    if reservation.scope.run != scope.run || reservation.scope.attempt != scope.attempt {
+    if reservation.scope.attempt != scope.attempt {
         return Err(CustodyError::Fenced);
     }
     Ok(Recovery {
@@ -1923,7 +1841,6 @@ pub(crate) fn acquire_reboot_recovery_with(
 ) -> Result<Recovery> {
     let lease = lock_writer_exclusion(&directory, budget, cancel, clock)?;
     let lock_directory = directory;
-    carry_forward_slot_reservation(&lock_directory)?;
     let directory = recovery_evidence(&lock_directory, scope)?;
     let reservation: Reservation = read_record(&directory, "reservation.json", RECORD_LIMIT)?;
     reservation.validate()?;
@@ -1939,7 +1856,7 @@ pub(crate) fn acquire_reboot_recovery_with(
         || reservation.attempt_inode != Some(target.inode)
         || !reservation.attempt_device.is_some_and(|device| {
             same_device_rebinding(
-                reservation.original_reservation_device(),
+                reservation.reservation_device,
                 device,
                 slot.device,
                 target.device,
@@ -1973,7 +1890,6 @@ pub fn prove_unreserved(
     clock: &dyn Clock,
 ) -> Result<Option<Unreserved>> {
     let lease = lock_writer_exclusion(directory, budget, cancel, clock)?;
-    carry_forward_slot_reservation(directory)?;
     match ensure_no_exclusive_reservation(directory) {
         Ok(()) => {}
         Err(CustodyError::Fenced) => return Ok(None),
@@ -2071,14 +1987,6 @@ pub fn list_writer_reservations_in_slot(slot: &Directory) -> Result<ReservationL
             return Err(CustodyError::InvalidRecord);
         }
         let attempt = attempt?;
-        if attempt == OsStr::new("reservation.json") {
-            let path = PathBuf::from(&attempt);
-            listing.issues.push(ReservationIssue {
-                reservation: path,
-                reason: "slot-root writer reservation requires reconciliation".into(),
-            });
-            continue;
-        }
         let path = PathBuf::from(&attempt).join("reservation.json");
         let entry = || -> Result<Option<WriterReservation>> {
             // Other retired registry files do not hold recovery evidence.
@@ -2221,7 +2129,7 @@ impl Recovery {
             if self.reservation.reservation_inode != slot.inode
                 || !self.reservation.attempt_device.is_some_and(|device| {
                     same_device_rebinding(
-                        self.reservation.original_reservation_device(),
+                        self.reservation.reservation_device,
                         device,
                         slot.device,
                         metadata.device,
@@ -2236,7 +2144,6 @@ impl Recovery {
             Err(FsError::LockTimeout { .. }) => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        orphans::resume_paused_with(attempt, scope, observer)?;
         Ok(Some(RebootRecovery {
             recovery: self,
             _custody: custody,
@@ -2378,7 +2285,7 @@ pub(crate) fn verify_release(
     quarantine: &Directory,
 ) -> Result<()> {
     let release: ReleaseReceipt = read_record(receipt, "release.json", RECORD_LIMIT)?;
-    if release.scope != scope {
+    if release.schema_version != 1 || release.scope != scope {
         return Err(CustodyError::InvalidRecord);
     }
     for (directory, name, digest, expected_terminal) in [
@@ -2522,7 +2429,6 @@ impl Recovery {
             &CancelToken::new(),
             &clock,
         )?;
-        self.resume_paused_builds(attempt)?;
         SettlementCommit::verify(
             self.reservation.scope,
             attempt,
@@ -2679,10 +2585,76 @@ impl Recovery {
 }
 
 mod orphans;
-#[cfg(feature = "fixture")]
-pub(crate) use orphans::resume_orphaned_builds_with;
-pub use orphans::{OrphanReport, resume_orphaned_builds};
+pub use orphans::OrphanReport;
 
 #[cfg(test)]
 #[path = "custody_tests.rs"]
 mod tests;
+
+/// A fixed work key for fixtures that need a custody command.
+#[cfg(any(test, feature = "fixture"))]
+#[doc(hidden)]
+#[allow(clippy::expect_used)]
+pub fn fixture_key(seed: u8) -> provenant_records::WorkKey {
+    provenant_records::WorkKey::new(
+        provenant_core::ProjectId::from_bytes([seed; 16]),
+        "fixture",
+        "node",
+        1,
+    )
+    .expect("fixture key is valid")
+}
+
+#[cfg(test)]
+mod exit_shape_tests {
+    use super::{ProcessExit, Scope, StoredExit};
+    use provenant_core::AttemptId;
+
+    #[test]
+    fn current_exit_requires_cancellation_ordering_member_but_allows_unobserved() {
+        let mut exit = ProcessExit::never_spawned(
+            Scope {
+                attempt: AttemptId::from_bytes([7; 16]),
+                generation: 1,
+            },
+            None,
+            vec![],
+        );
+        exit.cancel_delivered_before_exit = None;
+        let mut value = serde_json::to_value(exit).unwrap();
+        assert!(value["cancel_delivered_before_exit"].is_null());
+        let parsed: StoredExit = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(parsed.cancel_delivered_before_exit, None);
+
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("cancel_delivered_before_exit");
+        assert!(serde_json::from_value::<StoredExit>(value).is_err());
+    }
+
+    #[test]
+    fn current_pending_checkpoint_requires_publication_state_member() {
+        let current_pending = serde_json::json!({
+            "schema_version": 1,
+            "scope": Scope {
+                attempt: AttemptId::from_bytes([8; 16]),
+                generation: 2,
+            },
+            "publication_pending": true,
+            "priority": null,
+        });
+        let parsed: super::StoredObservation =
+            serde_json::from_value(current_pending.clone()).unwrap();
+        assert!(parsed.publication_pending);
+        assert!(parsed.guardian.is_none());
+        assert!(parsed.provider.is_none());
+
+        let mut missing = current_pending;
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("publication_pending");
+        assert!(serde_json::from_value::<super::StoredObservation>(missing).is_err());
+    }
+}
