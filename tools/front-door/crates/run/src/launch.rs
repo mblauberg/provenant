@@ -71,13 +71,6 @@ pub fn capture_plan(task: &TaskRequest, limits: &provenant_records::LaneLimits) 
         // worktree from its handoff. 0 or unset is off; a provider that
         // reports no per-call context figure is never stopped for it.
         context_handoff: enforced(&limits.context_handoff),
-        slot_wait_ms: task
-            .profile
-            .knob_u64("lanes.slot_wait_seconds")
-            .map_or_else(
-                provenant_supervisor::custody::default_slot_wait_ms,
-                |seconds| seconds.saturating_mul(1000),
-            ),
         ..CapturePlan::default()
     }
 }

@@ -87,7 +87,13 @@ impl DiskPressure for LaneDisk {
         let floor = provenant_config::GcSettings::read(state)?.free_floor_bytes(state)?;
         let free =
             provenant_confinement::disk::lane_available_bytes(state, &context.roots.home, cwd)?;
-        Ok(free < floor)
+        let settings = provenant_config::LaneBuildSettings::read(state)?;
+        let policy = provenant_run::resource_policy(&settings).map_err(io::Error::other)?;
+        // Strictness only affects new admissions. Running builds always continue.
+        Ok(!matches!(
+            policy.check("disk_floor", free < floor),
+            provenant_records::policy::Effect::Proceed
+        ))
     }
 }
 

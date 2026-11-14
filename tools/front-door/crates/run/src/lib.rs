@@ -52,7 +52,7 @@ mod writer;
 
 pub use admission::{
     AdmissionPolicy, AdmissionTimeoutOrigin, EffectiveAdmissionTimeout, HOST_ACTIVE, HOST_QUEUED,
-    LaneWait, PROJECT_ACTIVE, Resources, SystemResources,
+    LaneWait, PROJECT_ACTIVE, Resources, SystemResources, resource_policy,
 };
 pub use controls::{
     CancelReceipt, Reconciled, Resume, TemporaryReason, TemporaryReasonKind, UncertainReason,

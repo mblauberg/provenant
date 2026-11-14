@@ -1187,37 +1187,6 @@ printf 'agy 1.0.0\n'
     let grants =
         provenant_confinement::write_grants(confinement.plan.permissions(), &codex.profile);
     assert!(!grants.is_empty(), "the profile lists its write grants");
-    // The shim's wait marker must be writable by the lane, or a sandboxed
-    // wait is never shown.
-    let shim = codex
-        .setup
-        .iter()
-        .find_map(|step| match step {
-            provenant_providers::SetupStep::WriteExecutable { path, bytes }
-                if path.ends_with("bin/cargo") =>
-            {
-                String::from_utf8(bytes.clone()).ok()
-            }
-            _ => None,
-        })
-        .ok_or("cargo shim")?;
-    let marker = confinement
-        .plan
-        .permissions()
-        .scratch
-        .path
-        .join(provenant_os::build_slots::WAIT_MARKER);
-    assert!(
-        shim.contains(&marker.to_string_lossy().into_owned()),
-        "{shim}"
-    );
-    assert!(
-        grants
-            .iter()
-            .any(|grant| grant.scope == PathScope::Subtree && marker.starts_with(&grant.path)),
-        "no write grant covers the wait marker {}",
-        marker.display()
-    );
     for grant in &grants {
         let reaches = match grant.scope {
             PathScope::Exact => grant.path == slots,

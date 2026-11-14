@@ -813,14 +813,6 @@ pub struct CapturePlan {
     /// provider that reports no context figure is never stopped for it.
     #[serde(default)]
     pub context_handoff: u64,
-    /// The most time spent queued for a build slot that is kept off the wall
-    /// deadline, in total.
-    #[serde(default = "default_slot_wait_ms")]
-    pub slot_wait_ms: u64,
-}
-/// Registry default for lanes.slot_wait_seconds, in milliseconds.
-pub fn default_slot_wait_ms() -> u64 {
-    7_200_000
 }
 // Registry default for lanes.silence_seconds, expressed in milliseconds.
 fn default_silence_ms() -> u64 {
@@ -842,7 +834,6 @@ impl Default for CapturePlan {
             token_budget: 0,
             budget_action: provenant_records::BudgetAction::default(),
             context_handoff: 0,
-            slot_wait_ms: default_slot_wait_ms(),
         }
     }
 }
@@ -852,14 +843,9 @@ impl CapturePlan {
         now_ms.saturating_sub(last_progress_ms.unwrap_or(0)) >= self.silence_ms
     }
 
-    /// Silence is inapplicable while the guardian has paused disk work.
-    pub fn silent_for_ms(
-        &self,
-        now_ms: u64,
-        last_progress_ms: Option<u64>,
-        disk_paused: bool,
-    ) -> Option<u64> {
-        (!disk_paused && self.silent(now_ms, last_progress_ms))
+    /// Elapsed silence since the last observed progress.
+    pub fn silent_for_ms(&self, now_ms: u64, last_progress_ms: Option<u64>) -> Option<u64> {
+        self.silent(now_ms, last_progress_ms)
             .then(|| now_ms.saturating_sub(last_progress_ms.unwrap_or(0)))
     }
 
@@ -870,7 +856,6 @@ impl CapturePlan {
             || self.silence_ms > 3_600_000
             || self.wall_ms == 0
             || self.wall_ms > 86400000
-            || self.slot_wait_ms > 86400000
             || self.descendant_grace_ms > 60000
             || self.root_flush_ms > 60000
         {
@@ -1460,7 +1445,6 @@ pub fn observe(
     cancel: &CancelToken,
     clock: &dyn Clock,
 ) -> Result<Observation> {
-    resume_orphaned_builds(&handle.directory, handle.scope)?;
     let remaining = Duration::from_micros(budget.remaining(clock.mono_now()).as_micros());
     let deadline = Instant::now()
         .checked_add(remaining)
@@ -2067,7 +2051,6 @@ impl Recovery {
             Err(FsError::LockTimeout { .. }) => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        orphans::resume_paused_with(attempt, scope, observer)?;
         Ok(Some(RebootRecovery {
             recovery: self,
             _custody: custody,
@@ -2353,7 +2336,6 @@ impl Recovery {
             &CancelToken::new(),
             &clock,
         )?;
-        self.resume_paused_builds(attempt)?;
         SettlementCommit::verify(
             self.reservation.scope,
             attempt,
@@ -2510,9 +2492,7 @@ impl Recovery {
 }
 
 mod orphans;
-#[cfg(feature = "fixture")]
-pub(crate) use orphans::resume_orphaned_builds_with;
-pub use orphans::{OrphanReport, resume_orphaned_builds};
+pub use orphans::OrphanReport;
 
 #[cfg(test)]
 #[path = "custody_tests.rs"]

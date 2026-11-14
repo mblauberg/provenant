@@ -61,6 +61,14 @@ pub const fn diagnostic_code(code: &'static str, replacement: &'static str) -> R
 /// Every removed CLI spelling and config key. A CLI spelling exits 2 with one
 /// line naming its replacement; there are no aliases.
 pub const REMOVED: &[Removed] = &[
+    config_key(
+        "domains.fabric.lanes.build_wait_minutes",
+        "build slots try once and proceed; Cargo manages its own locks",
+    ),
+    config_key(
+        "lanes.slot_wait_seconds",
+        "build-slot waits and their wall-clock extension have been removed",
+    ),
     flag(
         &["dispatch"],
         "prompt-file",

@@ -451,6 +451,7 @@ impl Default for GraphLimits {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Lanes {
+    pub admission_policy: BTreeMap<String, provenant_records::policy::Strength>,
     /// Milliseconds between starts of the same class; zero unless set.
     pub start_spacing_ms: Option<u64>,
     pub memory_pressure_threshold: provenant_config::MemoryPressureThreshold,
@@ -468,8 +469,6 @@ pub struct Lanes {
     pub max_writer_lanes: Option<u64>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub max_project_writer_lanes: Option<u64>,
-    #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
-    pub build_wait_minutes: Option<u64>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub lane_port_base: Option<u64>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
@@ -518,6 +517,7 @@ impl Default for Settlement {
 impl Lanes {
     pub fn build_settings(&self) -> provenant_config::LaneBuildSettings {
         provenant_config::LaneBuildSettings {
+            admission_policy: self.admission_policy.clone(),
             start_spacing_ms: self.start_spacing_ms,
             memory_pressure_threshold: Some(self.memory_pressure_threshold),
             max_concurrent_builds: self.max_concurrent_builds,
@@ -531,7 +531,6 @@ impl Lanes {
             max_project_lanes: self.max_project_lanes,
             max_writer_lanes: self.max_writer_lanes,
             max_project_writer_lanes: self.max_project_writer_lanes,
-            build_wait_minutes: self.build_wait_minutes,
             lane_port_base: self.lane_port_base,
             lane_port_block: self.lane_port_block,
             lane_port_blocks: self.lane_port_blocks,
@@ -885,6 +884,10 @@ fn defaults(_profile: Profile) -> &'static str {
 /// boundary: recovery could raise a cap, lift a budget or swap a binary. Labels,
 /// peers' addresses and lane tuning recover to defaults.
 pub const FIELD_METADATA: &[FieldMetadata] = &[
+    FieldMetadata::enumeration(
+        "lanes.admission_policy.{rule}",
+        &["warn", "off", "refuse", "queue"],
+    ),
     FieldMetadata::int("graph.launch_wait_seconds", 1, 14_400),
     FieldMetadata::int("graph.writer_provision_seconds", 1, 14_400),
     FieldMetadata::enumeration(
@@ -898,7 +901,6 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::int("lanes.max_project_lanes", 1, 32),
     FieldMetadata::int("lanes.max_writer_lanes", 1, 64),
     FieldMetadata::int("lanes.max_project_writer_lanes", 1, 32),
-    FieldMetadata::int("lanes.build_wait_minutes", 1, 1440),
     FieldMetadata::int("lanes.lane_port_base", 1024, 65535),
     FieldMetadata::int("lanes.lane_port_block", 1, 1024),
     FieldMetadata::int("lanes.lane_port_blocks", 0, 1024),
@@ -1069,7 +1071,6 @@ mod tests {
         config.lanes.max_project_lanes = Some(0);
         config.lanes.max_writer_lanes = Some(65);
         config.lanes.max_project_writer_lanes = Some(0);
-        config.lanes.build_wait_minutes = Some(0);
         let errors = config.validate();
         assert!(
             errors
@@ -1082,7 +1083,6 @@ mod tests {
             "max_project_lanes",
             "max_writer_lanes",
             "max_project_writer_lanes",
-            "build_wait_minutes",
         ] {
             assert!(errors.iter().any(|e| e.field == format!("lanes.{key}")));
         }

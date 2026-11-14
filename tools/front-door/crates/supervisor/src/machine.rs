@@ -148,12 +148,6 @@ pub struct State {
     last_progress_ms: Option<u64>,
 }
 impl State {
-    /// Push the wall deadline out by time the lane spent queued for a build
-    /// slot, which is not its own runtime.
-    pub fn extend_wall_deadline(&mut self, ms: u64) {
-        self.budgets.wall_deadline_ms = self.budgets.wall_deadline_ms.saturating_add(ms);
-    }
-
     pub fn prepared(budgets: Budgets) -> Self {
         Self {
             phase: Phase::Prepared,

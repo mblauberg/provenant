@@ -1,11 +1,11 @@
 use super::*;
 
 #[test]
-fn blocked_parent_reclaim_preserves_work_and_reports_admission_wait() -> TestResult {
+fn parent_reclaim_preserves_work_despite_advisory_caps() -> TestResult {
     child_wait_lease_cycle(true)
 }
 #[test]
-fn child_stores_share_the_host_ledger_and_recovery_frees_a_lease() -> TestResult {
+fn child_stores_admit_beyond_advisory_caps_and_preserve_live_work() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -63,8 +63,8 @@ fn child_stores_share_the_host_ledger_and_recovery_frees_a_lease() -> TestResult
         &call,
     )?;
     assert!(
-        stores[1].claim(waiting, &now, &call)?.is_none(),
-        "both child stores count against one project limit"
+        stores[1].claim(waiting, &now, &call)?.is_some(),
+        "the advisory project cap must not block a child store"
     );
     // The first attempt's owner dies; recovery commits its terminal from the
     // sealed exit, as reconcile does, and that frees its host lease.
@@ -82,9 +82,7 @@ fn child_stores_share_the_host_ledger_and_recovery_frees_a_lease() -> TestResult
         ..Fake::default()
     };
     stores[0].finish(dead, &dir, &observed, &fake, &call)?;
-    let admitted = stores[1]
-        .claim(waiting, &now, &call)?
-        .ok_or("recovered lease not freed")?;
+    let admitted = stores[1].record(waiting, &call)?;
     assert_eq!(
         admitted.state,
         AttemptState::Running {

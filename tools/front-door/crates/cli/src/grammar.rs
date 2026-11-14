@@ -1077,7 +1077,7 @@ pub enum Internal {
     },
     /// Detached cargo-seed refresh queued by the daily collector.
     TickSeed,
-    /// Take a host build slot, then run the given cargo command (the lane's cargo shim). The slot directory, count and wait come from the host's environment (`PROVENANT_BUILD_SLOT_STATE`, `PROVENANT_BUILD_SLOTS`, `PROVENANT_BUILD_WAIT_SECS`), never from arguments.
+    /// Take a host build slot, then run the given cargo command (the lane's cargo shim). The slot directory, count come from the host's environment (`PROVENANT_BUILD_SLOT_STATE`, `PROVENANT_BUILD_SLOTS`), never from arguments.
     BuildSlot {
         /// The real cargo, then its arguments.
         #[arg(last = true, required = true, allow_hyphen_values = true)]

@@ -13,20 +13,17 @@
 //! reason an unexpected error opening or locking a slot lets the build run
 //! without one, with a single warning.
 //!
-//! The slot directory, count and wait come from the environment the host
+//! The slot directory and count come from the environment the host
 //! wrote into the shim script, never from arguments a lane chooses. Slot files
 //! live under the host state directory shared by every project, so
-//! `max_concurrent_builds` bounds builds across the host, not per project.
-use provenant_core::CancelToken;
-use provenant_os::build_slots::{
-    BuildSlots, SlotError, SlotWait, Wait, WaitKind, wait_for_cargo_lock,
-};
+//! `max_concurrent_builds` observes occupancy across the host. Busy slots warn
+//! and proceed immediately; Cargo owns its own build-lock queue.
+use provenant_os::build_slots::BuildSlots;
 use provenant_supervisor::census::{ProcessObservation, ProcessObserver, SystemProcessObserver};
 use std::{
     ffi::{OsStr, OsString},
     io::Write,
     path::{Path, PathBuf},
-    time::{Duration, Instant},
 };
 
 /// Set in the environment of a gated build to `pid:start`, the holder shim's
@@ -40,12 +37,6 @@ pub(crate) const HELD: &str = "PROVENANT_BUILD_SLOT";
 pub(crate) const STATE_ENV: &str = "PROVENANT_BUILD_SLOT_STATE";
 /// How many builds the host runs at once.
 pub(crate) const SLOTS_ENV: &str = "PROVENANT_BUILD_SLOTS";
-/// Seconds a build waits for a slot or a Cargo lock before giving up.
-pub(crate) const WAIT_ENV: &str = "PROVENANT_BUILD_WAIT_SECS";
-/// Prefix of the file where a waiting build says so, in the lane's scratch
-/// directory; the build adds `.pid`.
-pub(crate) const MARKER_ENV: &str = "PROVENANT_BUILD_WAIT_MARKER";
-
 /// Which cargo subcommands the host lets this lane run, written into the shim
 /// script from the `lanes.local_cargo` knob and never from a lane's arguments.
 pub(crate) const LOCAL_ENV: &str = "PROVENANT_LOCAL_CARGO";
@@ -122,10 +113,6 @@ fn subcommand(args: &[OsString]) -> Option<&str> {
 pub(crate) struct Settings {
     pub state: PathBuf,
     pub slots: u64,
-    pub wait: Duration,
-    /// Where to publish a wait for the host's `lanes` and `status`; none means
-    /// the wait shows on stderr only.
-    pub marker: Option<PathBuf>,
 }
 impl Settings {
     /// None when the host did not configure slots; the build then runs
@@ -141,10 +128,6 @@ impl Settings {
         Some(Self {
             state: state.is_absolute().then_some(state)?,
             slots: number(SLOTS_ENV).filter(|n| (1..=64).contains(n))?,
-            wait: Duration::from_secs(number(WAIT_ENV).filter(|n| *n >= 1)?),
-            marker: get(MARKER_ENV)
-                .map(PathBuf::from)
-                .filter(|path| path.is_absolute()),
         })
     }
 }
@@ -291,8 +274,7 @@ fn nested_with(env: &[(OsString, OsString)], observer: &dyn ProcessObserver) -> 
 }
 
 /// Take a slot when `gate.command` compiles, run it and return its exit
-/// code. A slot that cannot be had in time is an error; one that cannot be
-/// opened or locked is a warning and the build runs without it.
+/// code. Busy or unavailable slots warn and the build proceeds immediately.
 pub(crate) fn run(gate: Gate<'_>) -> i32 {
     let Some((program, args)) = gate.command.split_first() else {
         return report("no command to run");
@@ -306,33 +288,25 @@ pub(crate) fn run(gate: Gate<'_>) -> i32 {
         return report(&message);
     }
     let gate_this = gated(args) && !nested;
+    if gate_this && let Err(message) = check_disk(&env) {
+        return report(&message);
+    }
     if gate_this && gate.settings.is_none() {
         warn(&"the host's build slot settings are missing or invalid");
     }
     if gate_this && let Some(settings) = &gate.settings {
-        // One deadline covers the Cargo-lock wait and the slot wait.
-        #[allow(clippy::disallowed_methods)]
-        let began = Instant::now();
-        let locked = wait_for_lock(&env, settings);
-        unmark(settings);
-        if let Err(message) = locked {
-            return report(&message);
-        }
         match BuildSlots::open(&settings.state) {
-            Ok(slots) => match acquire(&slots, settings, began) {
-                Ok(slot) => held = Some(slot),
-                Err(SlotError::Timeout { held, .. }) => {
-                    return report(&format!(
-                        "gave up waiting for a build slot after {} min: all {} are held ({held} in use). Run `provenant status` to find the lanes holding them, or raise domains.fabric.lanes.max_concurrent_builds or build_wait_minutes",
-                        began.elapsed().as_secs().div_ceil(60),
-                        settings.slots
-                    ));
+            Ok(slots) => match slots.try_acquire(settings.slots) {
+                Ok(Some(slot)) => held = Some(slot),
+                Ok(None) => {
+                    warn(&"all configured slots are busy; Cargo manages its own build locks")
                 }
                 Err(error) => warn(&error),
             },
             Err(error) => warn(&error),
         }
     }
+
     if held.is_some()
         && let Some((me, _)) = own(&SystemProcessObserver)
     {
@@ -348,112 +322,52 @@ pub(crate) fn run(gate: Gate<'_>) -> i32 {
     code
 }
 
-/// Wait for a slot, telling the host while it does.
-fn acquire(
-    slots: &BuildSlots,
-    settings: &Settings,
-    began: Instant,
-) -> Result<provenant_os::build_slots::SlotGuard, SlotError> {
-    let acquired = slots.acquire(
-        settings.slots,
-        Wait::new(remaining_wait(settings.wait, began.elapsed())),
-        &CancelToken::new(),
-        &mut |busy, waited| {
-            mark_slot(settings, busy, waited);
-            waiting(busy, settings.slots, waited);
-        },
-    );
-    unmark(settings);
-    acquired
-}
-
-fn remaining_wait(budget: Duration, elapsed: Duration) -> Duration {
-    budget.saturating_sub(elapsed)
-}
-
-/// Cargo queues a second build behind the first one's `.cargo-lock`. Waiting
-/// for that lock before taking a slot keeps the slot free for a build that
-/// can use it. The wait is bounded and reported like the slot wait.
-fn wait_for_lock(env: &[(OsString, OsString)], settings: &Settings) -> Result<(), String> {
-    let Some(target) = env
-        .iter()
-        .find(|(name, _)| name == OsStr::new("CARGO_TARGET_DIR"))
-        .map(|(_, value)| Path::new(value))
-    else {
+/// New builds sample their output volume once. Existing builds are never signalled.
+fn check_disk(env: &[(OsString, OsString)]) -> Result<(), String> {
+    let value = |name: &str| {
+        env.iter()
+            .find(|(key, _)| key == OsStr::new(name))
+            .and_then(|(_, value)| value.to_str())
+    };
+    let (Some(floor), Some(rule)) = (
+        value("PROVENANT_BUILD_DISK_FLOOR"),
+        value("PROVENANT_BUILD_DISK_RULE"),
+    ) else {
         return Ok(());
     };
-    wait_for_cargo_lock(target, Wait::new(settings.wait), &mut |waited| {
-        mark(settings, WaitKind::CargoLock);
-        say(&format!(
-            "waiting for another cargo build to release its lock{}",
-            since(waited)
-        ));
-    })
-    .map_err(|error| {
-        format!(
-            "gave up after {error}. Run `provenant status` to find the lane building in the same target directory, or raise domains.fabric.lanes.build_wait_minutes"
-        )
-    })
-}
-
-/// Tell the host this build waits, now. Best effort: the wait shows on
-/// stderr whatever happens here.
-fn mark(settings: &Settings, kind: WaitKind) {
-    let Some(marker) = &settings.marker else {
-        return;
-    };
-    let _ = std::fs::write(own_marker(marker), kind.marker(now_seconds()));
-}
-
-/// Tell the host this build waits for a slot, with when it began and how many
-/// of the slots are held, so `provenant status` can show its place in the queue.
-fn mark_slot(settings: &Settings, held: u64, waited: Duration) {
-    let Some(marker) = &settings.marker else {
-        return;
-    };
-    let now = now_seconds();
-    let wait = SlotWait {
-        since: now.saturating_sub(waited.as_secs()),
-        held,
-        limit: settings.slots,
-    };
-    let _ = std::fs::write(own_marker(marker), WaitKind::slot_marker(now, wait));
-}
-
-fn now_seconds() -> u64 {
-    u64::try_from(provenant_core::Clock::unix_seconds(
-        &provenant_os::clock::SystemClock::new(),
-    ))
-    .unwrap_or(0)
-}
-
-/// One marker per command, so a sibling that gets a slot cannot remove the
-/// wait of one that still waits.
-fn own_marker(base: &std::path::Path) -> PathBuf {
-    let mut name = base.as_os_str().to_owned();
-    name.push(format!(".{}", std::process::id()));
-    name.into()
-}
-
-fn unmark(settings: &Settings) {
-    if let Some(marker) = &settings.marker {
-        let _ = std::fs::remove_file(own_marker(marker));
+    let observed = (|| {
+        let floor = floor.parse::<u64>().map_err(|error| error.to_string())?;
+        let rule: provenant_records::policy::Rule =
+            serde_json::from_str(rule).map_err(|error| error.to_string())?;
+        let target = value("CARGO_TARGET_DIR").map_or_else(|| Path::new("."), Path::new);
+        let mut root = target;
+        while !root.exists() {
+            root = root.parent().unwrap_or(Path::new("."));
+        }
+        let free = provenant_os::fs::available_bytes_at(root).map_err(|error| error.to_string())?;
+        let effect = provenant_records::policy::Policy { rules: vec![rule] }
+            .check("disk_floor", free < floor);
+        Ok::<_, String>((effect, free, floor))
+    })();
+    use provenant_records::policy::Effect;
+    match observed {
+        Ok((Effect::Refuse(message) | Effect::Queue(message), free, floor)) => {
+            Err(format!("{message}; free={free} bytes, floor={floor} bytes"))
+        }
+        Ok((Effect::Warn(message), free, floor)) => {
+            say(&format!(
+                "{message}; free={free} bytes, floor={floor} bytes; building"
+            ));
+            Ok(())
+        }
+        Ok(_) => Ok(()),
+        Err(error) => {
+            say(&format!(
+                "disk policy observation failed: {error}; building"
+            ));
+            Ok(())
+        }
     }
-}
-
-fn since(waited: Duration) -> String {
-    if waited.is_zero() {
-        String::new()
-    } else {
-        format!(", waited {} s", waited.as_secs())
-    }
-}
-
-fn waiting(busy: u64, slots: u64, waited: Duration) {
-    say(&format!(
-        "waiting for a build slot ({busy} of {slots} in use){}",
-        since(waited)
-    ));
 }
 
 /// The lane's own stderr is the only place a wait shows; a closed stream is
@@ -513,23 +427,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn cargo_lock_time_reduces_slot_budget() {
-        assert_eq!(
-            super::remaining_wait(
-                std::time::Duration::from_secs(5),
-                std::time::Duration::from_secs(2)
-            ),
-            std::time::Duration::from_secs(3)
-        );
-        assert_eq!(
-            super::remaining_wait(
-                std::time::Duration::from_secs(5),
-                std::time::Duration::from_secs(6)
-            ),
-            std::time::Duration::ZERO
-        );
-    }
     use super::*;
     use provenant_supervisor::census::{ProcessFact, ProcessIdentity};
     use std::collections::HashMap;
@@ -609,19 +506,15 @@ mod tests {
                 .map(|(k, v)| (OsString::from(k), OsString::from(v)))
                 .collect::<Vec<_>>()
         };
-        let good = env(&[(STATE_ENV, "/s"), (SLOTS_ENV, "2"), (WAIT_ENV, "90")]);
+        let good = env(&[(STATE_ENV, "/s"), (SLOTS_ENV, "2")]);
         let settings = Settings::from_env(&good).unwrap();
-        assert_eq!(
-            (settings.slots, settings.wait),
-            (2, Duration::from_secs(90))
-        );
+        assert_eq!(settings.slots, 2);
         for bad in [
             env(&[]),
-            env(&[(STATE_ENV, "relative"), (SLOTS_ENV, "2"), (WAIT_ENV, "9")]),
-            env(&[(STATE_ENV, "/s"), (SLOTS_ENV, "0"), (WAIT_ENV, "9")]),
-            env(&[(STATE_ENV, "/s"), (SLOTS_ENV, "65"), (WAIT_ENV, "9")]),
-            env(&[(STATE_ENV, "/s"), (SLOTS_ENV, "2"), (WAIT_ENV, "0")]),
-            env(&[(STATE_ENV, "/s"), (SLOTS_ENV, "x"), (WAIT_ENV, "9")]),
+            env(&[(STATE_ENV, "relative"), (SLOTS_ENV, "2")]),
+            env(&[(STATE_ENV, "/s"), (SLOTS_ENV, "0")]),
+            env(&[(STATE_ENV, "/s"), (SLOTS_ENV, "65")]),
+            env(&[(STATE_ENV, "/s"), (SLOTS_ENV, "x")]),
         ] {
             assert!(Settings::from_env(&bad).is_none());
         }
@@ -731,17 +624,5 @@ mod tests {
             !ancestor_of(500, &holder(300, 30), "provenant", &Tree(dead)),
             "a zombie holder is gone"
         );
-    }
-
-    #[test]
-    fn markers_round_trip_and_reject_anything_malformed() {
-        let marker = holder(300, 30).marker();
-        assert_eq!(marker, "300:30");
-        assert_eq!(Holder::parse(&marker), Some(holder(300, 30)));
-        for bad in [
-            "300", "300:", ":30", "1:30", "0:30", "-5:30", "x:30", "300:y", "",
-        ] {
-            assert_eq!(Holder::parse(bad), None, "{bad:?}");
-        }
     }
 }

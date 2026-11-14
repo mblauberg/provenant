@@ -1,0 +1,39 @@
+[[rules]]
+code = "memory_pressure"
+boundary = "none"
+strength = "warn"
+knob = "domains.fabric.lanes.admission_policy.memory_pressure"
+source = "shipped policy"
+justification = "Kernel memory pressure exceeds the configured threshold."
+
+[[rules]]
+code = "process_budget"
+boundary = "none"
+strength = "warn"
+knob = "domains.fabric.lanes.admission_policy.process_budget"
+source = "shipped policy"
+justification = "The host process budget has no reserved headroom."
+
+[[rules]]
+code = "lane_cap"
+boundary = "none"
+strength = "warn"
+knob = "domains.fabric.lanes.admission_policy.lane_cap"
+source = "shipped policy"
+justification = "The configured host or project lane cap is reached."
+
+[[rules]]
+code = "disk_floor"
+boundary = "none"
+strength = "warn"
+knob = "domains.fabric.lanes.admission_policy.disk_floor"
+source = "shipped policy"
+justification = "Free space is below gc.free_floor; free output before starting more builds."
+
+[[rules]]
+code = "startup_spacing"
+boundary = "none"
+strength = "warn"
+knob = "domains.fabric.lanes.admission_policy.startup_spacing"
+source = "shipped policy"
+justification = "Another lane of this class started within the configured spacing window."

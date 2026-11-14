@@ -18,8 +18,6 @@ pub struct ExecutionContext {
     pub actor_id: ActorId,
     pub read_prompts: bool,
 }
-/// How long a launch waits for its guardian to acknowledge custody.
-const GUARDIAN_HANDSHAKE_MICROS: u64 = 30_000_000;
 pub struct Request<'a> {
     pub clock: &'a dyn Clock,
     pub cancel: &'a CancelToken,
@@ -30,13 +28,10 @@ impl Request<'_> {
     pub fn lock_budget(&self) -> WaitBudget {
         provenant_sqlite::lock_budget(self.clock.mono_now())
     }
-    /// The wait for a guardian's launch handshake that starts now. It is not
-    /// store contention, so the store busy timeout never shortens it.
+    /// Custody ACK uses one bounded store-integrity allowance, without a
+    /// separate launch retry window. Missing proof still refuses the transfer.
     pub fn handshake_budget(&self) -> WaitBudget {
-        WaitBudget::up_to(
-            self.clock.mono_now(),
-            provenant_core::DurationMicros::from_micros(GUARDIAN_HANDSHAKE_MICROS),
-        )
+        self.lock_budget()
     }
     pub(crate) fn check(&self) -> Result<()> {
         if self.cancel.is_cancelled() {

@@ -438,17 +438,28 @@ pub(super) fn configure_build_slots(
         let slots = settings.build_limit(total);
         match provenant_os::build_slots::BuildSlots::provision(state, slots) {
             Ok(()) => {
+                let disk = provenant_config::GcSettings::read(state)
+                    .and_then(|gc| gc.free_floor_bytes(state))
+                    .ok()
+                    .zip(
+                        provenant_run::resource_policy(settings)
+                            .ok()
+                            .and_then(|policy| {
+                                policy
+                                    .rules
+                                    .into_iter()
+                                    .find(|rule| rule.code == "disk_floor")
+                            })
+                            .and_then(|rule| serde_json::to_string(&rule).ok()),
+                    );
                 if let Err(error) = spec.configure_build_slots(
                     scratch,
                     &provenant_providers::BuildSlotGate {
                         provenant: runtime,
                         state,
                         slots,
-                        wait_seconds: settings.build_wait().as_secs(),
+                        disk_policy: disk.as_ref().map(|(floor, rule)| (*floor, rule.as_str())),
                         cargo: &cargo,
-                        // Inside the lane's writable scratch (its $TMPDIR), where
-                        // the host finds it; each waiting build adds its pid.
-                        wait_marker: &scratch.join(provenant_os::build_slots::WAIT_MARKER),
                         local_cargo: local_cargo(knobs),
                     },
                 ) {

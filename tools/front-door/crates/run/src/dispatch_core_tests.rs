@@ -537,163 +537,7 @@ fn host_launch_uses_the_recorded_requester() -> TestResult {
     assert_eq!(seen.get(), Some(requester));
     Ok(())
 }
-#[test]
-fn memory_pressure_threshold_controls_admission_and_waits() -> TestResult {
-    use provenant_os::sys::resources::MemoryPressure;
-    struct Pressured(MemoryPressure);
-    impl Resources for Pressured {
-        fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
-            crate::tests::HostFacts::new(100).guardian_identity()
-        }
-        fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
-            crate::tests::HostFacts::new(100).observe_process(pid)
-        }
-        fn memory(&self) -> std::io::Result<MemorySample> {
-            HostFacts::new(100).memory()
-        }
-        fn pressure(
-            &self,
-        ) -> std::io::Result<Option<provenant_os::sys::resources::MemoryPressure>> {
-            Ok(Some(self.0))
-        }
-        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
-            Ok(u64::MAX)
-        }
-    }
-    for (threshold, level, writer, defers) in [
-        (None, MemoryPressure::Warning, true, false),
-        (None, MemoryPressure::Critical, false, true),
-        (None, MemoryPressure::Normal, true, false),
-        (Some("warning"), MemoryPressure::Warning, false, true),
-        (Some("warning"), MemoryPressure::Critical, true, true),
-        (Some("warning"), MemoryPressure::Normal, false, false),
-        (Some("never"), MemoryPressure::Critical, true, false),
-    ] {
-        let temp = tempfile::tempdir()?;
-        let (clock, cancel) = (clock(), CancelToken::new());
-        let call = call(&clock, &cancel);
-        let mut store = RunStore::open(&context(temp.path())?, &call)?;
-        if let Some(threshold) = threshold {
-            std::fs::create_dir_all(&store.writer_registry)?;
-            std::fs::write(
-                store.writer_registry.join("config.toml"),
-                format!(
-                    "schema_version = 1\n[domains.fabric.lanes]\nmemory_pressure_threshold = '{threshold}'\n"
-                ),
-            )?;
-        }
-        store.set_admission_policy(AdmissionPolicy {
-            admission_seconds: 1,
-            ..AdmissionPolicy::default()
-        });
-        let run = lane(54, writer);
-        let id = starting(&store, &run, &call)?;
-        let attempt = store.attempt_dir(id, false)?;
-        let waits =
-            store.lane_waits_with_resources(&[store.record(id, &call)?], &call, &Pressured(level));
-        assert_eq!(
-            waits[0]
-                .waiting_for
-                .contains(&format!("memory pressure {level:?}")),
-            defers
-        );
-        let result = store.admit(id, &attempt, &Pressured(level), &clock, &cancel);
-        if !defers {
-            assert_eq!(
-                result?.state,
-                AttemptState::Running {
-                    extra: Default::default()
-                }
-            );
-        } else {
-            let Err(RunError::Admission(AdmissionError::MemoryPressure {
-                level: actual,
-                threshold: selected,
-                origin,
-            })) = result
-            else {
-                return Err("memory pressure was not refused".into());
-            };
-            assert_eq!(format!("{actual:?}"), format!("{level:?}"));
-            assert_eq!(
-                origin,
-                if threshold.is_some() {
-                    provenant_records::diagnostic::SettingSource::Configuration
-                } else {
-                    provenant_records::diagnostic::SettingSource::ShippedDefault
-                }
-            );
-            assert_eq!(
-                selected,
-                if threshold == Some("warning") {
-                    provenant_records::diagnostic::PressureThreshold::Warning
-                } else {
-                    provenant_records::diagnostic::PressureThreshold::Critical
-                }
-            );
-        }
-    }
-    Ok(())
-}
-#[test]
-fn admission_refuses_near_the_user_process_limit() -> TestResult {
-    use provenant_os::sys::resources::ProcessBudget;
-    struct Processes(ProcessBudget);
-    impl Resources for Processes {
-        fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
-            crate::tests::HostFacts::new(100).guardian_identity()
-        }
-        fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
-            crate::tests::HostFacts::new(100).observe_process(pid)
-        }
-        fn memory(&self) -> std::io::Result<MemorySample> {
-            HostFacts::new(100).memory()
-        }
-        fn process_budget(&self) -> std::io::Result<ProcessBudget> {
-            Ok(self.0)
-        }
-        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
-            Ok(u64::MAX)
-        }
-    }
-    for (used, limit, full) in [(2601, 2666, true), (2666, 2666, true), (100, 2666, false)] {
-        let temp = tempfile::tempdir()?;
-        let (clock, cancel) = (clock(), CancelToken::new());
-        let call = call(&clock, &cancel);
-        let mut store = RunStore::open(&context(temp.path())?, &call)?;
-        store.set_admission_policy(AdmissionPolicy {
-            admission_seconds: 1,
-            ..AdmissionPolicy::default()
-        });
-        let run = lane(55, true);
-        let id = starting(&store, &run, &call)?;
-        let attempt = store.attempt_dir(id, false)?;
-        let resources = Processes(ProcessBudget { used, limit });
-        let waits = store.lane_waits_with_resources(&[store.record(id, &call)?], &call, &resources);
-        assert_eq!(
-            waits[0]
-                .waiting_for
-                .contains(&format!("user process count {used} of {limit}")),
-            full
-        );
-        let result = store.admit(id, &attempt, &resources, &clock, &cancel);
-        if full {
-            assert!(matches!(
-                result,
-                Err(RunError::Admission(AdmissionError::Processes { used: u, limit: l }))
-                    if u == used && l == limit
-            ));
-        } else {
-            assert_eq!(
-                result?.state,
-                AttemptState::Running {
-                    extra: Default::default()
-                }
-            );
-        }
-    }
-    Ok(())
-}
+
 #[test]
 fn pressure_errors_and_low_advisory_memory_do_not_refuse() -> TestResult {
     use provenant_os::sys::resources::MemoryPressure;
@@ -805,7 +649,7 @@ fn out_of_range_build_settings_do_not_block_admission() -> TestResult {
     Ok(())
 }
 #[test]
-fn guardian_identity_unknown_retries_and_names_expiry() -> TestResult {
+fn guardian_identity_unknown_refuses_without_waiting() -> TestResult {
     struct Observation {
         remaining: Cell<u32>,
     }
@@ -829,7 +673,7 @@ fn guardian_identity_unknown_retries_and_names_expiry() -> TestResult {
             }
         }
     }
-    for (failures, admitted) in [(2, true), (100, false)] {
+    for (failures, admitted) in [(0, true), (1, false)] {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
@@ -900,84 +744,7 @@ fn idle_writers_are_admitted_beyond_the_build_limit() -> TestResult {
     }
     Ok(())
 }
-#[test]
-fn the_writer_cap_refuses_at_its_limit_and_names_it() -> TestResult {
-    for (config, scope) in [
-        ("max_writer_lanes = 3\nmax_project_writer_lanes = 3", "host"),
-        (
-            "max_writer_lanes = 8\nmax_project_writer_lanes = 3",
-            "project",
-        ),
-    ] {
-        let temp = tempfile::tempdir()?;
-        let (clock, cancel) = (clock(), CancelToken::new());
-        let call = call(&clock, &cancel);
-        let mut store = RunStore::open(&context(temp.path())?, &call)?;
-        store.set_admission_policy(AdmissionPolicy {
-            startup_spacing_ms: 0,
-            admission_seconds: 1,
-            ..AdmissionPolicy::default()
-        });
-        std::fs::write(
-            store.writer_registry.join("config.toml"),
-            format!("schema_version=1\n[domains.fabric.lanes]\n{config}\n"),
-        )?;
-        let facts = super::tests::HostFacts::new(100);
-        let mut last = None;
-        for seed in 80..84 {
-            let run = lane(seed, true);
-            let id = starting(&store, &run, &call)?;
-            let dir = store.attempt_dir(id, false)?;
-            last = Some(store.admit(id, &dir, &facts, &clock, &cancel));
-            if seed < 83 {
-                assert_eq!(
-                    last.take().ok_or("admitted")??.state,
-                    AttemptState::Running {
-                        extra: Default::default()
-                    },
-                    "writer {seed} is inside the cap"
-                );
-            }
-        }
-        match last.ok_or("a fourth writer")? {
-            Err(
-                error @ RunError::Admission(AdmissionError::LaneCap {
-                    limit: 3,
-                    kind: refused,
-                    origin,
-                    ..
-                }),
-            ) => {
-                assert_eq!(error.code(), "LANE_CAP");
-                assert_eq!(
-                    refused,
-                    if scope == "host" {
-                        provenant_records::diagnostic::LaneLimit::HostWriters
-                    } else {
-                        provenant_records::diagnostic::LaneLimit::ProjectWriters
-                    }
-                );
-                assert_eq!(
-                    origin,
-                    provenant_records::diagnostic::SettingSource::Configuration
-                );
-                // The message names the configuration key to raise.
-                let key = if scope == "project" {
-                    "max_project_writer_lanes"
-                } else {
-                    "max_writer_lanes"
-                };
-                assert!(error.to_string().contains(key), "{error}");
-            }
-            other => return Err(format!("the fourth writer is refused: {other:?}").into()),
-        }
-        assert!(
-            facts.observations() > 0,
-            "cap checks use the injected process table"
-        );
-    }
-    Ok(())
-}
+
 #[test]
 fn policy_refusal_skips_provider_preparation() -> TestResult {
     let temp = tempfile::tempdir()?;

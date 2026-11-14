@@ -596,7 +596,6 @@ pub(crate) struct ProviderGroup {
     observed: Option<Termination>,
     provider_identity: Option<ProcessIdentity>,
     owned_descendants: BTreeSet<ProcessIdentity>,
-    paused_builds: crate::build_pause::PausedBuilds,
     spared_descendants: BTreeSet<ProcessIdentity>,
     last_adopted_signal: BTreeMap<ProcessIdentity, i32>,
     ownership_uncertain: bool,
@@ -815,7 +814,6 @@ impl ProviderGroup {
             observed: None,
             provider_identity: Some(identity),
             owned_descendants: BTreeSet::new(),
-            paused_builds: crate::build_pause::PausedBuilds::default(),
             spared_descendants: BTreeSet::new(),
             last_adopted_signal: BTreeMap::new(),
             ownership_uncertain: false,
@@ -1008,28 +1006,6 @@ impl ProviderGroup {
         }
     }
 
-    /// Only builds with a current ancestry proof below this provider qualify.
-    /// The policy excludes nested owners and their entire descendant trees.
-    pub(crate) fn pause_builds(
-        &mut self,
-        census: &Census,
-        provider: &ProcessIdentity,
-        spared: &BTreeSet<ProcessIdentity>,
-        attempt: &provenant_os::fs::Directory,
-        scope: crate::custody::Scope,
-        guardian: &ProcessIdentity,
-    ) {
-        if self.paused_builds.bind(attempt, scope, guardian).is_err() {
-            return;
-        }
-        self.paused_builds
-            .pause(census, provider, spared, signal_build);
-    }
-
-    pub(crate) fn resume_builds(&mut self) {
-        self.paused_builds.resume(signal_build);
-    }
-
     /// Reap only exact native identities previously proven below the provider
     /// and now adopted by this guardian. Sparing includes descendants proven
     /// through `Census::ancestry`; unknown and escaped rows remain fenced.
@@ -1220,7 +1196,6 @@ impl ProviderGroup {
 }
 impl Drop for ProviderGroup {
     fn drop(&mut self) {
-        self.resume_builds();
         if let (Some(child), Some(permit)) = (self.child.take(), self.permit.take()) {
             // Permit was reserved before spawn. Transfer preserves bounded
             // direct-child reaping and deliberately performs no signal.

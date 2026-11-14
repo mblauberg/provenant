@@ -8,14 +8,6 @@ use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
-/// Resume orphaned build identities through the production recovery path.
-pub fn resume_orphaned_builds(
-    attempt: &provenant_os::fs::Directory,
-    scope: crate::custody::Scope,
-) -> crate::custody::Result<()> {
-    crate::custody::resume_orphaned_builds_with(attempt, scope, &RecordedBootObserver)
-}
-
 /// Inject native boot observation for reboot recovery tests only.
 pub fn after_reboot_with(
     recovery: crate::custody::Recovery,

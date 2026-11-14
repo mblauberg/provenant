@@ -83,27 +83,19 @@ pub(crate) fn prepare_lease(
     })
 }
 
-/// Take this attempt's lease when host and project counts and startup spacing
-/// allow, returning the wall time it started at, for display only. Idle
-/// writers are admitted whatever `max_concurrent_builds` says: that limit gates
-/// builds (`provenant_os::build_slots`), not live lanes. Spacing is
-/// judged on the host's monotonic clock, never the wall clock, and only
-/// against the last start of the same class: within one boot no two lanes of a
-/// class start less than one spacing apart. The clock is read inside the
-/// transaction that checks and records spacing, so lock order is clock order
-/// across every process on the host. A clock or boot identity that cannot be
-/// read refuses the claim. A retried claim finds its own lease already held.
+/// Record one custody-backed lease. Capacity and spacing are sampled by the
+/// admission policy; neither creates a transaction retry or a hard resource hold.
+/// Boot, guardian and store identities remain mandatory integrity evidence.
 pub(crate) fn lease(
     db: &Connection,
     store: &Path,
     ticket: &AdmissionTicket,
-    caps: LaneCaps,
+    _caps: LaneCaps,
     time: &dyn Clock,
     request: &Request<'_>,
     owner: &LeaseOwner,
 ) -> Result<Option<WallTime>> {
     let (project, class) = (ticket.project_id, ticket.lane_class);
-    let spacing = spacing_micros(ticket.startup_spacing_ms)?;
     let id = ticket.attempt_id.to_string();
     immediate(db, request, |tx| {
         let now = time
@@ -117,14 +109,7 @@ pub(crate) fn lease(
         if held {
             return Ok(Some(now));
         }
-        if cap_hit(tx, project, class, caps)?.is_some() {
-            return Ok(None);
-        }
         let host = HostInstant::read(time)?;
-        let last = recorded_start(tx, class)?;
-        if spacing_wait(last.as_ref(), &host, spacing) > 0 {
-            return Ok(None);
-        }
         tx.execute(
             "INSERT INTO spacing(class,boot,last_start) VALUES (?1,?2,?3) ON CONFLICT(class) DO UPDATE SET boot=excluded.boot, last_start=excluded.last_start",
             params![class.as_str(), &host.boot, sql_int(host.micros)?],

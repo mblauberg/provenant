@@ -20,6 +20,7 @@ mod install;
 mod json;
 mod jsonc;
 mod path_wire;
+pub mod policy;
 mod source;
 pub mod telemetry_context;
 mod trace;

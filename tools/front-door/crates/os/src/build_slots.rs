@@ -1,5 +1,5 @@
 //! Host-wide build slots: cooperative fair sharing of CPU and memory among
-//! the lanes that share one state directory. This is a build throttle, not a
+//! the lanes that share one state directory. This is an advisory occupancy signal, not a
 //! security boundary and not a hard cap.
 //!
 //! Each slot is a file the host (Provenant, outside any sandbox) pre-creates
@@ -14,205 +14,19 @@
 //! accepted: the aim is fair sharing among our own lanes.
 use crate::fs::{Directory, FsError, LockGuard, LockMode, Result};
 use crate::sys::fs as os;
-use provenant_core::CancelToken;
 use std::ffi::OsString;
-use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 /// Slot directory below the host state root. It sits beside `fabric/`, not
 /// inside `fabric/locks`: a lane writes its landing locks under
 /// `fabric/locks`, and a slot file a lane can unlink is no throttle at all.
 pub const DIRECTORY: [&str; 1] = ["build-slots"];
-const POLL: Duration = Duration::from_millis(100);
-/// Default time a build waits for a slot before giving up.
-pub const DEFAULT_WAIT: Duration = Duration::from_secs(30 * 60);
-/// How often a waiting build repeats its progress message.
-pub const PROGRESS_EVERY: Duration = Duration::from_secs(60);
-
-/// Prefix of the file (`build-slot-wait.PID`, one per command) a gated build
-/// writes in the lane's writable scratch directory while it waits, so the host can show the wait. It holds a kind and the host's
-/// wall-clock seconds and is refreshed about every `PROGRESS_EVERY`, so a
-/// build that died while waiting stops showing once the file goes stale.
-pub const WAIT_MARKER: &str = "build-slot-wait";
-/// How long after its last refresh a wait marker still counts.
-pub const WAIT_MARKER_FRESH: Duration = Duration::from_secs(150);
-
-/// Whether any command of the lane at `attempt` is waiting for a build slot
-/// now. The lane writes the marker, so it is read bounded and trusted only for
-/// being a fresh slot wait. A lane that keeps one fresh only extends its own
-/// wall clock, and the guardian bounds the total extension
-/// (`lanes.slot_wait_seconds`), so a stuck lane cannot run forever.
-pub fn slot_wait_active(attempt: &Directory, now_secs: u64) -> bool {
-    let Ok(temporary) = attempt.open_directory("tmp".as_ref()) else {
-        return false;
-    };
-    let Ok(entries) = temporary.entries() else {
-        return false;
-    };
-    entries
-        .map_while(|entry| entry.ok())
-        .take(32)
-        .filter_map(|name| temporary.open_directory(&name).ok())
-        .any(|scratch| {
-            scratch.entries().is_ok_and(|names| {
-                names
-                    .map_while(|entry| entry.ok())
-                    .filter(|name| name.to_string_lossy().starts_with(WAIT_MARKER))
-                    .take(32)
-                    .any(|name| {
-                        scratch
-                            .read_stable(&name, 64)
-                            .ok()
-                            .and_then(|raw| String::from_utf8(raw).ok())
-                            .is_some_and(|text| {
-                                WaitKind::from_marker(&text, now_secs) == Some(WaitKind::Slot)
-                            })
-                    })
-            })
-        })
-}
-
-/// What a gated build is waiting for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WaitKind {
-    Slot,
-    CargoLock,
-}
-/// A slot wait as its marker reports it: when it began, how many of the
-/// `limit` slots were held when it last refreshed. The lane writes this, so
-/// the reader bounds it and shows it as information only.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SlotWait {
-    pub since: u64,
-    pub held: u64,
-    pub limit: u64,
-}
-
-impl WaitKind {
-    /// The marker body for a wait observed at `now_secs`.
-    pub fn marker(self, now_secs: u64) -> String {
-        let name = match self {
-            Self::Slot => "slot",
-            Self::CargoLock => "lock",
-        };
-        format!("{name} {now_secs}")
-    }
-    /// The marker body for a slot wait that began at `wait.since`.
-    pub fn slot_marker(now_secs: u64, wait: SlotWait) -> String {
-        format!(
-            "slot {now_secs} {} {} {}",
-            wait.since, wait.held, wait.limit
-        )
-    }
-    /// The wait a marker body names, if it is well formed and fresh at
-    /// `now_secs`. A lane writes this text, so anything else is ignored.
-    pub fn from_marker(text: &str, now_secs: u64) -> Option<Self> {
-        let mut fields = text.split_whitespace();
-        let (name, at) = (fields.next()?, fields.next()?);
-        let at: u64 = at.parse().ok()?;
-        // Nothing more, or exactly the three numbers of a slot wait.
-        let rest: Vec<_> = fields.collect();
-        if !(rest.is_empty() || rest.len() == 3 && rest.iter().all(|f| f.parse::<u64>().is_ok())) {
-            return None;
-        }
-        if now_secs.saturating_sub(at) > WAIT_MARKER_FRESH.as_secs() {
-            return None;
-        }
-        match name {
-            "slot" => Some(Self::Slot),
-            "lock" => Some(Self::CargoLock),
-            _ => None,
-        }
-    }
-    /// The start time and slot counts of a fresh slot-wait marker, if it
-    /// carries them and they are plausible (1 to 64 slots, no more held than
-    /// exist, a start no later than now).
-    pub fn slot_wait(text: &str, now_secs: u64) -> Option<SlotWait> {
-        if Self::from_marker(text, now_secs)? != Self::Slot {
-            return None;
-        }
-        let fields: Vec<u64> = text
-            .split_whitespace()
-            .skip(2)
-            .map(str::parse)
-            .collect::<std::result::Result<_, _>>()
-            .ok()?;
-        let [since, held, limit] = fields[..] else {
-            return None;
-        };
-        ((1..=64).contains(&limit) && held <= limit && since <= now_secs).then_some(SlotWait {
-            since,
-            held,
-            limit,
-        })
-    }
-}
-
 fn directory(state: &Path) -> PathBuf {
     DIRECTORY.iter().fold(state.to_owned(), |p, n| p.join(n))
 }
 
 fn slot_name(index: u64) -> OsString {
     format!("slot-{index}.lock").into()
-}
-
-/// How long `acquire` waits and how often it reports.
-#[derive(Clone, Copy, Debug)]
-pub struct Wait {
-    pub timeout: Duration,
-    pub progress_every: Duration,
-}
-impl Wait {
-    pub fn new(timeout: Duration) -> Self {
-        Self {
-            timeout,
-            progress_every: PROGRESS_EVERY,
-        }
-    }
-}
-
-/// Why `acquire` did not produce a slot.
-#[derive(Debug)]
-pub enum SlotError {
-    /// Every slot stayed held for the whole wait.
-    Timeout {
-        limit: u64,
-        held: u64,
-        waited: Duration,
-    },
-    Cancelled,
-    Fs(FsError),
-}
-impl std::fmt::Display for SlotError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Timeout {
-                limit: 0, waited, ..
-            } => write!(
-                f,
-                "a Cargo build lock stayed held for {} s",
-                waited.as_secs()
-            ),
-            Self::Timeout {
-                limit,
-                held,
-                waited,
-            } => write!(
-                f,
-                "all {limit} build slots stayed busy ({held} held) for {} s",
-                waited.as_secs()
-            ),
-            Self::Cancelled => f.write_str("the wait for a build slot was cancelled"),
-            Self::Fs(error) => write!(f, "{error}"),
-        }
-    }
-}
-impl std::error::Error for SlotError {}
-impl From<FsError> for SlotError {
-    fn from(error: FsError) -> Self {
-        Self::Fs(error)
-    }
 }
 
 /// An open slot directory, read-only for the lane.
@@ -316,46 +130,6 @@ impl BuildSlots {
         }
     }
 
-    /// Wait for a slot below `limit` for at most `wait.timeout`. `progress`
-    /// runs with the number of slots held and the time waited when the first
-    /// try fails, then every `wait.progress_every`.
-    #[allow(clippy::disallowed_methods)]
-    pub fn acquire(
-        &self,
-        limit: u64,
-        wait: Wait,
-        cancel: &CancelToken,
-        progress: &mut dyn FnMut(u64, Duration),
-    ) -> std::result::Result<SlotGuard, SlotError> {
-        if let Some(guard) = self.try_acquire(limit)? {
-            return Ok(guard);
-        }
-        let start = std::time::Instant::now();
-        let mut reported = Duration::ZERO;
-        progress(self.held(limit), Duration::ZERO);
-        loop {
-            if cancel.is_cancelled() {
-                return Err(SlotError::Cancelled);
-            }
-            os::wait(POLL);
-            if let Some(guard) = self.try_acquire(limit)? {
-                return Ok(guard);
-            }
-            let waited = start.elapsed();
-            if waited >= wait.timeout {
-                return Err(SlotError::Timeout {
-                    limit,
-                    held: self.held(limit),
-                    waited,
-                });
-            }
-            if waited - reported >= wait.progress_every {
-                reported = waited;
-                progress(self.held(limit), waited);
-            }
-        }
-    }
-
     /// How many of the first `limit` slots are held now.
     pub fn held(&self, limit: u64) -> u64 {
         (0..limit)
@@ -373,67 +147,7 @@ impl BuildSlots {
 /// Lock files Cargo holds in a profile directory while it builds there.
 const CARGO_LOCKS: [&str; 3] = [".cargo-lock", ".cargo-build-lock", ".cargo-artifact-lock"];
 
-/// Whether another process holds a Cargo build lock below `target`: one of
-/// `CARGO_LOCKS` in a profile directory (`target/debug`) or in a target
-/// triple's (`target/<triple>/debug`). Cargo queues a second build behind that
-/// lock, so a caller that waits for it first holds no build slot meanwhile.
-pub fn cargo_lock_held(target: &Path) -> bool {
-    let held = |profile: PathBuf| {
-        CARGO_LOCKS.iter().any(|name| {
-            std::fs::File::open(profile.join(name)).is_ok_and(|file| {
-                matches!(
-                    os::try_flock(&file, LockMode::Shared),
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock
-                )
-            })
-        })
-    };
-    let Ok(top) = std::fs::read_dir(target) else {
-        return false;
-    };
-    top.flatten().any(|entry| {
-        let path = entry.path();
-        held(path.clone())
-            || std::fs::read_dir(&path)
-                .is_ok_and(|inner| inner.flatten().any(|child| held(child.path())))
-    })
-}
-
-/// Wait until no process holds a Cargo build lock below `target`, for at most
-/// `wait.timeout`. `progress` runs with the time waited when the first probe
-/// finds a lock held, then every `wait.progress_every`. A timeout reports
-/// `limit` and `held` as 0: it is not a slot wait.
-#[allow(clippy::disallowed_methods)]
-pub fn wait_for_cargo_lock(
-    target: &Path,
-    wait: Wait,
-    progress: &mut dyn FnMut(Duration),
-) -> std::result::Result<(), SlotError> {
-    if !cargo_lock_held(target) {
-        return Ok(());
-    }
-    let start = std::time::Instant::now();
-    let mut reported = Duration::ZERO;
-    progress(Duration::ZERO);
-    while cargo_lock_held(target) {
-        os::wait(POLL);
-        let waited = start.elapsed();
-        if waited >= wait.timeout {
-            return Err(SlotError::Timeout {
-                limit: 0,
-                held: 0,
-                waited,
-            });
-        }
-        if waited - reported >= wait.progress_every {
-            reported = waited;
-            progress(waited);
-        }
-    }
-    Ok(())
-}
-
-/// One held slot. Dropping it, or the process exiting, releases the slot. The
+/// One held advisory slot. The kernel releases it when the shim exits.
 /// descriptor is close-on-exec, so a child never inherits it.
 #[derive(Debug)]
 pub struct SlotGuard {
@@ -456,36 +170,7 @@ impl SlotGuard {
 mod tests {
     use super::*;
 
-    #[test]
-    fn slot_wait_markers_carry_bounded_queue_information() {
-        let wait = SlotWait {
-            since: 90,
-            held: 2,
-            limit: 3,
-        };
-        let text = WaitKind::slot_marker(100, wait);
-        assert_eq!(text, "slot 100 90 2 3");
-        assert_eq!(WaitKind::from_marker(&text, 100), Some(WaitKind::Slot));
-        assert_eq!(WaitKind::slot_wait(&text, 100), Some(wait));
-        // The old two-field marker still names the wait, without counts.
-        assert_eq!(WaitKind::from_marker("slot 100", 100), Some(WaitKind::Slot));
-        assert_eq!(WaitKind::slot_wait("slot 100", 100), None);
-        assert_eq!(WaitKind::slot_wait("lock 100 90 2 3", 100), None);
-        for forged in [
-            "slot 100 90 4 3",
-            "slot 100 90 0 0",
-            "slot 100 90 0 65",
-            "slot 100 101 0 3",
-            "slot 100 90 2",
-            "slot 100 90 2 3 4",
-            "slot 100 90 x 3",
-        ] {
-            assert_eq!(WaitKind::slot_wait(forged, 100), None, "{forged}");
-        }
-        assert_eq!(WaitKind::slot_wait(&text, 1000), None, "stale");
-    }
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Forking while another test holds a lock lets the child keep a copy of
     /// that lock until it execs, so these tests run one at a time.
@@ -523,34 +208,6 @@ mod tests {
         drop(first);
         assert_eq!(slots.held(2), 1);
         assert!(slots.try_acquire(2).unwrap().is_some());
-    }
-
-    #[test]
-    fn contention_never_exceeds_the_limit() {
-        let _serial = serial();
-        let (state, _slots) = provisioned(2);
-        let running = AtomicU64::new(0);
-        let peak = AtomicU64::new(0);
-        std::thread::scope(|scope| {
-            for _ in 0..6 {
-                scope.spawn(|| {
-                    let slots = BuildSlots::open(state.path()).unwrap();
-                    let _slot = slots
-                        .acquire(
-                            2,
-                            Wait::new(Duration::from_secs(60)),
-                            &CancelToken::new(),
-                            &mut |_, _| {},
-                        )
-                        .unwrap();
-                    let now = running.fetch_add(1, Ordering::SeqCst) + 1;
-                    peak.fetch_max(now, Ordering::SeqCst);
-                    os::wait(Duration::from_millis(150));
-                    running.fetch_sub(1, Ordering::SeqCst);
-                });
-            }
-        });
-        assert_eq!(peak.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -618,63 +275,6 @@ mod tests {
     }
 
     #[test]
-    fn a_wait_reports_progress_then_times_out_naming_the_slots() {
-        let _serial = serial();
-        let (_state, slots) = provisioned(1);
-        let _held = slots.try_acquire(1).unwrap().unwrap();
-        let mut reports = Vec::new();
-        let error = slots
-            .acquire(
-                1,
-                Wait {
-                    timeout: Duration::from_millis(700),
-                    progress_every: Duration::from_millis(200),
-                },
-                &CancelToken::new(),
-                &mut |held, waited| reports.push((held, waited)),
-            )
-            .unwrap_err();
-        assert!(
-            matches!(
-                error,
-                SlotError::Timeout {
-                    limit: 1,
-                    held: 1,
-                    ..
-                }
-            ),
-            "{error}"
-        );
-        assert!(error.to_string().contains("all 1 build slots"), "{error}");
-        // A loaded runner can take most of the timeout per poll, so require
-        // the immediate report plus at least one later one, in order.
-        assert!(reports.len() >= 2, "{reports:?}");
-        assert_eq!(reports[0], (1, Duration::ZERO));
-        assert!(
-            reports.windows(2).all(|pair| pair[0].1 < pair[1].1),
-            "{reports:?}"
-        );
-    }
-
-    #[test]
-    fn cancel_ends_a_wait() {
-        let _serial = serial();
-        let (_state, slots) = provisioned(1);
-        let _held = slots.try_acquire(1).unwrap().unwrap();
-        let cancel = CancelToken::new();
-        cancel.cancel();
-        let error = slots
-            .acquire(
-                1,
-                Wait::new(Duration::from_secs(60)),
-                &cancel,
-                &mut |_, _| {},
-            )
-            .unwrap_err();
-        assert!(matches!(error, SlotError::Cancelled));
-    }
-
-    #[test]
     fn provisioning_again_repairs_the_directory_and_its_slot_files() {
         use std::os::unix::fs::MetadataExt;
         let _serial = serial();
@@ -739,59 +339,6 @@ mod tests {
         assert!(slots.try_acquire(3).unwrap().is_some());
         std::fs::remove_file(directory(state.path()).join("slot-0.lock")).unwrap();
         assert!(slots.try_acquire(3).is_err());
-    }
-
-    #[test]
-    fn a_held_cargo_lock_is_seen_in_profile_and_triple_directories() {
-        let _serial = serial();
-        let target = tempfile::tempdir().unwrap();
-        assert!(!cargo_lock_held(target.path()));
-        for (relative, name) in [
-            ("debug", ".cargo-lock"),
-            ("aarch64-apple-darwin/debug", ".cargo-lock"),
-            ("release", ".cargo-build-lock"),
-            ("release", ".cargo-artifact-lock"),
-        ] {
-            let profile = target.path().join(relative);
-            std::fs::create_dir_all(&profile).unwrap();
-            let lock = std::fs::File::create(profile.join(name)).unwrap();
-            assert!(!cargo_lock_held(target.path()), "an unheld lock is free");
-            os::try_flock(&lock, LockMode::Exclusive).unwrap();
-            assert!(cargo_lock_held(target.path()), "{relative}/{name}");
-            drop(lock);
-            assert!(!cargo_lock_held(target.path()));
-        }
-        assert!(!cargo_lock_held(&target.path().join("missing")));
-    }
-
-    #[test]
-    fn waiting_for_a_cargo_lock_reports_progress_and_times_out() {
-        let _serial = serial();
-        let target = tempfile::tempdir().unwrap();
-        let profile = target.path().join("debug");
-        std::fs::create_dir_all(&profile).unwrap();
-        let lock = std::fs::File::create(profile.join(".cargo-lock")).unwrap();
-        os::try_flock(&lock, LockMode::Exclusive).unwrap();
-        let mut reports = Vec::new();
-        let error = wait_for_cargo_lock(
-            target.path(),
-            Wait {
-                timeout: Duration::from_millis(600),
-                // Six intervals per timeout leave room for a slow scheduler tick.
-                progress_every: Duration::from_millis(100),
-            },
-            &mut |waited| reports.push(waited),
-        )
-        .unwrap_err();
-        assert!(matches!(error, SlotError::Timeout { .. }));
-        assert!(reports.len() >= 3, "{reports:?}");
-        drop(lock);
-        wait_for_cargo_lock(
-            target.path(),
-            Wait::new(Duration::from_secs(1)),
-            &mut |_| {},
-        )
-        .unwrap();
     }
 
     #[test]
