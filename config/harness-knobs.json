@@ -654,15 +654,19 @@
       "effect": "Let every lane with open network, read-only lanes included, use the host's gh login, a git credential helper and gh to push their own branch and read or update issues and pull requests.",
       "trade_off": "On (default) gives every networked lane your GitHub credential, so a malicious lane can extract the token and act outside the wrapper. false keeps publishing with the chair through host-side delivery."
     },
+    "lanes.sandbox_floor": {
+      "type": "enum", "values": ["off", "warn", "strict"], "default": "warn", "status": "wired",
+      "reader": "tools/front-door/crates/records/src/run.rs, tools/front-door/crates/cli/src/run/provider/confinement.rs",
+      "effect": "Admission policy for children of an explicitly sandboxed parent, including continuations and fallback. warn proceeds with the selected sandbox toggle and reports a lowered floor; strict retains the parent's sandbox; off disables the advisory. This is policy with boundary None, not an authority boundary. The sealed receipt records the effective value and its source.",
+      "trade_off": "Warn keeps sandboxing opt-in; strict requires children to retain a sandbox the user enabled on their parent."
+    },
     "lanes.sandbox": {
-      "strict": true,
-      "safe": "on",
       "type": "enum",
       "values": ["auto", "on", "off"],
       "default": "auto",
       "status": "wired",
       "reader": "tools/front-door/crates/cli/src/run/provider/confinement.rs",
-      "effect": "Whether a macOS lane runs under the Seatbelt sandbox. The default auto runs every lane kind (including read-only) unsandboxed unless a configured route, narrowed network or parent floor requires sandboxing. Explicit off / --no-sandbox takes precedence over route, narrowed-network and parent floors where Provenant decides them, with a one-line warning naming the dropped restriction; an inherited operating-system sandbox is always reported honestly as effective. Off macOS every lane resolves as sandboxed, so Linux keeps refusing lanes. on / --sandbox explicitly opts into sandboxing. Set per run with --sandbox or --no-sandbox, per graph node or template with attempt.sandbox, or as the host default in [knobs]. The lane sees PROVENANT_SANDBOX=on or off, and status and the receipt show requested and effective mode and its source (parent, route, network, platform, knob or default).",
+      "effect": "Whether a lane runs under the operating-system sandbox. auto (default) and off run unsandboxed unless the user configured a sandboxed route or selected lanes.sandbox_floor=strict for an explicitly sandboxed parent. on opts into sandboxing. An inherited operating-system sandbox remains effective. Unsupported hosts warn and proceed without a sandbox; the requested and effective mode and source remain visible. Set per run with --sandbox or --no-sandbox, per node with attempt.sandbox, or in the host [knobs].",
       "trade_off": "Unsandboxed lanes work like the same CLI started by hand: they share host build caches and services, and can read on-disk credential stores and write outside their worktree. The environment is still rebuilt from an allowlist with hosted-cloud keys stripped, Git delivery stays host-owned with one writer per worktree, and host_policy path denials apply only to sandboxed lanes. A sandboxed lane reads domains.run.sandbox_cache_reads and never writes there."
     }
   },

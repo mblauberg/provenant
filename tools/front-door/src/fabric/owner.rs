@@ -2481,9 +2481,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
 /// round-tripping all fields that affect dispatch and request hashing.
 pub(crate) fn recovered_attempt_spec(
     task: &provenant_records::run::TaskRequest,
-    admitted_by: Option<&str>,
-) -> provenant_fabric_runtime::graph::AttemptSpec {
-    provenant_fabric_runtime::graph::AttemptSpec {
+    original: Option<&provenant_fabric_runtime::graph::AttemptSpec>,
+) -> Result<provenant_fabric_runtime::graph::AttemptSpec, FacadeError> {
+    Ok(provenant_fabric_runtime::graph::AttemptSpec {
         account: task.account.clone(),
         build_heavy: task.build_heavy,
         confidential: task
@@ -2492,22 +2492,35 @@ pub(crate) fn recovered_attempt_spec(
             .get("confidential")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
-        parent_sandboxed: task
-            .profile
-            .extra
-            .get(provenant_records::run::PARENT_SANDBOXED_FIELD)
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
+        parent_sandboxed: [&task.profile.extra, &task.extra]
+            .into_iter()
+            .filter_map(|extra| {
+                extra
+                    .get(provenant_records::run::PARENT_SANDBOXED_FIELD)
+                    .and_then(serde_json::Value::as_bool)
+            })
+            .any(|value| value)
+            || original.is_some_and(|spec| spec.parent_sandboxed),
         admitted_by: task
             .profile
             .extra
             .get("admitted_by")
             .and_then(serde_json::Value::as_str)
-            .or(admitted_by)
+            .or_else(|| original.and_then(|spec| spec.admitted_by.as_deref()))
             .map(str::to_owned),
+        launch_policy: task
+            .profile
+            .extra
+            .get(provenant_records::run::LAUNCH_POLICY_FIELD)
+            .map(|value| {
+                serde_json::from_value(value.clone()).map_err(|_| FacadeError::StateCorrupt)
+            })
+            .transpose()?,
+        policy_sealed: true,
+        sealed_profile: Some(task.profile.clone()),
         provider_timeout: Some(task.provider_timeout_seconds),
         ..Default::default()
-    }
+    })
 }
 
 impl BoundGraphOwner<'_> {
@@ -2776,10 +2789,7 @@ impl BoundGraphOwner<'_> {
                             accepted_retry_limit = Some(task.profile.settlement_retry_limit);
                             accepted_access = Some(task.access.clone());
                             accepted_skill_location = Some(task.profile.require_skill_location);
-                            accepted_attempt = Some(recovered_attempt_spec(
-                                task,
-                                node.attempt.and_then(|spec| spec.admitted_by.as_deref()),
-                            ));
+                            accepted_attempt = Some(recovered_attempt_spec(task, node.attempt)?);
                         }
                         task.context.clone()
                     }
@@ -4853,10 +4863,24 @@ mod recovery_rebuild_tests {
                                     parent_sandboxed,
                                     admitted_by: admitted_by.clone(),
                                     provider_timeout,
+                                    launch_policy: Some(provenant_records::run::LaunchPolicy {
+                                        confidential,
+                                        sources: vec!["repository declaration".into()],
+                                        repository_config: Some(
+                                            provenant_config::REPOSITORY_CONFIG.into(),
+                                        ),
+                                    }),
                                     ..Default::default()
                                 };
 
                                 let mut profile = provenant_records::run::HarnessProfile::default();
+                                profile
+                                    .knobs
+                                    .insert("lanes.sandbox_floor".into(), "strict".into());
+                                profile.extra.insert(
+                                    provenant_config::KNOB_SOURCES.into(),
+                                    serde_json::json!({"lanes.sandbox_floor":"host"}),
+                                );
                                 if spec.confidential {
                                     profile
                                         .extra
@@ -4869,6 +4893,15 @@ mod recovery_rebuild_tests {
                                     );
                                 }
 
+                                profile.extra.insert(
+                                    provenant_records::run::LAUNCH_POLICY_FIELD.into(),
+                                    serde_json::to_value(&spec.launch_policy)?,
+                                );
+                                if let Some(admitter) = &spec.admitted_by {
+                                    profile
+                                        .extra
+                                        .insert("admitted_by".into(), serde_json::json!(admitter));
+                                }
                                 let original_task = provenant_records::run::TaskRequest {
                                     context: None,
                                     extra: Default::default(),
@@ -4907,10 +4940,8 @@ mod recovery_rebuild_tests {
                                     parent_attempt: None,
                                 };
 
-                                let rebuilt_spec = recovered_attempt_spec(
-                                    &original_task,
-                                    spec.admitted_by.as_deref(),
-                                );
+                                let rebuilt_spec =
+                                    recovered_attempt_spec(&original_task, Some(&spec))?;
 
                                 assert_eq!(rebuilt_spec.parent_sandboxed, spec.parent_sandboxed);
                                 assert_eq!(rebuilt_spec.admitted_by, spec.admitted_by);
@@ -4922,20 +4953,12 @@ mod recovery_rebuild_tests {
                                     Some(original_task.provider_timeout_seconds)
                                 );
 
-                                let mut rebuilt_profile =
-                                    provenant_records::run::HarnessProfile::default();
-                                if rebuilt_spec.confidential {
-                                    rebuilt_profile
-                                        .extra
-                                        .insert("confidential".into(), serde_json::json!(true));
-                                }
-                                if rebuilt_spec.parent_sandboxed {
-                                    rebuilt_profile.extra.insert(
-                                        provenant_records::run::PARENT_SANDBOXED_FIELD.into(),
-                                        serde_json::json!(true),
-                                    );
-                                }
-
+                                let rebuilt_profile = rebuilt_spec
+                                    .sealed_profile
+                                    .clone()
+                                    .ok_or("sealed profile")?;
+                                assert!(rebuilt_spec.policy_sealed);
+                                assert_eq!(rebuilt_spec.launch_policy, spec.launch_policy);
                                 let rebuilt_task = provenant_records::run::TaskRequest {
                                     profile: rebuilt_profile,
                                     build_heavy: rebuilt_spec.build_heavy,

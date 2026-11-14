@@ -541,7 +541,7 @@ impl BinaryRunOwner<'_> {
                 store
                     .get_or_insert_with(|| self.read_session(cancel).ok())
                     .as_ref()
-                    .is_none_or(|session| {
+                    .is_some_and(|session| {
                         session
                             .store
                             .attempt_floors_children(id, &self.call(cancel))
@@ -944,7 +944,7 @@ impl BinaryRunOwner<'_> {
             facts,
             access,
             settlement_retry_limit,
-            attempt,
+            mut attempt,
             refusal,
         } = policy;
         let SubmitInput::Submit {
@@ -980,7 +980,27 @@ impl BinaryRunOwner<'_> {
             // An accepted pre-cutover operation may have no context. The sealed
             // request digest below still rejects any change to its launch inputs.
         }
-        let floored = self.admitter_floors_launch(&task, attempt.as_ref(), cancel);
+        // Replays use sealed admission facts, never a fresh checkpoint lookup.
+        let floored = !attempt.as_ref().is_some_and(|spec| spec.policy_sealed)
+            && self.admitter_floors_launch(&task, attempt.as_ref(), cancel);
+        let spec = attempt.get_or_insert_with(Default::default);
+        spec.parent_sandboxed |= floored;
+        let directory = task
+            .worktree
+            .as_deref()
+            .map(Path::new)
+            .or_else(|| spec.directory.as_deref().map(Path::new))
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.factory.cwd.clone());
+        provenant_cli::run::seal_launch_policy(
+            spec,
+            &directory,
+            &task.prompt,
+            &access,
+            task.base.as_deref(),
+            task.head.as_deref(),
+        )
+        .map_err(fail_error)?;
         if let Some(host) = host.filter(|host| *host != self.factory.context.identity.host) {
             if !self.allow_remote
                 || task.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
@@ -1741,9 +1761,9 @@ fn require_graph_context(
 }
 
 /// Whether the lane of `admitter`, the node whose lane or plan admitted the
-/// node being launched, was sandboxed by distrust, so the node is sandboxed
-/// too. An unreadable graph, an admitter without recorded attempts, an attempt
-/// on another host and a record that cannot be read all floor.
+/// node being launched, has sealed user-enabled sandbox evidence. Missing
+/// evidence does not invent an enabled sandbox; peers carry the host-sealed
+/// parent flag alongside the launch.
 pub(crate) fn admitter_floors(
     admitter: &str,
     checkpoint: impl FnOnce() -> Option<provenant_fabric_runtime::graph::GraphCheckpoint>,
@@ -1751,7 +1771,7 @@ pub(crate) fn admitter_floors(
     floors: &mut dyn FnMut(provenant_core::AttemptId) -> bool,
 ) -> bool {
     let Some(checkpoint) = checkpoint() else {
-        return true;
+        return false;
     };
     let mut references = checkpoint
         .nodes
@@ -1761,7 +1781,7 @@ pub(crate) fn admitter_floors(
         .filter_map(|row| row.attempt_ref.as_deref())
         .peekable();
     if references.peek().is_none() {
-        return true;
+        return false;
     }
     references.any(|reference| {
         match reference
@@ -1770,7 +1790,7 @@ pub(crate) fn admitter_floors(
             .and_then(|(_, id)| id.parse::<provenant_core::AttemptId>().ok())
         {
             Some(id) => floors(id),
-            None => true,
+            None => false,
         }
     })
 }
@@ -1783,7 +1803,7 @@ pub(crate) fn admitter_floors(
 mod graph_control_tests {
     use super::*;
     #[test]
-    fn nodes_admitted_by_a_distrusted_lane_are_sandboxed() {
+    fn admission_requires_user_enabled_sandbox_evidence() {
         let open = provenant_core::AttemptId::from_bytes([1; 16]);
         let closed = provenant_core::AttemptId::from_bytes([2; 16]);
         let checkpoint = |reference: String| {
@@ -1815,16 +1835,16 @@ mod graph_control_tests {
             "host",
             &mut lookup
         ));
-        // Another host's attempt, an unreadable graph and an admitter without
-        // attempts all fail closed.
-        assert!(admitter_floors(
+        // Missing evidence cannot turn optional sandboxing on. A peer's
+        // host-sealed floor travels on AttemptSpec instead.
+        assert!(!admitter_floors(
             "lane",
             checkpoint(format!("peer/{open}")),
             "host",
             &mut lookup
         ));
-        assert!(admitter_floors("lane", || None, "host", &mut lookup));
-        assert!(admitter_floors(
+        assert!(!admitter_floors("lane", || None, "host", &mut lookup));
+        assert!(!admitter_floors(
             "composite",
             checkpoint(local(open)),
             "host",

@@ -145,7 +145,7 @@ pub enum SandboxSource {
     Route,
     /// The lane's network is narrower than open; only the sandbox holds it.
     Network,
-    /// The platform has no unsandboxed launch: Linux keeps refusing lanes.
+    /// The host platform does not implement sandbox confinement.
     Platform,
     /// The `lanes.sandbox` knob, from the run, graph node or host `[knobs]`.
     Knob,
@@ -159,7 +159,7 @@ pub struct SandboxInputs<'a> {
     pub route: &'a str,
     /// The sealed `lanes.sandbox` value, if any.
     pub knob: Option<&'a str>,
-    /// The host found the submitting lane sandboxed (or could not tell).
+    /// The shared admission-floor policy requires parent sandbox retention.
     pub parent_sandboxed: bool,
     /// The lane's effective network is `provider` or `local`.
     pub network_narrowed: bool,
@@ -336,8 +336,8 @@ impl RunConfig {
     /// An OS-inherited sandbox (the process is already inside Seatbelt) cannot be removed by
     /// a child process and is always reported honestly as effective (`effective: true`, `source: Parent`).
     ///
-    /// Off macOS (or when platform confinement is unsupported), every lane resolves as sandboxed
-    /// (`source: Platform`).
+    /// Without a supported backend, defaults remain off. An explicit on
+    /// retains its request so preparation reports the unavailable confinement.
     pub fn sandbox_for(&self, inputs: SandboxInputs<'_>) -> SandboxMode {
         let listed = self
             .sandboxed_routes
@@ -348,25 +348,8 @@ impl RunConfig {
             Some("off") => false,
             Some("on") => true,
             None | Some("auto") => false,
-            Some(_) => true,
+            Some(_) => false,
         };
-
-        if !inputs.platform_supported {
-            let warning = if inputs.knob == Some("off") {
-                Some(
-                    "platform does not support unsandboxed launch; lane remains sandboxed"
-                        .to_string(),
-                )
-            } else {
-                None
-            };
-            return SandboxMode {
-                requested,
-                effective: true,
-                source: SandboxSource::Platform,
-                warning,
-            };
-        }
 
         if inputs.os_sandboxed {
             let warning = if inputs.knob == Some("off") {
@@ -379,6 +362,18 @@ impl RunConfig {
                 effective: true,
                 source: SandboxSource::Parent,
                 warning,
+            };
+        }
+
+        if !inputs.platform_supported {
+            let effective =
+                requested || inputs.parent_sandboxed || (listed && inputs.knob != Some("off"));
+            return SandboxMode {
+                requested,
+                effective,
+                source: SandboxSource::Platform,
+                warning: effective
+                    .then(|| "requested sandbox is unavailable on this platform".into()),
             };
         }
 
@@ -409,7 +404,7 @@ impl RunConfig {
             };
         }
 
-        if matches!(inputs.knob, Some(k) if k != "auto") {
+        if inputs.knob == Some("on") {
             return SandboxMode {
                 requested: true,
                 effective: true,
@@ -432,19 +427,15 @@ impl RunConfig {
                 source: SandboxSource::Route,
                 warning: None,
             }
-        } else if inputs.network_narrowed {
-            SandboxMode {
-                requested: false,
-                effective: true,
-                source: SandboxSource::Network,
-                warning: None,
-            }
         } else {
             SandboxMode {
                 requested: false,
                 effective: false,
                 source: SandboxSource::Default,
-                warning: None,
+                warning: inputs
+                    .knob
+                    .filter(|value| !matches!(*value, "auto" | "off" | "on"))
+                    .map(|_| "invalid lanes.sandbox; using default off".into()),
             }
         }
     }
@@ -958,9 +949,6 @@ mod tests {
                                 } else if listed {
                                     assert!(def_mode.effective);
                                     assert_eq!(def_mode.source, SandboxSource::Route);
-                                } else if network_narrowed {
-                                    assert!(def_mode.effective);
-                                    assert_eq!(def_mode.source, SandboxSource::Network);
                                 } else {
                                     assert!(!def_mode.effective);
                                     assert_eq!(def_mode.source, SandboxSource::Default);
@@ -996,7 +984,7 @@ mod tests {
             }
         }
 
-        // 4. Invariant: Unsupported platform always resolves sandboxed.
+        // 4. Unsupported platforms never turn an implicit sandbox on.
         for knob in [None, Some("auto"), Some("off"), Some("on")] {
             let input = SandboxInputs {
                 knob,
@@ -1004,10 +992,8 @@ mod tests {
                 ..lane_input("codex/gpt-5.5")
             };
             let mode = default_config.sandbox_for(input);
-            assert!(
-                mode.effective,
-                "unsupported platform must always resolve sandboxed"
-            );
+            assert_eq!(mode.effective, knob == Some("on"));
+            assert_eq!(mode.requested, knob == Some("on"));
             assert_eq!(mode.source, SandboxSource::Platform);
         }
     }

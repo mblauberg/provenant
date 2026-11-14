@@ -267,23 +267,33 @@ pub struct AttemptSpec {
     /// `delivery` (default) keeps the delivery receipt; `none` withholds it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipts: Option<String>,
-    /// `on` sandboxes this node's lane, `off` runs unsandboxed (overriding route,
-    /// network and parent floors), and `auto` (default) runs unsandboxed for every
+    /// `on` sandboxes this node's lane, `off` runs unsandboxed unless the user
+    /// selected a strict parent admission floor, and `auto` (default) runs unsandboxed for every
     /// lane kind. Sets the `lanes.sandbox` knob for this node alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<String>,
-    /// The node whose lane or plan added or replaced this one, set by patch
-    /// admission. When that lane was sandboxed by distrust (its route, its
-    /// parent or the knob), the graph owner sandboxes this node too. Admission
-    /// overwrites any value an author supplies, and a value can only add a
-    /// sandbox.
+    /// The node whose lane or plan admitted this launch. The host reads its
+    /// sealed sandbox evidence; authors cannot replace the admission identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admitted_by: Option<String>,
-    /// Set by the graph owner from `admitted_by` before launch, and carried to
-    /// a peer. It only narrows: the lane is then sandboxed whatever `sandbox`
-    /// says.
+    /// Host-sealed evidence carried to peers and recovery. The shared floor
+    /// policy warns by default; strict retains a user-enabled parent sandbox.
     #[serde(default, skip_serializing_if = "is_false")]
     pub parent_sandboxed: bool,
+    /// Effective host classification, retained across peer launch and replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_policy: Option<provenant_records::run::LaunchPolicy>,
+    /// Declared file inputs, including the original brief file, for host
+    /// confidentiality classification before any provider is selected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policy_inputs: Vec<std::path::PathBuf>,
+    /// Host-only seal marker; graph authors and peer payloads cannot set it.
+    #[serde(skip)]
+    pub policy_sealed: bool,
+    /// Accepted profile restored by the host, including effective knobs and
+    /// their sources. Replays must not rebuild it from current host defaults.
+    #[serde(skip)]
+    pub sealed_profile: Option<provenant_records::run::HarnessProfile>,
 }
 
 /// The `light` preset: no private source view, minimal supervision and no
@@ -397,6 +407,8 @@ impl AttemptSpec {
             && self.sandbox.is_none()
             && self.admitted_by.is_none()
             && !self.parent_sandboxed
+            && self.launch_policy.is_none()
+            && self.policy_inputs.is_empty()
     }
 }
 

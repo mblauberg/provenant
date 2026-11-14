@@ -1412,37 +1412,60 @@ impl AttemptRecord {
         self.applied_route.as_ref()?.extra.get(SANDBOX_ROUTE_FIELD)
     }
 
-    /// Whether a lane this attempt submits or admits must be sandboxed. It
-    /// must when this attempt was sandboxed by distrust: its route, its own
-    /// parent, the `lanes.sandbox` knob or the platform. A sandbox that only
-    /// enforces read-only access or a narrowed network does not pass on, so a
-    /// read-only planner's writers stay unsandboxed. A record that does not
-    /// say, such as one written before lanes could run unsandboxed, floors.
+    /// Whether this attempt carries a user-enabled sandbox admission floor.
+    /// Missing evidence does not enable sandboxing. Children use the selected
+    /// warn/off/strict policy rather than treating this as an authority grant.
     pub fn floors_children(&self) -> bool {
         sandbox_floors_children(self.sandbox())
     }
 }
 /// [`AttemptRecord::floors_children`] for a recorded sandbox mode.
 fn sandbox_floors_children(sandbox: Option<&serde_json::Value>) -> bool {
-    let Some(sandbox) = sandbox else {
-        return true;
-    };
-    match sandbox
-        .get("effective")
-        .and_then(serde_json::Value::as_bool)
-    {
-        Some(false) => false,
-        Some(true) => !matches!(
-            sandbox.get("source").and_then(serde_json::Value::as_str),
-            Some("network" | "default")
-        ),
-        None => true,
-    }
+    sandbox.is_some_and(|sandbox| {
+        sandbox
+            .get("effective")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+            && (sandbox
+                .get("requested")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+                || matches!(
+                    sandbox.get("source").and_then(serde_json::Value::as_str),
+                    Some("parent" | "route")
+                ))
+    })
 }
 /// The applied-route field that records an attempt's sandbox mode.
 pub const SANDBOX_ROUTE_FIELD: &str = "sandbox";
 /// The task field the host sets when the submitting lane was sandboxed.
 pub const PARENT_SANDBOXED_FIELD: &str = "parent_sandboxed";
+
+/// Sealed launch classification, shared by local, peer and recovered attempts.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchPolicy {
+    pub confidential: bool,
+    pub sources: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_config: Option<String>,
+}
+
+pub const LAUNCH_POLICY_FIELD: &str = "launch_policy";
+
+/// The one sandbox admission floor. The parent fact comes from a host-sealed
+/// attempt, never from prompt text. This is advisory policy (boundary None),
+/// with warn as its default; strict is an explicit user override.
+pub fn admission_floor(
+    parent_sandboxed: bool,
+    sandbox: Option<&str>,
+    strength: &str,
+) -> (bool, bool) {
+    let applies = parent_sandboxed && sandbox != Some("on");
+    (
+        applies && strength == "strict",
+        applies && strength == "warn",
+    )
+}
 /// A live-only value that is deliberately absent from durable identity and
 /// equality. It can decorate a record read without making two reads of that
 /// record compare differently.
@@ -1563,8 +1586,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_a_sandbox_forced_by_distrust_floors_children() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn only_a_user_enabled_sandbox_floors_children() -> Result<(), Box<dyn std::error::Error>> {
         let project = ProjectId::from_bytes([1; 16]);
         let mut record: AttemptRecord = serde_json::from_value(serde_json::json!({
             "schema_version":1, "key":crate::WorkKey::new(project, "sandbox-test", "lane", 1)?,
@@ -1577,7 +1599,7 @@ mod tests {
             "prompt":{"path":{"encoding":"utf8","path":"prompt"},
                 "digest":CanonicalV1::file_digest(b"fixture"),"bytes":7,"complete":true,"redacted":false}
         }))?;
-        assert!(record.floors_children());
+        assert!(!record.floors_children());
         let mut floors = |value: serde_json::Value| {
             record.applied_route = Some(RouteRecord {
                 extra: [(SANDBOX_ROUTE_FIELD.into(), value)].into(),
@@ -1585,23 +1607,21 @@ mod tests {
             });
             record.floors_children()
         };
-        for source in ["route", "parent", "knob", "platform", "unknown"] {
-            assert!(
-                floors(serde_json::json!({"effective":true,"source":source})),
-                "{source}"
-            );
+        for source in [
+            "route", "parent", "knob", "platform", "network", "default", "unknown",
+        ] {
+            for requested in [false, true] {
+                for effective in [false, true] {
+                    let expected = effective && (requested || matches!(source, "route" | "parent"));
+                    assert_eq!(
+                        floors(serde_json::json!({"effective":effective,
+                        "requested":requested,"source":source})),
+                        expected
+                    );
+                }
+            }
         }
-        for source in ["network", "default"] {
-            assert!(
-                !floors(serde_json::json!({"effective":true,"source":source})),
-                "{source}"
-            );
-        }
-        assert!(!floors(
-            serde_json::json!({"effective":false,"source":"default"})
-        ));
-        assert!(floors(serde_json::json!({"effective":true})));
-        assert!(floors(serde_json::json!({})));
+        assert!(!floors(serde_json::json!({})));
         Ok(())
     }
 

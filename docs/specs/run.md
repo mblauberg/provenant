@@ -968,6 +968,29 @@ capture ceiling.
   `source_view_batch_reader_decodes_in_order_and_names_missing_objects`)
 - Owner: `crates/cli/src/run/provider/source_tree.rs`
 
+## Sandbox admission policy
+
+Sandboxing defaults off. A user may enable it per launch, node or host, or
+for configured route prefixes. Network narrowing alone does not enable a
+sandbox. An inherited operating-system sandbox remains effective. An
+unsupported host keeps implicit sandboxing off; an explicit sandbox request
+reports unavailable confinement instead of claiming it ran unsandboxed.
+
+The host seals the admitting parent's sandbox evidence and identity. The same
+admission-floor function applies before each adapter candidate, including
+continuation, fallback and local or peer launches. `lanes.sandbox_floor`
+defaults to `warn`: a lower selected sandbox mode warns and proceeds. `strict`
+retains a user-enabled parent's sandbox; `off` disables the advisory. This is
+policy with boundary `None`, not authority. Effective strength and source are
+recorded with the applied route, and replay restores the sealed admission
+facts instead of recomputing them from a changed graph checkpoint.
+- Why (default): sandboxing is an explicit user choice, while retries must
+  preserve the admission evidence and strict policy the user selected.
+- Test: `crates/run/src/launch.rs::policy_reporting_tests::continuation_keeps_the_sealed_parent_floor_and_policy`;
+  `src/fabric/owner.rs::recovery_rebuild_preserves_request_digest_for_any_submitted_spec`
+- Owner: `crates/records/src/run.rs::admission_floor`,
+  `crates/cli/src/run/provider/confinement.rs`, `src/fabric/run_owner.rs`
+
 ## Host-native launch rows
 
 The optional `host-native` adapter selects a named

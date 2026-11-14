@@ -544,9 +544,9 @@ impl RunStore {
         }
         task
     }
-    /// A lane submitted by a lane sandboxed by distrust is sandboxed:
-    /// authority only narrows. The host reads the parent's record. The flag
-    /// can only add a sandbox, so a value already on the task is kept.
+    /// Seal the parent's user-enabled sandbox evidence for the shared
+    /// admission-floor policy. It is a fact, not an authority boundary; warn
+    /// or strict is decided from the request's sealed knob at preparation.
     pub(crate) fn seal_parent_sandbox(
         &self,
         request: &CanonicalRequest,
@@ -1627,8 +1627,144 @@ mod policy_reporting_tests {
         ProviderProfile, ProviderProfileSpec,
     };
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
-    use provenant_core::{CancelToken, WorkScope};
+    use provenant_core::{CancelToken, Clock as _, WorkScope};
     use std::path::Path;
+
+    // Medium: real accepted requests and continuation through RunStore::start;
+    // the provider edge inspects admission without spawning a process.
+    #[test]
+    fn continuation_keeps_the_sealed_parent_floor_and_policy()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        struct Inspect<'a> {
+            strength: &'a str,
+            prior: Option<AttemptId>,
+        }
+        impl Providers for Inspect<'_> {
+            fn prepare(
+                &self,
+                task: &TaskRequest,
+                _: &str,
+                _: &LaunchPaths,
+                prior: Option<&AttemptRecord>,
+            ) -> std::result::Result<PreparedLaunch, PrepareRefusal> {
+                assert_eq!(prior.map(|record| record.attempt_id), self.prior);
+                assert_eq!(
+                    task.extra
+                        .get(provenant_records::run::PARENT_SANDBOXED_FIELD)
+                        .and_then(serde_json::Value::as_bool),
+                    Some(true)
+                );
+                let strength = task
+                    .profile
+                    .knobs
+                    .get("lanes.sandbox_floor")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap();
+                assert_eq!(strength, self.strength);
+                let sandbox = task
+                    .profile
+                    .knobs
+                    .get("lanes.sandbox")
+                    .and_then(serde_json::Value::as_str);
+                assert_eq!(
+                    provenant_records::run::admission_floor(true, sandbox, strength),
+                    if self.strength == "strict" {
+                        (true, false)
+                    } else {
+                        (false, true)
+                    }
+                );
+                Err(PrepareRefusal::new(
+                    TerminalCause::RouteResolutionRefused,
+                    "fixture inspected admission",
+                ))
+            }
+            fn decode(
+                &self,
+                _: &RouteRecord,
+                _: &[u8],
+                _: &ExitObservation,
+                _: &Path,
+            ) -> std::result::Result<Decoded, String> {
+                unreachable!()
+            }
+        }
+        for strength in ["warn", "strict"] {
+            let temp = tempfile::tempdir()?;
+            let (clock, cancel) = (clock(), CancelToken::new());
+            let call = call(&clock, &cancel);
+            let store = RunStore::open(&context(temp.path())?, &call)?;
+            let parent = input();
+            store.create(&parent, &call)?;
+            let mut applied = route();
+            applied.extra.insert(
+                provenant_records::run::SANDBOX_ROUTE_FIELD.into(),
+                serde_json::json!({"requested":true,"effective":true,"source":"knob"}),
+            );
+            let starting = store.mark_starting(
+                &store.record(parent.attempt_id, &call)?,
+                &applied,
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            store.withdraw(
+                parent.attempt_id,
+                starting.state,
+                Outcome::Rejected,
+                "fixture parent",
+                clock.wall_now()?,
+                &call,
+            )?;
+            assert!(store.attempt_floors_children(parent.attempt_id, &call));
+            let mut child = input();
+            child.attempt_id = AttemptId::from_bytes([7; 16]);
+            child.operation_id = provenant_core::OperationId::parse("admission-child")?;
+            child.request.parent_attempt = Some(parent.attempt_id);
+            child
+                .request
+                .task
+                .profile
+                .knobs
+                .insert("lanes.sandbox".into(), "off".into());
+            child
+                .request
+                .task
+                .profile
+                .knobs
+                .insert("lanes.sandbox_floor".into(), strength.into());
+            crate::tests::rekey(&mut child);
+            store.create(&child, &call)?;
+            store.start(
+                child.attempt_id,
+                &Inspect {
+                    strength,
+                    prior: None,
+                },
+                &|_, _| unreachable!(),
+                &call,
+            )?;
+            let mut continuation = input();
+            continuation.request = child.request.clone();
+            continuation.prompt = child.prompt.clone();
+            continuation.attempt_id = AttemptId::from_bytes([8; 16]);
+            continuation.operation_id =
+                provenant_core::OperationId::parse("admission-continuation")?;
+            continuation.request.parent = Some(child.attempt_id);
+            store.create(&continuation, &call)?;
+            store.start(
+                continuation.attempt_id,
+                &Inspect {
+                    strength,
+                    prior: Some(child.attempt_id),
+                },
+                &|_, _| unreachable!(),
+                &call,
+            )?;
+        }
+        Ok(())
+    }
 
     #[test]
     fn claimed_launch_reports_once_when_a_prepared_attempt_is_replayed()
