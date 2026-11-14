@@ -7,6 +7,7 @@ use provenant_os::exec::Executor;
 use provenant_os::exec::{ExecOptions, ExecOutcome, StreamPolicy, Termination};
 #[cfg(target_os = "macos")]
 use provenant_os::fs::FileKind;
+use provenant_records::policy::{Effect, Facts, Policy};
 #[cfg(target_os = "macos")]
 use std::ffi::OsString;
 #[cfg(target_os = "macos")]
@@ -83,33 +84,64 @@ pub fn system_backend_with_limits(
     context: &BackendContext<'_>,
     limits: ProfileLimits,
 ) -> Result<Box<dyn ConfinementBackend>, PermissionError> {
+    system_backend_with_limits_and_policy(context, limits, &Policy::default())
+}
+
+/// Bind the resolved launch policy to the backend that compiles this launch.
+/// Boundary checks remain immutable; warning thresholds use the sealed source
+/// and strength selected before dispatch.
+pub fn system_backend_with_limits_and_policy(
+    context: &BackendContext<'_>,
+    limits: ProfileLimits,
+    policy: &Policy,
+) -> Result<Box<dyn ConfinementBackend>, PermissionError> {
     #[cfg(target_os = "macos")]
     {
-        match probe_sandbox(context)? {
+        match probe_sandbox(context)
+            .map_err(|error| backend_boundary_error(error, "sandbox probe failed before launch"))?
+        {
             Availability::Available {
                 backend: BackendKind::MacOsSbpl,
             } => Ok(Box::new(MacOsSandboxBackend {
                 ready: true,
                 limits,
+                policy: policy.clone(),
             })),
-            Availability::Unavailable { reason } => {
-                Err(PermissionError::BackendNotAvailable(reason))
-            }
+            Availability::Unavailable { reason } => Err(backend_boundary_error(
+                PermissionError::BackendNotAvailable(reason),
+                "sandbox probe did not establish an enforcing backend",
+            )),
         }
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (context, limits);
-        Err(PermissionError::BackendNotAvailable(
-            AvailabilityReason::UnsupportedPlatform,
+        let _ = (context, limits, policy);
+        Err(backend_boundary_error(
+            PermissionError::BackendNotAvailable(AvailabilityReason::UnsupportedPlatform),
+            "this platform has no enforcing sandbox backend",
         ))
     }
+}
+
+fn backend_boundary_error(error: PermissionError, detail: &str) -> PermissionError {
+    let policy = Policy::default();
+    let error = policy.boundary_error(
+        "PROBE_SYSTEM_BACKEND_CREDENTIALS",
+        Facts::violation(detail),
+        error,
+    );
+    policy.boundary_error(
+        "PROBE_SYSTEM_BACKEND_GIT_ISOLATION",
+        Facts::violation(detail),
+        error,
+    )
 }
 
 #[cfg(target_os = "macos")]
 pub(super) struct MacOsSandboxBackend {
     pub(super) ready: bool,
     pub(super) limits: ProfileLimits,
+    pub(super) policy: Policy,
 }
 
 #[cfg(target_os = "macos")]
@@ -130,7 +162,7 @@ impl ConfinementBackend for MacOsSandboxBackend {
         if !self.ready {
             return Err(PermissionError::BackendUnavailable);
         }
-        compile_sbpl_with_diagnostic(plan, profile, anchors, self.limits)
+        compile_sbpl_with_diagnostic(plan, profile, anchors, self.limits, &self.policy)
     }
 }
 
@@ -284,24 +316,42 @@ pub(super) fn denied_probe(outcome: &ExecOutcome) -> bool {
         && !outcome.stderr.read_failed
 }
 
-/// A bounded diagnostic: never include grant paths or profile contents.
 #[cfg(any(target_os = "macos", test, feature = "snapshot"))]
-pub(super) fn capacity_warning(
+pub(super) fn report_policy_message(message: String) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr().lock(), "{message}");
+}
+
+/// Apply one advisory launch threshold. The table controls whether an
+/// observation warns, is silent, or returns its existing typed strict error.
+/// Queue has no admission point in profile compilation and is rejected if a
+/// malformed table ever enables it.
+#[cfg(any(target_os = "macos", test, feature = "snapshot"))]
+#[allow(clippy::panic)]
+pub(super) fn check_capacity_policy(
+    policy: &Policy,
+    code: &str,
     setting: &str,
     actual: usize,
     threshold: usize,
     origin: provenant_records::diagnostic::SettingSource,
-) -> Option<String> {
-    (actual > threshold).then(|| format!(
-        "warning: {setting} exceeded: effective value={actual}, warning threshold={threshold} (source: {})",
-        origin.description()
-    ))
-}
-
-#[cfg(any(target_os = "macos", test, feature = "snapshot"))]
-pub(super) fn report_capacity_warning(warning: Option<String>) {
-    use std::io::Write;
-    if let Some(warning) = warning {
-        let _ = writeln!(std::io::stderr().lock(), "{warning}");
+    strict_error: PermissionError,
+) -> Result<Option<String>, PermissionError> {
+    let facts = if actual > threshold {
+        Facts::violation(format!(
+            "{setting} exceeded: effective value={actual}, threshold={threshold} (setting source: {})",
+            origin.description()
+        ))
+    } else {
+        Facts {
+            violated: false,
+            detail: String::new(),
+        }
+    };
+    match policy.check(code, facts) {
+        Effect::Proceed => Ok(None),
+        Effect::Warn(message) => Ok(Some(message)),
+        Effect::Queue(_) => panic!("capacity rules do not support queue effects"),
+        Effect::Refuse(_) => Err(strict_error),
     }
 }

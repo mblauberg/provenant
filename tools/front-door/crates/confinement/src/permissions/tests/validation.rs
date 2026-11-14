@@ -45,6 +45,23 @@ fn only_git_control_files_are_checked_for_other_names() -> Result<(), Box<dyn st
             matches!(&error, PermissionError::GitControlHardLinked(path) if path == &git_dir.join(control)),
             "{control}: {error}"
         );
+        let policy = provenant_records::policy::Policy::default();
+        let rule = policy.rule("VALIDATION_VERIFY_GIT_CONTROL_LINKS_GIT_ISOLATION");
+        assert_eq!(
+            rule.rule.boundary,
+            provenant_records::policy::Boundary::GitIsolation
+        );
+        assert_eq!(
+            rule.rule.strength,
+            provenant_records::policy::Strength::Refuse
+        );
+        assert!(matches!(
+            policy.check(
+                "VALIDATION_VERIFY_GIT_CONTROL_LINKS_GIT_ISOLATION",
+                provenant_records::policy::Facts::violation("guard failed"),
+            ),
+            provenant_records::policy::Effect::Refuse(_)
+        ));
         std::fs::remove_file(alias)?;
         verify_git_control_links(&fixture.repo)?;
     }
@@ -417,6 +434,16 @@ fn lane_root_table_agrees_with_compiler_checks() {
     let standalone =
         "/Users/alice/.codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin";
     let home = Path::new("/fixture/host-home");
+    let credential_policy = provenant_records::policy::Policy::default();
+    let credential_rule = credential_policy.rule("VALIDATION_REFUSES_LANE_ROOT_CREDENTIALS");
+    assert_eq!(
+        credential_rule.rule.boundary,
+        provenant_records::policy::Boundary::Credentials
+    );
+    assert_eq!(
+        credential_rule.rule.strength,
+        provenant_records::policy::Strength::Refuse
+    );
     for (path, read_allowed, write_allowed) in [
         ("/Users/alice/.ssh", false, false),
         ("/Users/alice/.config", false, false),
@@ -793,7 +820,11 @@ fn credential_writes_stay_inside_auth_roots_and_state_stays_outside() {
 
 #[test]
 fn invalid_native_control_labels_are_omitted() {
-    use super::super::validation::filtered_native_controls;
+    use super::super::validation::{
+        filtered_native_controls, filtered_native_controls_with_policy,
+    };
+    use provenant_records::policy::{Effect, Facts, Policy, Source, Strength};
+    use std::collections::BTreeMap;
     let mut spec = ProviderProfileSpec {
         process_executables: vec![PathGrant {
             path: "/fixture/provider".into(),
@@ -812,6 +843,25 @@ fn invalid_native_control_labels_are_omitted() {
     );
     assert_eq!(
         filtered_native_controls(&spec.native_controls),
+        ["valid.control"]
+    );
+    let mut policy = Policy::default();
+    let code = "RENDER_FILTERED_NATIVE_CONTROLS_NONE";
+    assert_eq!(policy.rule(code).rule.strength, Strength::Warn);
+    assert!(matches!(
+        policy.check(code, Facts::violation("predicate observed")),
+        Effect::Warn(_)
+    ));
+    policy.overlay(
+        &BTreeMap::from([(code.to_owned(), Strength::Off)]),
+        Source::Host,
+    );
+    assert_eq!(
+        policy.check(code, Facts::violation("predicate observed")),
+        Effect::Proceed
+    );
+    assert_eq!(
+        filtered_native_controls_with_policy(&spec.native_controls, &policy),
         ["valid.control"]
     );
     spec.native_controls = filtered_native_controls(&spec.native_controls);

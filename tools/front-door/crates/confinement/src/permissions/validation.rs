@@ -5,6 +5,7 @@ use super::*;
 use crate::repo::VerifiedWorktree;
 #[cfg(target_os = "macos")]
 use provenant_os::fs::{Directory, FileKind};
+use provenant_records::policy::{Effect, Facts, Policy};
 use std::ffi::OsStr;
 #[cfg(target_os = "macos")]
 use std::io::Read;
@@ -16,34 +17,23 @@ pub(super) const MAX_PATH_GRANTS: usize = 128;
 #[cfg(target_os = "macos")]
 pub(super) const MAX_GIT_HEAD_BYTES: u64 = 1024;
 
-#[cfg(any(target_os = "macos", test))]
-pub(super) fn validate_plan_grant_limit(
-    plan: &PlanPermissions,
-    limit: usize,
-) -> Result<(), PermissionError> {
-    for (family, count) in [
-        (
-            "total root grant count",
-            plan.read_roots
-                .len()
-                .saturating_add(plan.protected_roots.len())
-                .saturating_add(plan.secret_roots.len())
-                .saturating_add(plan.write_roots.len()),
-        ),
-        ("read root grant count", plan.read_roots.len()),
-        ("protected root grant count", plan.protected_roots.len()),
-        ("secret root grant count", plan.secret_roots.len()),
-        ("write root grant count", plan.write_roots.len()),
-    ] {
-        if count > limit {
-            return Err(PermissionError::GrantLimitExceeded { family, limit });
-        }
-    }
-    Ok(())
+fn boundary_error<E: std::fmt::Display>(code: &str, error: E) -> E {
+    let detail = error.to_string();
+    Policy::default().boundary_error(code, Facts::violation(detail), error)
 }
 
 #[cfg(target_os = "macos")]
 pub(super) fn verify_worktree_authority(
+    authority: &WorktreeWriteAuthority,
+    anchors: &Anchors<'_>,
+) -> Result<WorktreeWriteGrants, PermissionError> {
+    verify_worktree_authority_inner(authority, anchors).map_err(|error| {
+        boundary_error("VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION", error)
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn verify_worktree_authority_inner(
     authority: &WorktreeWriteAuthority,
     anchors: &Anchors<'_>,
 ) -> Result<WorktreeWriteGrants, PermissionError> {
@@ -83,6 +73,18 @@ pub(super) fn verify_worktree_authority(
 pub(super) fn verify_git_control_links(
     repo: &crate::repo::VerifiedRepo,
 ) -> Result<(), PermissionError> {
+    verify_git_control_links_inner(repo).map_err(|error| {
+        let code = if matches!(&error, PermissionError::GitControlHardLinked(_)) {
+            "VALIDATION_VERIFY_GIT_CONTROL_LINKS_GIT_ISOLATION"
+        } else {
+            "VALIDATION_VERIFY_GIT_CONTROL_LINKS_DATA_INTEGRITY"
+        };
+        boundary_error(code, error)
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn verify_git_control_links_inner(repo: &crate::repo::VerifiedRepo) -> Result<(), PermissionError> {
     const ENTRIES_PER_DIRECTORY: usize = 512;
     let check = |directory: &Directory, parent: &Path, name: &OsStr| match directory
         .metadata_at(name, false)
@@ -196,6 +198,35 @@ pub(super) fn validate_profile_spec_with_home(
 
 #[cfg(any(target_os = "macos", test))]
 fn validate_profile_spec_impl(
+    spec: &ProviderProfileSpec,
+    home: Option<&Path>,
+    grant_limit: usize,
+) -> Result<(), PermissionError> {
+    validate_profile_spec_inner(spec, home, grant_limit).map_err(|error| {
+        use PermissionError as E;
+        let code = match &error {
+            E::CredentialRoot
+            | E::CredentialRootAt { .. }
+            | E::CredentialGrant { .. }
+            | E::InvalidFixture => Some("VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_CREDENTIALS"),
+            E::ProcessPolicyMissing => Some("VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_AUTHORITY"),
+            E::InvalidPath(_) | E::BroadRoot | E::NonUtf8Path => {
+                Some("VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_AUTHORITY_2")
+            }
+            // Hard count bounds used by validation fixtures remain typed
+            // validation errors; launch warning thresholds run in compile_sbpl.
+            E::GrantLimitExceeded { .. } => None,
+            _ => None,
+        };
+        match code {
+            Some(code) => boundary_error(code, error),
+            None => error,
+        }
+    })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn validate_profile_spec_inner(
     spec: &ProviderProfileSpec,
     home: Option<&Path>,
     grant_limit: usize,
@@ -418,8 +449,22 @@ pub fn refuses_lane_root(path: &Path, read: bool, home: Option<&Path>) -> bool {
         path: path.to_owned(),
         scope: PathScope::Subtree,
     };
-    refuses_credential_grant(&grant, read)
-        || home.is_some_and(|home| encloses_home_credentials(&grant, home))
+    let refused = refuses_credential_grant(&grant, read)
+        || home.is_some_and(|home| encloses_home_credentials(&grant, home));
+    if refused {
+        let detail = format!("lane root exposes credential material: {}", path.display());
+        // Preserve the existing bool API while driving the immutable rule
+        // through the shared typed boundary helper.
+        return matches!(
+            Policy::default().boundary_error(
+                "VALIDATION_REFUSES_LANE_ROOT_CREDENTIALS",
+                Facts::violation(detail),
+                PermissionError::CredentialRoot,
+            ),
+            PermissionError::CredentialRoot
+        );
+    }
+    refused
 }
 
 /// The grant-level form of [`refuses_lane_root`], honouring an exact grant's
@@ -635,17 +680,31 @@ pub(super) fn validate_endpoint(endpoint: &NetworkEndpoint) -> Result<(), Permis
 
 #[cfg(any(target_os = "macos", test))]
 pub(super) fn filtered_native_controls(controls: &[String]) -> Vec<String> {
+    filtered_native_controls_with_policy(controls, &Policy::default())
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[allow(clippy::panic)]
+pub(super) fn filtered_native_controls_with_policy(
+    controls: &[String],
+    policy: &Policy,
+) -> Vec<String> {
     let filtered: Vec<_> = controls
         .iter()
         .filter(|control| valid_native_control(control))
         .cloned()
         .collect();
     if filtered.len() != controls.len() {
-        use std::io::Write;
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: invalid native control labels were omitted"
-        );
+        let invalid = controls.len() - filtered.len();
+        match policy.check(
+            "RENDER_FILTERED_NATIVE_CONTROLS_NONE",
+            Facts::violation(format!("omitted {invalid} malformed native control labels")),
+        ) {
+            Effect::Proceed => {}
+            Effect::Warn(message) => crate::permissions::probe::report_policy_message(message),
+            Effect::Queue(_) => panic!("native-control filtering does not support queue effects"),
+            Effect::Refuse(_) => panic!("native-control filtering is a warning-only decision"),
+        }
     }
     filtered
 }

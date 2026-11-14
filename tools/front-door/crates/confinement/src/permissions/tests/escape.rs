@@ -348,6 +348,7 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     let backend = MacOsSandboxBackend {
         ready: true,
         limits: ProfileLimits::default(),
+        policy: provenant_records::policy::Policy::default(),
     };
     // Existing hard links in the scratch, the worktree and its ignored
     // build and dependency trees do not refuse the launch: the sandbox

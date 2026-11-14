@@ -112,60 +112,127 @@ fn expanded_authentication_family_grants_only_selected_credentials() -> Result<(
 
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 #[test]
-fn profiles_above_former_thresholds_render_without_truncation()
--> Result<(), Box<dyn std::error::Error>> {
+fn large_profiles_render_without_truncation() -> Result<(), Box<dyn std::error::Error>> {
     let (plan, profile) = write_grants_fixture();
-    let mut many = plan.clone();
-    many.read_roots = (0..129)
-        .map(|index| PathGrant {
-            path: PathBuf::from(format!("/fixture/root/{index}")),
-            scope: PathScope::Subtree,
-        })
-        .collect();
-    assert!(validate_plan_grant_limit(&many, 128).is_err());
-    assert!(validate_plan_grant_limit(&many, 256).is_ok());
     let mut grants = GrantSet::build(&plan, &profile, Path::new("/fixture/home"), None)?;
     let root = |index: usize, width: usize| PathGrant {
         path: PathBuf::from(format!("/fixture/reads/{index}/{}", "x".repeat(width))),
         scope: PathScope::Subtree,
     };
-    // About 130 KiB: over the former 64 KiB cap, inside the launch limit.
     grants.reads = (0..1000).map(|index| root(index, 100)).collect();
     let source = render(&grants)?;
-    assert!(source.len() > 64 * 1024 && source.len() <= PROFILE_LIMIT);
+    for grant in &grants.reads {
+        assert!(source.contains(grant.path.to_str().expect("fixture UTF-8")));
+    }
     grants.reads = (0..4000).map(|index| root(index, 200)).collect();
     let expanded = render(&grants)?;
-    assert!(expanded.len() > PROFILE_LIMIT);
-    assert_eq!(expanded, render_with_limit(&grants, usize::MAX)?);
     for grant in &grants.reads {
         assert!(expanded.contains(grant.path.to_str().expect("fixture UTF-8")));
     }
-    for origin in [
-        provenant_records::diagnostic::SettingSource::ShippedDefault,
-        provenant_records::diagnostic::SettingSource::Configuration,
-    ] {
-        let warning = capacity_warning(
-            "domains.run.profile_limit_bytes",
-            expanded.len(),
-            PROFILE_LIMIT,
-            origin,
-        )
-        .expect("warning above threshold");
-        assert!(warning.contains(&expanded.len().to_string()));
-        assert!(warning.contains(&PROFILE_LIMIT.to_string()));
-        assert!(warning.contains(origin.description()));
-        assert!(warning.len() < 256);
-        assert!(
-            capacity_warning(
-                "domains.run.profile_limit_bytes",
-                PROFILE_LIMIT,
-                PROFILE_LIMIT,
-                origin
-            )
-            .is_none()
-        );
-    }
     Ok(())
+}
+
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[test]
+fn capacity_policy_controls_warning_off_and_typed_refusal() {
+    use provenant_records::policy::{Boundary, Policy, Source, Strength};
+    use std::collections::BTreeMap;
+
+    let default = Policy::default();
+    for code in ["GRANT_COUNT", "PROFILE_GRANT_COUNT", "PROFILE_BYTES"] {
+        let rule = default.rule(code);
+        assert_eq!(rule.rule.boundary, Boundary::None);
+        assert_eq!(rule.rule.strength, Strength::Warn);
+    }
+    let origin = provenant_records::diagnostic::SettingSource::Configuration;
+    assert!(
+        check_capacity_policy(
+            &default,
+            "GRANT_COUNT",
+            "domains.run.grant_limit",
+            2,
+            1,
+            origin,
+            PermissionError::GrantLimitExceeded {
+                family: "plan root grant count",
+                limit: 1,
+            },
+        )
+        .expect("warning policy proceeds")
+        .is_some()
+    );
+
+    let mut off = Policy::default();
+    off.overlay(
+        &BTreeMap::from([("PROFILE_GRANT_COUNT".to_owned(), Strength::Off)]),
+        Source::Host,
+    );
+    assert!(
+        check_capacity_policy(
+            &off,
+            "PROFILE_GRANT_COUNT",
+            "domains.run.grant_limit",
+            2,
+            1,
+            origin,
+            PermissionError::GrantLimitExceeded {
+                family: "provider profile grant count",
+                limit: 1,
+            },
+        )
+        .expect("off policy proceeds")
+        .is_none()
+    );
+
+    let mut strict = Policy::default();
+    strict.overlay(
+        &BTreeMap::from([("PROFILE_BYTES".to_owned(), Strength::Refuse)]),
+        Source::Dispatch,
+    );
+    assert!(matches!(
+        check_capacity_policy(
+            &strict,
+            "PROFILE_BYTES",
+            "domains.run.profile_limit_bytes",
+            2,
+            1,
+            origin,
+            PermissionError::ProfileTooLarge { bytes: 2, limit: 1 },
+        ),
+        Err(PermissionError::ProfileTooLarge { bytes: 2, limit: 1 })
+    ));
+}
+
+#[test]
+fn read_only_extension_guard_uses_immutable_authority_policy() {
+    use provenant_records::policy::{Boundary, Effect, Facts, Policy, Strength};
+
+    let (permissions, _) = write_grants_fixture();
+    let error = ConfinedPlan::new(PlanRequest {
+        scope: provenant_core::WorkScope::Project(provenant_core::ProjectId::from_bytes([1; 16])),
+        permissions,
+        codex: CodexPolicy::Inherited,
+        extensions: ExtensionPolicy::Unconfined,
+        agy_state: None,
+    })
+    .err()
+    .expect("unconfined read-only extensions are refused");
+    assert!(matches!(
+        error,
+        crate::plan::PlanError::UnconfinedExtensions
+    ));
+
+    let policy = provenant_records::policy::Policy::default();
+    let rule = policy.rule("PLAN_CONFINEDPLAN_NEW_AUTHORITY");
+    assert_eq!(rule.rule.boundary, Boundary::Authority);
+    assert_eq!(rule.rule.strength, Strength::Refuse);
+    assert!(matches!(
+        policy.check(
+            "PLAN_CONFINEDPLAN_NEW_AUTHORITY",
+            Facts::violation("guard failed"),
+        ),
+        Effect::Refuse(_)
+    ));
 }
 
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
@@ -353,6 +420,7 @@ fn worktree_access_read_only_profile_limits_checkout_writes()
     let compiled = MacOsSandboxBackend {
         ready: true,
         limits: ProfileLimits::default(),
+        policy: Policy::default(),
     }
     .compile(plan.permissions(), &profile, &anchors)?;
     let source = String::from_utf8(compiled.profile)?;
@@ -364,11 +432,12 @@ fn worktree_access_read_only_profile_limits_checkout_writes()
             grant_origin: provenant_records::diagnostic::SettingSource::Configuration,
             profile_origin: provenant_records::diagnostic::SettingSource::Configuration,
         },
+        policy: Policy::default(),
     }
     .compile(plan.permissions(), &profile, &anchors)?;
     assert_eq!(over_threshold.profile, source.as_bytes());
-    // Medium/native acceptance: real anchors and compiler, above both former
-    // defaults. Exact absent files share an already-held read-only parent.
+    // Large/native acceptance: real anchors and compiler, above the effective
+    // profile threshold. Exact absent files share an already-held read parent.
     let mut large_profile = ProviderProfile {
         spec: profile.spec.clone(),
         observations: profile.observations.clone(),
@@ -388,9 +457,10 @@ fn worktree_access_read_only_profile_limits_checkout_writes()
     let large = MacOsSandboxBackend {
         ready: true,
         limits: ProfileLimits::default(),
+        policy: Policy::default(),
     }
     .compile(plan.permissions(), &large_profile, &anchors)?;
-    assert!(large.profile.len() > PROFILE_LIMIT);
+    assert!(large.profile.len() > ProfileLimits::default().profile_limit_bytes);
     let native = || -> Result<(), Box<dyn std::error::Error>> {
         let env = [("HOME".into(), home.clone().into_os_string())];
         let executor = SystemExecutor::new(1)?;
@@ -439,6 +509,7 @@ fn worktree_access_read_only_profile_limits_checkout_writes()
     let strict_profile = MacOsSandboxBackend {
         ready: true,
         limits: ProfileLimits::default(),
+        policy: Policy::default(),
     }
     .compile(strict.permissions(), &profile, &anchors)?;
     let strict_source = String::from_utf8(strict_profile.profile)?;
@@ -511,7 +582,8 @@ fn worktree_access_read_only_profile_limits_checkout_writes()
     assert!(
         MacOsSandboxBackend {
             ready: true,
-            limits: ProfileLimits::default()
+            limits: ProfileLimits::default(),
+            policy: Policy::default(),
         }
         .compile(plan.permissions(), &profile, &anchors)
         .is_err()
@@ -524,7 +596,8 @@ fn worktree_access_read_only_profile_limits_checkout_writes()
     assert!(
         MacOsSandboxBackend {
             ready: true,
-            limits: ProfileLimits::default()
+            limits: ProfileLimits::default(),
+            policy: Policy::default(),
         }
         .compile(plan.permissions(), &profile, &anchors)
         .is_err()
@@ -834,7 +907,7 @@ fn network_endpoints_accept_only_sbpl_hosts_and_checked_ports() {
 }
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 #[test]
-fn invalid_provider_endpoints_warn_and_preserve_open_network() -> Result<(), PermissionError> {
+fn invalid_provider_endpoints_are_omitted_from_sbpl() -> Result<(), PermissionError> {
     let (mut plan, mut profile) = write_grants_fixture();
     plan.network = NetworkAccess::Open;
     profile.spec.process_executables.push(PathGrant {
@@ -858,6 +931,23 @@ fn invalid_provider_endpoints_warn_and_preserve_open_network() -> Result<(), Per
     validate_profile_spec_with_home(&profile.spec, Path::new("/fixture/home"), 128)?;
     let grants = GrantSet::build(&plan, &profile, Path::new("/fixture/home"), None)?;
     let source = render(&grants)?;
+    let policy = provenant_records::policy::Policy::default();
+    let rule = policy.rule("RENDER_RENDER_PROFILE_WITH_LIMIT_NONE");
+    assert_eq!(
+        rule.rule.boundary,
+        provenant_records::policy::Boundary::None
+    );
+    assert_eq!(
+        rule.rule.strength,
+        provenant_records::policy::Strength::Warn
+    );
+    assert!(matches!(
+        policy.check(
+            "RENDER_RENDER_PROFILE_WITH_LIMIT_NONE",
+            provenant_records::policy::Facts::violation("predicate observed"),
+        ),
+        provenant_records::policy::Effect::Warn(_)
+    ));
     assert!(source.contains("(allow network-outbound (remote tcp \"localhost:443\"))"));
     assert!(source.contains("(allow network-outbound (remote ip \"*:*\"))"));
     assert!(!source.contains("invalid"));
@@ -902,6 +992,23 @@ fn invalid_discovery_reads_are_omitted_before_anchoring_and_rendering()
     assert!(!anchors.contains(invalid_native.parent().expect("fixture parent")));
     let grants = GrantSet::build(&plan, &profile, Path::new("/fixture/home"), None)?;
     let source = render(&grants)?;
+    let policy = provenant_records::policy::Policy::default();
+    let rule = policy.rule("RENDER_RENDER_PROFILE_WITH_LIMIT_NONE_2");
+    assert_eq!(
+        rule.rule.boundary,
+        provenant_records::policy::Boundary::None
+    );
+    assert_eq!(
+        rule.rule.strength,
+        provenant_records::policy::Strength::Warn
+    );
+    assert!(matches!(
+        policy.check(
+            "RENDER_RENDER_PROFILE_WITH_LIMIT_NONE_2",
+            provenant_records::policy::Facts::violation("predicate observed"),
+        ),
+        provenant_records::policy::Effect::Warn(_)
+    ));
     assert!(source.contains("(allow file-read* (literal \"/fixture/repo/.agents\"))"));
     assert!(!source.contains("hosts.yml"));
     assert!(!source.contains("/fixture/unsafe/.codex"));
@@ -1254,6 +1361,7 @@ fn enforcing_backend_refuses_missing_host_policy_before_inspecting_grants() {
     let result = MacOsSandboxBackend {
         ready: true,
         limits: ProfileLimits::default(),
+        policy: Policy::default(),
     }
     .compile(&plan, &profile, &anchors);
     assert!(matches!(
