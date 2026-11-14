@@ -1201,6 +1201,8 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Wait(cmd) => status_wait::run(cmd, globals),
         Command::Land {
             numbers,
+            strategy,
+            target,
             head,
             wait,
             poll,
@@ -1211,6 +1213,8 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         } => pr::landing::run(
             pr::landing::Options {
                 numbers,
+                strategy,
+                target,
                 head,
                 wait,
                 poll,
