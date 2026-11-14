@@ -26,6 +26,7 @@ pub struct ArchiveIssue {
 #[derive(Debug, Default, Serialize)]
 pub struct ArchiveReport {
     pub removed: Vec<PathBuf>,
+    pub would_remove: Vec<PathBuf>,
     pub bytes: u64,
     pub errors: Vec<ArchiveIssue>,
 }
@@ -46,7 +47,9 @@ pub(super) fn capture(
 ) -> Result<ArchiveInfo, WorktreeError> {
     let root_name = OsStr::new("discard-archives");
     match context.project_state.mkdir(root_name, 0o700) {
-        Ok(()) => {}
+        Ok(()) => {
+            context.project_state.sync()?;
+        }
         Err(error) if error.is_exists() => {}
         Err(error) => return Err(error.into()),
     }
@@ -55,7 +58,7 @@ pub(super) fn capture(
     let stage_name = OsString::from(format!(".stage-{}", nonce.to_string_lossy()));
     root.mkdir(&stage_name, 0o700)?;
     let stage = root.open_verified_directory(&stage_name)?;
-    let stage_path = stage.anchored_path();
+    let stage_path = stage.current_path()?;
     // An incomplete stage is never evidence authorising discard.
     let capture = (|| -> Result<(), WorktreeError> {
         let reference = GitRefName::new(format!(
@@ -154,12 +157,34 @@ pub(super) fn capture(
         stage.sync()?;
         Ok(())
     })();
-    capture?;
+    if let Err(error) = capture {
+        if let Ok(reference) = GitRefName::new(format!(
+            "refs/provenant/discard-archives/{}",
+            nonce.to_string_lossy()
+        )) {
+            let _ = execute_mutation(
+                context,
+                GitMutation::DeleteRef {
+                    name: reference,
+                    expected_old_oid: tip,
+                },
+                cancel,
+            );
+        }
+        if let Ok(metadata) = root.metadata_at(&stage_name, false) {
+            if let Ok(tree) = PayloadTree::claim(&root, &stage_name, &metadata) {
+                if super::gc::dispose_archive_tree(&tree).is_ok() {
+                    let _ = root.rmdir(&stage_name);
+                }
+            }
+        }
+        return Err(error);
+    }
     let name = OsString::from(format!("archive-{}", nonce.to_string_lossy()));
     root.rename_noreplace(&stage_name, &root, &name)?;
     root.sync()?;
     Ok(ArchiveInfo {
-        path: root.anchored_path().join(name),
+        path: root.current_path()?.join(name),
         tip,
     })
 }
@@ -175,7 +200,7 @@ fn append_path(root: &Directory, path: &Path, out: &mut FileHandle) -> io::Resul
     {
         return Err(io::Error::other("unsafe repository-relative archive path"));
     }
-    let mut directory = Directory::open_anchor(&root.anchored_path()).map_err(io::Error::other)?;
+    let mut directory = root.try_clone().map_err(io::Error::other)?;
     for component in &components[..components.len() - 1] {
         directory = directory
             .open_verified_directory(component.as_os_str())
@@ -286,7 +311,7 @@ pub fn collect_archives(
             if metadata.kind != FileKind::Directory || metadata.modified_ns >= before_ns {
                 continue;
             }
-            let path = root.anchored_path().join(&name);
+            let path = root.current_path()?.join(&name);
             let tree = PayloadTree::claim(&root, &name, &metadata)?;
             fn visit(tree: &PayloadTree, dry: bool) -> Result<u64, FsError> {
                 let mut bytes = 0_u64;
@@ -311,7 +336,11 @@ pub fn collect_archives(
                 root.sync()?;
             }
             report.bytes = report.bytes.saturating_add(bytes);
-            report.removed.push(path);
+            if dry_run {
+                report.would_remove.push(path);
+            } else {
+                report.removed.push(path);
+            }
         }
         Ok(())
     })();

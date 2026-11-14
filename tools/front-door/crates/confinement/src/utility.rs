@@ -239,6 +239,9 @@ pub enum GitRead {
         head: GitOid,
     },
     IsShallow,
+    CommitTime {
+        tip: GitOid,
+    },
     PushPatch {
         base: Option<GitOid>,
         head: GitOid,
@@ -1296,6 +1299,13 @@ fn git_args(
             target.to_string().into(),
             head.to_string().into(),
         ],
+        GitRead::CommitTime { tip } => vec![
+            "show".into(),
+            "-s".into(),
+            "--format=%ct".into(),
+            tip.to_string().into(),
+            "--".into(),
+        ],
         GitRead::IsShallow => vec!["rev-parse".into(), "--is-shallow-repository".into()],
         GitRead::Status => vec![
             "status".into(),
@@ -2286,7 +2296,7 @@ fn mutation_args(mutation: GitMutation) -> Result<(Vec<OsString>, Option<Vec<u8>
                 "update-ref".into(),
                 reference.as_str().into(),
                 tip.to_string().into(),
-                "0000000000000000000000000000000000000000".into(),
+                "0".repeat(tip.to_string().len()).into(),
             ]);
             None
         }

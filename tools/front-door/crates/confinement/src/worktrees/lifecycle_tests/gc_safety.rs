@@ -167,7 +167,11 @@ fn gc_idle_output_requires_ignored_idle_and_free_writer() -> Result<(), Box<dyn 
             &context,
             &lanes,
             &WorktreeGcPolicy {
-                foreign_merged_clean: false,
+                include_foreign: false,
+                retirement: None,
+                upstream_reference: None,
+                integration_patterns: &[],
+                excluded_paths: &[],
                 upstream: None,
                 terminal: &|_| false,
                 no_live_lanes: &|_| scenario != "lane",
@@ -250,7 +254,11 @@ fn gc_protects_nested_repositories_under_ignored_directories() -> Result<(), Box
                     keep: &[],
                     written_before_ns: i128::MAX,
                     dry_run: false,
-                    foreign_merged_clean: false,
+                    include_foreign: false,
+                    retirement: None,
+                    upstream_reference: None,
+                    integration_patterns: &[],
+                    excluded_paths: &[],
                 },
                 &cancel(),
             )?;
@@ -351,7 +359,7 @@ fn remove_lane_scratch_without_declaration() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn gc_foreign_merged_clean_is_opt_in_immediate_and_requires_complete_census()
+fn gc_foreign_cleanup_respects_exclusions_and_requires_complete_census()
 -> Result<(), Box<dyn Error>> {
     for scenario in [
         "default",
@@ -375,6 +383,8 @@ fn gc_foreign_merged_clean_is_opt_in_immediate_and_requires_complete_census()
             path.to_str().ok_or("path")?,
         ])?;
         if scenario == "unmerged" {
+            fs::write(path.join("new-work"), b"new work")?;
+            run_in_worktree(&fixture, &path, &["add", "new-work"])?;
             run_in_worktree(
                 &fixture,
                 &path,
@@ -393,7 +403,11 @@ fn gc_foreign_merged_clean_is_opt_in_immediate_and_requires_complete_census()
             &context,
             &lanes,
             &WorktreeGcPolicy {
-                foreign_merged_clean: scenario != "default",
+                include_foreign: scenario != "default",
+                retirement: None,
+                upstream_reference: None,
+                integration_patterns: &[],
+                excluded_paths: &[],
                 upstream: Some(fixture.head()?),
                 terminal: &|_| false,
                 no_live_lanes: &|_| scenario != "live-lane",
@@ -490,7 +504,11 @@ fn gc_output_pruning_holds_writer_but_not_repository_lock() -> Result<(), Box<dy
         &context,
         &[lane],
         &WorktreeGcPolicy {
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
             upstream: None,
             terminal: &terminal,
             no_live_lanes: &|_| true,
@@ -564,7 +582,11 @@ fn gc_foreign_rechecks_changes_before_removal() -> Result<(), Box<dyn Error>> {
                 keep: &[],
                 written_before_ns: i128::MAX,
                 dry_run: false,
-                foreign_merged_clean: true,
+                include_foreign: true,
+                retirement: None,
+                upstream_reference: None,
+                integration_patterns: &[],
+                excluded_paths: &[],
             },
             &cancel(),
         )?;
@@ -633,7 +655,11 @@ fn gc_foreign_prunes_under_writer_then_locks_repository() -> Result<(), Box<dyn 
             keep: &[],
             written_before_ns: i128::MAX,
             dry_run: false,
-            foreign_merged_clean: true,
+            include_foreign: true,
+            retirement: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
         },
         &cancel(),
     )?;
@@ -664,7 +690,11 @@ fn gc_failed_prune_retains_once_and_continues() -> Result<(), Box<dyn Error>> {
         &context,
         &[first.clone(), second.clone()],
         &WorktreeGcPolicy {
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
             upstream: Some(fixture.head()?),
             terminal: &terminal,
             no_live_lanes: &|_| true,
@@ -725,7 +755,11 @@ fn gc_reclaims_unmanaged_output_but_keeps_worktree() -> Result<(), Box<dyn Error
         &context,
         &[lane],
         &WorktreeGcPolicy {
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
             upstream: Some(fixture.head()?),
             terminal: &|_| true,
             no_live_lanes: &|_| true,
@@ -768,7 +802,11 @@ fn gc_merged_tree_previews_and_removes_recent_declared_output() -> Result<(), Bo
         keep: &[],
         written_before_ns: 0,
         dry_run: true,
-        foreign_merged_clean: false,
+        include_foreign: false,
+        retirement: None,
+        upstream_reference: None,
+        integration_patterns: &[],
+        excluded_paths: &[],
     };
     let preview = collect(&context, &[lane.clone()], &settings, &cancel())?;
     assert_eq!(preview.worktrees.removed.len(), 1);
@@ -803,78 +841,6 @@ fn gc_merge_proof_requires_containment_in_the_pinned_default() -> Result<(), Box
 }
 
 #[test]
-fn gc_managed_fallback_keeps_fresh_trees_at_the_tip_or_first_parent() -> Result<(), Box<dyn Error>>
-{
-    // Two ways a managed tree reaches the foreign fallback: no terminal lane,
-    // or a writer reported unknown. Neither may bypass the managed protections.
-    for entry in ["no-terminal-lane", "unknown-writer"] {
-        for shape in ["at-tip", "first-parent"] {
-            let fixture = Fixture::new()?;
-            let test_context = TestContext::new(&fixture)?;
-            let context = test_context.context();
-            let name = format!("gc-fallback-{entry}-{shape}");
-            let created = create(
-                &context,
-                WorktreeCreate {
-                    branch: name.clone(),
-                    base: None,
-                },
-                &cancel(),
-            )?;
-            if shape == "first-parent" {
-                run_in_worktree(
-                    &fixture,
-                    &created.path,
-                    &["commit", "--allow-empty", "-m", "lane"],
-                )?;
-                fixture.run(&["merge", "--ff-only", &name])?;
-                fixture.run(&["commit", "--allow-empty", "-m", "main moves on"])?;
-            }
-            let mut lane = list(&context, &cancel())?
-                .into_iter()
-                .find(|lane| lane.path == created.path)
-                .ok_or("missing lane")?;
-            if entry == "unknown-writer" {
-                lane.occupancy =
-                    Occupancy::custody_unknown(lane.path.clone(), "fixture unknown writer");
-            }
-            let report = collect(
-                &context,
-                &[lane],
-                &WorktreeGcPolicy {
-                    foreign_merged_clean: true,
-                    upstream: Some(fixture.head()?),
-                    terminal: &|_| entry == "unknown-writer",
-                    no_live_lanes: &|_| true,
-                    regenerable: &[],
-                    keep: &[],
-                    written_before_ns: i128::MAX,
-                    dry_run: false,
-                },
-                &cancel(),
-            )?;
-            let expected = if shape == "at-tip" {
-                RetainReason::AtIntegrationTip
-            } else {
-                RetainReason::NoUniqueCommit
-            };
-            assert_eq!(
-                report.worktrees.retained,
-                vec![RetainedBranch {
-                    branch: name.clone(),
-                    reason: expected,
-                    detail: None,
-                }],
-                "{entry} {shape}: {report:?}"
-            );
-            assert!(report.worktrees.removed.is_empty(), "{entry} {shape}");
-            assert!(created.path.is_dir() && branch_exists(&fixture, &name));
-        }
-    }
-    Ok(())
-}
-
-#[test]
 fn gc_census_never_runs_under_the_repository_lock() -> Result<(), Box<dyn Error>> {
     for scenario in ["managed", "managed-preview", "foreign", "foreign-preview"] {
         let fixture = Fixture::new()?;
@@ -895,7 +861,11 @@ fn gc_census_never_runs_under_the_repository_lock() -> Result<(), Box<dyn Error>
             &context,
             &[lane],
             &WorktreeGcPolicy {
-                foreign_merged_clean: foreign,
+                include_foreign: foreign,
+                retirement: None,
+                upstream_reference: None,
+                integration_patterns: &[],
+                excluded_paths: &[],
                 upstream: Some(fixture.head()?),
                 terminal: &|_| !foreign,
                 no_live_lanes: &|_| true,

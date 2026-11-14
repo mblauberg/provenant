@@ -8,7 +8,11 @@ mod custody;
 mod doctor;
 #[cfg(test)]
 mod doctor_tests;
+mod evidence;
 mod gc;
+pub use evidence::{
+    EvidenceRef, RemovalEvidence, matches_pattern, removal_evidence, retained_refs,
+};
 mod inventory;
 mod landed;
 mod lifecycle;
@@ -23,7 +27,10 @@ pub use context::{
 };
 pub use custody::*;
 pub use doctor::{WorktreeDiagnosis, WorktreeDiagnosisState, doctor};
-pub use gc::{OutputEntry, WorktreeGcPolicy, WorktreeGcReport, collect, collect_lazy};
+pub use gc::{
+    CandidateReport, ForgeObservation, OutputEntry, RetirementAction, RetirementOwner,
+    WorktreeGcPolicy, WorktreeGcReport, collect, collect_lazy,
+};
 pub use inventory::*;
 pub use landed::{
     CommitGraph, IntegrationEdge, LandedBy, Landing, LandingTarget, RepoGraph, Unproven,
@@ -99,10 +106,7 @@ pub fn lock_repository(
     }
     // Protect creation/removal, registration, and coherent Git config snapshots.
     // Never retain this hold across provider work or network discovery.
-    match common.try_lock(OsStr::new(REPOSITORY_LOCK), mode) {
-        Err(FsError::LockTimeout { .. }) => common.try_lock(OsStr::new(REPOSITORY_LOCK), mode),
-        result => result,
-    }
+    common.try_lock(OsStr::new(REPOSITORY_LOCK), mode)
 }
 const WRITER_LOCK: &str = "writer.lock";
 

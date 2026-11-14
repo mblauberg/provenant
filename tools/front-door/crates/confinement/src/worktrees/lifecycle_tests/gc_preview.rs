@@ -26,7 +26,11 @@ fn gc_lazy_inventory_still_refuses_a_dirty_candidate() -> Result<(), Box<dyn Err
             keep: &[],
             written_before_ns: i128::MAX,
             dry_run: true,
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
         },
         &cancel(),
     )?;
@@ -97,7 +101,11 @@ fn gc_lazy_candidate_is_retained_when_its_git_probe_fails() -> Result<(), Box<dy
             keep: &[],
             written_before_ns: i128::MAX,
             dry_run: false,
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
         },
         &cancel(),
     )?;
@@ -143,7 +151,11 @@ fn gc_lazy_candidate_never_runs_nested_git_filters() -> Result<(), Box<dyn Error
             keep: &[],
             written_before_ns: i128::MAX,
             dry_run: true,
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
         },
         &cancel(),
     )?;
@@ -254,7 +266,11 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
                     _ => i128::MAX,
                 },
                 dry_run: matches!(scenario, "preview" | "no-output" | "unconfigured"),
-                foreign_merged_clean: false,
+                include_foreign: false,
+                retirement: None,
+                upstream_reference: None,
+                integration_patterns: &[],
+                excluded_paths: &[],
             },
             &cancel(),
         )?;
@@ -338,7 +354,11 @@ fn gc_native_output_preview_creates_no_writer_state() -> Result<(), Box<dyn Erro
             keep: &[],
             written_before_ns: i128::MAX,
             dry_run: true,
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
         };
         let preview = collect(&context, &lanes, &policy, &cancel())?;
         assert_eq!(preview.idle_output.len(), 1);
@@ -569,7 +589,11 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
         keep: &[],
         written_before_ns: i128::MAX,
         dry_run: false,
-        foreign_merged_clean: false,
+        include_foreign: false,
+        retirement: None,
+        upstream_reference: None,
+        integration_patterns: &[],
+        excluded_paths: &[],
     };
     collect(&context, &lanes, &policy, &cancel())?;
     assert!(path.join("target/artifact").is_file());
@@ -751,7 +775,11 @@ fn writer_lock_busy_is_distinct_from_observed_live_process() -> Result<(), Box<d
             keep: &[],
             written_before_ns: i128::MAX,
             dry_run: true,
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
         },
         &cancel(),
     )?;
@@ -806,7 +834,11 @@ fn foreign_gc_removes_recent_declared_output() -> Result<(), Box<dyn Error>> {
             keep: &[],
             written_before_ns: 0,
             dry_run: false,
-            foreign_merged_clean: true,
+            include_foreign: true,
+            retirement: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
         },
         &cancel(),
     )?;

@@ -12,7 +12,7 @@ use std::{
 };
 type Error = Box<dyn std::error::Error>;
 
-fn presence(
+pub(crate) fn presence(
     record: &CustodyRecord,
     roots: &Roots,
     host: provenant_core::HostId,

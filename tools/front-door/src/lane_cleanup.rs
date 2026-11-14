@@ -26,13 +26,28 @@ const REMOTE_READ: Duration = Duration::from_secs(30);
 const REMOTE_WRITE: Duration = Duration::from_secs(60);
 
 /// The policy one pass applies.
-pub(crate) struct Sweep {
+pub(crate) struct Sweep<'a> {
+    owner: Option<&'a crate::retention_owner::Owner<'a>>,
+    settings: Option<&'a provenant_config::ProjectGcSettings>,
     pub(crate) dry_run: bool,
 }
 
-impl Sweep {
+impl<'a> Sweep<'a> {
     pub(crate) fn new(dry_run: bool) -> Self {
-        Self { dry_run }
+        Self {
+            dry_run,
+            owner: None,
+            settings: None,
+        }
+    }
+    pub(crate) fn with_retention(
+        mut self,
+        owner: &'a crate::retention_owner::Owner<'a>,
+        settings: &'a provenant_config::ProjectGcSettings,
+    ) -> Self {
+        self.owner = Some(owner);
+        self.settings = Some(settings);
+        self
     }
 }
 
@@ -150,7 +165,7 @@ pub(crate) fn sweep_local(
     ledger: &RefLedger,
     record: &RefRecord,
     targets: &[LandingTarget],
-    sweep: &Sweep,
+    sweep: &Sweep<'_>,
     cancel: &CancelToken,
 ) -> ArtefactOutcome {
     let outcome = local_outcome(context, ledger, record, targets, sweep, cancel);
@@ -163,12 +178,12 @@ fn local_outcome(
     ledger: &RefLedger,
     record: &RefRecord,
     targets: &[LandingTarget],
-    sweep: &Sweep,
+    sweep: &Sweep<'_>,
     cancel: &CancelToken,
 ) -> ArtefactOutcome {
     let name = record.reference.clone();
     let out = |state| ArtefactOutcome::new(Artefact::LocalBranch, name.clone(), state);
-    if record.origin != RefOrigin::Created || record.endpoint != RefEndpoint::Local {
+    if record.endpoint != RefEndpoint::Local {
         return out(ArtefactState::Retained).with_reason("not_created");
     }
     let Ok(reference) = GitRefName::new(&record.reference) else {
@@ -195,12 +210,55 @@ fn local_outcome(
             .with_reason("changed")
             .with_head(tip);
     }
+    if let Some(settings) = sweep.settings {
+        if record.origin == RefOrigin::Adopted && settings.foreign_worktrees == provenant_config::ForeignWorktrees::Keep {
+            return out(ArtefactState::Retained).with_reason("foreign cleanup disabled by repository configuration");
+        }
+        if settings.keep_paths.iter().any(|p| worktrees::matches_pattern(reference.as_str(), p)) {
+            return out(ArtefactState::Retained).with_reason("excluded by gc.projects.keep_paths");
+        }
+    }
     match worktrees::branch_checked_out(context, &reference, cancel) {
         Ok(false) => {}
         Ok(true) => return out(ArtefactState::Retained).with_reason("checked_out"),
         Err(error) => return out(ArtefactState::Failed).with_reason(error.to_string()),
     }
-    let decision = landed_on_any(context, tip, targets, &[], cancel);
+    if let Some(owner) = sweep.owner {
+        use worktrees::RetirementOwner;
+        if let Err(error) = owner.custody(&owner.branch(context, &reference, tip)) {
+            return out(ArtefactState::Retained).with_reason(error);
+        }
+    }
+    let patterns = sweep
+        .settings
+        .map(|s| s.integration_branches.as_slice())
+        .unwrap_or(&[]);
+    let mut evidence_refs =
+        match worktrees::retained_refs(context, Some(&reference), None, patterns, cancel) {
+            Ok(refs) => refs,
+            Err(error) => return out(ArtefactState::Retained).with_reason(error.to_string()),
+        };
+    for target in targets {
+        if let Some(reference) = &target.reference {
+            evidence_refs.push(worktrees::EvidenceRef {
+                reference: reference.clone(),
+                commit: target.tip,
+                integration: true,
+            });
+        }
+    }
+    let decision = match worktrees::removal_evidence(context, tip, &evidence_refs, cancel) {
+        Ok(worktrees::RemovalEvidence::Proven(evidence)) => LandingDecision {
+            verdict: Verdict::Landed,
+            removal: RemovalOutcome::Removed { evidence },
+        },
+        Ok(worktrees::RemovalEvidence::Unknown(cause)) => kept_decision("uncertain", cause),
+        Ok(worktrees::RemovalEvidence::NotSubsumed) => {
+            kept_decision("not_subsumed", RemovalUncertainty::UnprovenLanding)
+        }
+        Err(error) => return out(ArtefactState::Retained).with_reason(error.to_string()),
+    };
+
     if let Verdict::Keep(why) = decision.verdict {
         return out(ArtefactState::Retained)
             .with_reason(why)
@@ -217,8 +275,20 @@ fn local_outcome(
             .with_reason(reason(decision.verdict))
             .with_head(tip);
     }
+    if let (Some(owner), RemovalOutcome::Removed { evidence }) = (sweep.owner, &decision.removal) {
+        use worktrees::RetirementOwner;
+        if let Err(error) = owner.record(context, &owner.branch(context, &reference, tip), &worktrees::RetirementAction::Subsumed(evidence.clone()), false) {
+            return out(ArtefactState::Retained).with_reason(error.to_string());
+        }
+    }
     match worktrees::delete_ref_leased(context, &reference, tip, cancel) {
         Ok(RefDeletion::Removed) => {
+            if let (Some(owner), RemovalOutcome::Removed { evidence }) = (sweep.owner, &decision.removal) {
+                use worktrees::RetirementOwner;
+                if let Err(error) = owner.record(context, &owner.branch(context, &reference, tip), &worktrees::RetirementAction::Subsumed(evidence.clone()), true) {
+                    return out(ArtefactState::Failed).with_reason(format!("branch removed; retirement completion pending: {error}"));
+                }
+            }
             let _ = ledger.forget(record, context.clock, cancel);
             out(ArtefactState::Removed)
                 .with_reason(reason(decision.verdict))
@@ -248,7 +318,7 @@ pub(crate) fn sweep_remote(
     record: &RefRecord,
     target: Option<&LandingTarget>,
     chain: &[IntegrationEdge],
-    sweep: &Sweep,
+    sweep: &Sweep<'_>,
     cancel: &CancelToken,
 ) -> Vec<ArtefactOutcome> {
     let outcomes = remote_outcomes(context, ledger, record, target, chain, sweep, cancel);
@@ -262,7 +332,7 @@ fn remote_outcomes(
     record: &RefRecord,
     target: Option<&LandingTarget>,
     chain: &[IntegrationEdge],
-    sweep: &Sweep,
+    sweep: &Sweep<'_>,
     cancel: &CancelToken,
 ) -> Vec<ArtefactOutcome> {
     let RefEndpoint::Remote { remote, push_url } = &record.endpoint else {
@@ -272,8 +342,17 @@ fn remote_outcomes(
     let out = |state| {
         ArtefactOutcome::new(Artefact::RemoteBranch, name.clone(), state).with_remote(remote)
     };
-    if record.origin != RefOrigin::Created {
-        return vec![out(ArtefactState::Retained).with_reason("not_created")];
+    let policy = sweep
+        .settings
+        .map(|s| s.remote_branches)
+        .unwrap_or_default();
+    if policy == provenant_config::RemoteBranches::Never
+        || (record.origin != RefOrigin::Created && policy != provenant_config::RemoteBranches::All)
+    {
+        return vec![
+            out(ArtefactState::Retained)
+                .with_reason("remote deletion disabled for this ownership class"),
+        ];
     }
     let Ok(reference) = GitRefName::new(&record.reference) else {
         return vec![out(ArtefactState::Retained).with_reason("invalid_ref")];
@@ -349,6 +428,39 @@ fn remote_outcomes(
         }
         return outcomes;
     }
+    let Some(owner) = sweep.owner else {
+        return vec![out(ArtefactState::Retained).with_reason("forge recheck unavailable")];
+    };
+    let days = sweep.settings.map_or(1, |s| s.remote_min_tip_age_days);
+    let now = match context.clock.wall_now() {
+        Ok(now) => now,
+        Err(error) => return vec![out(ArtefactState::Retained).with_reason(error.to_string())],
+    };
+    if now
+        .as_micros()
+        .saturating_sub(record.recorded_at.as_micros())
+        < i64::try_from(days.saturating_mul(86_400_000_000)).unwrap_or(i64::MAX)
+    {
+        return vec![
+            out(ArtefactState::Retained)
+                .with_reason("remote observation is younger than the minimum tip age"),
+        ];
+    }
+    if let Err(error) = owner.remote_safe(reference.short_name(), tip, days, context) {
+        return vec![
+            out(ArtefactState::Retained)
+                .with_reason(error)
+                .with_head(tip)
+                .with_removal(ref_removal(
+                    context.binding.project_id(),
+                    &reference,
+                    tip,
+                    RemovalOutcome::Kept {
+                        cause: RemovalUncertainty::OfflineForge,
+                    },
+                )),
+        ];
+    }
     match delete_remote(context, push_url, &reference, tip) {
         Ok(()) => {
             let _ = ledger.forget(record, context.clock, cancel);
@@ -382,7 +494,7 @@ fn stale_tracking(
     tracking: &GitRefName,
     target: Option<&LandingTarget>,
     chain: &[IntegrationEdge],
-    sweep: &Sweep,
+    sweep: &Sweep<'_>,
     cancel: &CancelToken,
 ) -> Option<ArtefactOutcome> {
     let out = |state| {
@@ -588,7 +700,7 @@ pub(crate) fn fetched_target(fetched: &(String, GitOid)) -> Option<LandingTarget
 pub(crate) fn collect(
     context: &WorktreeContext<'_>,
     upstream: Option<LandingTarget>,
-    sweep: &Sweep,
+    sweep: &Sweep<'_>,
     cancel: &CancelToken,
 ) -> Vec<ArtefactOutcome> {
     let ledger = match RefLedger::for_context(context) {
@@ -606,10 +718,32 @@ pub(crate) fn collect(
             return Vec::new();
         }
     };
-    let created = records
-        .into_iter()
-        .filter(|record| record.origin == RefOrigin::Created)
-        .collect::<Vec<_>>();
+    let mut created = records;
+    if let Ok(refs) = worktrees::retained_refs(context, None, None, &[], cancel) {
+        for retained in refs
+            .into_iter()
+            .filter(|r| r.reference.as_str().starts_with("refs/heads/"))
+        {
+            if !created.iter().any(|r| {
+                r.endpoint == RefEndpoint::Local && r.reference == retained.reference.as_str()
+            }) {
+                if let Ok(now) = context.clock.wall_now() {
+                    created.push(RefRecord {
+                        schema_version: 2,
+                        repository: context.binding.project_id(),
+                        endpoint: RefEndpoint::Local,
+                        reference: retained.reference.as_str().into(),
+                        generation: 1,
+                        origin: RefOrigin::Adopted,
+                        tip: retained.commit,
+                        recorded_at: now,
+                        attempt_id: None,
+                        operation_id: None,
+                    });
+                }
+            }
+        }
+    }
     // One default-branch fetch per bound endpoint.
     let mut endpoints: Vec<(RefEndpoint, Option<LandingTarget>)> = Vec::new();
     for record in &created {
@@ -669,7 +803,7 @@ pub(crate) fn settle_integrated(
     context: &WorktreeContext<'_>,
     branch: &GitRefName,
     receipt: &provenant_run::WriterDeliveryReceipt,
-    sweep: &Sweep,
+    sweep: &Sweep<'_>,
     cancel: &CancelToken,
 ) -> Vec<ArtefactOutcome> {
     let (Some(integration), Some(head)) = (receipt.integration.as_ref(), receipt.head) else {

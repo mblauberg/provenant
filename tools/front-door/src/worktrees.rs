@@ -851,45 +851,9 @@ fn append_gc_removal_records(
     project: provenant_core::ProjectId,
     upstream: Option<&(String, GitOid)>,
 ) {
-    if !report.dry_run {
-        if let Some((reference, commit)) = upstream {
-            let evidence = LandedEvidence {
-                predicate: LandingPredicate::Landed,
-                source: LandingSource::IntegrationTarget {
-                    reference: reference.clone(),
-                    commit: *commit,
-                },
-            };
-            for lane in &report.worktrees.removed {
-                report.removals.push(RemovalRecord {
-                    project,
-                    subject: Subject::new(SubjectKind::Worktree, lane.path.to_string_lossy()),
-                    tip: lane.head,
-                    outcome: provenant_records::custody::RemovalOutcome::Removed {
-                        evidence: evidence.clone(),
-                    },
-                });
-                if let Some(branch) = lane.branch.as_deref()
-                    && branch.strip_prefix("refs/heads/").is_some_and(|short| {
-                        report
-                            .worktrees
-                            .pruned_refs
-                            .iter()
-                            .any(|name| name == short)
-                    })
-                {
-                    report.removals.push(RemovalRecord {
-                        project,
-                        subject: Subject::new(SubjectKind::Branch, branch),
-                        tip: lane.head,
-                        outcome: provenant_records::custody::RemovalOutcome::Removed {
-                            evidence: evidence.clone(),
-                        },
-                    });
-                }
-            }
-        }
-    }
+    // The retirement owner supplies worktree/branch evidence. Never synthesize
+    // Landed from the fact that an upstream ref happened to be fetched.
+    let _ = (project, upstream);
     report.removals.extend(
         report
             .refs
@@ -1142,7 +1106,11 @@ pub(crate) fn land_cleanup(
                     regenerable: &regenerable,
                     keep: &settings.keep,
                     written_before_ns: now_ns,
-                    foreign_merged_clean: false,
+                    include_foreign: false,
+                    retirement: None,
+                    upstream_reference: None,
+                    integration_patterns: &[],
+                    excluded_paths: &[],
                     dry_run: false,
                 },
                 cancel,
@@ -1489,6 +1457,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                     .wall_now()
                     .map(|now| i128::from(now.as_micros()) * 1_000)
                     .map_err(|_| Error::Budget)?;
+                let retention_owner = crate::retention_owner::Owner::new(&roots, &home, &project.path);
                 let mut report = worktrees::collect_lazy(
                     context,
                     &lanes,
@@ -1500,9 +1469,13 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                         keep: &settings.keep,
                         written_before_ns: now_ns
                             - i128::from(output_idle_days) * 86_400 * 1_000_000_000,
-                        foreign_merged_clean: !command.pressure
+                        include_foreign: !command.pressure
                             && settings.foreign_worktrees
-                                == provenant_config::ForeignWorktrees::MergedClean,
+                                == provenant_config::ForeignWorktrees::Collect,
+                                    retirement: Some(&retention_owner),
+                        upstream_reference: upstream.as_ref().map(|(name,_)| name.as_str()),
+                        integration_patterns: &settings.integration_branches,
+                        excluded_paths: &settings.keep_paths,
                         dry_run: command.dry_run || !command.apply,
                     },
                     cancel,
@@ -1511,7 +1484,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 append_gc_subpass_removals(&mut report, unsettled.removals);
                 // Only proven landed refs with unchanged ledger tips may go.
                 if !command.pressure {
-                    let sweep = crate::lane_cleanup::Sweep::new(command.dry_run || !command.apply);
+                    let sweep = crate::lane_cleanup::Sweep::new(report.dry_run || !command.apply).with_retention(&retention_owner, &settings);
                     report.refs = crate::lane_cleanup::collect(
                         context,
                         upstream

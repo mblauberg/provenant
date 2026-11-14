@@ -919,12 +919,12 @@ justification = "A guardian and store identity are required to bind a lease to i
 [[rule]]
 code = "ADMISSION_DISK"
 site = "run/src/admission.rs#RunStore::admit"
-boundary = "none"
-strength = "warn"
+boundary = "data_integrity"
+strength = "refuse"
 refusable = true
 knob = "policy.ADMISSION_DISK"
-threshold = "gc.free_floor"
-justification = "The effective disk floor is configured or shipped; its source and value accompany the observation."
+threshold = "gc.critical_free"
+justification = "Only the small critical disk threshold stops a build to protect state writes; gc.free_floor is advisory. Both effective values and sources are reported."
 
 [[rule]]
 code = "ADMISSION_SPACING"

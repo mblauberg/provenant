@@ -322,20 +322,110 @@ fn recovered_removal_records(
     Ok(confirmed)
 }
 
+fn release_settled_cache(
+    settled: &provenant_run::HolderContext,
+    roots: &provenant_core::Roots,
+    workers: &dyn WorkerObserver,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::worktrees;
+    let clock = SystemClock;
+    let cancel = CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let execution = provenant_run::ExecutionContext {
+        state_root: roots.state.clone(),
+        project_id: settled.project_id,
+        actor_id: settled.actor_id,
+        read_prompts: false,
+    };
+    let store = provenant_run::RunStore::open(&execution, &call)?
+        .with_writer_registry(roots.state.as_path());
+    let record = store.record(settled.attempt_id, &call)?;
+    if !matches!(record.state, provenant_run::AttemptState::Terminal { .. }) {
+        return Ok(());
+    }
+    let Some(writer) = store.request(record.attempt_id, &call)?.task.writer else {
+        return Ok(());
+    };
+    // Private output belongs to a settled lane, not to the lifetime of its
+    // worktree. A continuation can recreate it; shared download links are
+    // unlinked without traversing their targets. Busy/unknown is retried by GC.
+    if let Err(error) = crate::worktrees::with_context_using_facts(
+        roots,
+        &settled.roots.home,
+        &writer.project,
+        std::time::Duration::ZERO,
+        workers,
+        store.repo_facts(),
+        |context, _| {
+            provenant_confinement::cache::gc_worktree_cargo_caches_with_writer_guard(
+                &settled.roots.home,
+                &provenant_confinement::cache::CacheGcPolicy {
+                    idle_before_ns: Some(i128::MAX),
+                    project_owners: [writer.worktree.clone()].into(),
+                    selected_only: true,
+                    ..Default::default()
+                },
+                |path| {
+                    let guard = worktrees::cache_writer_guard(context.project_state, path)?;
+                    let state = crate::gc_support::lane_states(
+                        roots,
+                        &settled.roots.home,
+                        &settled.roots.checkout,
+                        settled.project_id,
+                    )
+                    .map_err(|error| {
+                        worktrees::Occupancy::custody_unknown(path.to_owned(), error.to_string())
+                    })?;
+                    if state.get(path) != Some(&true) || !state.no_live_lanes(path) {
+                        return Err(worktrees::Occupancy::custody_unknown(
+                            path.to_owned(),
+                            "settlement custody is not free",
+                        ));
+                    }
+                    Ok(Some(guard))
+                },
+            )
+            .map_err(|error| crate::worktrees::Error::Permissions(*error.source))
+        },
+    ) {
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "warning: private cache release for {}: {error}",
+            writer.worktree.display()
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn collect_owned_worktree(
     settled: &provenant_run::HolderContext,
     roots: &provenant_core::Roots,
     workers: &dyn WorkerObserver,
     delivery_override: Option<&provenant_run::WriterDeliveryReceipt>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    collect_owned_worktree_with(
-        settled,
-        roots,
-        workers,
-        delivery_override,
-        Collection::Settlement,
-        None,
-    )
+    for class in
+        provenant_config::retention_schedule(provenant_config::RetentionTrigger::Settlement)
+    {
+        match class.class {
+            provenant_config::RetentionKind::LaneCargoCaches => {
+                release_settled_cache(settled, roots, workers)?
+            }
+            provenant_config::RetentionKind::GitWorktrees => collect_owned_worktree_with(
+                settled,
+                roots,
+                workers,
+                delivery_override,
+                Collection::Settlement,
+                None,
+            )?,
+            _ => {} // Other classes are owned by RunStore's terminal transaction.
+        }
+    }
+    Ok(())
 }
 
 /// The sweep's half of completion cleanup. Settlement makes one detached
@@ -497,55 +587,6 @@ fn collect_owned_worktree_with(
         )?;
         return Ok(());
     };
-    // Private output belongs to a settled lane, not to the lifetime of its
-    // worktree. A continuation can recreate it; shared download links are
-    // unlinked without traversing their targets. Busy/unknown is retried by GC.
-    if let Err(error) = crate::worktrees::with_context_using_facts(
-        roots,
-        &settled.roots.home,
-        &writer.project,
-        std::time::Duration::ZERO,
-        workers,
-        store.repo_facts(),
-        |context, _| {
-            provenant_confinement::cache::gc_worktree_cargo_caches_with_writer_guard(
-                &settled.roots.home,
-                &provenant_confinement::cache::CacheGcPolicy {
-                    idle_before_ns: Some(i128::MAX),
-                    project_owners: [writer.worktree.clone()].into(),
-                    selected_only: true,
-                    ..Default::default()
-                },
-                |path| {
-                    let guard = worktrees::cache_writer_guard(context.project_state, path)?;
-                    let state = crate::gc_support::lane_states(
-                        roots,
-                        &settled.roots.home,
-                        &settled.roots.checkout,
-                        settled.project_id,
-                    )
-                    .map_err(|error| {
-                        worktrees::Occupancy::custody_unknown(path.to_owned(), error.to_string())
-                    })?;
-                    if state.get(path) != Some(&true) || !state.no_live_lanes(path) {
-                        return Err(worktrees::Occupancy::custody_unknown(
-                            path.to_owned(),
-                            "settlement custody is not free",
-                        ));
-                    }
-                    Ok(Some(guard))
-                },
-            )
-            .map_err(|error| crate::worktrees::Error::Permissions(*error.source))
-        },
-    ) {
-        use std::io::Write;
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: private cache release for {}: {error}",
-            writer.worktree.display()
-        );
-    }
     // Recover an interrupted prune before classifying an absent worktree.
     let prior = store.worktree_settlement(record.attempt_id, &call)?;
     if replay_worktree_settlement(prior.as_ref(), &writer.worktree)?.is_none() {
@@ -759,7 +800,11 @@ fn collect_owned_worktree_with(
                     regenerable: &settings.regenerable,
                     keep: &settings.keep,
                     written_before_ns: i128::MAX,
-                    foreign_merged_clean: false,
+                    include_foreign: false,
+                    retirement: None,
+                    upstream_reference: None,
+                    integration_patterns: &[],
+                    excluded_paths: &[],
                     dry_run: false,
                 };
                 // A failed pre-prune step must not replace a retained lane's

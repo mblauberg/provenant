@@ -805,3 +805,111 @@ fn explicit_discard_publishes_recoverable_data_before_removing_work() -> Result<
     assert!(!branch_exists(&fixture, "scratch/archive"));
     Ok(())
 }
+
+#[test]
+fn retention_proofs_distinguish_preservation_completion_and_new_work() -> Result<(), Box<dyn Error>>
+{
+    for mode in ["ancestry", "squash", "new_work", "reverted"] {
+        let fixture = Fixture::new()?;
+        let owner = TestContext::new(&fixture)?;
+        let context = owner.context();
+        let lane = create(
+            &context,
+            WorktreeCreate {
+                branch: "proof-lane".into(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        fs::write(lane.path.join("feature"), b"feature")?;
+        run_in_worktree(&fixture, &lane.path, &["add", "feature"])?;
+        run_in_worktree(&fixture, &lane.path, &["commit", "-m", "feature"])?;
+        let head =
+            context
+                .facts
+                .resolve_commit(&context, GitRefName::branch("proof-lane")?, &cancel())?;
+        if mode == "squash" {
+            fixture.run(&["merge", "--squash", "proof-lane"])?;
+            fixture.run(&["commit", "-m", "squashed feature"])?;
+        } else {
+            fixture.run(&["merge", "--no-ff", "-m", "integrated", "proof-lane"])?;
+        }
+        if mode == "reverted" {
+            fixture.run(&["revert", "--no-edit", "-m", "1", "HEAD"])?;
+        }
+        let target = fixture.head()?;
+        let head = if mode == "new_work" {
+            fs::write(lane.path.join("later"), b"later")?;
+            run_in_worktree(&fixture, &lane.path, &["add", "later"])?;
+            run_in_worktree(&fixture, &lane.path, &["commit", "-m", "new work"])?;
+            context
+                .facts
+                .resolve_commit(&context, GitRefName::branch("proof-lane")?, &cancel())?
+        } else {
+            head
+        };
+        for integration in [false, true] {
+            let references = [EvidenceRef {
+                reference: GitRefName::branch("main")?,
+                commit: target,
+                integration,
+            }];
+            let proof = removal_evidence(&context, head, &references, &cancel())?;
+            if mode == "new_work" {
+                assert!(matches!(proof, RemovalEvidence::NotSubsumed));
+            } else {
+                let RemovalEvidence::Proven(evidence) = proof else {
+                    return Err("retained work was not proved".into());
+                };
+                assert_eq!(
+                    evidence.predicate,
+                    if integration {
+                        provenant_records::custody::LandingPredicate::Landed
+                    } else {
+                        provenant_records::custody::LandingPredicate::Subsumed
+                    }
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn first_foreign_pass_previews_then_subsumed_detached_tree_can_go() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let owner = TestContext::new(&fixture)?;
+    let context = owner.context();
+    let id = context.repo.common_identity();
+    context.project_state.unlink(OsStr::new(&format!(
+        "foreign-preview-{}-{}",
+        id.device, id.inode
+    )))?;
+    let path = fixture._temp.path().join("foreign-review");
+    fixture.run(&[
+        "worktree",
+        "add",
+        "--detach",
+        path.to_str().ok_or("path")?,
+        "HEAD",
+    ])?;
+    let policy = WorktreeGcPolicy {
+        upstream: None,
+        upstream_reference: None,
+        terminal: &|_| true,
+        no_live_lanes: &|_| true,
+        regenerable: &[],
+        keep: &[],
+        written_before_ns: i128::MAX,
+        dry_run: false,
+        include_foreign: true,
+        retirement: None,
+        integration_patterns: &[],
+        excluded_paths: &[],
+    };
+    let first = collect(&context, &list(&context, &cancel())?, &policy, &cancel())?;
+    assert!(first.first_foreign_preview && first.dry_run && path.exists());
+    let second = collect(&context, &list(&context, &cancel())?, &policy, &cancel())?;
+    assert!(!second.first_foreign_preview && !second.dry_run && !path.exists());
+    Ok(())
+}

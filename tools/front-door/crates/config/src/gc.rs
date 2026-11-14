@@ -681,24 +681,55 @@ fn default_free_floor(total_bytes: u64) -> u64 {
     (total_bytes / 100).min(5 * 1024_u64.pow(3))
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProjectGcSettings {
     pub regenerable: Vec<String>,
     pub keep: Vec<String>,
     pub foreign_worktrees: ForeignWorktrees,
+    pub integration_branches: Vec<String>,
+    pub keep_paths: Vec<String>,
+    pub remote_branches: RemoteBranches,
+    pub remote_min_tip_age_days: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ForeignWorktrees {
-    #[default]
     Keep,
-    MergedClean,
+    #[default]
+    Collect,
+}
+
+/// Remote deletion is independent of local preservation evidence.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteBranches {
+    Never,
+    #[default]
+    Managed,
+    All,
+}
+
+impl Default for ProjectGcSettings {
+    fn default() -> Self {
+        Self {
+            regenerable: Vec::new(),
+            keep: Vec::new(),
+            foreign_worktrees: ForeignWorktrees::Collect,
+            integration_branches: Vec::new(),
+            keep_paths: Vec::new(),
+            remote_branches: RemoteBranches::Managed,
+            remote_min_tip_age_days: 1,
+        }
+    }
 }
 
 impl ProjectGcSettings {
     fn validate(&self) -> Result<(), &'static str> {
+        if self.remote_min_tip_age_days > 3650 {
+            return Err("remote_min_tip_age_days_range");
+        }
         let worktree_roots = crate::PortTable::builtin().worktree_layout.roots;
         for name in &self.regenerable {
             let path = Path::new(name);
@@ -918,13 +949,10 @@ mod tests {
     #[test]
     fn foreign_collection_requires_the_explicit_merged_clean_value() {
         let defaults: super::ProjectGcSettings = serde_json::from_str("{}").unwrap();
-        assert_eq!(defaults.foreign_worktrees, super::ForeignWorktrees::Keep);
+        assert_eq!(defaults.foreign_worktrees, super::ForeignWorktrees::Collect);
         let opted: super::ProjectGcSettings =
-            serde_json::from_str(r#"{"foreign_worktrees":"merged-clean"}"#).unwrap();
-        assert_eq!(
-            opted.foreign_worktrees,
-            super::ForeignWorktrees::MergedClean
-        );
+            serde_json::from_str(r#"{"foreign_worktrees":"collect"}"#).unwrap();
+        assert_eq!(opted.foreign_worktrees, super::ForeignWorktrees::Collect);
         assert!(
             serde_json::from_str::<super::ProjectGcSettings>(r#"{"foreign_worktrees":"all"}"#)
                 .is_err()

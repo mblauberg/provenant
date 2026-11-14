@@ -114,6 +114,17 @@ impl<'a> TestContext<'a> {
         fs::create_dir(&state_path)?;
         fs::set_permissions(&state_path, fs::Permissions::from_mode(0o700))?;
         let project_state = Directory::open_anchor(&state_path)?;
+        // Baseline fixtures model a repository whose first foreign preview has
+        // already been observed. The first-pass invariant removes this receipt.
+        let identity = fixture.repo.common_identity();
+        fs::write(
+            state_path.join(format!(
+                "foreign-preview-{}-{}",
+                identity.device, identity.inode
+            )),
+            b"{}",
+        )?;
+
         let clock = SystemClock;
         let lock_budget = WaitBudget::cli(clock.mono_now(), 5)?;
         Ok(Self {
@@ -318,7 +329,11 @@ pub(super) fn gc_foreign_retains_a_process_with_cwd_inside_the_worktree()
             keep: &[],
             written_before_ns: i128::MAX,
             dry_run: false,
-            foreign_merged_clean: true,
+            include_foreign: true,
+            retirement: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
         },
         &cancel(),
     )?;
@@ -422,7 +437,11 @@ pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck()
                 keep: &[],
                 written_before_ns: i128::MAX,
                 dry_run: false,
-                foreign_merged_clean: true,
+                include_foreign: true,
+                retirement: None,
+                upstream_reference: None,
+                integration_patterns: &[],
+                excluded_paths: &[],
             },
             &collection_cancel,
         )?;
@@ -523,7 +542,11 @@ fn merge_proof_scenario() -> Result<(), Box<dyn Error>> {
         &["commit", "--allow-empty", "-m", "after listing"],
     )?;
     let policy = |upstream, dry_run| WorktreeGcPolicy {
-        foreign_merged_clean: false,
+        include_foreign: false,
+        retirement: None,
+        upstream_reference: None,
+        integration_patterns: &[],
+        excluded_paths: &[],
         upstream: Some(upstream),
         terminal: &|_| true,
         no_live_lanes: &|_| true,
