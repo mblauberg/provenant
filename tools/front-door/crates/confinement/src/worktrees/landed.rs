@@ -142,6 +142,7 @@ pub fn landed(
 /// The repository's object graph through the bounded Git utility.
 pub struct RepoGraph<'a, 'b> {
     pub context: &'a WorktreeContext<'b>,
+    pub repo: &'a VerifiedRepo,
     pub cancel: &'a CancelToken,
 }
 
@@ -149,7 +150,7 @@ impl CommitGraph for RepoGraph<'_, '_> {
     fn parents(&self, commit: GitOid) -> Result<Option<Vec<GitOid>>, WorktreeError> {
         let outcome = run_git(
             self.context,
-            self.context.repo,
+            self.repo,
             GitRead::RawObject {
                 kind: crate::utility::GitObjectKind::Commit,
                 oid: commit,
@@ -163,7 +164,17 @@ impl CommitGraph for RepoGraph<'_, '_> {
     }
 
     fn contains(&self, ancestor: GitOid, tip: GitOid) -> Result<bool, WorktreeError> {
-        is_ancestor(self.context, ancestor, tip, self.cancel)
+        let outcome = run_git(
+            self.context,
+            self.repo,
+            GitRead::MergeBaseIsAncestor { ancestor, tip },
+            self.cancel,
+        )?;
+        match exit_code(&outcome)? {
+            0 => Ok(true),
+            1 => Ok(false),
+            _ => Err(WorktreeError::InvalidOutput),
+        }
     }
 }
 
@@ -189,7 +200,16 @@ pub(super) fn landing_on(
     root: &LandingTarget,
     cancel: &CancelToken,
 ) -> Result<Landing, WorktreeError> {
-    landed(&RepoGraph { context, cancel }, tip, root, &[])
+    landed(
+        &RepoGraph {
+            context,
+            repo: context.repo,
+            cancel,
+        },
+        tip,
+        root,
+        &[],
+    )
 }
 
 /// Ancestry of the target the caller just read, with no receipts.

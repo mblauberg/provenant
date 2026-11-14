@@ -381,6 +381,7 @@ fn writer_samples_missing_roots_without_creating_them() -> Result<(), Box<dyn st
     let base = temp.path().canonicalize()?;
     let settings = provenant_config::GcSettings {
         free_floor: Some("1B".into()),
+        critical_free: Some("1B".into()),
         ..Default::default()
     };
     let state = base.join("missing/state");

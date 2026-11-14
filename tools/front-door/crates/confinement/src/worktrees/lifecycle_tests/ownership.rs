@@ -248,7 +248,13 @@ fn occupancy_keeps_scoped_census_evidence_and_held_lease_priority() -> Result<()
         keep: &[],
         written_before_ns: i128::MAX,
         dry_run: false,
-        foreign_merged_clean: false,
+        include_foreign: false,
+        retirement: None,
+        mode: CollectionMode::Worktrees,
+        proof: None,
+        upstream_reference: None,
+        integration_patterns: &[],
+        excluded_paths: &[],
     };
     collect(
         &context,
@@ -838,7 +844,13 @@ fn owned_cleanup_rechecks_regenerated_output_and_keep_paths() -> Result<(), Box<
             regenerable: &["build".into(), "saved".into()],
             keep: &kept,
             written_before_ns: i128::MAX,
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
             dry_run: false,
         };
         let result = prune_owned(
@@ -901,7 +913,13 @@ fn owned_cleanup_refuses_dirty_unmerged_and_adopted_trees() -> Result<(), Box<dy
         regenerable: &[],
         keep: &[],
         written_before_ns: i128::MAX,
-        foreign_merged_clean: false,
+        include_foreign: false,
+        retirement: None,
+        mode: CollectionMode::Worktrees,
+        proof: None,
+        upstream_reference: None,
+        integration_patterns: &[],
+        excluded_paths: &[],
         dry_run: false,
     };
     fs::write(info.path.join("dirty"), "keep")?;

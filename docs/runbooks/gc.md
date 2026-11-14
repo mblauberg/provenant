@@ -23,13 +23,47 @@ provenant --project /absolute/path/to/repo gc --apply --json
 
 ## What is removed and when
 
-GC collects eligible provider state, payloads, build output, worktrees, refs and
-old records. The [disk spec](../specs/disk.md) owns retention invariants; inspect
-`provenant config schema` for settings. A failed upstream fetch preserves
-worktrees. Record a ref's reported head before recreating it. Configure
-regenerable and keep paths for each project before collecting output; unknown
-ignored files can prevent removal. See [worktrees](../worktrees.md) for explicit
-removal and [lane recovery](lane-lifecycle.md#recovery) for uncertain custody.
+GC dispatches from `RETENTION_CLASSES`. Caches and build profiles are considered
+before worktrees. Preview and apply use allocated tree bytes without following
+links; APFS clones may share physical blocks, so the change in volume free space
+can differ. Partial observations and failed paths remain visible in JSON and text.
+
+`gc.free_floor` is an advisory collection target. New builds warn below it and
+stop only below `gc.critical_free` (2 GiB by default); diagnostics show the effective
+threshold and source. Settlement releases private Cargo output and attempt scratch
+without waiting for worktree removal. Registry and Git downloads remain shared.
+
+Cleanup separates **subsumed** (the exact tip is retained elsewhere, including
+verified tree equivalence) from **landed** (integration-target or forge merge
+proof). Failed forge reads use last-fetched refs for subsumption and never imply
+an absent PR. Source refs and candidate tips are rechecked under mutation custody.
+
+Foreign worktrees and local branches are included by default. Their first pass
+previews and records that preview for the repository incarnation. Configure
+`gc.projects.<project>.foreign_worktrees = 'keep'` to opt out, `keep_paths` for
+path/ref patterns, and `integration_branches` for integration-ref patterns.
+Idle clean worktrees with no PR, or a closed unmerged PR at exactly the current
+tip, retire without deleting their branch. Unknown custody, run, forge or census
+feeds keep the affected item. Initialised submodules are checked recursively. Removal requires clean working
+data and a retained head in a scoped Git store that survives deletion; detached
+unpushed heads, stores inside removed metadata and unknown child custody keep
+the parent worktree.
+
+Remote pruning defaults to pushed or held refs in the ref ledger; set
+`remote_branches = 'never'` to disable it. `remote_min_tip_age_days` defaults to
+one day. Every remote deletion rechecks open PR heads and bases and leases the
+push on the observed tip. Unobserved remote branches are outside this surface.
+
+Explicit discard first publishes a private state-root archive: exact-tip Git
+bundle, binary working/index patches, NUL-delimited status, untracked and ignored
+files in a no-follow ustar, and a manifest. Unrepresentable paths or changing
+source data keep the original worktree. `gc.discard_archive_days` controls archive
+retention (90 days by default). Clean subsumed removals need no archive.
+
+Record a ref's reported head before recreating it. Configure regenerable and keep
+paths before collecting output; undeclared ignored files such as local databases
+prevent removal. See [worktrees](../worktrees.md) and
+[lane recovery](lane-lifecycle.md#recovery) for uncertain custody.
 
 On macOS the tick agent schedules collection; other installs schedule
 `provenant tick` themselves. Inspect the tick logs when a sweep fails.

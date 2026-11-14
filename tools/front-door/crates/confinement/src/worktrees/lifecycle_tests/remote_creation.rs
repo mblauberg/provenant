@@ -292,7 +292,13 @@ fn gc_missing_observer_gate_remains_unknown_during_preview_and_apply() -> Result
         keep: &[],
         written_before_ns: i128::MAX,
         dry_run: true,
-        foreign_merged_clean: true,
+        include_foreign: true,
+        retirement: None,
+        mode: CollectionMode::Worktrees,
+        proof: None,
+        upstream_reference: None,
+        integration_patterns: &[],
+        excluded_paths: &[],
     };
     let preview = collect(&context, std::slice::from_ref(&lane), &policy, &cancel())?;
     assert!(preview.worktrees.removed.is_empty());
@@ -479,7 +485,13 @@ fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error
             keep: &[],
             written_before_ns: i128::MAX,
             dry_run: true,
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
         },
         &cancel(),
     )?;
@@ -1001,7 +1013,7 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
     context.executor = &git;
     let lanes = list_for_gc(&context, &cancel())?;
     assert_eq!(lanes.len(), 100);
-    let report = collect_lazy(
+    let report = collect(
         &context,
         &lanes,
         &WorktreeGcPolicy {
@@ -1012,7 +1024,13 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
             keep: &[],
             written_before_ns: i128::MAX,
             dry_run: true,
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
         },
         &cancel(),
     )?;
@@ -1021,7 +1039,7 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
     assert_eq!(git.calls.load(Ordering::SeqCst), 1);
     assert_eq!(git.listings.load(Ordering::SeqCst), 1);
     let lanes = list_for_gc(&context, &cancel())?;
-    collect_lazy(
+    collect(
         &context,
         &lanes,
         &WorktreeGcPolicy {
@@ -1032,7 +1050,13 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
             keep: &[],
             written_before_ns: i128::MAX,
             dry_run: false,
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
         },
         &cancel(),
     )?;

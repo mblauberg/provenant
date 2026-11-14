@@ -12,7 +12,7 @@ use std::{
 };
 type Error = Box<dyn std::error::Error>;
 
-fn presence(
+pub(crate) fn presence(
     record: &CustodyRecord,
     roots: &Roots,
     host: provenant_core::HostId,
@@ -539,6 +539,12 @@ pub fn settle_landing(
                         &call,
                     )?;
                 }
+            }
+            if let Err(error) = crate::worktrees::retention_event(&resolved, &artefacts, &evidence)
+            {
+                provenant_fabric_runtime::custody::warning(format!(
+                    "merge retention will retry: {error}"
+                ));
             }
         }
     }

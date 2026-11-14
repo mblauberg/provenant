@@ -132,6 +132,7 @@ pub enum LandingSource {
         commit: provenant_core::GitOid,
     },
     TreeEquivalent {
+        reference: String,
         head: provenant_core::GitOid,
         target: provenant_core::GitOid,
         tree: provenant_core::GitOid,
@@ -170,6 +171,13 @@ removal_uncertainties! {
     RewrittenDefaultBranch => "rewritten_default_branch",
     UnprovenLanding => "unproven_landing",
     MissingCommit => "missing_commit",
+    CustodyUnknown => "custody_unknown",
+    CensusUnknown => "census_unknown",
+    RunRecordsUnknown => "run_records_unknown",
+    Busy => "busy",
+    DirtyWorktree => "dirty_worktree",
+    LockedOrUnavailable => "locked_or_unavailable",
+    ObservationFailed => "observation_failed",
 }
 
 /// The outcome of considering one subject and tip for removal.
@@ -187,6 +195,104 @@ pub struct RemovalRecord {
     pub subject: Subject,
     pub tip: provenant_core::GitOid,
     pub outcome: RemovalOutcome,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RetirementProjectionError {
+    #[error("retirement belongs to a different project or subject")]
+    Identity,
+    #[error("retirement has an invalid expected tip")]
+    Tip,
+    #[error("retirement has unreadable removal evidence")]
+    Evidence,
+}
+
+pub const RETIREMENT_EVIDENCE_STEP: &str = "retention_evidence";
+
+pub fn retirement_evidence(
+    record: &crate::landing::RetirementRecord,
+) -> Result<Option<LandedEvidence>, RetirementProjectionError> {
+    match record
+        .outcomes
+        .iter()
+        .find(|s| s.step == RETIREMENT_EVIDENCE_STEP)
+        .map(|s| &s.state)
+    {
+        Some(crate::landing::RetirementStepState::Completed { detail: Some(raw) }) => {
+            serde_json::from_str(raw)
+                .map(Some)
+                .map_err(|_| RetirementProjectionError::Evidence)
+        }
+        None if record.decision.action == crate::landing::RetirementAction::Preserve => Ok(None),
+        _ => Err(RetirementProjectionError::Evidence),
+    }
+}
+
+/// Removal reports are projections of completed lifecycle steps, never a new
+/// removal authority. Preserved refs and unfinished steps emit no removal.
+pub fn retirement_removal(
+    project: ProjectId,
+    record: &crate::landing::RetirementRecord,
+    subject: Subject,
+) -> Result<Option<RemovalRecord>, RetirementProjectionError> {
+    if record.reference.repository != project.to_string()
+        || (subject.kind == SubjectKind::Branch && record.reference.reference != subject.id)
+    {
+        return Err(RetirementProjectionError::Identity);
+    }
+    if subject.kind == SubjectKind::Branch
+        && record.decision.action == crate::landing::RetirementAction::Preserve
+    {
+        return Ok(None);
+    }
+    let step = format!(
+        "{}:{}",
+        if subject.kind == SubjectKind::Branch {
+            "branch"
+        } else {
+            "worktree"
+        },
+        subject.id
+    );
+    if !record.outcomes.iter().any(|s| {
+        s.step == step
+            && matches!(
+                s.state,
+                crate::landing::RetirementStepState::Completed { .. }
+            )
+    }) {
+        return Ok(None);
+    }
+    let Some(evidence) = retirement_evidence(record)? else {
+        return Ok(None);
+    };
+    let tip = record
+        .expected_tip
+        .parse()
+        .map_err(|_| RetirementProjectionError::Tip)?;
+    let valid = match &evidence.source {
+        LandingSource::RetainedRef { reference, .. } => {
+            evidence.predicate == LandingPredicate::Subsumed && reference.starts_with("refs/")
+        }
+        LandingSource::IntegrationTarget { reference, .. } => {
+            evidence.predicate == LandingPredicate::Landed && reference.starts_with("refs/")
+        }
+        LandingSource::TreeEquivalent {
+            reference, head, ..
+        } => reference.starts_with("refs/") && *head == tip,
+        LandingSource::ForgeMerged { pr, head, .. } => {
+            evidence.predicate == LandingPredicate::Landed && !pr.is_empty() && *head == tip
+        }
+    };
+    if !valid {
+        return Err(RetirementProjectionError::Evidence);
+    }
+    Ok(Some(RemovalRecord {
+        project,
+        subject,
+        tip,
+        outcome: RemovalOutcome::Removed { evidence },
+    }))
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -304,6 +410,85 @@ pub struct CustodyStatus {
 mod tests {
     use super::*;
     #[test]
+    fn removal_projection_requires_completed_steps_and_preserves_refs() {
+        use crate::landing::*;
+        let project = ProjectId::from_bytes([9; 16]);
+        let tip = provenant_core::GitOid::parse(&"a1".repeat(20)).unwrap();
+        let evidence = LandedEvidence {
+            predicate: LandingPredicate::Subsumed,
+            source: LandingSource::RetainedRef {
+                reference: "refs/heads/retained".into(),
+                commit: tip,
+            },
+        };
+        let worktree = Subject::new(SubjectKind::Worktree, "/fixture/lane");
+        let branch = Subject::new(SubjectKind::Branch, "refs/heads/lane");
+        let mut record = RetirementRecord {
+            schema_version: 2,
+            id: "fixture".into(),
+            reference: RetirementRef {
+                repository: project.to_string(),
+                endpoint: RetirementEndpoint::Local,
+                reference: branch.id.clone(),
+                generation: 1,
+                origin: RetirementOrigin::Created,
+            },
+            expected_tip: tip.to_string(),
+            decision: RetirementDecision {
+                authority: "fixture".into(),
+                reason: "fixture proof".into(),
+                action: RetirementAction::Discard,
+                decided_at: "fixture".into(),
+            },
+            recovery_reference: Some("refs/heads/retained".into()),
+            revision: 1,
+            outcomes: vec![RetirementStepOutcome {
+                step: RETIREMENT_EVIDENCE_STEP.into(),
+                state: RetirementStepState::Completed {
+                    detail: Some(serde_json::to_string(&evidence).unwrap()),
+                },
+            }],
+        };
+        for subject in [worktree, branch] {
+            let step = format!(
+                "{}:{}",
+                if subject.kind == SubjectKind::Branch {
+                    "branch"
+                } else {
+                    "worktree"
+                },
+                subject.id
+            );
+            record.outcomes.push(RetirementStepOutcome {
+                step: step.clone(),
+                state: RetirementStepState::Pending,
+            });
+            assert!(
+                retirement_removal(project, &record, subject.clone())
+                    .unwrap()
+                    .is_none()
+            );
+            record.outcomes.last_mut().unwrap().state =
+                RetirementStepState::Completed { detail: None };
+            let projected = retirement_removal(project, &record, subject.clone())
+                .unwrap()
+                .unwrap();
+            assert_eq!(projected.tip, tip);
+            assert!(
+                matches!(projected.outcome, RemovalOutcome::Removed { evidence: actual } if actual == evidence)
+            );
+            if subject.kind == SubjectKind::Branch {
+                record.decision.action = RetirementAction::Preserve;
+                assert!(
+                    retirement_removal(project, &record, subject)
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn removal_records_round_trip_every_predicate_source_and_uncertainty() {
         let oid = provenant_core::GitOid::parse(&"a".repeat(40)).unwrap();
         let target = provenant_core::GitOid::parse(&"b".repeat(40)).unwrap();
@@ -314,6 +499,7 @@ mod tests {
                 commit: oid,
             },
             LandingSource::TreeEquivalent {
+                reference: "refs/heads/retained".into(),
                 head: oid,
                 target,
                 tree: oid,

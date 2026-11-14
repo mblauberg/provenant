@@ -1,12 +1,19 @@
 //! Repository-scoped linked-worktree lifecycle and merged-ref pruning.
 
+mod archive;
+pub use archive::{ArchiveError, ArchiveInfo, ArchiveReport, collect_archives};
 mod census;
 mod context;
 mod custody;
 mod doctor;
 #[cfg(test)]
 mod doctor_tests;
+mod evidence;
 mod gc;
+pub use evidence::{
+    EvidenceRef, RemovalEvidence, matches_pattern, removal_evidence, retained_refs,
+    validate_removal_evidence,
+};
 mod inventory;
 mod landed;
 mod lifecycle;
@@ -21,7 +28,11 @@ pub use context::{
 };
 pub use custody::*;
 pub use doctor::{WorktreeDiagnosis, WorktreeDiagnosisState, doctor};
-pub use gc::{OutputEntry, WorktreeGcPolicy, WorktreeGcReport, collect, collect_lazy};
+pub use gc::{
+    CandidateReport, CollectionMode, ForgeObservation, OutputEntry, RetirementAction,
+    RetirementOwner, WorktreeGcPolicy, WorktreeGcReport, acknowledge_foreign_preview,
+    branch_candidate, collect, first_foreign_pass,
+};
 pub use inventory::*;
 pub use landed::{
     CommitGraph, IntegrationEdge, LandedBy, Landing, LandingTarget, RepoGraph, Unproven,
@@ -34,8 +45,9 @@ pub use owner::{
 };
 pub use refs::{RefEndpoint, RefLedger, RefObservation, RefOrigin, RefOwnership, RefRecord};
 pub use removal::{
-    Artefact, ArtefactOutcome, ArtefactState, RefDeletion, branch_checked_out, created_branch,
-    delete_ref_leased, has_commit, landing_in_repo, ref_tip,
+    Artefact, ArtefactClass, ArtefactOutcome, ArtefactState, RefDeletion, branch_checked_out,
+    created_branch, delete_ref_leased, delete_ref_leased_when, has_commit, landing_in_repo,
+    ref_tip,
 };
 
 use crate::repo::{
@@ -75,7 +87,7 @@ const MAX_WORKTREES: usize = 10_000;
 const MAX_BRANCHES: usize = 10_000;
 const MAX_STATE_RECORD: u64 = 64 * 1024;
 /// The single common-directory protocol for repository mutations and the Git
-/// snapshots they depend on. Acquisition tries once plus one immediate retry;
+/// snapshots they depend on. Acquisition tries once;
 /// a repository holder may only try a writer lock without waiting. Release
 /// this owner before network discovery, slow census, or provider execution.
 pub const REPOSITORY_LOCK: &str = "provenant-repository.lock";
@@ -97,10 +109,7 @@ pub fn lock_repository(
     }
     // Protect creation/removal, registration, and coherent Git config snapshots.
     // Never retain this hold across provider work or network discovery.
-    match common.try_lock(OsStr::new(REPOSITORY_LOCK), mode) {
-        Err(FsError::LockTimeout { .. }) => common.try_lock(OsStr::new(REPOSITORY_LOCK), mode),
-        result => result,
-    }
+    common.try_lock(OsStr::new(REPOSITORY_LOCK), mode)
 }
 const WRITER_LOCK: &str = "writer.lock";
 
@@ -174,6 +183,10 @@ impl From<provenant_config::ConfigError> for WorktreeError {
 
 #[derive(Debug, Error)]
 pub enum WorktreeError {
+    #[error(transparent)]
+    RetirementProjection(#[from] provenant_records::custody::RetirementProjectionError),
+    #[error(transparent)]
+    Archive(#[from] ArchiveError),
     #[error("worktree census configuration refused: {0}")]
     Configuration(#[from] Box<provenant_config::ConfigError>),
     #[error("worktree port configuration refused: {0}")]
@@ -294,6 +307,8 @@ pub enum WorktreeError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(rename_all = "snake_case")]
 pub enum GitMutationOperation {
+    #[error("git bundle create")]
+    BundleCreate,
     #[error("git merge --ff-only")]
     FastForward,
     #[error("git worktree add")]
@@ -734,6 +749,7 @@ pub struct RemoveOutcome {
     /// Unmerged branches deleted with `discard`. `head` is the commit the
     /// branch pointed at, which recovers it while Git still holds the object.
     pub discarded: Vec<DiscardedRef>,
+    pub archives: Vec<ArchiveInfo>,
     pub retained: Vec<RetainedBranch>,
 }
 

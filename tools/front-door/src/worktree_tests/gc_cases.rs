@@ -718,7 +718,7 @@ pub(super) fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Re
     fs::write(
         rig.state.join("config.toml"),
         format!(
-            "schema_version=1\n[gc]\nfree_floor='1B'\n{output_config}foreign_worktrees='merged-clean'\n"
+            "schema_version=1\n[gc]\nfree_floor='1B'\n{output_config}foreign_worktrees='collect'\n"
         ),
     )?;
     let queued_preview = ok(&rig, &["gc", "--dry-run", "--json"])?;

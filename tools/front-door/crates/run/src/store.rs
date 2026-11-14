@@ -1243,6 +1243,26 @@ impl RunStore {
         {
             let _ = self.retry_git_cleanup_with_custody(record, recovery, call);
         }
+        // Terminal publication is not proof that a read-only guardian has
+        // released its attempt. Try once under the same admission gate as GC.
+        let Ok(observation) = provenant_supervisor::custody::writer_admission_guard(&attempt_dir)
+        else {
+            let _ = self.set_temporary_retained(record.attempt_id, true, call);
+            return;
+        };
+        let lease = attempt_dir.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive);
+        drop(observation);
+        let Ok(_lease) = lease else {
+            let _ = self.set_temporary_retained(record.attempt_id, true, call);
+            return;
+        };
+        if !matches!(
+            provenant_supervisor::custody::reservation_present(&attempt_dir, Self::scope(record)),
+            Ok(false)
+        ) {
+            let _ = self.set_temporary_retained(record.attempt_id, true, call);
+            return;
+        }
         // The terminal record retains tmp before cleanup; clear that hint only
         // after removal succeeds.
         let _ = crate::retention::prune_caches(
@@ -1252,7 +1272,10 @@ impl RunStore {
             &mut ProviderStateGc::default(),
         );
         let _ = self.set_temporary_retained(record.attempt_id, true, call);
-        if remove_temporary_best_effort(&attempt_dir).is_ok() {
+        let scratch_declared =
+            provenant_config::retention_schedule(provenant_config::RetentionTrigger::Settlement)
+                .any(|class| class.class == provenant_config::RetentionKind::AttemptScratch);
+        if scratch_declared && remove_temporary_best_effort(&attempt_dir).is_ok() {
             let _ = self.set_temporary_retained(record.attempt_id, false, call);
         }
     }

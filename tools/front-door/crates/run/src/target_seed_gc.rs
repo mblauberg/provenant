@@ -68,7 +68,7 @@ pub fn collect(
                 remove(&entry.path(), dry_run, &mut report)?;
                 continue;
             }
-            let size = apparent_size(&entry.path())?;
+            let size = allocated_size(&entry.path())?;
             generations.push((entry.file_name(), entry.path(), size));
         }
     }
@@ -93,7 +93,7 @@ pub fn collect(
 }
 
 fn remove(path: &Path, dry_run: bool, report: &mut Report) -> io::Result<()> {
-    let size = apparent_size(path)?;
+    let size = allocated_size(path)?;
     if !dry_run {
         make_directories_writable(path)?;
         fs::remove_dir_all(path)?;
@@ -103,14 +103,15 @@ fn remove(path: &Path, dry_run: bool, report: &mut Report) -> io::Result<()> {
     Ok(())
 }
 
-fn apparent_size(path: &Path) -> io::Result<u64> {
+fn allocated_size(path: &Path) -> io::Result<u64> {
     let metadata = fs::symlink_metadata(path)?;
+    use std::os::unix::fs::MetadataExt;
+    let mut size = metadata.blocks().saturating_mul(512);
     if !metadata.is_dir() {
-        return Ok(metadata.len());
+        return Ok(size);
     }
-    let mut size = 0u64;
     for entry in fs::read_dir(path)? {
-        size = size.saturating_add(apparent_size(&entry?.path())?);
+        size = size.saturating_add(allocated_size(&entry?.path())?);
     }
     Ok(size)
 }
@@ -153,13 +154,14 @@ mod tests {
         let old = generation(state.path(), "001", 3);
         let middle = generation(state.path(), "002", 4);
         let newest = generation(state.path(), "003", 5);
-        let preview = collect(state.path(), 2, 20, true).unwrap();
-        assert_eq!(preview.removed, vec![old.clone(), middle.clone()]);
-        assert!(middle.exists());
-        let result = collect(state.path(), 1, 100, false).unwrap();
-        assert_eq!(result.removed, vec![old.clone(), middle.clone()]);
-        assert!(newest.exists());
-        assert!(!middle.exists() && !old.exists());
+        let cap = allocated_size(&newest).unwrap();
+        let expected = allocated_size(&old).unwrap() + allocated_size(&middle).unwrap();
+        let preview = collect(state.path(), 2, cap, true).unwrap();
+        assert!(old.exists() && middle.exists() && newest.exists());
+        let applied = collect(state.path(), 2, cap, false).unwrap();
+        assert_eq!(preview.bytes, expected);
+        assert_eq!(preview.bytes, applied.bytes);
+        assert!(newest.exists() && !middle.exists() && !old.exists());
     }
     #[test]
     fn active_clone_lock_prevents_collection() {

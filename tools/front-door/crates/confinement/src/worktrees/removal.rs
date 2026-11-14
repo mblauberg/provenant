@@ -29,12 +29,21 @@ pub enum ArtefactState {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtefactClass {
+    Managed,
+    Foreign,
+}
+
 /// One artefact's outcome. `name` is a worktree path or a full ref name;
 /// `remote` names the bound remote for a remote branch or tracking ref.
 /// `head` is the commit a removed ref held, which restores it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ArtefactOutcome {
     pub artefact: Artefact,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class: Option<ArtefactClass>,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote: Option<String>,
@@ -52,6 +61,7 @@ impl ArtefactOutcome {
     pub fn new(artefact: Artefact, name: impl Into<String>, outcome: ArtefactState) -> Self {
         Self {
             artefact,
+            class: None,
             name: name.into(),
             remote: None,
             outcome,
@@ -59,6 +69,10 @@ impl ArtefactOutcome {
             head: None,
             removal: None,
         }
+    }
+    pub fn with_class(mut self, class: ArtefactClass) -> Self {
+        self.class = Some(class);
+        self
     }
 
     pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
@@ -164,7 +178,16 @@ pub fn landing_in_repo(
     chain: &[IntegrationEdge],
     cancel: &CancelToken,
 ) -> Result<Landing, WorktreeError> {
-    landed::landed(&RepoGraph { context, cancel }, tip, root, chain)
+    landed::landed(
+        &RepoGraph {
+            context,
+            repo: context.repo,
+            cancel,
+        },
+        tip,
+        root,
+        chain,
+    )
 }
 
 /// Whether the local object store holds `commit`, so a deleted ref that
@@ -174,7 +197,13 @@ pub fn has_commit(
     commit: GitOid,
     cancel: &CancelToken,
 ) -> Result<bool, WorktreeError> {
-    Ok(RepoGraph { context, cancel }.parents(commit)?.is_some())
+    Ok(RepoGraph {
+        context,
+        repo: context.repo,
+        cancel,
+    }
+    .parents(commit)?
+    .is_some())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -195,6 +224,16 @@ pub fn delete_ref_leased(
     reference: &GitRefName,
     expected: GitOid,
     cancel: &CancelToken,
+) -> Result<RefDeletion, WorktreeError> {
+    delete_ref_leased_when(context, reference, expected, cancel, &|| Ok(()))
+}
+
+pub fn delete_ref_leased_when(
+    context: &WorktreeContext<'_>,
+    reference: &GitRefName,
+    expected: GitOid,
+    cancel: &CancelToken,
+    eligible: &dyn Fn() -> Result<(), WorktreeError>,
 ) -> Result<RefDeletion, WorktreeError> {
     let name = reference.as_str();
     if !(name.starts_with("refs/heads/") || name.starts_with("refs/remotes/")) {
@@ -217,6 +256,7 @@ pub fn delete_ref_leased(
         Err(WorktreeError::NotFound) => return Ok(RefDeletion::Absent),
         Err(error) => return Err(error),
     }
+    eligible()?;
     let _ = context.facts.take_inventory(context);
     let deleted = execute_git_mutation(
         context.executor,

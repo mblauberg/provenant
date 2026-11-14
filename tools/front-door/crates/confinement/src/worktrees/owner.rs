@@ -348,9 +348,10 @@ pub fn prune_owned(
     // fenced below, after rechecking ownership, ancestry and exact HEAD.
     let output_policy = WorktreeGcPolicy {
         upstream: None,
+        mode: CollectionMode::Outputs,
         ..*policy
     };
-    collect_lazy(context, &lanes, &output_policy, cancel)?;
+    collect(context, &lanes, &output_policy, cancel)?;
     let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
     let entries = context.facts.read_inventory(context, cancel)?;
     let entry = entries
@@ -366,21 +367,20 @@ pub fn prune_owned(
     }
     // A pushed lane ref or an open PR is not an integration target. Its
     // worktree can be pruned while the local ref remains for landing and GC.
-    let disposition = match policy.upstream {
-        Some(integration)
-            if landed::landed_on(
-                context,
-                head,
-                &LandingTarget {
-                    reference: None,
-                    tip: integration,
-                },
-                cancel,
-            )? =>
-        {
-            Disposition::Merged
-        }
-        _ => Disposition::Keep(RetainReason::NotMerged),
+    let references = retained_refs(
+        context,
+        Some(branch),
+        None,
+        policy.integration_patterns,
+        cancel,
+    )?;
+    let disposition = if matches!(
+        removal_evidence(context, head, &references, cancel)?,
+        RemovalEvidence::Proven(_)
+    ) {
+        Disposition::Merged
+    } else {
+        Disposition::Keep(RetainReason::NotMerged)
     };
     // Only a branch the ledger records as created, at the generation this
     // owner links, may be deleted; an adopted or unobserved one is kept.
@@ -392,12 +392,32 @@ pub fn prune_owned(
         }
         other => other,
     };
+    let refs = retained_refs(
+        context,
+        if matches!(disposition, Disposition::Merged) {
+            Some(branch)
+        } else {
+            None
+        },
+        None,
+        &[],
+        cancel,
+    )?;
+    let proof = if let Some(proof) = policy.proof {
+        proof.clone()
+    } else {
+        match removal_evidence(context, head, &refs, cancel)? {
+            RemovalEvidence::Proven(proof) => proof,
+            _ => return Err(WorktreeError::IdentityChanged),
+        }
+    };
     let removed = remove_tree_when(
         context,
         entry,
         head,
         cancel,
         &|| {
+            validate_removal_evidence(context, head, &proof, &refs, cancel)?;
             ((policy.terminal)(path)
                 && (policy.no_live_lanes)(path)
                 && verify_worktree(context.repo, path)
