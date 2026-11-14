@@ -354,7 +354,6 @@ pub(super) fn review_preparation_substitution(node: &PlannedNode, attempt: &Grap
 pub(crate) fn live_fallback_allowed(
     outcome: AttemptOutcome,
     launched: bool,
-    access: AccessMode,
     evidence: Option<PreparationFallbackEvidence>,
 ) -> bool {
     use provenant_records::run::PreparationFailure;
@@ -376,7 +375,6 @@ pub(crate) fn live_fallback_allowed(
             outcome: expected,
             handoff: evidence.handoff,
             custody_released: evidence.custody_released,
-            read_only: access == AccessMode::ReadOnly,
             budget_remaining: true,
             pinned: false,
         }
@@ -672,7 +670,7 @@ pub(super) fn decide_next_attempt<R: AttemptOwner>(
                     _ => (None, false),
                 };
                 let denied = last.outcome.is_some_and(|outcome| {
-                    !live_fallback_allowed(outcome, last.launched, node.access, evidence)
+                    !live_fallback_allowed(outcome, last.launched, evidence)
                 });
                 let cause = denied
                     .then(|| {
@@ -728,37 +726,31 @@ mod tests {
         assert!(live_fallback_allowed(
             AttemptOutcome::AuthRequired,
             false,
-            AccessMode::WorktreeWrite,
             Some(evidence)
         ));
         assert!(!live_fallback_allowed(
             AttemptOutcome::AuthRequired,
             true,
-            AccessMode::WorktreeWrite,
             Some(evidence)
         ));
         assert!(!live_fallback_allowed(
             AttemptOutcome::UsageLimited,
             false,
-            AccessMode::WorktreeWrite,
             Some(evidence)
         ));
         assert!(!live_fallback_allowed(
             AttemptOutcome::TaskFailed,
             false,
-            AccessMode::WorktreeWrite,
             Some(evidence)
         ));
         assert!(!live_fallback_allowed(
             AttemptOutcome::AuthRequired,
             false,
-            AccessMode::WorktreeWrite,
             None
         ));
         assert!(!live_fallback_allowed(
             AttemptOutcome::AuthRequired,
             false,
-            AccessMode::WorktreeWrite,
             Some(PreparationFallbackEvidence {
                 custody_released: false,
                 ..evidence
@@ -767,7 +759,6 @@ mod tests {
         assert!(!live_fallback_allowed(
             AttemptOutcome::AuthRequired,
             false,
-            AccessMode::WorktreeWrite,
             Some(PreparationFallbackEvidence {
                 handoff: FallbackHandoff::UncertainOrLaunched,
                 ..evidence

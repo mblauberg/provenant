@@ -344,7 +344,7 @@ fn enable_with(
 /// Disable and stop the timer when it is enabled or running; absent is already stopped.
 fn disable_with(
     mut run: impl FnMut(&[&OsStr]) -> Result<(bool, String), AgentError>,
-) -> Result<(), AgentError> {
+) -> Result<bool, AgentError> {
     let present = run(&["is-enabled".as_ref(), TIMER.as_ref()])?.0
         || run(&["is-active".as_ref(), TIMER.as_ref()])?.0;
     if present {
@@ -353,10 +353,10 @@ fn disable_with(
             return Err(AgentError::Systemctl("disable", error));
         }
     }
-    Ok(())
+    Ok(present)
 }
 
-pub fn stop(home: &Path) -> Result<(), AgentError> {
+pub fn stop(home: &Path) -> Result<bool, AgentError> {
     if cfg!(target_os = "linux") {
         disable_with(|args| systemctl(args, home))
     } else {
@@ -366,22 +366,23 @@ pub fn stop(home: &Path) -> Result<(), AgentError> {
 
 /// Retire the former scheduler even when its plist has already disappeared.
 pub fn retire_gc(home: &Path) -> Result<(), AgentError> {
-    stop_with(home, "dev.provenant.gc", launchctl)
+    stop_with(home, "dev.provenant.gc", launchctl).map(|_| ())
 }
 
 fn stop_with(
     home: &Path,
     label: &str,
     mut run: impl FnMut(&[&OsStr], &Path) -> Result<(bool, String), AgentError>,
-) -> Result<(), AgentError> {
+) -> Result<bool, AgentError> {
     let service = format!("gui/{}/{label}", provenant_os::fs::effective_uid());
-    if run(&["print".as_ref(), service.as_ref()], home)?.0 {
+    let present = run(&["print".as_ref(), service.as_ref()], home)?.0;
+    if present {
         let (ok, error) = run(&["bootout".as_ref(), service.as_ref()], home)?;
         if !ok {
             return Err(AgentError::Launchctl("bootout", error));
         }
     }
-    Ok(())
+    Ok(present)
 }
 
 #[cfg(test)]

@@ -850,7 +850,7 @@ fn execute(
         PeerAction::SessionHandoff {
             extra: Default::default(),
             input: Box::new(input),
-            budget_seconds: Some(context.config.limits.peer_seconds),
+            budget_seconds: context.config.limits.peer_seconds,
         },
         budget,
         &cancel,

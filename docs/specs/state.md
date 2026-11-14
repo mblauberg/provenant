@@ -97,9 +97,11 @@ tombstones, never follows links and writes nothing on a dry run
 ### A format break needs acknowledgement
 
 An install never opens an older-format store with SQLite. A format-1 receipt
-(also the pending-reset marker) or positively identified format-1 stores trigger `STATE_FORMAT_BREAK`
+or positively identified format-1 stores trigger `STATE_FORMAT_BREAK`
 (exit 6). Without `--reset-state` the install changes nothing, even with `--yes`.
-A dry run describes the reset. Receipt errors and newer formats refuse rather
+A dry run describes the reset. A format-1 receipt identifies the old state without
+requiring release-current store headers; interrupted 1.x migration versions do
+not veto it. Receipt errors and newer formats refuse rather
 than guessing. The same header-only test applies with a format-2 receipt or no
 receipt, so old agents recreating stores can be detected without guessing from
 filenames. Without a receipt, positive format-1 evidence also requires an
@@ -125,18 +127,22 @@ header evidence. Format-2 writers use versions above these sets, including
 admission 7 and PR contributions 5, avoiding the old admission 6 collision and
 the PR version regression. Current versions come from the owning crates'
 schema constants. Later bumps and earlier format-2 versions are never reset
-evidence. A short/empty main file or SQLite header with version zero and a
-`-wal` or `-shm` companion is unknown pending a possible checkpoint, not
-format-1 evidence. Other unknown or unreadable headers refuse with the file
-and repair/restore instructions, even with acknowledgement or an old receipt.
+evidence. An empty main file or SQLite header with version zero identifies
+neither format, with or without companions. A short main file with a `-wal`
+or `-shm` companion may await a checkpoint and is also not format-1 evidence.
+Without a format-1 receipt, other unknown non-empty or unreadable headers
+refuse with the file and repair/restore instructions, even with acknowledgement.
 Store symlinks supply no format evidence; an independently established reset
 unlinks them without following their targets.
 
 Reset follows source verification, every account preview and release smoke
-checks. The plan is rechecked before removal. Old peer and tick agents are
+checks. Intermediate install batches publish a format-1 receipt until removal
+succeeds and the final batch publishes format 2; there is no separate reset
+marker. The plan is rechecked before removal. Old peer and tick agents are
 stopped before deletion and restarted after a successful install; on failure
-the output names all stopped or potentially stopped agents and the exact
-acknowledged install command to restart the current agents. This also covers
+the output names only current agents successfully stopped and prints
+`install.sh --upgrade --state-dir STATE --reset-state` to finish installation
+and restart them. Failures without a reset plan omit `--reset-state`. This also covers
 receipt publication and final-inspection failures after deletion. No other chair/harness
 session may be active during cut-over. Held custody locks in base, run-keyed and
 nested child stores block reset. Fleet upgrade preflights every host before
@@ -157,9 +163,13 @@ Before removing any dropped tree, provider archives from its actual
 `attempts/<id>/provider-history` layout (including run-keyed and child stores)
 are moved to `provider-history/format-1/<relative-attempt-path>/provider-history`
 with identity checks and no replacement. A symlink or non-directory at a source
-history or archive ancestor refuses at preflight. Interrupted resets are rerunnable;
-archive collisions refuse without overwriting either archive. Usage and quota
-ledgers, these provider archives, session checkpoints, chair logs, worktrees
+history or archive ancestor, or any existing archive destination, refuses
+at preflight before shutdown or moves. The format-1 `usage-ledger/` directory
+is moved without replacement to `usage-history/format-1/`; a non-directory
+source or ancestor and an existing destination also refuse during preflight.
+Format 2 starts a fresh usage ledger; there is no format-1 reader. Interrupted
+resets are rerunnable: an already moved source is absent and its archive stays.
+Quota history, these archives, session checkpoints, chair logs, worktrees
 and branches stay.
 - Why: deleting state is irreversible and a lane may be running.
 - Test: `tests/install.rs::format_one_state_is_reset_only_on_acknowledgement`;

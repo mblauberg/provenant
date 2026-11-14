@@ -599,68 +599,12 @@ fn submit_after_probe(
     submit().map_err(|error| peer_failure(peer, &error))
 }
 
-const MIN_SUBMIT_RELEASE: (u64, u64, u64) = (1, 6, 5);
-
-/// Refuse only capabilities the peer explicitly reports as incompatible.
+/// Format-2 health always reports the supported run operations.
 fn check_submit_health(peer: &str, result: PeerResult) -> Result<(), PeerFailure> {
     let PeerResult::Health { data, .. } = result else {
         return Ok(());
     };
-    let version = data.release.as_deref().and_then(|v| {
-        let valid_identifiers = |suffix: &str, prerelease: bool| {
-            suffix.split('.').all(|part| {
-                !part.is_empty()
-                    && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-                    && !(prerelease
-                        && part.len() > 1
-                        && part.starts_with('0')
-                        && part.bytes().all(|b| b.is_ascii_digit()))
-            })
-        };
-        let core = if let Some((core, build)) = v.split_once('+') {
-            if !valid_identifiers(build, false) {
-                return None;
-            }
-            core
-        } else {
-            v
-        };
-        let core = if let Some((core, prerelease)) = core.split_once('-') {
-            if !valid_identifiers(prerelease, true) {
-                return None;
-            }
-            core
-        } else {
-            core
-        };
-        let mut parts = core.split('.').map(|part| {
-            if part.len() > 1 && part.starts_with('0') {
-                return None;
-            }
-            if !part.bytes().all(|b| b.is_ascii_digit()) {
-                return None;
-            }
-            part.parse::<u64>().ok()
-        });
-        let version = (parts.next()??, parts.next()??, parts.next()??);
-        parts.next().is_none().then_some(version)
-    });
-    if version.is_some_and(|version| version < MIN_SUBMIT_RELEASE) {
-        return Err(PeerFailure::new(
-            FacadeError::PeerVersion,
-            format!(
-                "{peer}: peer release {} is too old for submission; run `provenant upgrade` on the peer",
-                provenant_fabric_runtime::hosts::plain_text(
-                    data.release.as_deref().unwrap_or("unknown"),
-                    80
-                )
-            ),
-        ));
-    }
-    if data
-        .run_capabilities
-        .is_some_and(|capabilities| !capabilities.submit)
-    {
+    if !data.run_capabilities.submit {
         return Err(PeerFailure::new(
             FacadeError::DispatchRefused {
                 reason: "peer does not support submission".into(),
@@ -887,15 +831,7 @@ mod tests {
         let host = HostId::from_bytes([2; 16]);
         let project =
             CrossHostProjectKey::from_home(Path::new("/home/a"), Path::new("/home/a/repo"))?;
-        for (release, submit, code) in [
-            (Some("1.6.4"), Some(true), Some("peer_version")),
-            (Some("1.6.5"), Some(false), Some("dispatch_refused")),
-            (Some("1.6.5"), Some(true), None),
-            (Some("1.6.5-rc.1"), Some(true), None),
-            (None, None, None),
-            (Some("unparseable"), None, None),
-            (Some("1.6.4-"), None, None),
-        ] {
+        for (submit, code) in [(false, Some("dispatch_refused")), (true, None)] {
             let calls = Cell::new(0);
             let stub = || {
                 calls.set(calls.get() + 1);
@@ -912,8 +848,8 @@ mod tests {
                             host,
                             available: true,
                             execution: submit,
-                            release: release.map(str::to_owned),
-                            run_capabilities: submit.map(|submit| RunCapabilities {
+                            release: env!("CARGO_PKG_VERSION").into(),
+                            run_capabilities: RunCapabilities {
                                 submit,
                                 list: true,
                                 status: true,
@@ -922,8 +858,8 @@ mod tests {
                                 resume: true,
                                 output: true,
                                 events: true,
-                            }),
-                            readiness: None,
+                            },
+                            readiness: provenant_fabric_runtime::hosts::PeerReadiness::reporting(),
                         },
                     },
                 })
@@ -933,14 +869,6 @@ mod tests {
                 let error = result.unwrap_err();
                 assert_eq!(error.error.code(), code);
                 assert_eq!(calls.get(), 1);
-                if code == "peer_version" {
-                    assert!(
-                        error
-                            .detail
-                            .unwrap_or_default()
-                            .contains("provenant upgrade")
-                    );
-                }
             } else {
                 assert!(result.is_ok());
                 assert_eq!(calls.get(), 2);

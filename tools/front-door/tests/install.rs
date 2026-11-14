@@ -1607,7 +1607,7 @@ chmod +x "$2/bin/provenant"
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh");
     let mut args = vec![
         script.into_os_string(),
-        "--from-source".into(),
+        "--source".into(),
         source.into_os_string(),
     ];
     let declined = rig.execute_os(Path::new("/bin/sh"), &args, None)?;
@@ -2972,7 +2972,6 @@ fn format_one_state_is_reset_only_on_acknowledgement() -> Result {
         "pr-contributions.sqlite3",
     ];
     let kept = [
-        "usage-ledger/segment-0.jsonl",
         "quota/history/work.claude.jsonl",
         "provider-history/existing.jsonl",
         "workflow/projects/p/sessions/s/checkpoint.md",
@@ -3065,6 +3064,9 @@ fn format_one_state_is_reset_only_on_acknowledgement() -> Result {
     ] {
         fs::write(state.join(name), format!("format-1 {name}"))?;
     }
+    let usage = state.join("usage-ledger/segment-0.jsonl");
+    fs::create_dir_all(usage.parent().ok_or("usage parent")?)?;
+    fs::write(&usage, "format-1 usage row")?;
     let histories = [
         "attempts/base/provider-history/candidate-0/transcript.jsonl",
         "runs/r1/attempts/a1/provider-history/candidate-0/session.jsonl",
@@ -3144,6 +3146,11 @@ fn format_one_state_is_reset_only_on_acknowledgement() -> Result {
             name
         );
     }
+    assert!(!state.join("usage-ledger").exists());
+    assert_eq!(
+        fs::read_to_string(state.join("usage-history/format-1/segment-0.jsonl"))?,
+        "format-1 usage row"
+    );
     assert!(lane.join(".git").exists());
     git(
         &rig,
@@ -3193,6 +3200,181 @@ fn reset_install(
     ];
     args.extend_from_slice(extra);
     rig.command(&args)
+}
+
+#[test]
+fn install_identifies_state_only_from_receipts_or_positive_headers() -> Result {
+    for (store, old, intermediate, current) in [
+        ("run.sqlite3", 10, 5, provenant_run::RUN_SCHEMA_VERSION),
+        (
+            "fabric/fabric.sqlite3",
+            15,
+            8,
+            provenant_fabric_store::CURRENT_SCHEMA_VERSION as u32,
+        ),
+        (
+            "fabric/host.sqlite3",
+            15,
+            8,
+            provenant_fabric_store::CURRENT_SCHEMA_VERSION as u32,
+        ),
+        (
+            "admission.sqlite3",
+            6,
+            3,
+            provenant_run::ADMISSION_SCHEMA_VERSION,
+        ),
+        (
+            "pr-contributions.sqlite3",
+            4,
+            2,
+            provenant_run::CONTRIBUTIONS_SCHEMA_VERSION,
+        ),
+    ] {
+        let (rig, stage) = reset_fixture()?;
+        fs::remove_file(rig.state.join("run.sqlite3"))?;
+        let receipt_path = rig.state.join("install/receipt.json");
+        let receipt_bytes = fs::read(&receipt_path)?;
+        let store_path = rig.state.join(store);
+        fs::create_dir_all(store_path.parent().ok_or("store parent")?)?;
+        for receipt in [None, Some(1), Some(2)] {
+            if let Some(format) = receipt {
+                fs::write(&receipt_path, &receipt_bytes)?;
+                set_receipt_format(&rig, format)?;
+            } else if receipt_path.exists() {
+                fs::remove_file(&receipt_path)?;
+            }
+            for version in [0, old, intermediate, current, current + 1] {
+                old_sqlite_header(&store_path, version)?;
+                let before = snapshot(&rig.state)?;
+                let output = reset_install(&rig, &stage, &["--upgrade-preflight"])?;
+                let expected = if receipt == Some(1) || version == old {
+                    6
+                } else if version == intermediate {
+                    2
+                } else {
+                    0
+                };
+                if expected == 2 {
+                    assert_ne!(
+                        code(&output),
+                        0,
+                        "{store} {version} {receipt:?}: {output:?}"
+                    );
+                    let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+                    assert_eq!(value["error"]["code"], "STATE_RESET_UNSAFE");
+                } else {
+                    assert_eq!(
+                        code(&output),
+                        expected,
+                        "{store} {version} {receipt:?}: {output:?}"
+                    );
+                }
+                assert_eq!(snapshot(&rig.state)?, before);
+            }
+            old_sqlite_header(&store_path, 0)?;
+            let zero_header = fs::read(&store_path)?;
+            for (bytes, companion, unknown) in [
+                (Vec::new(), None, false),
+                (Vec::new(), Some("-wal"), false),
+                (vec![0; 12], Some("-wal"), false),
+                (vec![0; 12], Some("-shm"), false),
+                (zero_header.clone(), Some("-wal"), false),
+                (zero_header, Some("-shm"), false),
+                (b"not a database".to_vec(), None, true),
+            ] {
+                fs::write(&store_path, bytes)?;
+                let companion_path = companion.map(|suffix| {
+                    store_path.with_file_name(format!(
+                        "{}{suffix}",
+                        store_path
+                            .file_name()
+                            .expect("store name")
+                            .to_string_lossy()
+                    ))
+                });
+                if let Some(path) = &companion_path {
+                    fs::write(path, "uncheckpointed")?;
+                }
+                let before = snapshot(&rig.state)?;
+                let output = reset_install(&rig, &stage, &["--upgrade-preflight"])?;
+                if receipt == Some(1) {
+                    assert_eq!(code(&output), 6, "{output:?}");
+                } else if unknown {
+                    let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+                    assert_eq!(value["error"]["code"], "STATE_RESET_UNSAFE");
+                } else {
+                    assert_eq!(code(&output), 0, "{output:?}");
+                }
+                assert_eq!(snapshot(&rig.state)?, before);
+                if let Some(path) = companion_path {
+                    fs::remove_file(path)?;
+                }
+            }
+        }
+    }
+    // A format-1 receipt also authorises the actual reset of intermediate stores.
+    let (rig, stage) = reset_fixture()?;
+    fs::create_dir_all(rig.state.join("fabric"))?;
+    old_sqlite_header(&rig.state.join("fabric/fabric.sqlite3"), 8)?;
+    old_sqlite_header(&rig.state.join("pr-contributions.sqlite3"), 2)?;
+    let done = reset_install(&rig, &stage, &["--reset-state"])?;
+    assert_eq!(code(&done), 0, "{done:?}");
+    for name in ["fabric/fabric.sqlite3", "pr-contributions.sqlite3"] {
+        assert!(!rig.state.join(name).exists());
+    }
+    Ok(())
+}
+
+#[test]
+fn reset_usage_archive_refuses_unsafe_sources_and_destinations_before_writes() -> Result {
+    for name in ["usage-ledger", "usage-history", "usage-history/format-1"] {
+        for kind in ["file", "link", "directory"] {
+            if name != "usage-history/format-1" && kind == "directory" {
+                continue;
+            }
+            let (rig, stage) = reset_fixture()?;
+            let outside = rig.root.join("outside-usage");
+            fs::create_dir(&outside)?;
+            fs::write(outside.join("rows.jsonl"), "keep")?;
+            let invalid = rig.state.join(name);
+            fs::create_dir_all(invalid.parent().ok_or("usage parent")?)?;
+            match kind {
+                "file" => fs::write(&invalid, "unknown")?,
+                "link" => std::os::unix::fs::symlink(&outside, &invalid)?,
+                _ => fs::create_dir(&invalid)?,
+            }
+            if name != "usage-ledger" {
+                fs::create_dir(rig.state.join("usage-ledger"))?;
+                fs::write(rig.state.join("usage-ledger/old.jsonl"), "old usage")?;
+            }
+            let before = snapshot(&rig.state)?;
+            let refused = reset_install(&rig, &stage, &["--upgrade-preflight", "--reset-state"])?;
+            assert_ne!(code(&refused), 0, "{refused:?}");
+            assert_eq!(snapshot(&rig.state)?, before);
+            assert_eq!(fs::read_to_string(outside.join("rows.jsonl"))?, "keep");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn reset_refuses_writable_roots_and_unsupported_lock_entries_before_writes() -> Result {
+    for writable_root in [true, false] {
+        let (rig, stage) = reset_fixture()?;
+        if writable_root {
+            fs::set_permissions(&rig.state, fs::Permissions::from_mode(0o722))?;
+        } else {
+            fs::create_dir_all(rig.state.join("attempts/a1/custody.lock"))?;
+        }
+        let before = snapshot(&rig.state)?;
+        let refused = reset_install(&rig, &stage, &["--upgrade-preflight", "--reset-state"])?;
+        assert_ne!(code(&refused), 0, "{refused:?}");
+        let value: serde_json::Value = serde_json::from_slice(&refused.stdout.bytes)?;
+        assert_eq!(value["error"]["code"], "STATE_RESET_UNSAFE");
+        assert_eq!(snapshot(&rig.state)?, before);
+    }
+    Ok(())
 }
 
 #[test]
@@ -3373,7 +3555,7 @@ fn reset_invalid_provider_history_refuses_during_preflight() -> Result {
 }
 
 #[test]
-fn reset_partial_archive_failure_is_rerunnable_without_overwriting_history() -> Result {
+fn reset_archive_collision_refuses_before_writes_and_is_rerunnable() -> Result {
     let (rig, stage) = reset_fixture()?;
     // A current receipt can coexist with foreign stores recreated by an old agent.
     set_receipt_format(&rig, 2)?;
@@ -3385,8 +3567,11 @@ fn reset_partial_archive_failure_is_rerunnable_without_overwriting_history() -> 
     fs::write(source.join("transcript.jsonl"), "original transcript")?;
     fs::create_dir_all(&archive)?;
     fs::write(archive.join("transcript.jsonl"), "existing archive")?;
-    let failed = reset_install(&rig, &stage, &["--reset-state"])?;
+    let before = snapshot(&rig.state)?;
+    let failed = reset_install(&rig, &stage, &["--upgrade-preflight", "--reset-state"])?;
     assert_ne!(code(&failed), 0);
+    assert_eq!(snapshot(&rig.state)?, before);
+    assert!(!String::from_utf8_lossy(&failed.stderr.bytes).contains("Agents stopped"));
     assert_eq!(
         fs::read_to_string(source.join("transcript.jsonl"))?,
         "original transcript"
@@ -3396,12 +3581,6 @@ fn reset_partial_archive_failure_is_rerunnable_without_overwriting_history() -> 
         "existing archive"
     );
     assert!(rig.state.join("run.sqlite3").exists());
-    let pending: serde_json::Value =
-        serde_json::from_slice(&fs::read(rig.state.join("install/receipt.json"))?)?;
-    assert_eq!(pending["state_format_version"], 1);
-    // Losing the last foreign header must not hide the unfinished reset.
-    fs::remove_file(rig.state.join("run.sqlite3"))?;
-    assert_eq!(code(&reset_install(&rig, &stage, &[])?), 6);
     // Resolve the collision without deleting its content, then retry.
     fs::rename(&archive, rig.state.join("provider-history/previous"))?;
     let result = reset_install(&rig, &stage, &["--reset-state"])?;
@@ -3508,7 +3687,7 @@ cp '{}' "$2/bin/provenant"
     let mut args = vec![
         script.into_os_string(),
         "--upgrade".into(),
-        "--from-source".into(),
+        "--source".into(),
         source.into_os_string(),
     ];
     rig.env.push(("PREFLIGHT_STATUS".into(), "2".into()));
@@ -3518,12 +3697,17 @@ cp '{}' "$2/bin/provenant"
     assert!(!String::from_utf8_lossy(&invalid.stderr.bytes).contains("Type reset"));
     rig.env.retain(|(key, _)| key != "PREFLIGHT_STATUS");
     rig.env.push(("PREFLIGHT_STATUS".into(), "6".into()));
+    let prompted = rig.execute_os(Path::new("/bin/sh"), &args, Some(b"reset\n"))?;
+    assert_eq!(code(&prompted), 0, "{prompted:?}");
+    assert!(String::from_utf8_lossy(&prompted.stderr.bytes).contains("Type reset"));
+    assert!(rig.home.join("installed").exists());
+    fs::remove_file(rig.home.join("installed"))?;
     let captured_stderr = rig.root.join("captured-stderr");
     rig.env
         .push(("CAPTURE".into(), captured_stderr.clone().into_os_string()));
     let mut redirected = vec![
         "-c".into(),
-        "exec /bin/sh \"$@\" </dev/null 2>\"$CAPTURE\"".into(),
+        "unset PROVENANT_INSTALL_TTY; exec /bin/sh \"$@\" </dev/null 2>\"$CAPTURE\"".into(),
         "bootstrap-test".into(),
     ];
     redirected.extend(args.clone());

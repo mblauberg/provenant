@@ -23,7 +23,8 @@ const DROPPED: &[&str] = &[
     "admission.sqlite3",
 ];
 const COMPANIONS: &[&str] = &["-wal", "-shm", "-journal", ".lock"];
-const KEPT: &str = "usage ledger, quota history, provider history (relocated to provider-history/format-1), session checkpoints, chair log";
+const USAGE_ARCHIVE: &str = "usage-history/format-1";
+const KEPT: &str = "usage ledger (archived to usage-history/format-1), quota history, provider history (relocated to provider-history/format-1), session checkpoints, chair log";
 
 pub(crate) struct Plan {
     root: Directory,
@@ -126,6 +127,10 @@ fn format_one_header(
             Err(error) => return Err(error),
         };
         let version = u32::from_be_bytes([header[60], header[61], header[62], header[63]]);
+        if value.size == 0 || (complete && &header[..16] == b"SQLite format 3\0" && version == 0) {
+            // A never-written database identifies neither state format.
+            return Ok(false);
+        }
         if !complete || (&header[..16] == b"SQLite format 3\0" && version == 0) {
             for suffix in ["-wal", "-shm"] {
                 if metadata(&parent, OsStr::new(&format!("{leaf}{suffix}")))?.is_some() {
@@ -193,9 +198,10 @@ pub(crate) fn plan(state: &Path, receipt_format: Option<u64>) -> io::Result<Opti
         ));
     }
     let older = receipt_format == Some(1);
-    // A missing receipt uses exactly the same positive evidence. Validate all
-    // headers even with an old/pending receipt; corrupt files are never guessed.
-    let foreign = foreign_store_headers(&root)?;
+    // A format-1 receipt identifies the whole old state, including stores left
+    // at an intermediate migration step. Otherwise headers establish whether
+    // old agents have left foreign stores, even after a format-2 install.
+    let foreign = !older && foreign_store_headers(&root)?;
     let mut entries = Vec::new();
     let mut dropped = Vec::new();
     for base in DROPPED {
@@ -233,6 +239,14 @@ pub(crate) fn plan(state: &Path, receipt_format: Option<u64>) -> io::Result<Opti
         check_removal(&entry.parent, &entry.name)?;
     }
     check_provider_history(&root)?;
+    if let Some(value) = metadata(&root, OsStr::new("usage-ledger"))? {
+        if value.kind != FileKind::Directory {
+            return Err(io::Error::other(
+                "usage-ledger is not a directory; restore the ledger before retrying reset",
+            ));
+        }
+        check_archive_destination(&root, Path::new(USAGE_ARCHIVE))?;
+    }
     Ok(Some(Plan {
         root,
         state: state.into(),
@@ -255,12 +269,14 @@ fn check_provider_history(root: &Directory) -> io::Result<()> {
                 path.join("provider-history").display()
             )));
         }
-        check_archive_ancestors(
-            root,
-            &Path::new("provider-history/format-1")
-                .join(path)
-                .join("provider-history"),
-        )?;
+        if metadata(&attempt, OsStr::new("provider-history"))?.is_some() {
+            check_archive_destination(
+                root,
+                &Path::new("provider-history/format-1")
+                    .join(path)
+                    .join("provider-history"),
+            )?;
+        }
     }
     Ok(())
 }
@@ -278,6 +294,32 @@ fn check_archive_ancestors(root: &Directory, path: &Path) -> io::Result<()> {
             return Err(io::Error::other(format!(
                 "{} is not a directory; move it aside or restore provider history before retrying reset",
                 relative.display()
+            )));
+        }
+        dir = fs(dir.open_verified_directory(name))?;
+    }
+    Ok(())
+}
+
+fn check_archive_destination(root: &Directory, path: &Path) -> io::Result<()> {
+    let mut dir = fs(root.try_clone())?;
+    let mut parts = path.components().peekable();
+    while let Some(part) = parts.next() {
+        let last = parts.peek().is_none();
+        let name = part.as_os_str();
+        let Some(value) = metadata(&dir, name)? else {
+            return Ok(());
+        };
+        if last {
+            return Err(io::Error::other(format!(
+                "archive destination {} already exists; move it aside before retrying reset",
+                path.display()
+            )));
+        }
+        if value.kind != FileKind::Directory {
+            return Err(io::Error::other(format!(
+                "archive ancestor {} is not a directory; restore it before retrying reset",
+                path.display()
             )));
         }
         dir = fs(dir.open_verified_directory(name))?;
@@ -514,6 +556,16 @@ pub(crate) fn remove(plan: &Plan, quiesce: impl FnOnce() -> io::Result<()>) -> i
             fs(attempt.sync())?;
         }
     }
+    let usage = OsStr::new("usage-ledger");
+    if let Some(before) = metadata(&plan.root, usage)? {
+        let archive = create_path(&plan.root, Path::new("usage-history"))?;
+        recheck(&plan.root, usage, before)?;
+        fs(plan
+            .root
+            .rename_noreplace(usage, &archive, OsStr::new("format-1")))?;
+        fs(archive.sync())?;
+        fs(plan.root.sync())?;
+    }
     remove_aliases(&plan.state, &found)?;
     for entry in &plan.entries {
         remove_entry(&entry.parent, &entry.name)?;
@@ -623,9 +675,9 @@ mod tests {
         let temp = tempfile::tempdir()?;
         std::fs::create_dir(temp.path().join("install"))?;
         let path = temp.path().join("run.sqlite3");
-        for bytes in [b"not a database".to_vec(), header(0), header(5)] {
+        for bytes in [b"not a database".to_vec(), header(5)] {
             std::fs::write(&path, &bytes)?;
-            for receipt in [None, Some(1), Some(provenant_records::STATE_FORMAT_VERSION)] {
+            for receipt in [None, Some(provenant_records::STATE_FORMAT_VERSION)] {
                 let error = plan(temp.path(), receipt)
                     .err()
                     .ok_or("unknown header accepted")?
@@ -633,6 +685,10 @@ mod tests {
                 assert!(error.contains("run.sqlite3") && error.contains("before retrying"));
                 assert_eq!(std::fs::read(&path)?, bytes);
             }
+        }
+        for bytes in [Vec::new(), header(0)] {
+            std::fs::write(&path, &bytes)?;
+            assert!(plan(temp.path(), None)?.is_none());
         }
         for suffix in ["-wal", "-shm"] {
             let companion = temp.path().join(format!("run.sqlite3{suffix}"));
