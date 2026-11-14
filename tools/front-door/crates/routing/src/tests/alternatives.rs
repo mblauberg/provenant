@@ -735,9 +735,26 @@ fn account_spend_and_expiring_override_ignore_reserve() -> Result<(), Box<dyn st
             true,
         ),
     ] {
-        let config: RoutingConfig = serde_json::from_value(
+        let mut config: RoutingConfig = serde_json::from_value(
             serde_json::json!({"pacing": {"accounts": {"codex/opaque-account": {"policy":profile}}}, "pacing_overrides":overrides}),
         )?;
+        config.launch_policy.overlay(
+            &std::collections::BTreeMap::from([
+                (
+                    "PACING_ADAPTER".into(),
+                    provenant_records::policy::Strength::Refuse,
+                ),
+                (
+                    "PACING_ACCOUNT".into(),
+                    provenant_records::policy::Strength::Refuse,
+                ),
+                (
+                    "PACING_FREE".into(),
+                    provenant_records::policy::Strength::Refuse,
+                ),
+            ]),
+            provenant_records::policy::Source::Dispatch,
+        );
         let mut ctx = context(&catalogue, &config, now()?);
         ctx.registry = &registry;
         ctx.availability = &records;

@@ -1,0 +1,1129 @@
+# Executable launch policy. The four boundaries refuse; every other rule warns by default.
+schema_version = 2
+
+[[rule]]
+code = "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION"
+site = "confinement/src/permissions/validation.rs#verify_worktree_authority"
+boundary = "git_isolation"
+strength = "refuse"
+justification = "Verified worktree, selected ref and Git grants must match."
+
+[[rule]]
+code = "VALIDATION_VERIFY_GIT_CONTROL_LINKS_GIT_ISOLATION"
+site = "confinement/src/permissions/validation.rs#verify_git_control_links"
+boundary = "git_isolation"
+strength = "refuse"
+justification = "A second link to a Git control file could permit writes through another name."
+
+[[rule]]
+code = "VALIDATION_VERIFY_GIT_CONTROL_LINKS_DATA_INTEGRITY"
+site = "confinement/src/permissions/validation.rs#verify_git_control_links"
+boundary = "data_integrity"
+strength = "refuse"
+justification = "An incomplete control-directory scan cannot establish that protected Git files have no extra hard links."
+
+[[rule]]
+code = "VALIDATION_REFUSES_LANE_ROOT_CREDENTIALS"
+site = "confinement/src/permissions/validation.rs#refuses_lane_root"
+boundary = "credentials"
+strength = "refuse"
+justification = "A lane root must not expose credential stores."
+
+[[rule]]
+code = "WRITER_LAUNCH_RESOURCE_LIMITS_NONE"
+site = "run/src/writer.rs#launch_resource_limits"
+boundary = "none"
+strength = "warn"
+knob = "policy.WRITER_LAUNCH_RESOURCE_LIMITS_NONE"
+justification = "Unreadable or invalid resource settings warn and use the compiled domains.run.grant_limit and domains.run.profile_limit_bytes defaults."
+
+[[rule]]
+code = "PREPARATION_DEPENDENCY_PREPARATION_EVENT_NONE"
+site = "cli/src/run/provider/preparation.rs#dependency_preparation_event"
+boundary = "none"
+strength = "warn"
+knob = "policy.PREPARATION_DEPENDENCY_PREPARATION_EVENT_NONE"
+justification = "Dependency preparation failures warn with lanes.prepare_deps and its compiled default or sealed profile origin; the provider may repair dependencies in the lane."
+
+[[rule]]
+code = "GRANT_COUNT"
+site = "confinement/src/permissions/validation.rs#validate_plan_grant_limit"
+boundary = "none"
+strength = "warn"
+knob = "policy.GRANT_COUNT"
+threshold = "domains.run.grant_limit"
+justification = "Plan grant counts warn above the effective threshold, naming the count, threshold and host or compiled origin."
+
+[[rule]]
+code = "PROFILE_BYTES"
+site = "confinement/src/permissions/render.rs#render_with_limit"
+boundary = "none"
+strength = "warn"
+knob = "policy.PROFILE_BYTES"
+threshold = "domains.run.profile_limit_bytes"
+justification = "Rendered sandbox profile size warns above the effective threshold, naming the bytes, threshold and host or compiled origin."
+
+[[rule]]
+code = "ARGV_PROMPT"
+site = "providers/src/contract.rs#Prompt::check_argv"
+boundary = "none"
+strength = "warn"
+knob = "policy.ARGV_PROMPT"
+threshold = "domains.run.argv_prompt_limit_bytes"
+justification = "The argv prompt byte threshold defaults to 65536 and can be overridden; top-level launches spill above it."
+
+[[rule]]
+code = "OBSERVATION_CHECK_LAUNCH_PROMPT_AUTHORITY"
+site = "cli/src/run/provider/observation.rs#check_launch_prompt"
+boundary = "authority"
+strength = "refuse"
+justification = "Nested argv prompts above the threshold cannot spill to a parent-writable file without allowing the parent to alter the child task."
+
+[[rule]]
+code = "CONTRACT_CONTINUATION_VALIDATE_AUTHORITY"
+site = "providers/src/contract.rs#Continuation::validate"
+boundary = "authority"
+strength = "refuse"
+justification = "A continuation must match its recorded route and grant identity."
+
+[[rule]]
+code = "CONTINUATION_CONTINUATION_REQUEST_AUTHORITY"
+site = "cli/src/run/provider/continuation.rs#continuation_request"
+boundary = "authority"
+strength = "refuse"
+justification = "A continuation must resolve the provider and model actually applied to its prior attempt."
+
+[[rule]]
+code = "CONTINUATION_CONTINUATION_FOR_AUTHORITY"
+site = "cli/src/run/provider/continuation.rs#continuation_for"
+boundary = "authority"
+strength = "refuse"
+justification = "A continuation requires its recorded session, applied route and account identity and must match the selected route."
+
+[[rule]]
+code = "CONTINUATION_COPY_STATE_CLASSIFIED_DATA_INTEGRITY"
+site = "cli/src/run/provider/continuation.rs#copy_state_classified"
+boundary = "data_integrity"
+strength = "refuse"
+justification = "Hard-linked retained state cannot be copied as an independent history object."
+
+[[rule]]
+code = "CONTINUATION_COPY_STATE_CLASSIFIED_AUTHORITY"
+site = "cli/src/run/provider/continuation.rs#copy_state_classified"
+boundary = "authority"
+strength = "refuse"
+justification = "Retained state copying must remain on the anchored filesystem."
+
+[[rule]]
+code = "LAUNCH_APPLIED_WRITE_GRANTS_AUTHORITY"
+site = "run/src/launch.rs#applied_write_grants"
+boundary = "authority"
+strength = "refuse"
+justification = "Applied write grant paths must be representable so continuation and handoff use the selected attempt's actual authority."
+
+[[rule]]
+code = "WRITE_GRANT_BYTES"
+site = "run/src/launch.rs#applied_write_grants"
+boundary = "none"
+strength = "warn"
+knob = "policy.WRITE_GRANT_BYTES"
+threshold = "domains.run.write_grant_limit_bytes"
+justification = "The encoded applied write-grant ledger has a configurable warning threshold; the warning and receipt report the effective value and origin. Historical limit diagnostics remain readable."
+
+[[rule]]
+code = "LAUNCH_RUNSTORE_START_INNER_NONE"
+site = "run/src/launch.rs#RunStore::start_inner"
+boundary = "none"
+strength = "warn"
+knob = "policy.LAUNCH_RUNSTORE_START_INNER_NONE"
+threshold = "domains.fabric.lanes.priority"
+justification = "Unavailable lane priority warns and falls back to the compiled priority for the lane mode."
+
+[[rule]]
+code = "CONFINEMENT_HOST_INDEXES_PROTECTED_DATA_INTEGRITY"
+site = "cli/src/run/provider/confinement.rs#host_indexes_protected"
+boundary = "data_integrity"
+strength = "refuse"
+justification = "Applied write grants cannot overlap host indexes that carry durable authority and run state."
+
+[[rule]]
+code = "CONFINEMENT_TARGET_SEEDS_PROTECTED_DATA_INTEGRITY"
+site = "cli/src/run/provider/confinement.rs#target_seeds_protected"
+boundary = "data_integrity"
+strength = "refuse"
+justification = "Applied write grants cannot overlap the host-owned target seed store."
+
+[[rule]]
+code = "PREPARATION_PREPARE_CANDIDATES_AUTHORITY"
+site = "cli/src/run/provider/preparation.rs#prepare_candidates"
+boundary = "authority"
+strength = "refuse"
+justification = "An adapter cannot be launched with capabilities or write access its declared model policy does not permit."
+
+[[rule]]
+code = "LANE_LAUNCHSPEC_CONFIGURE_PUBLISHING_AUTHORITY"
+site = "providers/src/lane.rs#LaunchSpec::configure_publishing"
+boundary = "authority"
+strength = "refuse"
+justification = "Publishing requires valid absolute paths before constructing its selected credential and Git wrappers."
+
+[[rule]]
+code = "PREPARATION_PREPARE_WITH_CREDENTIALS"
+site = "cli/src/run/provider/preparation.rs#prepare_with"
+boundary = "credentials"
+strength = "refuse"
+justification = "Publishing policy must be read and its selected GitHub credential restrictions applied before publishing is enabled."
+
+[[rule]]
+code = "PREPARATION_PREPARE_WRITER_DEPENDENCIES_NONE"
+site = "cli/src/run/provider/preparation.rs#prepare_writer_dependencies"
+boundary = "none"
+strength = "warn"
+knob = "policy.PREPARATION_PREPARE_WRITER_DEPENDENCIES_NONE"
+justification = "Automatic dependency setup warns with a redacted cause and lets the writer continue; cancellation still stops preparation."
+
+[[rule]]
+code = "LAUNCH_LANE_PORT_PLAN_OR_WARN_NONE"
+site = "run/src/launch.rs#lane_port_plan_or_warn"
+boundary = "none"
+strength = "warn"
+knob = "policy.LAUNCH_LANE_PORT_PLAN_OR_WARN_NONE"
+justification = "Unreadable or unrepresentable lane-port settings warn and leave the lane without an allocated port block."
+
+[[rule]]
+code = "PORT_BLOCKS"
+site = "supervisor/src/guardian.rs#Driver::run"
+boundary = "none"
+strength = "warn"
+knob = "policy.PORT_BLOCKS"
+threshold = "domains.fabric.lanes.lane_port_blocks"
+justification = "An exhausted port-block pool warns the writer and reports the effective count, its host or compiled origin, and the setting that can raise the pool or disable allocation."
+
+[[rule]]
+code = "GUARDIAN_LANE_PORT_ALLOCATION_NONE"
+site = "supervisor/src/guardian.rs#lane_port_allocation"
+boundary = "none"
+strength = "warn"
+knob = "policy.GUARDIAN_LANE_PORT_ALLOCATION_NONE"
+justification = "A port-block allocation I/O failure warns and continues without a block; stale port-block environment variables are removed."
+
+[[rule]]
+code = "PACING_ADAPTER"
+site = "routing/src/resolve.rs#pacing_reserve_window"
+boundary = "none"
+strength = "warn"
+knob = "policy.PACING_ADAPTER"
+threshold = "domains.routing.pacing_reserve"
+justification = "An adapter reserve defaults to shipped values and can be configured; the observation reports its effective percentage and source."
+
+[[rule]]
+code = "PACING_ACCOUNT"
+site = "routing/src/resolve.rs#pacing_reserve_window"
+boundary = "none"
+strength = "warn"
+knob = "policy.PACING_ACCOUNT"
+threshold = "domains.routing.pacing.accounts"
+justification = "An account pacing profile can override the reserve for its selected window."
+
+[[rule]]
+code = "PACING_FREE"
+site = "routing/src/resolve.rs#pacing_reserve_window"
+boundary = "none"
+strength = "warn"
+knob = "policy.PACING_FREE"
+threshold = "domains.routing.pacing.free"
+justification = "A free-pool pacing profile can override the reserve for its selected window."
+
+[[rule]]
+code = "LAUNCH_DISK"
+site = "run/src/launch.rs#Providers::check_policy"
+boundary = "none"
+strength = "warn"
+knob = "policy.LAUNCH_DISK"
+threshold = "gc.free_floor"
+justification = "Writer launch may warns when available storage remains below the configured free-space floor after collection."
+
+[[rule]]
+code = "DISPATCH_PREPAREDPROVIDER_CHECK_POLICY_AUTHORITY"
+site = "cli/src/run/dispatch.rs#PreparedProvider::check_policy"
+boundary = "authority"
+strength = "refuse"
+justification = "A prepared continuation must retain its validated task identity."
+
+[[rule]]
+code = "RUN_WRITER_GC_SETTINGS_NONE"
+site = "cli/src/run.rs#writer_gc_settings"
+boundary = "none"
+strength = "warn"
+knob = "policy.RUN_WRITER_GC_SETTINGS_NONE"
+threshold = "gc.free_floor"
+justification = "An unreadable GC configuration warns and uses compiled defaults; an unavailable disk policy context warns and skips the check."
+
+[[rule]]
+code = "SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE"
+site = "cli/src/run/submit.rs#check_writer_disk_with_collection"
+boundary = "none"
+strength = "warn"
+knob = "policy.SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE"
+justification = "An unobservable disk floor or available space warns and allows dispatch; measured low space retains the configurable floor."
+
+[[rule]]
+code = "LAUNCH_RUNSTORE_START_INNER_AUTHORITY"
+site = "run/src/launch.rs#RunStore::start_inner"
+boundary = "authority"
+strength = "refuse"
+justification = "The stored prompt must match its recorded length and digest before a host launches the task."
+
+[[rule]]
+code = "ARTIFACTS_RUNSTORE_ARTIFACT_BYTES_DATA_INTEGRITY"
+site = "run/src/artifacts.rs#RunStore::artifact_bytes"
+boundary = "data_integrity"
+strength = "refuse"
+justification = "At launch the validated attempt record already limits its recorded prompt to RECORD_LIMIT; a file exceeding that read bound cannot match the recorded length. Length and digest are then verified before use."
+
+[[rule]]
+code = "ARTIFACTS_RUNSTORE_ARTIFACT_BYTES_AUTHORITY"
+site = "run/src/artifacts.rs#RunStore::artifact_bytes"
+boundary = "authority"
+strength = "refuse"
+justification = "If the stored prompt cannot be reopened, its bytes cannot be verified against the authorised task and no substitute prompt is launched."
+
+[[rule]]
+code = "PREPARATION_CHECK_GRAPH_INPUTS_ROOT_AUTHORITY"
+site = "cli/src/run/provider/preparation.rs#check_graph_inputs_root"
+boundary = "authority"
+strength = "refuse"
+justification = "A graph-bound task may receive only its own node's input directory, without a redirected path."
+
+[[rule]]
+code = "CONFINEMENT_SOURCE_CWD_AUTHORITY"
+site = "cli/src/run/provider/confinement.rs#source_cwd"
+boundary = "authority"
+strength = "refuse"
+justification = "The selected graph source must remain a permitted registered checkout with the recorded identity."
+
+[[rule]]
+code = "CONFINEMENT_REQUIRE_SOURCE_HEAD_AUTHORITY"
+site = "cli/src/run/provider/confinement.rs#require_source_head"
+boundary = "authority"
+strength = "refuse"
+justification = "A pinned graph source must have a valid recorded head and must not move before preparation."
+
+[[rule]]
+code = "CONFINEMENT_READ_ONLY_PLAN_AUTHORITY"
+site = "cli/src/run/provider/confinement.rs#read_only_plan"
+boundary = "authority"
+strength = "refuse"
+justification = "Read-only plans require the selected project binding and a Git repository when the source is pinned."
+
+[[rule]]
+code = "SOURCE_TREE_ENSURE_SOURCE_ROOTS_AUTHORITY"
+site = "cli/src/run/provider/source_tree.rs#ensure_source_roots"
+boundary = "authority"
+strength = "refuse"
+justification = "Access and asset grants cannot reopen the live checkout beside the selected pinned source view."
+
+[[rule]]
+code = "SOURCE_TREE_ENSURE_PROFILE_ISOLATED_AUTHORITY"
+site = "cli/src/run/provider/source_tree.rs#ensure_profile_isolated"
+boundary = "authority"
+strength = "refuse"
+justification = "Provider grants cannot reopen the live checkout beside the selected pinned source view."
+
+[[rule]]
+code = "SOURCE_TREE_ENSURE_VIEW_READ_ONLY_AUTHORITY"
+site = "cli/src/run/provider/source_tree.rs#ensure_view_read_only"
+boundary = "authority"
+strength = "refuse"
+justification = "Provider writes cannot modify the immutable source view supplied to the task."
+
+[[rule]]
+code = "CONFINEMENT_WRITER_SOURCE_CONTEXT_AUTHORITY"
+site = "cli/src/run/provider/confinement.rs#writer_source_context"
+boundary = "authority"
+strength = "refuse"
+justification = "A writer continuation requires readable predecessor status and a head descended from its pinned source; retained uncommitted edits are reported in its brief."
+
+[[rule]]
+code = "HAND_OFF_RUNSTORE_HAND_OFF_GIT_ISOLATION"
+site = "run/src/launch/hand_off.rs#RunStore::hand_off"
+boundary = "git_isolation"
+strength = "refuse"
+justification = "A retained writer import keeps its worktree fenced until the protected Git state is reconciled."
+
+[[rule]]
+code = "WRITER_WRITERLAUNCH_SNAPSHOT_GIT_ISOLATION"
+site = "run/src/writer.rs#WriterLaunch::snapshot"
+boundary = "git_isolation"
+strength = "refuse"
+justification = "The writer HEAD must match the selected lane branch before protected Git state is captured."
+
+[[rule]]
+code = "WRITER_WRITERLAUNCH_REQUIRE_CONTINUATION_SOURCE_GIT_ISOLATION"
+site = "run/src/writer.rs#WriterLaunch::require_continuation_source"
+boundary = "git_isolation"
+strength = "refuse"
+justification = "The selected source and continuation head must match the pinned commit and its ancestry before the writer is launched."
+
+[[rule]]
+code = "HAND_OFF_RUNSTORE_HAND_OFF_AUTHORITY"
+site = "run/src/launch/hand_off.rs#RunStore::hand_off"
+boundary = "authority"
+strength = "refuse"
+justification = "A handoff must use the selected worktree and held custody binding; fenced, unknown, invalid or unconfirmed custody cannot be granted to another attempt."
+
+[[rule]]
+code = "CUSTODY_PUBLICATIONRESERVATION_PREPARE_AUTHORITY"
+site = "supervisor/src/custody.rs#PublicationReservation::prepare"
+boundary = "authority"
+strength = "refuse"
+justification = "Existing launch or exit evidence fences an attempt against a second execution."
+
+[[rule]]
+code = "CONTROLS_RUNSTORE_CHECK_WRITER_LINEAGE_AUTHORITY"
+site = "run/src/controls.rs#RunStore::check_writer_lineage"
+boundary = "authority"
+strength = "refuse"
+justification = "A continuation must retain its recorded worktree ownership and cannot take custody from a nonterminal predecessor."
+
+[[rule]]
+code = "HAND_OFF_RUNSTORE_HAND_OFF_AUTHORITY_2"
+site = "run/src/launch/hand_off.rs#RunStore::hand_off"
+boundary = "authority"
+strength = "refuse"
+justification = "An attempt changed after custody acquisition cannot be handed off."
+
+[[rule]]
+code = "LAUNCH_RUNSTORE_START_INNER_NONE_2"
+site = "run/src/launch.rs#RunStore::start_inner"
+boundary = "none"
+strength = "warn"
+knob = "policy.LAUNCH_RUNSTORE_START_INNER_NONE_2"
+justification = "Untyped candidate preparation failures remain combined in RefusalKind::Preparation; typed per-candidate guard facts survive mixed fallback. These operational setup failures do not assert a security boundary."
+
+[[rule]]
+code = "HAND_OFF_RUNSTORE_HAND_OFF_NONE"
+site = "run/src/launch/hand_off.rs#RunStore::hand_off"
+boundary = "none"
+strength = "warn"
+knob = "policy.HAND_OFF_RUNSTORE_HAND_OFF_NONE"
+justification = "HandOff::Local still combines operational setup failures with typed custody and Git checks. Typed boundary failures retain their boundary cause; these setup failures do not assert a security boundary."
+
+[[rule]]
+code = "PLAN_CONFINEDPLAN_NEW_AUTHORITY"
+site = "confinement/src/plan.rs#ConfinedPlan::new"
+boundary = "authority"
+strength = "refuse"
+justification = "Read-only execution cannot enable unconfined extensions or inherited hooks that exceed its selected policy; requested nested confinement cannot be claimed when unsupported."
+
+[[rule]]
+code = "PLAN_CONFINEDPLAN_NEW_CREDENTIALS"
+site = "confinement/src/plan.rs#ConfinedPlan::new"
+boundary = "credentials"
+strength = "refuse"
+justification = "Secret roots and provider-private state must not overlap grants that expose credential material."
+
+[[rule]]
+code = "PLAN_CONFINEDPLAN_NEW_DATA_INTEGRITY"
+site = "confinement/src/plan.rs#ConfinedPlan::new"
+boundary = "data_integrity"
+strength = "refuse"
+justification = "Write roots cannot overlap protected host objects, and private scratch and provider state must not overlap each other or the approved lane roots."
+
+[[rule]]
+code = "PLAN_CONFINEDPLAN_NEW_CREDENTIALS_2"
+site = "confinement/src/plan.rs#ConfinedPlan::new"
+boundary = "credentials"
+strength = "refuse"
+justification = "Agy's selected home source and private destinations must not overlap secret or protected roots."
+
+[[rule]]
+code = "PLAN_CONFINEDPLAN_NEW_AUTHORITY_2"
+site = "confinement/src/plan.rs#ConfinedPlan::new"
+boundary = "authority"
+strength = "refuse"
+justification = "Required roots must be representable and disjoint so the selected grant and private state can be enforced."
+
+[[rule]]
+code = "RENDER_COMPILE_SBPL_GIT_ISOLATION"
+site = "confinement/src/permissions/render.rs#compile_sbpl"
+boundary = "git_isolation"
+strength = "refuse"
+justification = "Writer grants must match held worktree authority and keep real Git metadata outside writable scratch."
+
+[[rule]]
+code = "RENDER_COMPILE_SBPL_CREDENTIALS"
+site = "confinement/src/permissions/render.rs#compile_sbpl"
+boundary = "credentials"
+strength = "refuse"
+justification = "Credential, secret and private-state exclusions must hold after anchors and grants are resolved."
+
+[[rule]]
+code = "RENDER_COMPILE_SBPL_AUTHORITY"
+site = "confinement/src/permissions/render.rs#compile_sbpl"
+boundary = "authority"
+strength = "refuse"
+justification = "The backend cannot claim a requested nested confinement policy that it cannot enforce."
+
+[[rule]]
+code = "RENDER_COMPILE_SBPL_AUTHORITY_2"
+site = "confinement/src/permissions/render.rs#compile_sbpl"
+boundary = "authority"
+strength = "refuse"
+justification = "Held grant anchors are verified before and after rendering so replaced paths cannot change the authority that was approved."
+
+[[rule]]
+code = "RENDER_COMPILE_SBPL_AUTHORITY_3"
+site = "confinement/src/permissions/render.rs#compile_sbpl"
+boundary = "authority"
+strength = "refuse"
+justification = "Required anchors must be present and resolvable to enforce the selected grants."
+
+[[rule]]
+code = "LAUNCH_FILTER_OPTIONAL_GRANTS_NONE"
+site = "providers/src/launch.rs#filter_optional_grants"
+boundary = "none"
+strength = "warn"
+knob = "policy.LAUNCH_FILTER_OPTIONAL_GRANTS_NONE"
+justification = "Optional discovered grants that cannot be represented in SBPL are omitted and reported; required grants remain subject to confinement validation."
+
+[[rule]]
+code = "LAUNCH_LAUNCHSPEC_COMPLETE_TOOL_REQUIREMENTS_NONE"
+site = "providers/src/launch.rs#LaunchSpec::complete_tool_requirements"
+boundary = "none"
+strength = "warn"
+knob = "policy.LAUNCH_LAUNCHSPEC_COMPLETE_TOOL_REQUIREMENTS_NONE"
+justification = "Unrepresentable optional write grants are omitted; unrepresentable library dependencies make the reported closure incomplete."
+
+[[rule]]
+code = "PROJECT_PATHS_RESOLVE_NONE"
+site = "cli/src/run/provider/project_paths.rs#resolve"
+boundary = "none"
+strength = "warn"
+knob = "policy.PROJECT_PATHS_RESOLVE_NONE"
+justification = "A configured optional project path whose canonical target cannot be represented is omitted with its setting key and reason."
+
+[[rule]]
+code = "RENDER_SBPL_PATH_AUTHORITY"
+site = "confinement/src/permissions/render.rs#sbpl_path"
+boundary = "authority"
+strength = "refuse"
+justification = "Required paths must be encoded losslessly to enforce the requested permissions; optional discoveries warn and are omitted."
+
+[[rule]]
+code = "PROBE_SYSTEM_BACKEND_CREDENTIALS"
+site = "confinement/src/permissions/probe.rs#system_backend"
+boundary = "credentials"
+strength = "refuse"
+justification = "Without an enforcing sandbox the lane could read credential stores outside its selected authentication grants."
+
+[[rule]]
+code = "PROBE_SYSTEM_BACKEND_GIT_ISOLATION"
+site = "confinement/src/permissions/probe.rs#system_backend"
+boundary = "git_isolation"
+strength = "refuse"
+justification = "Without an enforcing sandbox a writer could modify the real Git administrative and common directories."
+
+[[rule]]
+code = "REPO_VERIFY_WORKTREE_GIT_ISOLATION"
+site = "confinement/src/repo.rs#verify_worktree"
+boundary = "git_isolation"
+strength = "refuse"
+justification = "Worktree registration, common Git identity, backlinks and repository revalidation bind a writer to its selected project and Git directories."
+
+[[rule]]
+code = "REPO_REJECT_ALTERNATES_DATA_INTEGRITY"
+site = "confinement/src/repo.rs#reject_alternates"
+boundary = "data_integrity"
+strength = "refuse"
+justification = "Protected history cannot rely on unverified alternate Git object stores."
+
+[[rule]]
+code = "REPO_VERIFIEDREPO_OPEN_STRUCTURE_GIT_ISOLATION"
+site = "confinement/src/repo.rs#VerifiedRepo::open_structure"
+boundary = "git_isolation"
+strength = "refuse"
+justification = "The selected repository and Git marker must be owner-controlled and their descriptors must identify the same Git structure."
+
+[[rule]]
+code = "REPO_VERIFIEDREPO_REVALIDATE_GIT_ISOLATION"
+site = "confinement/src/repo.rs#VerifiedRepo::revalidate"
+boundary = "git_isolation"
+strength = "refuse"
+justification = "A probed repository's Git structure and configuration must retain their recorded identities at use time."
+
+[[rule]]
+code = "REPO_READ_BOUNDED_GIT_ISOLATION"
+site = "confinement/src/repo.rs#read_bounded"
+boundary = "git_isolation"
+strength = "refuse"
+justification = "Git markers and configuration must be read completely and consistently before the selected worktree and its Git policy can be verified."
+
+[[rule]]
+code = "REPO_REJECT_ALTERNATES_DATA_INTEGRITY_2"
+site = "confinement/src/repo.rs#reject_alternates"
+boundary = "data_integrity"
+strength = "refuse"
+justification = "The complete alternates declaration must be inspected before protected history can be accepted."
+
+[[rule]]
+code = "REPO_REPOERROR_GIT_ISOLATION"
+site = "confinement/src/repo.rs#RepoError"
+boundary = "git_isolation"
+strength = "refuse"
+justification = "Repository opening and complete metadata reads are prerequisites for establishing the selected worktree and its Git authority."
+
+[[rule]]
+code = "OPENCODE_PREPARE_CREDENTIALS"
+site = "providers/src/opencode.rs#prepare"
+boundary = "credentials"
+strength = "refuse"
+justification = "The selected authentication policy and private provider state must match OpenCode's credential isolation."
+
+[[rule]]
+code = "OPENCODE_PREPARE_AUTHORITY"
+site = "providers/src/opencode.rs#prepare"
+boundary = "authority"
+strength = "refuse"
+justification = "A resumed invocation requires its validated continuation identity."
+
+[[rule]]
+code = "OPENCODE_PREPARE_NONE"
+site = "providers/src/opencode.rs#prepare"
+boundary = "none"
+strength = "warn"
+knob = "policy.OPENCODE_PREPARE_NONE"
+justification = "Absent separate private state warns and uses the already-confined attempt scratch directory for OpenCode configuration."
+
+[[rule]]
+code = "OPENCODE_PREPARE_AUTHORITY_2"
+site = "providers/src/opencode.rs#prepare"
+boundary = "authority"
+strength = "refuse"
+justification = "When a Git-context prompt refers to scratch, OpenCode must receive an exact matching path for that authorised context."
+
+[[rule]]
+code = "OPENCODE_PREPARE_NONE_2"
+site = "providers/src/opencode.rs#prepare"
+boundary = "none"
+strength = "warn"
+knob = "policy.OPENCODE_PREPARE_NONE_2"
+justification = "A read-only Git launcher whose directory cannot be encoded in PATH is omitted with a warning."
+
+[[rule]]
+code = "OPENCODE_PREPARE_GIT_ISOLATION"
+site = "providers/src/opencode.rs#prepare"
+boundary = "git_isolation"
+strength = "refuse"
+justification = "A writer must be able to place its private Git launcher in PATH before its Git binding can be enforced."
+
+[[rule]]
+code = "COMMAND_PREPARE_CREDENTIALS"
+site = "providers/src/command.rs#prepare"
+boundary = "credentials"
+strength = "refuse"
+justification = "A configured command does not accept a provider authentication grant."
+
+[[rule]]
+code = "COMMAND_PREPARE_AUTHORITY"
+site = "providers/src/command.rs#prepare"
+boundary = "authority"
+strength = "refuse"
+justification = "A configured command cannot silently ignore a requested continuation, model, effort or account selection."
+
+[[rule]]
+code = "COMMAND_PREPARE_AUTHORITY_2"
+site = "providers/src/command.rs#prepare"
+boundary = "authority"
+strength = "refuse"
+justification = "A configured command must have non-empty argv and an absolute host-resolved executable to launch the selected invocation."
+
+[[rule]]
+code = "COMMAND_PREPARE_AUTHORITY_3"
+site = "providers/src/command.rs#prepare"
+boundary = "authority"
+strength = "refuse"
+justification = "The command adapter only implements read-only access and cannot claim writer authority."
+
+[[rule]]
+code = "CURSOR_PREPARE_CREDENTIALS"
+site = "providers/src/cursor.rs#prepare"
+boundary = "credentials"
+strength = "refuse"
+justification = "The selected login and attempt-private state must be present before Cursor receives its credential access."
+
+[[rule]]
+code = "CURSOR_PREPARE_AUTHORITY"
+site = "providers/src/cursor.rs#prepare"
+boundary = "authority"
+strength = "refuse"
+justification = "A resumed invocation requires its validated continuation identity."
+
+[[rule]]
+code = "AGY_PREPARE_CREDENTIALS"
+site = "providers/src/agy.rs#prepare"
+boundary = "credentials"
+strength = "refuse"
+justification = "Agy must select its keychain authentication; its home remains in attempt-private state or scratch."
+
+[[rule]]
+code = "AGY_PREPARE_NONE"
+site = "providers/src/agy.rs#prepare"
+boundary = "none"
+strength = "warn"
+knob = "policy.AGY_PREPARE_NONE"
+justification = "Absent separate private state warns and uses the already-confined attempt scratch directory as Agy's home."
+
+[[rule]]
+code = "AGY_PREPARE_AUTHORITY"
+site = "providers/src/agy.rs#prepare"
+boundary = "authority"
+strength = "refuse"
+justification = "A resumed invocation requires its validated continuation identity."
+
+[[rule]]
+code = "CODEX_PREPARE_CREDENTIALS"
+site = "providers/src/codex.rs#prepare"
+boundary = "credentials"
+strength = "refuse"
+justification = "The selected login and attempt-private state must be present before Codex receives its credential access."
+
+[[rule]]
+code = "CODEX_PREPARE_AUTHORITY"
+site = "providers/src/codex.rs#prepare"
+boundary = "authority"
+strength = "refuse"
+justification = "A resumed invocation requires its validated continuation identity, and Codex must use its clean configuration policy."
+
+[[rule]]
+code = "CLAUDE_PREPARE_CREDENTIALS"
+site = "providers/src/claude.rs#prepare"
+boundary = "credentials"
+strength = "refuse"
+justification = "Claude receives only its selected account token through the host pipe, with no separate credential root grant."
+
+[[rule]]
+code = "CLAUDE_PREPARE_AUTHORITY"
+site = "providers/src/claude.rs#prepare"
+boundary = "authority"
+strength = "refuse"
+justification = "The token must match the selected account and a resumed invocation must retain its validated continuation identity."
+
+[[rule]]
+code = "CLAUDE_PREPARE_NONE"
+site = "providers/src/claude.rs#prepare"
+boundary = "none"
+strength = "warn"
+knob = "policy.CLAUDE_PREPARE_NONE"
+justification = "Absent separate private state warns and uses the already-confined attempt scratch directory for Claude configuration."
+
+[[rule]]
+code = "LANE_LANERUNTIME_MCP_NONE"
+site = "providers/src/lane.rs#LaneRuntime::mcp"
+boundary = "none"
+strength = "warn"
+knob = "policy.LANE_LANERUNTIME_MCP_NONE"
+justification = "Unrepresentable Fabric MCP paths warn and omit that optional integration; Claude retains its isolated settings."
+
+[[rule]]
+code = "LANE_LANERUNTIME_CLAUDE_AUTHORITY"
+site = "providers/src/lane.rs#LaneRuntime::claude"
+boundary = "authority"
+strength = "refuse"
+justification = "Claude's isolated settings must retain the Provenant pre-tool guard; an unrepresentable hook executable or state path cannot safely substitute inherited settings."
+
+[[rule]]
+code = "LAUNCH_RUNSTORE_START_INNER_AUTHORITY_2"
+site = "run/src/launch.rs#RunStore::start_inner"
+boundary = "authority"
+strength = "refuse"
+justification = "Request digest and host-owned retry checks bind launch to the validated request and caller."
+
+[[rule]]
+code = "PROFILE_GRANT_COUNT"
+site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
+boundary = "none"
+strength = "warn"
+knob = "policy.PROFILE_GRANT_COUNT"
+threshold = "domains.run.grant_limit"
+justification = "Profile family counts warn above the configured grant threshold, naming its effective value and origin; authority validation still warns invalid grants."
+
+[[rule]]
+code = "VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_CREDENTIALS"
+site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
+boundary = "credentials"
+strength = "refuse"
+justification = "Authentication roots and writes must be confined to the selected provider and ordinary reads and writes cannot encompass credential roots."
+
+[[rule]]
+code = "RENDER_FILTERED_NATIVE_CONTROLS_NONE"
+site = "confinement/src/permissions/render.rs#filtered_native_controls"
+boundary = "none"
+strength = "warn"
+knob = "policy.RENDER_FILTERED_NATIVE_CONTROLS_NONE"
+justification = "Malformed native-control labels are omitted from the applied result with a warning; they do not alter the sandbox profile."
+
+[[rule]]
+code = "VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_AUTHORITY"
+site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
+boundary = "authority"
+strength = "refuse"
+justification = "A process policy must identify exact executables and the Fabric socket must name an exact endpoint before those permissions can be enforced."
+
+[[rule]]
+code = "VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_CREDENTIALS_2"
+site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
+boundary = "credentials"
+strength = "refuse"
+justification = "Valid discovery marker anchors reject links or identity changes that could redirect a read into credential material."
+
+[[rule]]
+code = "RENDER_RENDER_PROFILE_WITH_LIMIT_NONE"
+site = "confinement/src/permissions/render.rs#render_profile_with_limit"
+boundary = "none"
+strength = "warn"
+knob = "policy.RENDER_RENDER_PROFILE_WITH_LIMIT_NONE"
+justification = "Malformed provider endpoints are omitted before SBPL rendering; valid endpoints and open-network policy remain in force."
+
+[[rule]]
+code = "RENDER_RENDER_PROFILE_WITH_LIMIT_NONE_2"
+site = "confinement/src/permissions/render.rs#render_profile_with_limit"
+boundary = "none"
+strength = "warn"
+knob = "policy.RENDER_RENDER_PROFILE_WITH_LIMIT_NONE_2"
+justification = "Malformed or unrepresentable discovery-only reads are omitted before anchor collection and rendering."
+
+[[rule]]
+code = "VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_AUTHORITY_2"
+site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
+boundary = "authority"
+strength = "refuse"
+justification = "Required profile paths must be representable and valid to enforce the selected permission policy."
+
+[[rule]]
+code = "LAUNCH_ADMIT_AUTHORITY"
+site = "providers/src/launch.rs#admit"
+boundary = "authority"
+strength = "refuse"
+justification = "The adapter, registered account and continuation must match the selected route, and a read-only working directory must lie within a granted root."
+
+[[rule]]
+code = "LAUNCH_ADMIT_CREDENTIALS"
+site = "providers/src/launch.rs#admit"
+boundary = "credentials"
+strength = "refuse"
+justification = "The host home must be absolute so credential exclusions are evaluated against the selected host identity."
+
+[[rule]]
+code = "LAUNCH_ADMIT_AUTHORITY_2"
+site = "providers/src/launch.rs#admit"
+boundary = "authority"
+strength = "refuse"
+justification = "Executable and working-directory paths must be absolute to bind the launch to the selected executable and granted working directory."
+
+[[rule]]
+code = "LAUNCH_TOOL_SEARCH_PATH_NONE"
+site = "providers/src/launch.rs#tool_search_path"
+boundary = "none"
+strength = "warn"
+knob = "policy.LAUNCH_TOOL_SEARCH_PATH_NONE"
+justification = "An optional Cargo directory that cannot be represented in PATH is omitted with a warning."
+
+[[rule]]
+code = "LAUNCH_PACKAGE_GRANT_NONE"
+site = "providers/src/launch.rs#package_grant"
+boundary = "none"
+strength = "warn"
+knob = "policy.LAUNCH_PACKAGE_GRANT_NONE"
+justification = "A shared package prefix is omitted and the executable receives an exact grant; the omission is reported."
+
+[[rule]]
+code = "LAUNCH_PRIVATE_GIT_OBJECTS_NONE"
+site = "providers/src/launch.rs#private_git_objects"
+boundary = "none"
+strength = "warn"
+knob = "policy.LAUNCH_PRIVATE_GIT_OBJECTS_NONE"
+justification = "A read-only Git launcher whose directory cannot be encoded in PATH is omitted with a warning; the selected Git executable remains explicitly granted."
+
+[[rule]]
+code = "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION"
+site = "providers/src/launch.rs#private_git_objects"
+boundary = "git_isolation"
+strength = "refuse"
+justification = "A writer's Git wrapper must bind commands to the private Git and object directories."
+
+[[rule]]
+code = "LANE_LAUNCHSPEC_CONFIGURE_PUBLISHING_CREDENTIALS"
+site = "providers/src/lane.rs#LaunchSpec::configure_publishing"
+boundary = "credentials"
+strength = "refuse"
+justification = "The publishing wrapper must preserve the selected GitHub credential policy and avoid exposing it to other lanes."
+
+[[rule]]
+code = "LANE_INSTALL_GIT_NONE"
+site = "providers/src/lane.rs#install_git"
+boundary = "none"
+strength = "warn"
+knob = "policy.LANE_INSTALL_GIT_NONE"
+justification = "A missing PATH warns and uses system defaults with the private Git launcher first."
+
+[[rule]]
+code = "LANE_INSTALL_GIT_NONE_2"
+site = "providers/src/lane.rs#install_git"
+boundary = "none"
+strength = "warn"
+knob = "policy.LANE_INSTALL_GIT_NONE_2"
+justification = "An unbound Git launcher whose directory cannot be encoded in PATH is omitted with a warning."
+
+[[rule]]
+code = "LANE_INSTALL_GIT_GIT_ISOLATION"
+site = "providers/src/lane.rs#install_git"
+boundary = "git_isolation"
+strength = "refuse"
+justification = "A bound writer Git launcher must be placed first in PATH so Git uses its private view."
+
+[[rule]]
+code = "LANE_GIT_WRAPPER_AUTHORITY"
+site = "providers/src/lane.rs#git_wrapper"
+boundary = "authority"
+strength = "refuse"
+justification = "A Git executable containing a NUL cannot identify an executable to launch; native non-UTF-8 and shell-special bytes are preserved."
+
+[[rule]]
+code = "LANE_LAUNCHSPEC_CONFIGURE_BUILD_SLOTS_NONE"
+site = "providers/src/lane.rs#LaunchSpec::configure_build_slots"
+boundary = "none"
+strength = "warn"
+knob = "policy.LANE_LAUNCHSPEC_CONFIGURE_BUILD_SLOTS_NONE"
+justification = "Unrepresentable optional build-slot shim configuration leaves the launch ungated and emits a warning."
+
+[[rule]]
+code = "IDENTITY_REGISTEREDACCOUNT_VALIDATE_ROUTE_AUTHORITY"
+site = "providers/src/identity.rs#RegisteredAccount::validate_route"
+boundary = "authority"
+strength = "refuse"
+justification = "The selected account must match the route it authorises."
+
+[[rule]]
+code = "ADMISSION_RUNSTORE_ADMIT_AUTHORITY"
+site = "run/src/admission.rs#RunStore::admit"
+boundary = "authority"
+strength = "refuse"
+justification = "A guardian and store identity are required to bind a lease to its owner and preserve custody when the host later recovers it."
+
+[[rule]]
+code = "ADMISSION_DISK"
+site = "run/src/admission.rs#RunStore::admit"
+boundary = "none"
+strength = "warn"
+knob = "policy.ADMISSION_DISK"
+threshold = "gc.free_floor"
+justification = "The effective disk floor is configured or shipped; its source and value accompany the observation."
+
+[[rule]]
+code = "ADMISSION_PRESSURE"
+site = "run/src/admission.rs#RunStore::admit"
+boundary = "none"
+strength = "warn"
+knob = "policy.ADMISSION_PRESSURE"
+threshold = "domains.fabric.lanes.memory_pressure_threshold"
+justification = "The effective pressure threshold is configured or shipped; its source and value accompany the observation."
+
+[[rule]]
+code = "ADMISSION_PROJECT_WRITERS"
+site = "run/src/admission.rs#RunStore::admit"
+boundary = "none"
+strength = "warn"
+knob = "policy.ADMISSION_PROJECT_WRITERS"
+threshold = "domains.fabric.lanes.max_project_writer_lanes"
+justification = "The applicable host or project cap is configured or shipped; the observation names its setting, source and value."
+
+[[rule]]
+code = "ADMISSION_WRITERS"
+site = "run/src/admission.rs#RunStore::admit"
+boundary = "none"
+strength = "warn"
+knob = "policy.ADMISSION_WRITERS"
+threshold = "domains.fabric.lanes.max_writer_lanes"
+justification = "The host writer cap is configured or shipped and its source and value accompany the observation."
+
+[[rule]]
+code = "ADMISSION_LANES"
+site = "run/src/admission.rs#RunStore::admit"
+boundary = "none"
+strength = "warn"
+knob = "policy.ADMISSION_LANES"
+threshold = "domains.fabric.lanes.max_lanes"
+justification = "The host lane cap is configured or shipped and its source and value accompany the observation."
+
+[[rule]]
+code = "ADMISSION_PROJECT_LANES"
+site = "run/src/admission.rs#RunStore::admit"
+boundary = "none"
+strength = "warn"
+knob = "policy.ADMISSION_PROJECT_LANES"
+threshold = "domains.fabric.lanes.max_project_lanes"
+justification = "The project lane cap is configured or shipped and its source and value accompany the observation."
+
+[[rule]]
+code = "PROCESS_CENSUS"
+site = "run/src/admission.rs#RunStore::admit"
+boundary = "none"
+strength = "warn"
+knob = "policy.PROCESS_CENSUS"
+threshold = "operating system RLIMIT_NPROC"
+justification = "The operating system's per-user soft process limit is adjustable; the observation identifies the limit and shipped reserved headroom."
+
+[[rule]]
+code = "CUSTODY_DISK"
+site = "run/src/launch/hand_off.rs#custody_refusal"
+boundary = "none"
+strength = "warn"
+knob = "policy.CUSTODY_DISK"
+threshold = "gc.free_floor"
+justification = "A custody admission resource observation retains the effective setting and source in its typed fact."
+
+[[rule]]
+code = "CUSTODY_PRESSURE"
+site = "run/src/launch/hand_off.rs#custody_refusal"
+boundary = "none"
+strength = "warn"
+knob = "policy.CUSTODY_PRESSURE"
+threshold = "domains.fabric.lanes.memory_pressure_threshold"
+justification = "A custody admission resource observation retains the effective setting and source in its typed fact."
+
+[[rule]]
+code = "CUSTODY_PROJECT_WRITERS"
+site = "run/src/launch/hand_off.rs#custody_refusal"
+boundary = "none"
+strength = "warn"
+knob = "policy.CUSTODY_PROJECT_WRITERS"
+threshold = "domains.fabric.lanes.max_project_writer_lanes"
+justification = "A custody admission resource observation retains the effective setting and source in its typed fact."
+
+[[rule]]
+code = "CUSTODY_WRITERS"
+site = "run/src/launch/hand_off.rs#custody_refusal"
+boundary = "none"
+strength = "warn"
+knob = "policy.CUSTODY_WRITERS"
+threshold = "domains.fabric.lanes.max_writer_lanes"
+justification = "A custody admission resource observation retains the effective setting and source in its typed fact."
+
+[[rule]]
+code = "CUSTODY_LANES"
+site = "run/src/launch/hand_off.rs#custody_refusal"
+boundary = "none"
+strength = "warn"
+knob = "policy.CUSTODY_LANES"
+threshold = "domains.fabric.lanes.max_lanes"
+justification = "A custody admission resource observation retains the effective setting and source in its typed fact."
+
+[[rule]]
+code = "CUSTODY_PROJECT_LANES"
+site = "run/src/launch/hand_off.rs#custody_refusal"
+boundary = "none"
+strength = "warn"
+knob = "policy.CUSTODY_PROJECT_LANES"
+threshold = "domains.fabric.lanes.max_project_lanes"
+justification = "A custody admission resource observation retains the effective setting and source in its typed fact."
+
+[[rule]]
+code = "CUSTODY_PROCESSES"
+site = "run/src/launch/hand_off.rs#custody_refusal"
+boundary = "none"
+strength = "warn"
+knob = "policy.CUSTODY_PROCESSES"
+threshold = "operating system RLIMIT_NPROC"
+justification = "A custody admission resource observation retains the effective setting and source in its typed fact."
+
+[[rule]]
+code = "COPY_BYTES"
+site = "cli/src/run/provider/continuation.rs#copy_state_classified"
+boundary = "none"
+strength = "warn"
+knob = "policy.COPY_BYTES"
+threshold = "domains.run.continuation_copy_limit_bytes"
+justification = "Retained-state copy and search budgets report the effective host setting or shipped default, its source and a corrective action."
+
+[[rule]]
+code = "COPY_ENTRIES"
+site = "cli/src/run/provider/continuation.rs#copy_state_classified"
+boundary = "none"
+strength = "warn"
+knob = "policy.COPY_ENTRIES"
+threshold = "domains.run.continuation_copy_entries"
+justification = "Retained-state copy and search budgets report the effective host setting or shipped default, its source and a corrective action."
+
+[[rule]]
+code = "COPY_DEPTH"
+site = "cli/src/run/provider/continuation.rs#copy_state_classified"
+boundary = "none"
+strength = "warn"
+knob = "policy.COPY_DEPTH"
+threshold = "domains.run.continuation_copy_depth"
+justification = "Retained-state copy and search budgets report the effective host setting or shipped default, its source and a corrective action."
+
+[[rule]]
+code = "CONTINUATION_STATECOPYPOLICY_READ_NONE"
+site = "cli/src/run/provider/continuation.rs#StateCopyPolicy::read"
+boundary = "none"
+strength = "warn"
+knob = "policy.CONTINUATION_STATECOPYPOLICY_READ_NONE"
+justification = "Unavailable or invalid copy budget settings warn and use compiled defaults."
+
+[[rule]]
+code = "OBSERVATION_LAUNCH_PROMPT_NONE"
+site = "cli/src/run/provider/observation.rs#launch_prompt"
+boundary = "none"
+strength = "warn"
+knob = "policy.OBSERVATION_LAUNCH_PROMPT_NONE"
+justification = "Host-added preambles and graph inputs exceeding 1 MiB warn with the safe shortening action; raw caller prompts retain their admission bound."
+
+[[rule]]
+code = "SEARCH_ENTRIES"
+site = "cli/src/run/provider/continuation.rs#find_session_state_within"
+boundary = "none"
+strength = "warn"
+knob = "policy.SEARCH_ENTRIES"
+threshold = "domains.run.continuation_copy_entries"
+justification = "An unfinished session search reports its exhausted configurable budget and host source rather than claiming the session is missing."
+
+[[rule]]
+code = "SEARCH_DEPTH"
+site = "cli/src/run/provider/continuation.rs#find_session_state_within"
+boundary = "none"
+strength = "warn"
+knob = "policy.SEARCH_DEPTH"
+threshold = "domains.run.continuation_copy_depth"
+justification = "An unfinished session search reports its exhausted configurable budget and host source rather than claiming the session is missing."
+
+[[rule]]
+code = "CONTINUATION_COPY_STATE_CLASSIFIED_AUTHORITY_2"
+site = "cli/src/run/provider/continuation.rs#copy_state_classified"
+boundary = "authority"
+strength = "refuse"
+justification = "The retained state root must remain an anchored directory; symlinks, non-directories and changed roots remain refused at every copy budget."
+
+[[rule]]
+code = "PREPARATION_PREPARE_CANDIDATES_DATA_INTEGRITY"
+site = "cli/src/run/provider/preparation.rs#prepare_candidates"
+boundary = "data_integrity"
+strength = "refuse"
+justification = "The raw prompt must fit RECORD_LIMIT, the same bound reader::validate_attempt applies to its recorded prompt artifact, before host preambles are added."
+
+[[rule]]
+code = "WRITE_SCOPE"
+site = "run/src/writer.rs#WriterLaunch::finish"
+boundary = "none"
+strength = "warn"
+knob = "policy.WRITE_SCOPE"
+justification = "Paths inside the writer worktree are advisory scope. Report paths outside the declared scope; only an explicit strict setting refuses settlement."
+
+[[rule]]
+code = "WRITER_CENSUS"
+site = "confinement/src/worktrees/custody.rs#lock_worktree_for_launch"
+boundary = "none"
+strength = "warn"
+knob = "policy.WRITER_CENSUS"
+justification = "Process census is observational; the exclusive writer lease and retained-import fence establish writer admission authority."

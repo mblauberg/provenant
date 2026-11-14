@@ -42,6 +42,7 @@ fn start(root: &Path, name: &str, scenario: &str) -> Result<(CustodyLease, Custo
         &clock,
     )?;
     let command = ProviderCommand {
+        policy: Default::default(),
         profile_file: None,
         priority: 0,
         lane_ports: None,

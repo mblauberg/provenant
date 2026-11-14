@@ -2614,6 +2614,100 @@ impl WriterLaunch {
         )?;
         Ok(())
     }
+    fn report_write_scope(
+        &self,
+        state: &Path,
+        attempt: &Directory,
+        base: GitOid,
+        head: GitOid,
+    ) -> Result<()> {
+        let Some(raw) =
+            crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)?
+        else {
+            return Ok(());
+        };
+        let request: crate::CanonicalRequest = crate::db::decode(&raw)?;
+        let Some(scope) = request
+            .task
+            .profile
+            .extra
+            .get("write_scope")
+            .and_then(serde_json::Value::as_array)
+        else {
+            return Ok(());
+        };
+        let scope: Vec<_> = scope
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(Path::new)
+            .collect();
+        if scope.is_empty() {
+            return Ok(());
+        }
+        let repo = self.worktree.repo();
+        let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
+        let changed = crate::objects::command(
+            &git,
+            repo.private_git_dir(),
+            repo.root_path(),
+            &[
+                "diff".into(),
+                "--no-ext-diff".into(),
+                "--no-textconv".into(),
+                "--no-renames".into(),
+                "--name-only".into(),
+                "-z".into(),
+                base.to_string().into(),
+                head.to_string().into(),
+                "--".into(),
+            ],
+            None,
+        )?;
+        let mut paths: Vec<String> = changed
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| String::from_utf8_lossy(path).into_owned())
+            .collect();
+        paths.extend(self.uncommitted_paths(&git)?);
+        paths.retain(|path| !scope.iter().any(|root| Path::new(path).starts_with(root)));
+        paths.sort();
+        paths.dedup();
+        let policy = crate::launch_policy(
+            state,
+            request
+                .task
+                .profile
+                .extra
+                .get("policy_project")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(""),
+            &request.task,
+        );
+        let effect = policy.check(
+            "WRITE_SCOPE",
+            provenant_records::policy::Facts {
+                violated: !paths.is_empty(),
+                detail: format!("paths outside declared write scope: {}", paths.join(", ")),
+            },
+        );
+        crate::artifacts::seal(
+            attempt,
+            "policy-write-scope.json",
+            &crate::db::bytes(&serde_json::json!({
+                "code": "WRITE_SCOPE", "strength": policy.rule("WRITE_SCOPE").rule.strength,
+                "source": policy.rule("WRITE_SCOPE").source, "out_of_scope_paths": paths,
+            }))?,
+            crate::RECORD_LIMIT,
+        )?;
+        if let Some(message) = effect.message() {
+            let _ = writeln!(std::io::stderr().lock(), "policy: {message}");
+        }
+        if effect.blocks() {
+            return Err(RunError::Validation("WRITE_SCOPE: strict scope policy"));
+        }
+        Ok(())
+    }
+
     pub(crate) fn terminal(
         &self,
         state: &Path,
@@ -2812,6 +2906,7 @@ impl WriterLaunch {
         {
             return Err(RunError::WriterHeadNotLaneBranch);
         }
+        self.report_write_scope(state, attempt, base, tip)?;
         if !merge_objects.is_empty() {
             let source = source
                 .as_ref()

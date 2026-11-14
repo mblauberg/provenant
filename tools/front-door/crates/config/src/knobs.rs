@@ -206,7 +206,30 @@ impl<D> crate::ResolvedConfig<D> {
 pub(crate) fn registry() -> Result<&'static Registry, ConfigError> {
     static PARSED: OnceLock<Option<Registry>> = OnceLock::new();
     PARSED
-        .get_or_init(|| serde_json::from_str(REGISTRY).ok())
+        .get_or_init(|| {
+            let mut registry: Registry = serde_json::from_str(REGISTRY).ok()?;
+            for rule in provenant_records::policy::table()
+                .iter()
+                .filter(|rule| rule.knob.is_some())
+            {
+                registry.knobs.insert(
+                    rule.knob.clone()?,
+                    Spec {
+                        kind: Kind::Enum,
+                        min: None,
+                        max: None,
+                        values: ["refuse", "queue", "warn", "off"]
+                            .map(str::to_owned)
+                            .to_vec(),
+                        default: serde_json::to_value(rule.strength).ok()?,
+                        strict: false,
+                        safe: None,
+                        host_only: false,
+                    },
+                );
+            }
+            Some(registry)
+        })
         .as_ref()
         .ok_or(ConfigError::KnobRegistry)
 }

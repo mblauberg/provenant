@@ -250,6 +250,23 @@ pub(crate) struct LaneCaps {
     project_source: provenant_records::diagnostic::SettingSource,
 }
 impl LaneCaps {
+    pub(crate) fn under_policy(mut self, policy: &provenant_records::policy::Policy) -> Self {
+        use provenant_records::policy::Facts;
+        for (code, value) in [
+            ("ADMISSION_WRITERS", &mut self.host_writers),
+            ("ADMISSION_PROJECT_WRITERS", &mut self.project_writers),
+            ("ADMISSION_LANES", &mut self.host_total),
+            ("ADMISSION_PROJECT_LANES", &mut self.project_total),
+        ] {
+            if !policy
+                .check(code, Facts::violation("configured lane cap"))
+                .blocks()
+            {
+                *value = u64::MAX;
+            }
+        }
+        self
+    }
     pub(crate) fn of(settings: &provenant_config::LaneBuildSettings) -> Self {
         Self {
             host_writers: settings.writer_lanes(),

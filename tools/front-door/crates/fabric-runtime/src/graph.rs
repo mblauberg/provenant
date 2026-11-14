@@ -2832,6 +2832,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     journal.save(&checkpoint).map_err(GraphError::Journal)?;
                 }
                 let continued = land::continued_branch(node, &checkpoint, &positions);
+                let mut launch_attempt = node.attempt.clone().unwrap_or_default();
+                if !node.write_scope.is_empty() {
+                    launch_attempt
+                        .extra
+                        .insert("write_scope".into(), serde_json::json!(node.write_scope));
+                }
                 let observation = match owner.observe_or_start(
                     &key,
                     NodeInput {
@@ -2851,7 +2857,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         attachments: &node.attachments,
                         capabilities: node.capabilities.as_deref(),
                         capability_sources: node.extra.get("capability_sources"),
-                        attempt: node.attempt.as_ref(),
+                        attempt: Some(&launch_attempt),
                         distinct_from_attempts: &distinct_attempts,
                         require_distinct,
                         source_commit: checkpoint.nodes[node_index].source_commit.as_deref(),

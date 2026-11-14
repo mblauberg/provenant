@@ -176,6 +176,7 @@ struct ExecutableSnapshot {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LaunchMessage {
+    policy: provenant_records::policy::Policy,
     schema_version: u64,
     priority: u8,
     scope: Scope,
@@ -230,6 +231,7 @@ pub(crate) fn handoff(
             .as_os_str(),
     )?;
     let message = LaunchMessage {
+        policy: owned.command.policy,
         schema_version: 1,
         profile: owned
             .command
@@ -627,6 +629,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
     )?;
     drop(inherited.channel);
     let mut driver = Driver {
+        policy: message.policy,
         spared: crate::census::SparingTracker::default(),
         tracked: std::collections::BTreeSet::new(),
         history: std::collections::BTreeSet::new(),
@@ -675,6 +678,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
 }
 
 struct Driver<'a> {
+    policy: provenant_records::policy::Policy,
     attempt: Directory,
     writer_dir: Directory,
     lock_dir: Directory,
@@ -809,31 +813,19 @@ impl LanePortRefusal {
 }
 
 fn lane_port_allocation(
+    policy: &provenant_records::policy::Policy,
     plan: Option<&provenant_os::lane_ports::Plan>,
-) -> std::result::Result<
-    (
-        Option<provenant_os::lane_ports::Lease>,
-        Option<&'static str>,
-    ),
-    LanePortRefusal,
-> {
+) -> std::result::Result<(Option<provenant_os::lane_ports::Lease>, Option<String>), LanePortRefusal>
+{
     let Some(plan) = plan else {
         return Ok((None, None));
     };
     match plan.try_acquire() {
         Ok(Some(lease)) => Ok((Some(lease), None)),
-        Ok(None)
-            if plan.blocks_origin
-                == Some(provenant_os::lane_ports::BlocksOrigin::CompiledDefault) =>
-        {
-            Ok((
-                None,
-                Some(
-                    "default lane port pool exhausted; continuing without allocation (domains.fabric.lanes.lane_port_blocks)",
-                ),
-            ))
-        }
         Ok(None) => {
+            use provenant_records::policy::Facts;
+            let effect = policy.check("PORT_BLOCKS", Facts::violation("lane port pool exhausted"));
+            if !effect.blocks() { return Ok((None, effect.message().map(str::to_owned))); }
             use provenant_records::diagnostic::PortSettingSource;
             let origin = match plan.blocks_origin {
                 Some(provenant_os::lane_ports::BlocksOrigin::CompiledDefault) => {
@@ -852,7 +844,7 @@ fn lane_port_allocation(
         Err(_) => Ok((
             None,
             Some(
-                "lane port block unavailable; continuing without allocation (domains.fabric.lanes.lane_port_blocks)",
+                "lane port block unavailable; continuing without allocation (domains.fabric.lanes.lane_port_blocks)".into(),
             ),
         )),
     }
@@ -932,11 +924,12 @@ impl Driver<'_> {
         }
         // Held until this function returns, which is after the provider and
         // its descendants are settled; the kernel drops it if we die first.
-        let (ports, port_warning) = match lane_port_allocation(self.lane_ports.as_ref()) {
-            Ok(result) => result,
-            Err(reason) => return self.never_spawned(&reason.to_string(), Some(reason.fact())),
-        };
-        if let Some(warning) = port_warning {
+        let (ports, port_warning) =
+            match lane_port_allocation(&self.policy, self.lane_ports.as_ref()) {
+                Ok(result) => result,
+                Err(reason) => return self.never_spawned(&reason.to_string(), Some(reason.fact())),
+            };
+        if let Some(warning) = &port_warning {
             warn(&mut warnings, &mut omitted_warnings, warning);
         }
         let adjusted_env;

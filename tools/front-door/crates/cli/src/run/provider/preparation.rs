@@ -1974,9 +1974,11 @@ pub(super) fn prepare_candidates(
     let executor =
         provenant_providers::host::HostProbeExecutor::new(&executor, roots.state.as_path())
             .map_err(|e| e.to_string())?;
-    let config = loaded_config
+    let mut config = loaded_config
         .ok_or("routing context is unavailable")?
         .map_err(|error| error.to_string())?;
+    let launch_policy = run::launch_policy(roots.state.as_path(), &project_id.to_string(), task);
+    config.domains.routing.launch_policy = launch_policy.clone();
     // Continue the applied decision rather than redrawing the named pool
     // using the new operation seed.
     let mut request = match resume {
@@ -2895,13 +2897,14 @@ pub(super) fn prepare_candidates(
             continue;
         }
         let continuation = match resume {
-            Some(prior) => match continuation_for(
+            Some(prior) => match continuation_for_policy(
                 prior,
                 &route,
                 &task.authority_digest.to_string(),
                 state_root,
                 roots.state.as_path(),
                 &private_state,
+                &launch_policy,
             ) {
                 Ok(continuation) => Some(continuation),
                 Err(error) => {
@@ -3003,11 +3006,12 @@ pub(super) fn prepare_candidates(
         );
         let text = format!(
             "{}\n{text}",
-            run::lane_preamble(
+            run::lane_preamble_with_policy(
                 &model_policy.guidance(),
                 &limits,
                 writer.is_some(),
-                writable_handoff.then_some(handoff.as_path())
+                writable_handoff.then_some(handoff.as_path()),
+                &launch_policy,
             )
         );
         let prompt = match launch_prompt(
@@ -3310,13 +3314,25 @@ pub(super) fn prepare_candidates(
             roots.state.as_path(),
             &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
         ) {
-            return Err(PrepareError::HostIndexOverlap);
+            let effect = launch_policy.check(
+                "PREPARATION_PREPARE_CANDIDATES_DATA_INTEGRITY",
+                provenant_records::policy::Facts::violation("write grants overlap host indexes"),
+            );
+            if effect.blocks() {
+                return Err(PrepareError::HostIndexOverlap);
+            }
         }
         if !target_seeds_protected(
             roots.state.as_path(),
             &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
         ) {
-            return Err(PrepareError::TargetSeedOverlap);
+            let effect = launch_policy.check(
+                "PREPARATION_PREPARE_CANDIDATES_DATA_INTEGRITY",
+                provenant_records::policy::Facts::violation("write grants overlap target seeds"),
+            );
+            if effect.blocks() {
+                return Err(PrepareError::TargetSeedOverlap);
+            }
         }
         if let Some(head) = &task.head {
             spec.env.push(("PROVENANT_LANE_HEAD".into(), head.into()));

@@ -108,7 +108,7 @@ fn pace_reserves_account_headroom_across_windows() -> Result<(), Box<dyn std::er
         (vec![window(18_000, 5_000, 9_000)], None),
     ] {
         for policy in ["pace", "spend", "max"] {
-            let config: RoutingConfig =
+            let mut config: RoutingConfig =
                 serde_json::from_value(serde_json::json!({"pacing": {"codex": policy}}))?;
             let mut observation = quota(
                 "codex/test",
@@ -120,6 +120,23 @@ fn pace_reserves_account_headroom_across_windows() -> Result<(), Box<dyn std::er
             )?;
             observation.snapshot.windows = windows.clone();
             let observations = [observation];
+            config.launch_policy.overlay(
+                &std::collections::BTreeMap::from([
+                    (
+                        "PACING_ADAPTER".into(),
+                        provenant_records::policy::Strength::Refuse,
+                    ),
+                    (
+                        "PACING_ACCOUNT".into(),
+                        provenant_records::policy::Strength::Refuse,
+                    ),
+                    (
+                        "PACING_FREE".into(),
+                        provenant_records::policy::Strength::Refuse,
+                    ),
+                ]),
+                provenant_records::policy::Source::Dispatch,
+            );
             let mut ctx = context(&catalogue, &config, now()?);
             ctx.registry = &registry;
             ctx.availability = &availability;
@@ -183,7 +200,24 @@ fn pace_reserves_account_headroom_across_windows() -> Result<(), Box<dyn std::er
             25,
         ),
     ] {
-        let config: RoutingConfig = serde_json::from_value(configuration)?;
+        let mut config: RoutingConfig = serde_json::from_value(configuration)?;
+        config.launch_policy.overlay(
+            &std::collections::BTreeMap::from([
+                (
+                    "PACING_ADAPTER".into(),
+                    provenant_records::policy::Strength::Refuse,
+                ),
+                (
+                    "PACING_ACCOUNT".into(),
+                    provenant_records::policy::Strength::Refuse,
+                ),
+                (
+                    "PACING_FREE".into(),
+                    provenant_records::policy::Strength::Refuse,
+                ),
+            ]),
+            provenant_records::policy::Source::Dispatch,
+        );
         let mut ctx = context(&catalogue, &config, now()?);
         ctx.registry = &registry;
         ctx.availability = &availability;

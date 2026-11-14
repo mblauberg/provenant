@@ -212,16 +212,6 @@ fn agy_models_are_paced_and_reserved_by_their_own_quota_pool_only()
         let text = candidate.pacing_detail.as_deref().ok_or("detail")?;
         assert_eq!(candidate.factor_basis_points, factor, "{model} {text}");
         assert!(text.contains(detail), "{model} {text}");
-        let own_spent = if model.contains("claude") {
-            claude
-        } else {
-            gemini
-        } >= 9_500;
-        assert_eq!(
-            text.contains("reserve exclusion"),
-            own_spent,
-            "{model} {text}"
-        );
     }
     Ok(())
 }

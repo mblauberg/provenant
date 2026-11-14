@@ -189,6 +189,21 @@ pub fn lane_preamble(
     )
 }
 
+/// Effective guards are rendered by the same table used by enforcement.
+pub fn lane_preamble_with_policy(
+    model_guidance: &str,
+    limits: &provenant_records::LaneLimits,
+    writer: bool,
+    handoff: Option<&Path>,
+    policy: &provenant_records::policy::Policy,
+) -> String {
+    format!(
+        "{}Launch policy (code, boundary, strength, source, knob):\n{}",
+        lane_preamble(model_guidance, limits, writer, handoff),
+        policy.render()
+    )
+}
+
 pub fn handoff_progress_guidance(path: &Path) -> String {
     format!(
         "Progress handoff JSON: {}. Update this file throughout the task by writing a temporary file beside it and renaming it into place (hard links are denied), and repeat its current value in the final handoff fence. A failed update never blocks the work: carry on and report the value in the fence. It is lane state, never a repository file or a commit.\n",

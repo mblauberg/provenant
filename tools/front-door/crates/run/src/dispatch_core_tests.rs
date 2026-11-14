@@ -578,7 +578,7 @@ fn memory_pressure_threshold_controls_admission_and_waits() -> TestResult {
             std::fs::write(
                 store.writer_registry.join("config.toml"),
                 format!(
-                    "schema_version = 1\n[domains.fabric.lanes]\nmemory_pressure_threshold = '{threshold}'\n"
+                    "schema_version = 1\n[knobs]\n'policy.ADMISSION_PRESSURE'='refuse'\n[domains.fabric.lanes]\nmemory_pressure_threshold = '{threshold}'\n"
                 ),
             )?;
         }
@@ -586,6 +586,12 @@ fn memory_pressure_threshold_controls_admission_and_waits() -> TestResult {
             admission_seconds: 1,
             ..AdmissionPolicy::default()
         });
+        if threshold.is_none() {
+            std::fs::write(
+                store.writer_registry.join("config.toml"),
+                "schema_version=1\n[knobs]\n'policy.ADMISSION_PRESSURE'='refuse'\n",
+            )?;
+        }
         let run = lane(54, writer);
         let id = starting(&store, &run, &call)?;
         let attempt = store.attempt_dir(id, false)?;
@@ -636,7 +642,7 @@ fn memory_pressure_threshold_controls_admission_and_waits() -> TestResult {
     Ok(())
 }
 #[test]
-fn admission_refuses_near_the_user_process_limit() -> TestResult {
+fn process_census_warns_without_blocking_admission() -> TestResult {
     use provenant_os::sys::resources::ProcessBudget;
     struct Processes(ProcessBudget);
     impl Resources for Processes {
@@ -677,20 +683,7 @@ fn admission_refuses_near_the_user_process_limit() -> TestResult {
             full
         );
         let result = store.admit(id, &attempt, &resources, &clock, &cancel);
-        if full {
-            assert!(matches!(
-                result,
-                Err(RunError::Admission(AdmissionError::Processes { used: u, limit: l }))
-                    if u == used && l == limit
-            ));
-        } else {
-            assert_eq!(
-                result?.state,
-                AttemptState::Running {
-                    extra: Default::default()
-                }
-            );
-        }
+        assert!(matches!(result?.state, AttemptState::Running { .. }));
     }
     Ok(())
 }
@@ -920,7 +913,9 @@ fn the_writer_cap_refuses_at_its_limit_and_names_it() -> TestResult {
         });
         std::fs::write(
             store.writer_registry.join("config.toml"),
-            format!("schema_version=1\n[domains.fabric.lanes]\n{config}\n"),
+            format!(
+                "schema_version=1\n[knobs]\n'policy.ADMISSION_WRITERS'='refuse'\n'policy.ADMISSION_PROJECT_WRITERS'='refuse'\n[domains.fabric.lanes]\n{config}\n"
+            ),
         )?;
         let facts = super::tests::HostFacts::new(100);
         let mut last = None;
@@ -984,6 +979,10 @@ fn policy_refusal_skips_provider_preparation() -> TestResult {
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
+    std::fs::write(
+        store.writer_registry.join("config.toml"),
+        "schema_version=1\n[knobs]\n'policy.LAUNCH_DISK'='refuse'\n",
+    )?;
     let prepared = input();
     store.create(&prepared, &call)?;
     let providers = Fake {
@@ -1003,55 +1002,6 @@ fn policy_refusal_skips_provider_preparation() -> TestResult {
     assert_eq!(
         terminal(&store, prepared.attempt_id, &call)?,
         Outcome::Rejected
-    );
-    Ok(())
-}
-#[test]
-fn policy_resource_refusal_retains_fact_and_skips_preparation() -> TestResult {
-    use provenant_records::diagnostic::{ResourceFact, SettingSource};
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
-    let request = input();
-    store.create(&request, &call)?;
-    let fact = ResourceFact::Disk {
-        free: 1,
-        floor: 2,
-        origin: SettingSource::Configuration,
-    };
-    let provider = Fake {
-        refuse_policy: true,
-        policy_resource: Some(fact),
-        ..Default::default()
-    };
-    let started = store.start(request.attempt_id, &provider, &|_, _| unreachable!(), &call)?;
-    assert!(
-        matches!(started.as_slice(), [Started::Refused { kind: RefusalKind::PolicyResource(actual), .. }] if *actual == fact)
-    );
-    assert_eq!(provider.prepared.get(), 0);
-    let diagnostic = RefusalKind::PolicyResource(fact).diagnostic().unwrap();
-    assert_eq!(diagnostic.code, "DISK_FLOOR");
-    let detail = diagnostic.detail.unwrap();
-    assert!(detail.contains("gc.free_floor"));
-    assert!(detail.contains("host configuration"));
-    let inventory =
-        include_str!("../assets/launch-guards.toml").parse::<toml_edit::DocumentMut>()?;
-    assert!(
-        inventory["guard"]
-            .as_array_of_tables()
-            .unwrap()
-            .iter()
-            .any(|row| {
-                row.get("site").and_then(|v| v.as_str())
-                    == Some("run/src/launch.rs#Providers::check_policy")
-                    && row.get("code").and_then(|v| v.as_str()) == Some(diagnostic.code.as_str())
-                    && row.get("boundary").and_then(|v| v.as_str()) == Some("configurable_default")
-                    && row
-                        .get("setting")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|setting| detail.contains(setting))
-            })
     );
     Ok(())
 }

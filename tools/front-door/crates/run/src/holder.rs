@@ -1902,6 +1902,20 @@ impl RunStore {
                     })
                 })
             };
+            if let Some(raw) = read_sealed(attempt, "policy-write-scope.json", RECORD_LIMIT)?
+                && let Some(handoff) = handoff.as_mut()
+            {
+                let report: serde_json::Value = crate::db::decode(&raw)?;
+                handoff.extra.insert("write_scope".into(), report);
+                let safe = crate::sanitise_handoff(handoff)?;
+                crate::artifacts::seal(
+                    attempt,
+                    provenant_records::AttemptFile::Handoff.name(),
+                    &crate::db::bytes(&safe)?,
+                    provenant_records::handoff::HANDOFF_BYTES as u64,
+                )?;
+                *handoff = safe;
+            }
             if let Some(bytes) = read_sealed(attempt, "budget-commit.json", RECORD_LIMIT)? {
                 let result: serde_json::Value = crate::db::decode(&bytes)?;
                 let note = result["note"]

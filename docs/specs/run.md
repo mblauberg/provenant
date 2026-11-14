@@ -373,6 +373,27 @@ Lane-writable missing child records alone cannot authorise deletion.
 - Owner: `crates/fabric-runtime/src/chairs.rs`, `crates/fabric-store/src/chairs.rs`,
   `crates/cli/src/run.rs`, `crates/cli/src/fabric/graph_relay.rs`
 
+## Launch policy
+
+`crates/run/assets/policy.toml` owns executable launch rules. The records API
+resolves each rule to code, boundary, strength, source, knob and justification;
+`Policy::check(code, facts)` returns proceed, warn, queue or refuse. Only
+credentials, Git isolation, data integrity and authority default to refuse.
+All other defaults warn (or are off), with explicit knobs. `provenant config
+show` includes `policy.rules`, and lane preambles render the same resolved table.
+`config set policy.CODE refuse` or dispatch `--set policy.CODE=refuse` selects
+strict enforcement; `[domains.policy.projects."PROJECT_ID".rules]` overrides
+host strengths, and dispatch overrides win. Sources are compiled default, host,
+project or dispatch.
+
+Writer census observations warn; they do not grant or withhold writer authority.
+The exclusive writer lease and retained-import/unlanded-work fences remain.
+Graph write scope is carried into the sealed attempt profile; paths inside the
+worktree remain writable. Settlement seals `policy-write-scope.json` and copies
+its out-of-scope path list into the handoff. `policy.WRITE_SCOPE=refuse` selects
+strict settlement. The worktree and its protected Git controls remain the
+Git-isolation boundary.
+
 ## Atomic admission
 
 Writer custody is exclusive per verified worktree, including retained-import

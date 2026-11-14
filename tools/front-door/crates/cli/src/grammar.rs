@@ -458,7 +458,7 @@ pub enum Config {
     /// List configuration warnings with their source file and key.
     Check(Page),
     /// Print the effective configuration and knobs with their source layer
-    /// and the configuration revision.
+    /// and the configuration revision, including resolved launch policy rules.
     Show,
     /// List each editable field with its type, bounds, default, effective
     /// value, source layer and whether a restart is needed.

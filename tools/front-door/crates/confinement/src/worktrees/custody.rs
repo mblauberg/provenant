@@ -372,6 +372,40 @@ fn lock_worktree_impl(
     if !preview {
         context.workers.invalidate();
     }
+    if reobserve {
+        use provenant_records::policy::{Effect, Facts};
+        let state = context.project_state.current_path()?;
+        let host = state
+            .parent()
+            .and_then(Path::parent)
+            .ok_or(WorktreeError::InvalidRequest)?;
+        let policy = provenant_config::policy::read(
+            host,
+            &context.binding.project_id().to_string(),
+            &Default::default(),
+        );
+        let (observed, _) = context
+            .workers
+            .observe_roots_with_details(std::slice::from_ref(&canonical));
+        let effect = policy.check("WRITER_CENSUS", Facts {
+            violated: !matches!(observed.get(&canonical), Some(Occupancy::Available)),
+            detail: "process census reports an occupant or incomplete observation; exclusive writer lease is held".into(),
+        });
+        match effect {
+            Effect::Proceed => {}
+            Effect::Warn(message) => {
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+            }
+            Effect::Queue(_) | Effect::Refuse(_) => {
+                return Err(live_refusal(context.workers, &canonical));
+            }
+        }
+        if cancel.is_cancelled() {
+            return Err(WorktreeError::Cancelled);
+        }
+        return Ok(LockedWorktree { verified, writer });
+    }
     let (mut observations, details) = if reobserve {
         let keep_going = || {
             !cancel.is_cancelled()

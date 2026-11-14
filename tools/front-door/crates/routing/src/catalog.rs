@@ -271,6 +271,8 @@ impl From<FixedDeadline> for String {
 /// registry-free callers and can match accounts across adapters, including
 /// profile, reset reference and override selectors.
 pub struct RoutingConfig {
+    #[serde(skip)]
+    pub launch_policy: provenant_records::policy::Policy,
     /// Exact models excluded from every pool while their schedule is active.
     pub model_exclusions: ModelExclusions,
     pub model_choices: Vec<ModelChoiceOverride>,
@@ -368,6 +370,7 @@ impl Default for RoutingConfig {
                     toml_edit::de::from_str(defaults(Profile::Balanced))
                         .expect("bundled routing defaults are valid");
                 Self {
+                    launch_policy: Default::default(),
                     model_exclusions: asset.model_exclusions,
                     model_choices: asset.model_choices,
                     model_policy: asset.model_policy,

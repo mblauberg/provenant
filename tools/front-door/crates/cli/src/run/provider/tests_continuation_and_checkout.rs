@@ -779,7 +779,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
             std::fs::rename(host.join("attempts"), nested.join("attempts"))?;
             std::fs::write(
                 host.join("config.toml"),
-                "schema_version=1\n[domains.run]\ncontinuation_copy_entries=1\n",
+                "schema_version=1\n[knobs]\n'policy.COPY_ENTRIES'='refuse'\n'policy.SEARCH_ENTRIES'='refuse'\n[domains.run]\ncontinuation_copy_entries=1\n",
             )?;
             std::fs::write(
                 nested.join("config.toml"),

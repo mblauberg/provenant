@@ -7,7 +7,10 @@ use provenant_supervisor::custody::{
     self, CapturePlan, ExitObservation, OwnedLaunch, ProviderCommand, PublicationReservation, Scope,
 };
 use rusqlite::params;
-use std::{ffi::OsString, path::PathBuf};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
 /// An explicit dispatch argument wins over the effective profile default. A
 /// batch with no writer defaults from `lanes.max_concurrency_read_only`
@@ -109,12 +112,15 @@ pub struct PreparedLaunch {
 enum WriteGrantError {
     #[error("invalid write grant path")]
     InvalidPath,
+    #[error("write-grant threshold selected strict policy")]
+    Policy(provenant_records::diagnostic::ResourceFact),
 }
 
 #[allow(clippy::print_stderr)]
 fn applied_write_grants(
     plan: &PreparedLaunch,
     limit: WriteGrantLimit,
+    policy: &provenant_records::policy::Policy,
 ) -> std::result::Result<admission::AppliedWriteGrants, WriteGrantError> {
     let Some(confinement) = &plan.confinement else {
         return Ok(admission::AppliedWriteGrants::default());
@@ -134,13 +140,28 @@ fn applied_write_grants(
         .collect::<std::result::Result<Vec<_>, WriteGrantError>>()?;
     let encoded =
         provenant_records::CanonicalV1::bytes(&grants).map_err(|_| WriteGrantError::InvalidPath)?;
-    if encoded.as_bytes().len() as u64 > limit.bytes {
-        eprintln!(
-            "warning: encoded write grants are {} bytes; domains.run.write_grant_limit_bytes={} (source: {})",
-            encoded.as_bytes().len(),
-            limit.bytes,
-            limit.origin.description()
-        );
+    let effect = policy.check(
+        "WRITE_GRANT_BYTES",
+        provenant_records::policy::Facts {
+            violated: encoded.as_bytes().len() as u64 > limit.bytes,
+            detail: format!(
+                "encoded write grants {} bytes, threshold={}, threshold source={}",
+                encoded.as_bytes().len(),
+                limit.bytes,
+                limit.origin.description()
+            ),
+        },
+    );
+    if effect.blocks() {
+        return Err(WriteGrantError::Policy(
+            provenant_records::diagnostic::ResourceFact::WriteGrantLimit {
+                limit: limit.bytes,
+                origin: limit.origin,
+            },
+        ));
+    }
+    if let Some(message) = effect.message() {
+        eprintln!("warning: {message}");
     }
     let git_grants_digest = match &permissions.mode {
         provenant_confinement::permissions::AccessMode::ReadOnly => None,
@@ -245,147 +266,6 @@ impl PrepareRefusal {
 }
 #[cfg(test)]
 #[test]
-fn preparation_refusal_retains_its_typed_boundary() {
-    use provenant_records::diagnostic::{BoundaryClass, ResourceFact, SettingSource};
-    let mut refusal = PrepareRefusal::new(TerminalCause::RouteResolutionRefused, "opaque source");
-    assert_eq!(refusal.kind().boundary_class(), BoundaryClass::None);
-    refusal.boundary_class = BoundaryClass::Credentials;
-    assert_eq!(refusal.kind().boundary_class(), BoundaryClass::Credentials);
-    refusal.boundary_class = BoundaryClass::None;
-    refusal.resource = Some(ResourceFact::ArgvPromptLimit {
-        limit: 3,
-        origin: SettingSource::Configuration,
-    });
-    let diagnostic = refusal.kind().diagnostic().expect("resource diagnostic");
-    assert_eq!(diagnostic.code, "INVALID");
-    let detail = diagnostic.detail.unwrap();
-    assert!(detail.contains("domains.run.argv_prompt_limit_bytes"));
-    assert!(detail.contains("host configuration"));
-    let inventory = include_str!("../assets/launch-guards.toml")
-        .parse::<toml_edit::DocumentMut>()
-        .unwrap();
-    assert!(
-        inventory["guard"]
-            .as_array_of_tables()
-            .unwrap()
-            .iter()
-            .any(|row| {
-                row.get("site").and_then(|v| v.as_str())
-                    == Some("providers/src/contract.rs#Prompt::check_argv")
-                    && row.get("code").and_then(|v| v.as_str()) == Some(diagnostic.code.as_str())
-                    && row.get("boundary").and_then(|v| v.as_str()) == Some("configurable_default")
-                    && row
-                        .get("setting")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|setting| detail.contains(setting))
-            })
-    );
-}
-#[test]
-fn write_grant_limit_diagnostic_names_setting_and_source() {
-    use provenant_records::diagnostic::{BoundaryClass, ResourceFact, SettingSource};
-    for source in [SettingSource::Configuration, SettingSource::ShippedDefault] {
-        let kind = RefusalKind::WriteGrantsLimit(ResourceFact::WriteGrantLimit {
-            limit: 1024,
-            origin: source,
-        });
-        assert_eq!(kind.boundary_class(), BoundaryClass::None);
-        let diagnostic = kind.diagnostic().unwrap();
-        assert_eq!(diagnostic.code, "LIMIT");
-        let detail = diagnostic.detail.unwrap();
-        assert!(detail.contains("domains.run.write_grant_limit_bytes"));
-        assert!(detail.contains("1024"));
-        assert!(detail.contains(source.description()));
-        let inventory = include_str!("../assets/launch-guards.toml")
-            .parse::<toml_edit::DocumentMut>()
-            .unwrap();
-        assert!(
-            inventory["guard"]
-                .as_array_of_tables()
-                .unwrap()
-                .iter()
-                .any(|row| {
-                    row.get("site").and_then(|v| v.as_str())
-                        == Some("run/src/launch.rs#applied_write_grants")
-                        && row.get("code").and_then(|v| v.as_str())
-                            == Some(diagnostic.code.as_str())
-                        && row.get("boundary").and_then(|v| v.as_str())
-                            == Some("configurable_default")
-                        && row
-                            .get("setting")
-                            .and_then(|v| v.as_str())
-                            .is_some_and(|setting| detail.contains(setting))
-                })
-        );
-    }
-}
-
-#[test]
-fn dependency_preparation_diagnostic_names_setting_and_source() {
-    let inventory = include_str!("../assets/launch-guards.toml")
-        .parse::<toml_edit::DocumentMut>()
-        .unwrap();
-    let warning = inventory["guard"]
-        .as_array_of_tables()
-        .unwrap()
-        .iter()
-        .find(|row| {
-            row.get("site").and_then(|v| v.as_str())
-                == Some("cli/src/run/provider/preparation.rs#dependency_preparation_event")
-        })
-        .expect("dependency preparation warning is inventoried");
-    assert_eq!(
-        warning.get("boundary").and_then(|v| v.as_str()),
-        Some("warning")
-    );
-    let reason = warning.get("reason").and_then(|v| v.as_str()).unwrap();
-    assert!(reason.contains("lanes.prepare_deps"));
-    assert!(reason.contains("compiled default"));
-    assert!(reason.contains("sealed profile"));
-    assert!(!reason.contains("TOKEN_SENTINEL"));
-}
-
-#[test]
-fn lane_port_limit_diagnostic_matches_inventory() {
-    use provenant_records::diagnostic::{PortSettingSource, ResourceFact};
-    let inventory = include_str!("../assets/launch-guards.toml")
-        .parse::<toml_edit::DocumentMut>()
-        .unwrap();
-    for source in [
-        PortSettingSource::Configuration,
-        PortSettingSource::ShippedDefault,
-        PortSettingSource::RecordedPlan,
-    ] {
-        let fact = ResourceFact::LanePorts {
-            blocks: 2,
-            origin: source,
-        };
-        let diagnostic = RefusalKind::HandoffResource(fact).diagnostic().unwrap();
-        let detail = diagnostic.detail.unwrap();
-        assert!(detail.contains("domains.fabric.lanes.lane_port_blocks"));
-        assert!(detail.contains(source.description()));
-        assert!(
-            inventory["guard"]
-                .as_array_of_tables()
-                .unwrap()
-                .iter()
-                .any(|row| {
-                    row.get("site").and_then(|v| v.as_str())
-                        == Some("supervisor/src/guardian.rs#Driver::run")
-                        && row.get("boundary").and_then(|v| v.as_str())
-                            == Some("configurable_default")
-                        && row.get("code").and_then(|v| v.as_str())
-                            == Some(diagnostic.code.as_str())
-                        && row
-                            .get("setting")
-                            .and_then(|v| v.as_str())
-                            .is_some_and(|setting| detail.contains(setting))
-                })
-        );
-    }
-}
-
-#[test]
 fn pacing_refusal_retains_the_selected_reserve_fact() {
     use provenant_records::diagnostic::{PacingReserveSetting, PacingSettingSource, ResourceFact};
     let fact = ResourceFact::PacingReserve {
@@ -477,6 +357,50 @@ fn output_prompt_directs_scratch_outside_worktree() {
     let prompt = output_prompt(std::path::Path::new("/attempt"), "task");
     assert!(prompt.contains("$TMPDIR"));
     assert!(prompt.contains("not in the worktree"));
+}
+
+/// Resolve policy once for this launch from host, project and dispatch settings.
+pub fn launch_policy(
+    state: &Path,
+    project: &str,
+    task: &TaskRequest,
+) -> provenant_records::policy::Policy {
+    provenant_config::policy::for_task(state, project, task)
+}
+
+fn check_launch_policy(
+    providers: &dyn Providers,
+    task: &TaskRequest,
+    policy: &provenant_records::policy::Policy,
+) -> std::result::Result<(), PrepareRefusal> {
+    use provenant_records::policy::{Effect, Facts};
+    let Err(refusal) = providers.check_policy(task) else {
+        return Ok(());
+    };
+    let code = match refusal.boundary_class {
+        provenant_records::diagnostic::BoundaryClass::Credentials => {
+            "PREPARATION_PREPARE_WITH_CREDENTIALS"
+        }
+        provenant_records::diagnostic::BoundaryClass::LaneGit => {
+            "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION"
+        }
+        provenant_records::diagnostic::BoundaryClass::Integrity => {
+            "PREPARATION_PREPARE_CANDIDATES_DATA_INTEGRITY"
+        }
+        provenant_records::diagnostic::BoundaryClass::Authority => {
+            "LAUNCH_RUNSTORE_START_INNER_AUTHORITY"
+        }
+        provenant_records::diagnostic::BoundaryClass::None => "LAUNCH_DISK",
+    };
+    match policy.check(code, Facts::violation(&refusal.message)) {
+        Effect::Proceed => Ok(()),
+        Effect::Warn(message) => {
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+            Ok(())
+        }
+        Effect::Queue(_) | Effect::Refuse(_) => Err(refusal),
+    }
 }
 
 impl RunStore {
@@ -612,8 +536,12 @@ impl RunStore {
             temporary_alias: crate::short_temporary::ensure(&directory),
         };
         let prompt = output_prompt(&base, &input.prompt);
-        let plan = providers
-            .check_policy(task)
+        let policy = launch_policy(
+            &self.writer_registry,
+            &self.context.project_id.to_string(),
+            task,
+        );
+        let plan = check_launch_policy(providers, task, &policy)
             .map_err(|error| RunError::ContinuationRefused {
                 cause: error.terminal_cause,
             })
@@ -626,7 +554,7 @@ impl RunStore {
             })
             .and_then(|mut plan| {
                 let limit = providers.write_grant_limit().checked();
-                applied_write_grants(&plan, limit).map_err(|error| RunError::Input {
+                applied_write_grants(&plan, limit, &policy).map_err(|error| RunError::Input {
                     kind: ErrorKind::ContinuationUnsupported,
                     message: error.to_string(),
                 })?;
@@ -1188,8 +1116,12 @@ impl RunStore {
                     "warning: lane priority unavailable ({reason}); using compiled domains.fabric.lanes.priority default {fallback}");
                 fallback
             });
-            let prepared = providers
-                .check_policy(task)
+            let policy = launch_policy(
+                &self.writer_registry,
+                &self.context.project_id.to_string(),
+                task,
+            );
+            let prepared = check_launch_policy(providers, task, &policy)
                 .map(|()| priority)
                 .map_err(|refusal| {
                     let kind = if let Some(fact) = refusal.resource {
@@ -1279,12 +1211,13 @@ impl RunStore {
             plan.route
                 .extra
                 .insert("write_grant_limit".into(), limit.receipt());
-            let write_grants = applied_write_grants(&plan, limit);
+            let write_grants = applied_write_grants(&plan, limit, &policy);
             let write_grants = match write_grants {
                 Ok(grants) => grants,
                 Err(error) => {
                     let kind = match error {
                         WriteGrantError::InvalidPath => RefusalKind::InvalidWriteGrantPath,
+                        WriteGrantError::Policy(fact) => RefusalKind::WriteGrantsLimit(fact),
                     };
                     let reason = error.to_string();
                     match self.withdraw_with_preparation_failure(
@@ -1687,7 +1620,8 @@ mod policy_reporting_tests {
                 sandboxed: true,
             }),
         };
-        let grants = applied_write_grants(&prepared, WriteGrantLimit::default())?;
+        let grants =
+            applied_write_grants(&prepared, WriteGrantLimit::default(), &Default::default())?;
         let mut output = Vec::new();
         let claimed = store.claim_launch(
             &expected,

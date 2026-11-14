@@ -242,6 +242,7 @@ fn guardian_missing_attempt_finishes_unresolved_group_cleanup() {
         ..CapturePlan::default()
     };
     let message = LaunchMessage {
+        policy: Default::default(),
         profile: None,
         schema_version: 1,
         priority: 0,
@@ -688,6 +689,7 @@ fn spawn_missing_attempt_guardian(
     .unwrap();
     let executable_snapshot = snapshot_executable(OsStr::from_bytes(&argv[0])).unwrap();
     let message = LaunchMessage {
+        policy: Default::default(),
         profile: None,
         schema_version: 1,
         priority: 0,
@@ -1258,6 +1260,7 @@ fn successful_terminal_publication_does_not_wait() {
 #[test]
 fn handoff_round_trips_one_mib_stdin_with_claude_argv_and_environment() {
     let message = LaunchMessage {
+        policy: Default::default(),
         profile: None,
         priority: 0,
         schema_version: 1,
@@ -1635,8 +1638,8 @@ fn unavailable_port_allocation_warns_and_does_not_claim_a_block()
         blocks: 1,
         blocks_origin: Some(provenant_os::lane_ports::BlocksOrigin::HostConfig),
     };
-    let (lease, warning) =
-        lane_port_allocation(Some(&unavailable)).map_err(std::io::Error::other)?;
+    let (lease, warning) = lane_port_allocation(&strict_port_policy(), Some(&unavailable))
+        .map_err(std::io::Error::other)?;
     assert!(lease.is_none());
     assert!(warning.is_some_and(|text| text.contains("domains.fabric.lanes.lane_port_blocks")));
     let env = vec![
@@ -1652,10 +1655,11 @@ fn unavailable_port_allocation_warns_and_does_not_claim_a_block()
         state: temp.path().into(),
         ..unavailable
     };
-    let (first, warning) = lane_port_allocation(Some(&available)).map_err(std::io::Error::other)?;
+    let (first, warning) = lane_port_allocation(&strict_port_policy(), Some(&available))
+        .map_err(std::io::Error::other)?;
     assert!(first.is_some());
     assert!(warning.is_none());
-    let error = lane_port_allocation(Some(&available))
+    let error = lane_port_allocation(&strict_port_policy(), Some(&available))
         .err()
         .ok_or("expected exhausted pool")?;
     assert!(
@@ -1675,7 +1679,8 @@ fn unavailable_port_allocation_warns_and_does_not_claim_a_block()
         blocks_origin: Some(provenant_os::lane_ports::BlocksOrigin::CompiledDefault),
         ..available
     };
-    let (lease, warning) = lane_port_allocation(Some(&automatic)).map_err(std::io::Error::other)?;
+    let (lease, warning) = lane_port_allocation(&Default::default(), Some(&automatic))
+        .map_err(std::io::Error::other)?;
     assert!(lease.is_none());
     assert!(warning.is_some());
     Ok(())
@@ -1773,4 +1778,16 @@ fn budget_actions_preserve_clean_points_and_natural_completion() {
             }
         }
     }
+}
+
+fn strict_port_policy() -> provenant_records::policy::Policy {
+    let mut policy = provenant_records::policy::Policy::default();
+    policy.overlay(
+        &std::collections::BTreeMap::from([(
+            "PORT_BLOCKS".into(),
+            provenant_records::policy::Strength::Refuse,
+        )]),
+        provenant_records::policy::Source::Dispatch,
+    );
+    policy
 }

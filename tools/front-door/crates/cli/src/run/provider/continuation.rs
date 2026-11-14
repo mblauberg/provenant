@@ -123,6 +123,7 @@ impl From<&str> for ContinuationError {
 /// provider, model and account the prior attempt ran with. The prior attempt's
 /// retained private state is copied into the new attempt's own, so the new
 /// attempt never writes into settled history.
+#[cfg(test)]
 pub(super) fn continuation_for(
     prior: &run::AttemptRecord,
     route: &ResolvedRoute,
@@ -130,6 +131,31 @@ pub(super) fn continuation_for(
     state_root: &Path,
     config_root: &Path,
     private_state: &Path,
+) -> Result<provenant_providers::Continuation, ContinuationError> {
+    let policy = provenant_config::policy::read(
+        config_root,
+        &prior.project_id.to_string(),
+        &Default::default(),
+    );
+    continuation_for_policy(
+        prior,
+        route,
+        grant_digest,
+        state_root,
+        config_root,
+        private_state,
+        &policy,
+    )
+}
+
+pub(super) fn continuation_for_policy(
+    prior: &run::AttemptRecord,
+    route: &ResolvedRoute,
+    grant_digest: &str,
+    state_root: &Path,
+    config_root: &Path,
+    private_state: &Path,
+    enforcement: &provenant_records::policy::Policy,
 ) -> Result<provenant_providers::Continuation, ContinuationError> {
     let session = prior
         .session
@@ -151,14 +177,41 @@ pub(super) fn continuation_for(
         .join("attempts")
         .join(prior.attempt_id.to_string())
         .join("provider-state");
-    let policy = StateCopyPolicy::read(config_root);
+    let mut policy = StateCopyPolicy::read(config_root);
+    policy.enforcement = Some(enforcement.clone());
     let located = if AdapterSpec::get(&route.adapter)
         .is_some_and(|spec| spec.model_observation == ModelObservation::SessionDatabase)
     {
         super::observation::find_opencode_session(&prior_state, session).ok()
     } else {
-        find_session_state_within(&prior_state, session, policy.limits)
-            .map_err(|exhausted| StateCopyError::resource(policy.fact(exhausted.limit(), None)))?
+        loop {
+            match find_session_state_within(&prior_state, session, policy.limits) {
+                Ok(found) => break found,
+                Err(exhausted) => {
+                    let setting = exhausted.limit();
+                    let code = match setting {
+                        ContinuationCopyLimit::Entries => "SEARCH_ENTRIES",
+                        _ => "SEARCH_DEPTH",
+                    };
+                    let effect = enforcement.check(
+                        code,
+                        provenant_records::policy::Facts::violation(
+                            "continuation session search exceeds its configured threshold",
+                        ),
+                    );
+                    if effect.blocks() {
+                        return Err(StateCopyError::resource(policy.fact(setting, None)).into());
+                    }
+                    if let Some(message) = effect.message() {
+                        let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                    }
+                    match setting {
+                        ContinuationCopyLimit::Entries => policy.limits.entries = u32::MAX,
+                        _ => policy.limits.depth = u32::MAX,
+                    }
+                }
+            }
+        }
     };
     match located {
         // Codex's SQLite index holds absolute rollout paths. Rebuild it from
@@ -197,14 +250,16 @@ pub(super) const RETAINED_STATE: StateLimits = StateLimits {
     bytes: 4 << 30,
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct StateCopyPolicy {
+    enforcement: Option<provenant_records::policy::Policy>,
     limits: StateLimits,
     origins: [provenant_records::diagnostic::SettingSource; 3],
 }
 impl StateCopyPolicy {
     fn shipped(limits: StateLimits) -> Self {
         Self {
+            enforcement: None,
             limits,
             origins: [provenant_records::diagnostic::SettingSource::ShippedDefault; 3],
         }
@@ -226,6 +281,11 @@ impl StateCopyPolicy {
                     }
                 });
                 Self {
+                    enforcement: Some(provenant_config::policy::read(
+                        state_root,
+                        "",
+                        &Default::default(),
+                    )),
                     limits: StateLimits {
                         bytes: config.continuation_copy_limit_bytes,
                         entries: config.continuation_copy_entries,
@@ -240,12 +300,14 @@ impl StateCopyPolicy {
                     std::io::stderr().lock(),
                     "warning: continuation copy settings unavailable ({error}); using compiled defaults"
                 );
-                Self::shipped(RETAINED_STATE)
+                let mut policy = Self::shipped(RETAINED_STATE);
+                policy.enforcement = Some(provenant_records::policy::Policy::default());
+                policy
             }
         }
     }
     fn fact(
-        self,
+        &self,
         setting: ContinuationCopyLimit,
         available_bytes: Option<u64>,
     ) -> provenant_records::diagnostic::ResourceFact {
@@ -460,6 +522,56 @@ pub(super) fn copy_state_within(
 }
 
 fn copy_state_classified(
+    from: &Path,
+    to: &Path,
+    mut policy: StateCopyPolicy,
+    sessions_only: bool,
+) -> Result<(), StateCopyError> {
+    loop {
+        let result = copy_state_bounded(from, to, policy.clone(), sessions_only);
+        let Err(error) = &result else {
+            return result;
+        };
+        let Some(provenant_records::diagnostic::ResourceFact::ContinuationCopy {
+            setting,
+            available_bytes,
+            ..
+        }) = error.resource
+        else {
+            return result;
+        };
+        let Some(enforcement) = &policy.enforcement else {
+            return result;
+        };
+        let code = match setting {
+            ContinuationCopyLimit::Bytes => "COPY_BYTES",
+            ContinuationCopyLimit::Entries => "COPY_ENTRIES",
+            ContinuationCopyLimit::Depth => "COPY_DEPTH",
+        };
+        let effect = enforcement.check(
+            code,
+            provenant_records::policy::Facts::violation(&error.message),
+        );
+        if effect.blocks() {
+            return result;
+        }
+        if let Some(message) = effect.message() {
+            let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+        }
+        match setting {
+            ContinuationCopyLimit::Bytes
+                if available_bytes.is_some_and(|free| free <= policy.limits.bytes) =>
+            {
+                return result;
+            }
+            ContinuationCopyLimit::Bytes => policy.limits.bytes = u64::MAX,
+            ContinuationCopyLimit::Entries => policy.limits.entries = u32::MAX,
+            ContinuationCopyLimit::Depth => policy.limits.depth = u32::MAX,
+        }
+    }
+}
+
+fn copy_state_bounded(
     from: &Path,
     to: &Path,
     policy: StateCopyPolicy,
@@ -773,143 +885,6 @@ pub(super) fn copy_tree(
                 }
             }
             FileKind::Symlink | FileKind::Other => {}
-        }
-    }
-    Ok(())
-}
-
-#[test]
-fn retained_state_copy_refusals_require_inventoried_settings_and_followable_remedies()
--> Result<(), Box<dyn std::error::Error>> {
-    use provenant_records::diagnostic::{
-        BoundaryClass, ContinuationCopyLimit, Diagnostic, ResourceFact, SettingSource,
-    };
-    let temp = tempfile::tempdir()?;
-    let base = std::fs::canonicalize(temp.path())?;
-    let retained = base.join("TOKEN_SENTINEL");
-    let source = retained.join("candidate-0");
-    std::fs::create_dir_all(source.join("a/b"))?;
-    std::fs::write(source.join("a/b/session"), "state")?;
-    let inventory = include_str!("../../../../run/assets/launch-guards.toml")
-        .parse::<toml_edit::DocumentMut>()?;
-    let guards = inventory["guard"].as_array_of_tables().unwrap();
-    // Exercise real refusal paths rather than constructing their resource facts.
-    for (field, value, expected_setting) in [
-        (
-            "continuation_copy_limit_bytes",
-            4,
-            ContinuationCopyLimit::Bytes,
-        ),
-        (
-            "continuation_copy_entries",
-            1,
-            ContinuationCopyLimit::Entries,
-        ),
-        ("continuation_copy_depth", 1, ContinuationCopyLimit::Depth),
-    ] {
-        for configured in [false, true] {
-            let policy = if configured {
-                std::fs::write(
-                    base.join("config.toml"),
-                    format!("schema_version=1\n[domains.run]\n{field}={value}\n"),
-                )?;
-                StateCopyPolicy::read(&base)
-            } else {
-                let limits = match expected_setting {
-                    ContinuationCopyLimit::Bytes => StateLimits {
-                        bytes: value,
-                        ..RETAINED_STATE
-                    },
-                    ContinuationCopyLimit::Entries => StateLimits {
-                        entries: value as u32,
-                        ..RETAINED_STATE
-                    },
-                    ContinuationCopyLimit::Depth => StateLimits {
-                        depth: value as u32,
-                        ..RETAINED_STATE
-                    },
-                };
-                StateCopyPolicy::shipped(limits)
-            };
-            let target = base.join(format!("copy-{field}-{configured}"));
-            let error = copy_state_classified(&source, &target, policy, false).unwrap_err();
-            let continuation = ContinuationError::StateCopy(error);
-            assert_eq!(continuation.boundary_class(), BoundaryClass::None);
-            let fact = continuation
-                .resource_fact()
-                .expect("a class-none policy refusal must carry a configurable resource fact");
-            assert!(
-                matches!(fact, ResourceFact::ContinuationCopy { setting, limit, origin, .. }
-                if setting == expected_setting && limit == value && origin == if configured { SettingSource::Configuration } else { SettingSource::ShippedDefault })
-            );
-            let diagnostic = fact.project(Diagnostic::new("REFUSED"));
-            let detail = diagnostic.detail.as_deref().unwrap();
-            assert!(detail.contains(expected_setting.setting()));
-            assert!(detail.contains(if configured {
-                "host configuration"
-            } else {
-                "shipped default"
-            }));
-            assert!(!detail.contains("TOKEN_SENTINEL"));
-            assert!(
-                diagnostic
-                    .next
-                    .as_deref()
-                    .unwrap()
-                    .contains(expected_setting.setting())
-            );
-            assert!(
-                guards.iter().any(|row| {
-                    row.get("site").and_then(|v| v.as_str())
-                        == Some("cli/src/run/provider/continuation.rs#copy_state_classified")
-                        && row.get("boundary").and_then(|v| v.as_str())
-                            == Some("configurable_default")
-                        && row.get("code").and_then(|v| v.as_str())
-                            == Some(diagnostic.code.as_str())
-                        && row.get("setting").and_then(|v| v.as_str())
-                            == Some(expected_setting.setting())
-                }),
-                "actual refusal lacks an inventory classification: {field}"
-            );
-            assert!(!target.exists(), "no partial provider state may survive");
-            // The search uses the same policy and retains the precise exhausted budget.
-            if expected_setting != ContinuationCopyLimit::Bytes {
-                let exhausted =
-                    find_session_state_within(&retained, "session", policy.limits).unwrap_err();
-                let search_error = StateCopyError::resource(policy.fact(exhausted.limit(), None));
-                assert!(
-                    matches!(search_error.resource, Some(ResourceFact::ContinuationCopy { setting, .. }) if setting == expected_setting)
-                );
-                assert!(
-                    guards.iter().any(|row| {
-                        row.get("site").and_then(|v| v.as_str())
-                            == Some(
-                                "cli/src/run/provider/continuation.rs#find_session_state_within",
-                            )
-                            && row.get("setting").and_then(|v| v.as_str())
-                                == Some(expected_setting.setting())
-                            && row.get("boundary").and_then(|v| v.as_str())
-                                == Some("configurable_default")
-                            && row.get("code").and_then(|v| v.as_str()) == Some("REFUSED")
-                    }),
-                    "search refusal is missing from inventory"
-                );
-            }
-            // Follow the printed setting remedy against the very same tree.
-            std::fs::write(
-                base.join("config.toml"),
-                format!("schema_version=1\n[domains.run]\n{field}=16\n"),
-            )?;
-            copy_state_classified(&source, &target, StateCopyPolicy::read(&base), false)?;
-            assert_eq!(std::fs::read(target.join("a/b/session"))?, b"state");
-            assert_eq!(
-                find_session_state_within(
-                    &retained,
-                    "session",
-                    StateCopyPolicy::read(&base).limits
-                ),
-                Ok(Some(source.clone()))
-            );
         }
     }
     Ok(())

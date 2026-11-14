@@ -71,6 +71,7 @@ pub mod run;
 pub mod finding_decision;
 pub mod limit;
 pub mod pause;
+pub mod policy;
 pub mod stop;
 pub mod work_key;
 pub use finding_decision::{FindingDecision, FindingDisposition};
