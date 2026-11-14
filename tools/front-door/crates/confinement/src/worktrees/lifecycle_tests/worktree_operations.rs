@@ -949,8 +949,8 @@ fn explicit_discard_publishes_recoverable_data_before_removing_work() -> Result<
         matches!(
             (&outcome.step, &outcome.state),
             (
-                RetirementStep::Worktree { subject },
-                RetirementStepState::Completed {
+                provenant_records::custody::RetirementStep::Worktree { subject },
+                provenant_records::custody::RetirementStepState::Completed {
                     evidence: provenant_records::custody::RemovalEvidence::ExplicitDiscard {
                         archive: Some(completion),
                     },
@@ -962,8 +962,8 @@ fn explicit_discard_publishes_recoverable_data_before_removing_work() -> Result<
         matches!(
             (&outcome.step, &outcome.state),
             (
-                RetirementStep::Reference,
-                RetirementStepState::Completed {
+                provenant_records::custody::RetirementStep::Reference,
+                provenant_records::custody::RetirementStepState::Completed {
                     evidence: provenant_records::custody::RemovalEvidence::ExplicitDiscard {
                         archive: Some(completion),
                     },

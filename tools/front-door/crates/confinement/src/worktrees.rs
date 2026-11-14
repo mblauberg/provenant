@@ -287,7 +287,7 @@ pub enum WorktreeError {
     #[error("worktree result path cannot be represented safely")]
     PathEncoding,
     #[error("durable retirement authority could not be read or advanced")]
-    Retirement(#[source] Box<dyn std::error::Error>),
+    Retirement(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("worktree creation failed: {cause}; {}", if *.rolled_back {
         "the partial checkout and new branch were removed, so it is safe to retry"
     } else {

@@ -225,12 +225,12 @@ pub(super) fn capture(
         } else {
             false
         };
-        if released && let Ok(metadata) = root.metadata_at(&stage_name, false) {
-            if let Ok(tree) = PayloadTree::claim(&root, &stage_name, &metadata) {
-                if super::gc::dispose_archive_tree(&tree).is_ok() {
-                    let _ = root.rmdir(&stage_name);
-                }
-            }
+        if released
+            && let Ok(metadata) = root.metadata_at(&stage_name, false)
+            && let Ok(tree) = PayloadTree::claim(&root, &stage_name, &metadata)
+            && super::gc::dispose_archive_tree(&tree).is_ok()
+        {
+            let _ = root.rmdir(&stage_name);
         }
         return Err(error);
     }
@@ -338,7 +338,7 @@ fn append_path(root: &Directory, path: &Path, out: &mut FileHandle) -> io::Resul
         if !metadata.unchanged(&file.metadata().map_err(io::Error::other)?) {
             return Err(io::Error::other("untracked file moved"));
         }
-        let copied = io::copy(&mut file.by_ref().take(size), out)?;
+        let copied = io::copy(&mut io::Read::by_ref(&mut file).take(size), out)?;
         if copied != size || !metadata.unchanged(&file.metadata().map_err(io::Error::other)?) {
             return Err(io::Error::other("untracked file changed during archive"));
         }

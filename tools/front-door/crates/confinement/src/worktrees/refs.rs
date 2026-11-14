@@ -303,6 +303,7 @@ impl RefLedger {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_identity(
         &self,
         endpoint: RefEndpoint,
@@ -341,7 +342,7 @@ impl RefLedger {
             current
                 .as_ref()
                 .map_or((origin, attempt_id, operation_id), |current| {
-                    (current.origin, current.attempt_id, current.operation_id)
+                    (current.origin, current.attempt_id, current.operation_id.clone())
                 })
         } else {
             (origin, attempt_id, operation_id)

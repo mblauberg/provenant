@@ -515,10 +515,11 @@ fn create_with_default(
     } else {
         default.as_ref().ok_or(WorktreeError::InvalidRequest)?.0
     };
-    let state = context
+    let current = context
         .project_state
         .current_path()
-        .map_err(|_| WorktreeError::InvalidRequest)?
+        .map_err(|_| WorktreeError::InvalidRequest)?;
+    let state = current
         .parent()
         .and_then(Path::parent)
         .ok_or(WorktreeError::InvalidRequest)?;
@@ -942,9 +943,9 @@ pub(super) struct RemovedTree {
     pub(super) repository: Option<LockGuard>,
 }
 
-/// How `remove_tree_when` meets the repository lock.
+/// How `remove_tree_when_before_delete` meets the repository lock.
 #[derive(Clone, Copy)]
-pub(super) enum Repository<'a> {
+pub(super) enum Repository {
     /// The caller holds it throughout.
     Held,
     /// Ordinary removal refreshes the census before locking, then rechecks
@@ -952,10 +953,6 @@ pub(super) enum Repository<'a> {
     Remove,
     /// Explicit destructive authority, requiring an archive before mutation.
     Discard,
-    /// Output is deleted under writer custody alone. The lock is taken for the
-    /// final registration recheck and the Git mutation, and returned with the
-    /// tree. `lanes` is the cheap fence rechecked under it.
-    Acquire { lanes: &'a dyn Fn() -> bool },
 }
 
 /// The registration still names this tree with its branch and head, unheld.
@@ -970,26 +967,6 @@ pub(super) fn tree_unchanged(
         .find(|tree| canonicalize(&tree.path).ok().as_deref() == Some(&canonical))
         .ok_or(WorktreeError::IdentityChanged)?;
     if current.branch != entry.branch || current.head != head || current.locked || current.prunable
-    {
-        return Err(WorktreeError::IdentityChanged);
-    }
-    Ok(())
-}
-
-/// The branch is checked out only at `path` and still points at `head`.
-pub(super) fn branch_unchanged(
-    context: &WorktreeContext<'_>,
-    fresh: &[GitWorktree],
-    branch: &GitRefName,
-    path: &Path,
-    head: GitOid,
-    cancel: &CancelToken,
-) -> Result<(), WorktreeError> {
-    if checked_out_elsewhere(fresh, branch, Some(path))?
-        || context
-            .facts
-            .resolve_commit(context, branch.clone(), cancel)?
-            != head
     {
         return Err(WorktreeError::IdentityChanged);
     }
@@ -1040,29 +1017,9 @@ pub(super) fn checked_out_elsewhere(
     Ok(false)
 }
 
-pub(super) fn remove_tree_when(
-    context: &WorktreeContext<'_>,
-    entry: &GitWorktree,
-    expected_head: GitOid,
-    cancel: &CancelToken,
-    eligible: &dyn Fn() -> Result<(), WorktreeError>,
-    output: Option<&provenant_config::ProjectGcSettings>,
-    repository: Repository<'_>,
-) -> Result<RemovedTree, WorktreeError> {
-    remove_tree_when_before_delete(
-        context,
-        entry,
-        expected_head,
-        cancel,
-        eligible,
-        output,
-        repository,
-        |_, _, _| Ok(()),
-    )
-}
-
 /// The same fenced removal core with one durable-authority callback after the
 /// final worktree and repository checks and immediately before Git mutation.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn remove_tree_when_before_delete(
     context: &WorktreeContext<'_>,
     entry: &GitWorktree,
@@ -1070,7 +1027,7 @@ pub(super) fn remove_tree_when_before_delete(
     cancel: &CancelToken,
     eligible: &dyn Fn() -> Result<(), WorktreeError>,
     output: Option<&provenant_config::ProjectGcSettings>,
-    repository: Repository<'_>,
+    repository: Repository,
     before_delete: impl FnOnce(
         &VerifiedWorktree,
         &Path,
@@ -1116,7 +1073,7 @@ pub(super) fn remove_tree_when_before_delete(
     // eligibility before removing the tree while writer exclusion is held.
     let repository_guard = match repository {
         Repository::Held => None,
-        Repository::Acquire { .. } | Repository::Remove | Repository::Discard => {
+        Repository::Remove | Repository::Discard => {
             // Any slow census happens before the repository lock is taken.
             if prepared {
                 eligible()?;
@@ -1130,16 +1087,7 @@ pub(super) fn remove_tree_when_before_delete(
         entry,
         expected_head,
     )?;
-    let fenced = match repository {
-        Repository::Held | Repository::Remove | Repository::Discard => {
-            eligible()?;
-            true
-        }
-        Repository::Acquire { lanes } => lanes(),
-    };
-    if !fenced {
-        return Err(WorktreeError::UnknownWriter);
-    }
+    eligible()?;
     let (_submodule_guards, submodules) = hold_submodules(context, locked.verified.repo(), cancel)?;
     let cleanliness = worktree_cleanliness_at(context, locked.verified.repo(), cancel)?;
     let discard = matches!(repository, Repository::Discard);
@@ -1369,6 +1317,7 @@ pub(super) fn retain(outcome: &mut RemoveOutcome, branch: &GitRefName, reason: R
     });
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct PruneRange<'a> {
     pub(super) integration: &'a GitRefName,
     pub(super) tip: GitOid,
@@ -1441,6 +1390,7 @@ pub(super) fn keep_disposition(
 
 /// Delete the local ref once its worktree is gone, under the exact expected
 /// tip, after rechecking that no other worktree has it checked out.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn settle_branch(
     context: &WorktreeContext<'_>,
     branch: &GitRefName,
@@ -1621,8 +1571,7 @@ pub(super) fn remove_merged_candidate(
                         return Err(WorktreeError::IdentityChanged);
                     }
                     revalidate_landing_evidence(context, tip, &evidence, cancel)?;
-                    if let (Some((port, authority)), Some(decision)) =
-                        (retirement, decision.clone())
+                    if let (Some((port, _)), Some(decision)) = (retirement, decision.clone())
                     {
                         let owner = load_owner(verified)?;
                         let lane = WorktreeInfo {
@@ -1857,7 +1806,7 @@ fn revalidate_landing_evidence_with_forge(
                 pr: current_pr,
                 head: current_head,
                 ..
-            }) if current_pr == *pr && *current_head == *head && *head == tip => Ok(()),
+            }) if current_pr == *pr && current_head == *head && *head == tip => Ok(()),
             _ => Err(WorktreeError::IdentityChanged),
         };
     }
@@ -1883,6 +1832,17 @@ pub fn remove_with_retirement(
         None,
         Some((port, authority)),
     )
+}
+
+/// Removal fences without a durable retirement port, for tests of the fences
+/// themselves. Production removal goes through `remove_with_retirement`.
+#[cfg(test)]
+pub fn remove(
+    context: &WorktreeContext<'_>,
+    request: WorktreeRemove,
+    cancel: &CancelToken,
+) -> Result<RemoveOutcome, WorktreeError> {
+    remove_with_owner(context, request, cancel, &Default::default(), None, None)
 }
 
 /// Remove a freshly created lane only while it is still owned by this operation.

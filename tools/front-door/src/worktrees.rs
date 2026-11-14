@@ -624,7 +624,7 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
             let error = *error;
             let failure = error.to_string();
             let data = GcData {
-                report: error.report,
+                report: *error.report,
                 idle_days: command.idle_days,
                 unobserved_projects,
                 skipped_transient,

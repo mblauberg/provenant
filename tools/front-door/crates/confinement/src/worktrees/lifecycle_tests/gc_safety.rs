@@ -884,8 +884,8 @@ fn gc_refreshes_the_owned_ref_generation_before_recording_retirement() -> Result
     assert!(current.generation > original.generation);
     assert_eq!(current.tip, lane.head);
     assert_eq!(current.origin, original.origin);
-    let worktree = Subject::new(
-        SubjectKind::Worktree,
+    let worktree = provenant_records::custody::Subject::new(
+        provenant_records::custody::SubjectKind::Worktree,
         fs::canonicalize(&lane.path)?.to_string_lossy().into_owned(),
     );
     let recorded = retirement

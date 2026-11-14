@@ -353,6 +353,7 @@ pub fn branch_ownership(
 /// declared regenerable output is removed, through GC's existing walker. The
 /// callback receives the durable S2 intent after the verified owner/ref refresh
 /// and before Git mutation so the caller can stage its settlement receipt.
+#[allow(clippy::too_many_arguments)]
 pub fn prune_owned(
     context: &WorktreeContext<'_>,
     path: &Path,
@@ -390,7 +391,10 @@ pub fn prune_owned(
         return Err(WorktreeError::InvalidRequest);
     };
     let worktree_subject =
-        provenant_records::custody::Subject::new(SubjectKind::Worktree, worktree_path);
+        provenant_records::custody::Subject::new(
+            provenant_records::custody::SubjectKind::Worktree,
+            worktree_path,
+        );
     let branch = GitRefName::branch(&owner.branch).map_err(|_| WorktreeError::InvalidRequest)?;
     let evidence = match decision.evidence() {
         provenant_records::custody::RemovalEvidence::Landing { evidence } => Some(evidence),
@@ -446,7 +450,7 @@ pub fn prune_owned(
     let references = if evidence.is_some() {
         let references = retained_refs(
             context,
-            Some(branch),
+            Some(&branch),
             None,
             policy.integration_patterns,
             cancel,

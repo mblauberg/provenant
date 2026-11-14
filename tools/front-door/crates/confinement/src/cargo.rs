@@ -189,7 +189,7 @@ mod tests {
                     .filter(|(key, _)| key == "CARGO_HOME")
                     .map(|(_, value)| PathBuf::from(value))
                     .collect();
-                assert_eq!(values, [expected.clone()]);
+                assert_eq!(values, std::slice::from_ref(&expected));
             }
         }
     }

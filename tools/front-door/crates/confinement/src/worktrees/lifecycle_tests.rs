@@ -307,7 +307,7 @@ impl HostRetirementFixture {
         Ok(())
     }
 
-    fn error(error: impl Error + 'static) -> WorktreeError {
+    fn error(error: impl Error + Send + Sync + 'static) -> WorktreeError {
         WorktreeError::Retirement(Box::new(error))
     }
 }

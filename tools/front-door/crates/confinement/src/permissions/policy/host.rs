@@ -46,8 +46,11 @@ pub fn host_credential_roots(lookup: impl Fn(&str) -> Option<OsString>) -> Vec<P
             scope: PathScope::Exact,
         });
     }
-    if let Some(path) = lookup("CARGO_HOME").filter(|value| !value.is_empty()) {
-        let path = std::path::absolute(PathBuf::from(path)).expect("host cwd resolves CARGO_HOME");
+    // A relative CARGO_HOME resolves against the host cwd, as Cargo does.
+    if let Some(path) = lookup("CARGO_HOME")
+        .filter(|value| !value.is_empty())
+        .and_then(|value| std::path::absolute(PathBuf::from(value)).ok())
+    {
         roots.extend(crate::cargo::CREDENTIAL_FILES.iter().map(|name| PathGrant {
             path: path.join(name),
             scope: PathScope::Exact,

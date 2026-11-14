@@ -1304,7 +1304,7 @@ fn collect_impl(
                 context,
                 branch.as_ref(),
                 integration.as_ref(),
-                &patterns,
+                patterns,
                 cancel,
             )?;
             for target in &mut refs {
@@ -1342,17 +1342,16 @@ fn collect_impl(
                 head,
                 merge_commit,
             } = &forge
+                && *head == lane.head
             {
-                if *head == lane.head {
-                    proof = LandingAssessment::Proven(LandedEvidence {
-                        predicate: provenant_records::custody::LandingPredicate::Landed,
-                        source: provenant_records::custody::LandingSource::ForgeMerged {
-                            pr: pr.clone(),
-                            head: *head,
-                            merge_commit: *merge_commit,
-                        },
-                    });
-                }
+                proof = LandingAssessment::Proven(LandedEvidence {
+                    predicate: provenant_records::custody::LandingPredicate::Landed,
+                    source: provenant_records::custody::LandingSource::ForgeMerged {
+                        pr: pr.clone(),
+                        head: *head,
+                        merge_commit: *merge_commit,
+                    },
+                });
             }
             // Source output is disposable only by a declared class. Undeclared
             // ignored files (.env, databases) keep the tree, as do submodules.
@@ -1601,13 +1600,13 @@ fn collect_impl(
                     report.caches.push(cache);
                 }
                 report.worktrees.removed.push(lane.clone());
-                if action.removes_reference(branch.as_ref()) {
-                    if let Some(branch) = &branch {
-                        report
-                            .worktrees
-                            .pruned_refs
-                            .push(branch.short_name().into());
-                    }
+                if action.removes_reference(branch.as_ref())
+                    && let Some(branch) = &branch
+                {
+                    report
+                        .worktrees
+                        .pruned_refs
+                        .push(branch.short_name().into());
                 }
             }
             if let Some(bytes) = tree_bytes {

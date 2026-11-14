@@ -341,7 +341,7 @@ fn cooperating_writers_share_one_ledger_per_repository() -> Result<(), Box<dyn E
     let mut new_owner = observation.clone();
     new_owner.origin = RefOrigin::Adopted;
     new_owner.attempt_id = Some(AttemptId::from_bytes([10; 16]));
-    let adopted = other.record(new_owner, &test.clock, &cancel())?;
+    let adopted = other.record(new_owner.clone(), &test.clock, &cancel())?;
     assert!(adopted.generation > first.generation);
     assert_eq!(adopted.origin, RefOrigin::Adopted);
     // The ledger remains shared by both writers.

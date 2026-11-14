@@ -96,7 +96,7 @@ pub struct CacheGcReport {
 #[derive(Debug, Error)]
 #[error("{source}")]
 pub struct CacheGcError {
-    pub report: CacheGcReport,
+    pub report: Box<CacheGcReport>,
     #[source]
     pub source: Box<PermissionError>,
 }
@@ -415,7 +415,7 @@ fn gc_caches_with_free_space(
                 });
             }
             Err(CacheGcError {
-                report,
+                report: Box::new(report),
                 source: Box::new(source),
             })
         }
@@ -1446,7 +1446,7 @@ mod tests {
             result
                 .map(|()| report.clone())
                 .map_err(|source| CacheGcError {
-                    report,
+                    report: Box::new(report),
                     source: Box::new(source),
                 })
         }

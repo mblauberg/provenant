@@ -18,7 +18,7 @@ pub(super) fn branch_name(
     };
     let state = match context.host_state() {
         Ok(state) => state,
-        Err(error) => return fallback(error),
+        Err(error) => return fallback(format!("could not read host state: {error}")),
     };
     let ports = match provenant_config::PortTable::read_for(Some(context.repo.root_path()), &state)
     {
@@ -65,7 +65,7 @@ pub(super) fn branch_name(
     if execution.disposition != provenant_config::PortCommandDisposition::Succeeded {
         return fallback(format!("returned {:?}", execution.disposition));
     }
-    let Some(outcome) = execution.outcome else {
+    let Some(outcome) = execution.outcome.as_ref() else {
         return fallback("returned no execution evidence".into());
     };
     if !execution.capture_complete() {
