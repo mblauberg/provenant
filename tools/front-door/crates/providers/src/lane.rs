@@ -611,20 +611,19 @@ const CI_DISPATCH_DENY_GUARD: &str = r#"deny_ci_dispatch() {
   endpoint=
   skip_next=false
   for item do
-    if $api_seen; then
-      if [ "$skip_next" = true ]; then skip_next=false; continue; fi
-      case "$item" in
-        -X|-H|-f|-F|-q|-t|--method|--header|--field|--raw-field|--jq|--template|--cache|--hostname|--input|--preview|--repo|-R)
-          skip_next=true
-          continue
-          ;;
-      esac
-      case "$item" in
-        --*=*|-X?*|-H?*|-f?*|-F?*|-q?*|-*) continue ;;
-        *) endpoint=$item; break ;;
-      esac
+    if [ "$skip_next" = true ]; then skip_next=false; continue; fi
+    case "$item" in
+      -X|-H|-f|-F|-q|-t|--method|--header|--field|--raw-field|--jq|--template|--cache|--hostname|--input|--preview|--repo|-R|--config|--app)
+        skip_next=true
+        continue
+        ;;
+      --*=*|-X?*|-H?*|-f?*|-F?*|-q?*|-*) continue ;;
+    esac
+    if ! $api_seen; then
+      case "$item" in api) api_seen=true; continue ;; *) return 1 ;; esac
     fi
-    case "$item" in api) api_seen=true ;; esac
+    endpoint=$item
+    break
   done
   case "$endpoint" in *\?*) endpoint=${endpoint%%\?*} ;; esac
   while [ "${endpoint%/}" != "$endpoint" ]; do endpoint=${endpoint%/}; done
@@ -1944,6 +1943,17 @@ mod tests {
         };
         let default_policy: provenant_config::GithubPolicy = serde_json::from_str("{}")?;
         for args in [
+            vec!["workflow", "run", "ci.yml"],
+            vec!["run", "rerun", "123"],
+            vec!["--hostname", "api", "api", "/repos/o/r/dispatches"],
+            vec![
+                "api",
+                "--config",
+                "api",
+                "--method",
+                "POST",
+                "/repos/o/r/dispatches",
+            ],
             vec![
                 "--repo",
                 "owner/repo",
@@ -1992,6 +2002,23 @@ mod tests {
             let output = run(&default_policy, true, &args)?;
             assert_eq!(output.termination, Termination::Exit(1));
             assert_eq!(output.stderr.bytes, b"github.deny_ci_dispatch\n");
+        }
+
+        for args in [
+            vec!["api", "--method", "GET", "/repos/o/r/actions/runs"],
+            vec![
+                "pr",
+                "create",
+                "--title",
+                "api",
+                "--body",
+                "/repos/o/r/dispatches",
+            ],
+        ] {
+            assert_eq!(
+                run(&default_policy, true, &args)?.termination,
+                Termination::Exit(0)
+            );
         }
 
         // Read-only lanes keep their existing GitHub CLI behaviour.
