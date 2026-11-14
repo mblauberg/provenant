@@ -164,7 +164,7 @@ pub(super) fn pending(
     let directory = graph_directory(root, project)?;
     let _control = match directory.try_lock(OsStr::new(&lock_name(graph_id)), LockMode::Exclusive) {
         Ok(lock) => lock,
-        Err(error) if matches!(error, provenant_os::fs::FsError::LockTimeout { .. }) => {
+        Err(provenant_os::fs::FsError::LockTimeout { .. }) => {
             return Ok(true);
         }
         Err(error) => return Err(error.into()),
@@ -188,7 +188,7 @@ pub(super) fn acknowledge(
         LockMode::Exclusive,
     ) {
         Ok(lock) => lock,
-        Err(error) if matches!(error, provenant_os::fs::FsError::LockTimeout { .. }) => {
+        Err(provenant_os::fs::FsError::LockTimeout { .. }) => {
             return Ok(false);
         }
         Err(error) => return Err(error.into()),

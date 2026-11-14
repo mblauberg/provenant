@@ -326,7 +326,7 @@ pub(super) fn report_policy_message(message: String) {
 /// observation warns, is silent, or returns its existing typed strict error.
 /// Queue has no admission point in profile compilation and is rejected if a
 /// malformed table ever enables it.
-#[cfg(any(target_os = "macos", test, feature = "snapshot"))]
+#[cfg(any(target_os = "macos", all(test, feature = "snapshot")))]
 #[allow(clippy::panic)]
 pub(super) fn check_capacity_policy(
     policy: &Policy,

@@ -5,7 +5,9 @@ use super::*;
 use crate::repo::VerifiedWorktree;
 #[cfg(target_os = "macos")]
 use provenant_os::fs::{Directory, FileKind};
-use provenant_records::policy::{Effect, Facts, Policy};
+#[cfg(any(target_os = "macos", test))]
+use provenant_records::policy::Effect;
+use provenant_records::policy::{Facts, Policy};
 use std::ffi::OsStr;
 #[cfg(target_os = "macos")]
 use std::io::Read;
@@ -17,6 +19,7 @@ pub(super) const MAX_PATH_GRANTS: usize = 128;
 #[cfg(target_os = "macos")]
 pub(super) const MAX_GIT_HEAD_BYTES: u64 = 1024;
 
+#[cfg(any(target_os = "macos", test))]
 fn boundary_error<E: std::fmt::Display>(code: &str, error: E) -> E {
     let detail = error.to_string();
     Policy::default().boundary_error(code, Facts::violation(detail), error)
