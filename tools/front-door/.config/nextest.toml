@@ -23,6 +23,13 @@ slow-timeout = { period = "10s", terminate-after = 9 }
 filter = 'package(=provenant) & binary(=graph_provider) & test(=graph_writer_restarts_fresh)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
+# Four concurrent first launches, then four waits, scheduled beside the
+# twelve-launch admission test. Locally it takes 5-8s at the green and current
+# heads alike; on a loaded macOS runner it took 20-25s and then crossed 30s.
+[[profile.ci.overrides]]
+filter = 'package(=provenant) & binary(=graph_provider) & test(=simultaneous_first_launches_pass_cutover_guard)'
+slow-timeout = { period = "30s", terminate-after = 2 }
+
 [profile.ci.junit]
 path = "junit.xml"
 
