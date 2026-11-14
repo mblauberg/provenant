@@ -749,23 +749,23 @@ esac
     fn settled_lanes_need_a_finish_after_the_baseline() {
         use super::*;
         use serde_json::json;
+        let outcome = |outcome| serde_json::to_value(outcome).unwrap();
         let data = json!({"lanes":[
-            {"key":{"graph":"g","node":"new","attempt":1},"attempt_id":"new","state":"failed","reason":"boom","finished_at":"2026-10-27T01:00:00Z"},
-            {"key":{"graph":"g","node":"old","attempt":1},"attempt_id":"old","state":"succeeded","finished_at":"2026-10-27T00:00:00Z"},
-            {"key":{"graph":"g","node":"none","attempt":1},"attempt_id":"none","state":"lost"}
+            {"key":{"graph":"g","node":"new","attempt":1},"attempt_id":"new","state":outcome(provenant_records::AttemptOutcome::Failed),"reason":"boom","finished_at":"2026-10-27T01:00:00Z"},
+            {"key":{"graph":"g","node":"old","attempt":1},"attempt_id":"old","state":outcome(provenant_records::AttemptOutcome::Succeeded),"finished_at":"2026-10-27T00:00:00Z"},
+            {"key":{"graph":"g","node":"no_finish","attempt":1},"attempt_id":"no-finish","state":outcome(provenant_records::AttemptOutcome::Lost)},
+            {"key":{"graph":"g","node":"active","attempt":1},"attempt_id":"active","state":"running"}
         ],"next_cursor":null});
         let after = "2026-10-27T00:30:00Z"
             .parse::<jiff::Timestamp>()
             .unwrap()
             .as_second();
         let (lanes, _) = parse_lanes(&data, Some(after));
-        assert_eq!(lanes.len(), 2);
-        assert!(
-            lanes
-                .iter()
-                .any(|lane| lane.id == "g/new#1" && lane.reason.as_deref() == Some("boom"))
-        );
-        assert!(lanes.iter().any(|lane| lane.id == "g/unsettled#1"));
+        let identities: std::collections::BTreeSet<_> =
+            lanes.iter().map(|lane| lane.id.as_str()).collect();
+        assert_eq!(identities, ["g/new#1"].into());
+        let recent = lanes.iter().find(|lane| lane.id == "g/new#1").unwrap();
+        assert_eq!(recent.reason.as_deref(), Some("boom"));
     }
 
     #[test]

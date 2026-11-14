@@ -463,19 +463,33 @@ mod tests {
             read(&roots, None, false, 50, None)?["lanes"][0]["chair"],
             json!(request.chair)
         );
-        let mut forged = request.clone();
-        forged.chair = None;
-        ChairIndex::open(&roots.state, &chair_call)?.submit(
-            other_project,
-            first["lanes"][1]["lane_id"]["key"]["graph"]
-                .as_str()
-                .ok_or("missing graph")?,
-            &forged,
-            &chair_call,
-        )?;
-        let mismatch = read(&roots, None, false, 50, None)?;
-        assert!(mismatch["lanes"][1]["chair"].is_null());
-        assert_eq!(mismatch["coverage"]["chairs"], "partial");
+        let chair_for = |board: &Value, graph: &str| {
+            board["lanes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|lane| lane["lane_id"]["key"]["graph"].as_str() == Some(graph))
+                .unwrap()["chair"]
+                .clone()
+        };
+        // Project scope and provenance determine whether an unmatched chair
+        // row is invisible or leaves coverage partial.
+        for (row_project, proposal, expected_coverage) in [
+            (project, "foreign-project-proposal", "complete"),
+            (other_project, "mismatched-project-proposal", "partial"),
+        ] {
+            let mut candidate = request.clone();
+            candidate.fresh_continuation = Some(proposal.into());
+            ChairIndex::open(&roots.state, &chair_call)?.submit(
+                row_project,
+                "lane-100",
+                &candidate,
+                &chair_call,
+            )?;
+            let board = read(&roots, None, false, 50, None)?;
+            assert_eq!(chair_for(&board, "lane-100"), Value::Null);
+            assert_eq!(board["coverage"]["chairs"], expected_coverage);
+        }
         let cursor = first["next_cursor"].as_str().ok_or("missing cursor")?;
         for malformed in ["", "junk", "g:0", "g:-1", "g:18446744073709551615"] {
             let error = read(&roots, None, false, 50, Some(malformed)).unwrap_err();

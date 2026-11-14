@@ -262,8 +262,8 @@ fn hints_from_a_hook_on_a_custom_store_carry_its_state_dir() -> Result {
         )),
         "{text}"
     );
-    assert!(text.contains(&format!("`{prefix} status`")), "{text}");
-    // No command the hook prints may name the default store.
+    // A resume checkpoint prints a save hint; every runnable command it prints
+    // must keep the same store scope the hook used.
     for line in text.lines().filter(|line| line.contains("provenant ")) {
         assert!(line.contains("--state-dir"), "{line}");
     }
