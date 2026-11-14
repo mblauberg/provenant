@@ -215,7 +215,7 @@ fn lease(seconds: u64) -> Result<(), InputError> {
 }
 
 fn wait(seconds: u64, transport: WaitTransport) -> Result<(), InputError> {
-    if !(1..=transport.maximum_seconds()).contains(&seconds) {
+    if seconds > transport.maximum_seconds() {
         return Err(field("wait_seconds"));
     }
     Ok(())
@@ -764,9 +764,18 @@ mod tests {
             json!({"op":"claim_acquire","scope":{"kind":"issue","key":"1"},"lease_seconds":0}),
             "lease_seconds",
         );
-        rejects::<super::super::EventsInput>(
-            json!({"op":"read","limit":1,"wait_seconds":0}),
-            "wait_seconds",
+        assert!(
+            serde_json::from_value::<super::super::EventsInput>(
+                json!({"op":"read","limit":1,"wait_seconds":0})
+            )
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<RunInput>(json!({
+                "op":"wait","condition":"any","wait_seconds":0,
+                "targets":[{"attempt":"00000000000000000000000000000001"}]
+            }))
+            .is_ok()
         );
         rejects::<RunInput>(
             json!({
