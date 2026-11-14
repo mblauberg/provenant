@@ -107,6 +107,7 @@ impl Driver<'_> {
         }
     }
 
+    #[cfg(target_os = "macos")]
     pub(super) fn holder_reports_no_live_children(&self) -> bool {
         host_allows_escapee_stop(self.holder, &self.holder_context)
     }
@@ -766,6 +767,7 @@ impl Driver<'_> {
 
 /// Unknown host graph state refuses escapee signals. This is intentionally
 /// separate from census: an ordinary history walk must not reopen graph state.
+#[cfg(any(target_os = "macos", test))]
 pub(super) fn host_allows_escapee_stop(holder: Option<&dyn Holder>, context: &[u8]) -> bool {
     holder.is_none_or(|holder| matches!(holder.has_live_children(context), Ok(false)))
 }
