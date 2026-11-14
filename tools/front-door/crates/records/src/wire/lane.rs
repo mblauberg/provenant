@@ -66,7 +66,7 @@ lane_row! {
     optional {
         git_import_failure: Value => object(&[("reason", string()), ("head", nullable(string())), ("retained_objects", nullable(super::schema::worktree_path()))], &[]);
         write_grants: Value => nullable(array(grant_schema()));
-        terminal_cause: crate::run::TerminalCause => choices(&["source_view_refused", "account_login_required", "route_resolution_refused", "access_policy_refused", "disk_floor", "disk_observation_unavailable", "stored_prompt_unreadable", "cloud_placement_removed", "write_grants_refused", "worktree_busy", "handoff_refused", "retained_writer_import", "unsupported_platform", "unknown_pacing_account", "unregistered_account", "delivery_prepare_credential_helper", "spawn_failure", "process_crash", "token_budget", "settlement_failure", "provider_early_stop", "free_pool_quota", "command_unavailable", "host_native_unconfigured", "identity_unobserved", "stopped_no_work", "context_handoff", "blocked", "lane_token_lost"]);
+        terminal_cause: crate::run::TerminalCause => choices(&["source_view_refused", "account_login_required", "route_resolution_refused", "access_policy_refused", "disk_floor", "disk_observation_unavailable", "stored_prompt_unreadable", "cloud_placement_removed", "write_grants_refused", "worktree_busy", "handoff_refused", "retained_writer_import", "unsupported_platform", "unknown_pacing_account", "unregistered_account", "delivery_prepare_credential_helper", "spawn_failure", "process_crash", "token_budget", "settlement_failure", "provider_early_stop", "free_pool_quota", "command_unavailable", "host_native_unconfigured", "identity_mismatch", "stopped_no_work", "context_handoff", "blocked", "lane_token_lost"]);
         host: String => string();
         title: String => string();
         requested_priority: i64 => integer();
@@ -562,7 +562,7 @@ mod terminal_cause_tests {
             TerminalCause::FreePoolQuota,
             TerminalCause::CommandUnavailable,
             TerminalCause::HostNativeUnconfigured,
-            TerminalCause::IdentityUnobserved,
+            TerminalCause::IdentityMismatch,
             TerminalCause::StoppedNoWork,
             TerminalCause::ContextHandoff,
             TerminalCause::Blocked,

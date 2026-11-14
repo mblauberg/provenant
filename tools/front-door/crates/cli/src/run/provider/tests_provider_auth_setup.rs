@@ -118,7 +118,10 @@ fn cursor_auth_reprobe_accepts_only_selected_host_login() -> Result<(), Box<dyn 
             Ok(ExecOutcome {
                 termination: Termination::Exit(0),
                 stdout: CapturedStream {
-                    bytes: b"Logged in successfully".to_vec(),
+                    bytes: include_bytes!(
+                        "../../../../../tests/fixtures/providers/cursor/status.stdout"
+                    )
+                    .to_vec(),
                     ..Default::default()
                 },
                 stderr: Default::default(),

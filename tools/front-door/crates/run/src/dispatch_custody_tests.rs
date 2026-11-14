@@ -192,8 +192,7 @@ fn holder_release_retains_temporary_when_verification_fails() -> TestResult {
     holder_release_temporary_fixture(false)
 }
 #[test]
-fn publication_holder_commits_decoded_success_only_with_exit_zero_and_observed_identity()
--> TestResult {
+fn publication_holder_commits_decoded_success_only_with_exit_zero() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);

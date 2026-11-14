@@ -387,6 +387,34 @@ impl provenant_os::exec::Executor for FileCredentialScript {
 }
 
 #[test]
+fn cursor_status_observes_the_signed_in_account() {
+    let output = include_bytes!("../../../tests/fixtures/providers/cursor/status.stdout");
+    assert_eq!(
+        cursor::status_account(output),
+        crate::identity::fingerprint("fixture@example.test")
+    );
+    assert_eq!(
+        crate::host::local_signin(
+            provenant_records::LoginReprobe::Cursor,
+            &CursorDesktopToken(std::str::from_utf8(output).unwrap(), 0),
+            Path::new("/bin/cursor-agent"),
+            Path::new("/home/test"),
+            Path::new("/home/test"),
+            Path::new("/"),
+        ),
+        Some(crate::host::LocalSignin::SignedIn)
+    );
+    for output in [
+        b"Not logged in".as_slice(),
+        b"Login successful",
+        b"broken",
+        b"\xff",
+    ] {
+        assert!(cursor::status_account(output).is_none());
+    }
+}
+
+#[test]
 fn cursor_cli_only_account_matches_desktop_identity() {
     use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
 

@@ -105,46 +105,69 @@ fn host_facts_can_override_resource_and_process_observations() {
 }
 
 #[test]
-fn command_identity_is_verified_without_manufacturing_model_evidence() {
-    let route = RouteRecord {
+fn route_identity_distinguishes_missing_evidence_from_contradictions() {
+    use crate::reader::{RouteIdentity as I, route_identity};
+    let command = RouteRecord {
         provider: Some("command".into()),
         ..Default::default()
     };
-    assert!(crate::reader::verified_route(
-        Some(&route),
-        Some(&route),
-        Some(&route)
-    ));
-    for provider in ["codex", "unknown"] {
-        let route = RouteRecord {
-            provider: Some(provider.into()),
-            ..Default::default()
-        };
-        assert!(!crate::reader::verified_route(
-            Some(&route),
-            Some(&route),
-            Some(&route)
-        ));
+    assert_eq!(
+        route_identity(Some(&command), Some(&command), Some(&command)),
+        I::Observed
+    );
+    let route = RouteRecord {
+        provider: Some("cursor".into()),
+        model: Some("cursor/model".into()),
+        effort: Some("high".into()),
+        account_key: Some("requested-account".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        route_identity(Some(&route), Some(&route), Some(&route)),
+        I::Observed
+    );
+    assert_eq!(
+        route_identity(Some(&route), Some(&route), None),
+        I::Unobserved
+    );
+    let incomplete = RouteRecord {
+        model: None,
+        ..route.clone()
+    };
+    assert_eq!(
+        route_identity(Some(&route), Some(&route), Some(&incomplete)),
+        I::Unobserved
+    );
+    for changed in [
+        RouteRecord {
+            provider: Some("other".into()),
+            ..route.clone()
+        },
+        RouteRecord {
+            model: Some("cursor/other".into()),
+            ..route.clone()
+        },
+        RouteRecord {
+            effort: Some("low".into()),
+            ..route.clone()
+        },
+        RouteRecord {
+            account_key: Some("other-account".into()),
+            ..route.clone()
+        },
+    ] {
+        assert_eq!(
+            route_identity(Some(&route), Some(&route), Some(&changed)),
+            I::Mismatch
+        );
+        assert_eq!(
+            route_identity(Some(&route), Some(&changed), Some(&route)),
+            I::Mismatch
+        );
     }
-    assert!(!crate::reader::verified_route(
-        Some(&route),
-        Some(&route),
-        None
-    ));
-    let mut invented = route.clone();
-    invented.model = Some("placeholder".into());
-    assert!(!crate::reader::verified_route(
-        Some(&route),
-        Some(&invented),
-        Some(&route)
-    ));
-    let mut effort = route.clone();
-    effort.effort = Some("high".into());
-    assert!(!crate::reader::verified_route(
-        Some(&route),
-        Some(&effort),
-        Some(&route)
-    ));
+    assert!(!I::Unobserved.permits_success(&[]));
+    assert!(I::Unobserved.permits_success(&[PartialSignal::IdentityUnobserved]));
+    assert!(!I::Mismatch.permits_success(&[PartialSignal::IdentityUnobserved]));
 }
 
 #[test]

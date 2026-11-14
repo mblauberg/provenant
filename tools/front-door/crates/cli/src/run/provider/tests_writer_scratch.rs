@@ -119,7 +119,13 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
     // inside the fixture assets, independent of host packages and PATH.
     let executable = assets.join("cursor/bin/agent");
     std::fs::create_dir_all(executable.parent().ok_or("provider bin")?)?;
-    std::fs::write(&executable, b"#!/bin/sh\nif [ \"$1\" = status ]; then printf 'Logged in successfully\\n'; else printf 'fixture-cursor 1.0\\n'; fi\n")?;
+    std::fs::write(
+        &executable,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = status ]; then printf '%s' '{}'; else printf 'fixture-cursor 1.0\\n'; fi\n",
+            include_str!("../../../../../tests/fixtures/providers/cursor/status.stdout")
+        ),
+    )?;
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
     let attempt_id = AttemptId::from_bytes([1; 16]);
     let attempt = state.join(format!("attempts/{attempt_id}"));

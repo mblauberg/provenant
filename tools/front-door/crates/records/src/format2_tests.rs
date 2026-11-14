@@ -87,12 +87,11 @@ fn an_override_moves_only_an_unpinned_cause() {
         StopCause::StoppedEarly.next_step(&override_of(StopCause::StoppedEarly, resume), RELEASED),
         resume
     );
-    for pinned in [
-        StopCause::Blocked,
-        StopCause::InputRequired,
-        StopCause::Cancelled,
-    ] {
-        assert!(pinned.rule().pinned);
+    for pinned in STOP_TABLE
+        .iter()
+        .filter(|rule| rule.pinned)
+        .map(|rule| rule.cause)
+    {
         assert_eq!(
             pinned.next_step(&override_of(pinned, resume), RELEASED),
             NextStep::Chair

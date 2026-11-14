@@ -24,6 +24,19 @@ pub const REGISTRATION: crate::Registration = crate::Registration {
     },
 };
 
+/// Project the CLI's current `status` output immediately to a non-secret
+/// account fingerprint. Display names and model selectors are not identities.
+pub fn status_account(output: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(output).ok()?;
+    let account = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("✓ Logged in as "))?;
+    if account.split_whitespace().count() != 1 || !account.contains('@') {
+        return None;
+    }
+    crate::identity::fingerprint(account)
+}
+
 crate::adapter!(Cursor, "cursor", prepare);
 // The stream reports a display name (including Auto), not an exact model id.
 const MODEL_ON_WIRE: bool = false;

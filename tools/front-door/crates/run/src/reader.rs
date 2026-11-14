@@ -1394,11 +1394,12 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
                 .as_ref()
                 .is_none_or(|result| !result.complete || result.bytes == 0)
                 || exit_code != Some(0)
-                || !verified_route(
+                || !route_identity(
                     r.resolved_route.as_ref(),
                     r.applied_route.as_ref(),
                     r.observed_route.as_ref(),
-                ))
+                )
+                .permits_success(&r.partial_signals))
         {
             return Err(RunError::Validation("invalid stored success"));
         }
@@ -1406,34 +1407,77 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
     Ok(())
 }
 
-/// Success must refer to the same exact provider/model at all three stages.
-/// Unknown effort/account observations remain absent, never inferred.
-pub(crate) fn verified_route(
+/// Missing observations are advice; only contradictory observations hold success.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RouteIdentity {
+    Observed,
+    Unobserved,
+    Mismatch,
+}
+impl RouteIdentity {
+    pub(crate) fn permits_success(self, signals: &[PartialSignal]) -> bool {
+        match self {
+            Self::Observed => true,
+            Self::Unobserved => signals.contains(&PartialSignal::IdentityUnobserved),
+            Self::Mismatch => false,
+        }
+    }
+}
+
+pub(crate) fn route_identity(
     resolved: Option<&RouteRecord>,
     applied: Option<&RouteRecord>,
     observed: Option<&RouteRecord>,
-) -> bool {
-    match (resolved, applied, observed) {
-        (Some(r), Some(a), Some(o)) => {
-            r.provider.as_ref().is_some_and(|v| !v.is_empty())
-                && (r.model.as_ref().is_some_and(|v| !v.is_empty())
-                    || (r.model.is_none()
-                        && r.effort.is_none()
-                        && a.effort.is_none()
-                        && o.effort.is_none()
-                        && r.provider
-                            .as_deref()
-                            .and_then(provenant_records::AdapterSpec::get)
-                            .is_some_and(|spec| !spec.launch.model)))
-                && r.provider == a.provider
-                && a.provider == o.provider
-                && r.model == a.model
-                && a.model == o.model
-                && a.effort
-                    .as_ref()
-                    .is_none_or(|effort| Some(effort) == o.effort.as_ref())
-        }
-        _ => false,
+) -> RouteIdentity {
+    let (Some(r), Some(a)) = (resolved, applied) else {
+        return RouteIdentity::Mismatch;
+    };
+    let valid_model = r.model.as_ref().is_some_and(|v| !v.is_empty())
+        || (r.model.is_none()
+            && r.effort.is_none()
+            && r.provider
+                .as_deref()
+                .and_then(provenant_records::AdapterSpec::get)
+                .is_some_and(|spec| !spec.launch.model));
+    if !r.provider.as_ref().is_some_and(|v| !v.is_empty())
+        || !valid_model
+        || r.provider != a.provider
+        || r.model != a.model
+        || r.effort != a.effort
+        || r.account_key != a.account_key
+    {
+        return RouteIdentity::Mismatch;
+    }
+    let Some(o) = observed else {
+        return RouteIdentity::Unobserved;
+    };
+    // Missing fields are not a contradiction. Present fields must agree with
+    // the authorised launch, including the account when it was selected.
+    if o.provider
+        .as_ref()
+        .is_some_and(|v| Some(v) != a.provider.as_ref())
+        || o.model
+            .as_ref()
+            .is_some_and(|v| Some(v) != a.model.as_ref())
+        || (a.effort.is_some()
+            && o.effort
+                .as_ref()
+                .is_some_and(|v| Some(v) != a.effort.as_ref()))
+        || (a.account_key.is_some()
+            && o.account_key
+                .as_ref()
+                .is_some_and(|v| Some(v) != a.account_key.as_ref()))
+    {
+        return RouteIdentity::Mismatch;
+    }
+    if o.provider.is_none()
+        || (a.model.is_some() && o.model.is_none())
+        || (a.effort.is_some() && o.effort.is_none())
+        || (a.account_key.is_some() && o.account_key.is_none())
+    {
+        RouteIdentity::Unobserved
+    } else {
+        RouteIdentity::Observed
     }
 }
 
