@@ -35,7 +35,6 @@ continuation_copy_depth = 32
 source_view_seconds = 300
 source_view_entries = 100000
 source_view_bytes = 536870912
-resource_sample_interval_ms = 5000
 sandboxed_routes = []
 sandbox_cache_reads = []
 
@@ -284,7 +283,7 @@ fn default_source_view_bytes() -> u64 {
     512 << 20
 }
 fn default_resource_sample_interval_ms() -> u64 {
-    5_000
+    provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL_MS
 }
 fn default_true() -> bool {
     true

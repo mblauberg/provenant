@@ -883,19 +883,19 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
                             (Some(std::time::Duration::from_millis(millis)), source)
                         } else {
                             let _ = writeln!(io::stderr().lock(),
-                                "warning: domains.run.resource_sample_interval_ms is outside 1..=60000; using compiled 5000ms default");
+                                "warning: domains.run.resource_sample_interval_ms is outside 1..=60000; using compiled {}ms default", provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL_MS);
                             (None, "compiled default (invalid configured value)".into())
                         }
                     }
                     Err(error) => {
                         let _ = writeln!(io::stderr().lock(),
-                            "warning: domains.run resource sampling configuration unavailable; using compiled 5000ms default: {error}");
+                            "warning: domains.run resource sampling configuration unavailable; using compiled {}ms default: {error}", provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL_MS);
                         (None, "compiled default (configuration unavailable)".into())
                     }
                 },
                 Err(error) => {
                     let _ = writeln!(io::stderr().lock(),
-                        "warning: resource sampling configuration roots unavailable; using compiled 5000ms default: {error}");
+                        "warning: resource sampling configuration roots unavailable; using compiled {}ms default: {error}", provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL_MS);
                     (None, "compiled default (roots unavailable)".into())
                 }
             };

@@ -7,7 +7,7 @@
 //! checkpoint before the receipt is returned, so a lost reply is answered by
 //! replaying the same idempotency key.
 use super::Context;
-use provenant_core::{CancelToken, Clock, WaitBudget};
+use provenant_core::{CancelToken, Clock, Pause, WaitBudget};
 use provenant_fabric_runtime::graph::{
     FileJournal, GraphJournal,
     patch::{LiveGraph, PatchContext, scan_for_secrets},
@@ -1258,14 +1258,37 @@ pub fn from_lane(
 pub fn wait_for_children(
     cancel: &CancelToken,
     within: std::time::Duration,
+    interval: std::time::Duration,
 ) -> Result<Value, ServiceError> {
     let clock = provenant_os::clock::SystemClock::new();
     let started = clock.mono_now();
     while_waiting(cancel, within, || {
-        poll_children(cancel, within, &clock, started, |remaining| {
+        poll_children(cancel, within, &clock, started, interval, |remaining| {
             from_lane(&RelayOp::Children, cancel, remaining)
         })
     })
+}
+
+pub fn child_wait_observation(interval: std::time::Duration) -> String {
+    format!(
+        "paced reread every {} ms (domains.wait.local_interval_ms); relay socket has no remote event subscription",
+        interval.as_millis()
+    )
+}
+
+fn pause_child_poll(cancel: &CancelToken, delay: std::time::Duration) {
+    let deadline = std::time::Instant::now() + delay;
+    while !cancel.is_cancelled() {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        Pause::wait(
+            &provenant_core::ThreadPause,
+            provenant_core::DurationMicros::from_micros(remaining.as_micros()),
+            cancel,
+        );
+    }
 }
 
 fn poll_children(
@@ -1273,6 +1296,7 @@ fn poll_children(
     within: std::time::Duration,
     clock: &dyn Clock,
     started: provenant_core::MonoTime,
+    interval: std::time::Duration,
     mut poll: impl FnMut(std::time::Duration) -> Result<Value, ServiceError>,
 ) -> Result<Value, ServiceError> {
     loop {
@@ -1295,7 +1319,14 @@ fn poll_children(
         if children.iter().all(|child| child["settled"] == true) {
             return Ok(value);
         }
-        provenant_os::sys::wait_pause(remaining.min(std::time::Duration::from_millis(100)));
+        let elapsed = std::time::Duration::from_micros(
+            clock
+                .mono_now()
+                .as_micros()
+                .saturating_sub(started.as_micros()),
+        );
+        let remaining = within.saturating_sub(elapsed);
+        pause_child_poll(cancel, remaining.min(interval));
     }
 }
 
@@ -1521,6 +1552,7 @@ mod child_wait_tests {
                         std::time::Duration::from_secs(2),
                         &provenant_os::clock::SystemClock::new(),
                         provenant_os::clock::SystemClock.mono_now(),
+                        std::time::Duration::from_millis(1),
                         |_| {
                             polls += 1;
                             if cancelled {
@@ -1576,6 +1608,7 @@ mod child_wait_tests {
                     std::time::Duration::from_secs(1),
                     &clock,
                     started,
+                    std::time::Duration::from_millis(1),
                     |_| panic!("must not poll after yield consumed the deadline"),
                 )
             },

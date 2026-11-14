@@ -644,13 +644,35 @@ impl Factory {
             if remaining == 0 {
                 return Ok(json!({"receipt":receipt,"observation_error":"child wait timed out"}));
             }
+            let (interval, configuration_warning) =
+                match provenant_cli::config_reads::read_for(&self.context.roots, "wait") {
+                    Ok(config) => (
+                        std::time::Duration::from_millis(config.domains.wait.local_interval_ms),
+                        None,
+                    ),
+                    Err(error) => (
+                        std::time::Duration::from_millis(
+                            provenant_cli::wait::Settings::default().local_interval_ms,
+                        ),
+                        Some(format!("configuration unavailable; compiled default: {error}")),
+                    ),
+                };
+            let mut observation = provenant_cli::fabric::graph_relay::child_wait_observation(interval);
+            if let Some(warning) = configuration_warning {
+                observation.push_str(&format!("; {warning}"));
+            }
             return Ok(
                 match provenant_cli::fabric::graph_relay::wait_for_children(
                     cancel,
                     std::time::Duration::from_micros(remaining),
+                    interval,
                 ) {
-                    Ok(children) => json!({"receipt":receipt,"children":children}),
-                    Err(error) => json!({"receipt":receipt,"observation_error":error.to_string()}),
+                    Ok(children) => {
+                        json!({"receipt":receipt,"children":children,"observation":observation})
+                    }
+                    Err(error) => {
+                        json!({"receipt":receipt,"observation_error":error.to_string(),"observation":observation})
+                    }
                 },
             );
         }

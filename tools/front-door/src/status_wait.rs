@@ -243,6 +243,62 @@ pub(crate) fn observation_text(
     }
 }
 
+fn rows_local<H: std::str::FromStr + PartialEq>(rows: &[Value], host: Option<&H>) -> bool {
+    host.is_some_and(|host| {
+        rows.iter().all(|row| {
+            row["kind"] != "attempt"
+                || row["attempt_id"]
+                    .as_str()
+                    .and_then(|id| id.split_once('/'))
+                    .is_none_or(|(owner, _)| owner.parse::<H>().is_ok_and(|owner| &owner == host))
+        })
+    })
+}
+
+fn reading_locally_represented(reading: &Reading, host: Option<&provenant_core::HostId>) -> bool {
+    reading.data["rows"]
+        .as_array()
+        .is_some_and(|rows| rows_local(rows, host))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GraphWake {
+    Event,
+    NativeTimeout,
+    PacedFallback,
+}
+
+fn graph_reads_for_wake(
+    pending: &[usize],
+    remote: &std::collections::BTreeSet<usize>,
+    wake: GraphWake,
+) -> Vec<usize> {
+    match wake {
+        GraphWake::Event | GraphWake::PacedFallback => pending.to_vec(),
+        GraphWake::NativeTimeout => pending
+            .iter()
+            .copied()
+            .filter(|index| remote.contains(index))
+            .collect(),
+    }
+}
+
+fn observation_text_with_remote(
+    watcher: Option<&provenant_os::changes::watch::Watcher>,
+    interval: Duration,
+    fallback: Option<&str>,
+    remote_pending: bool,
+) -> String {
+    let mut text = observation_text(watcher, interval, fallback);
+    if remote_pending {
+        text.push_str(&format!(
+            "; peer/relay or unrepresented rows reread every {} ms (domains.wait.local_interval_ms) because the relay has no remote event subscription",
+            interval.as_millis()
+        ));
+    }
+    text
+}
+
 /// Only terminal node/attempt states produce settlement events. In particular
 /// pending -> running is progress, not a reason for --any to return.
 fn digest_settle(digest: &Value) -> Option<Settle> {
@@ -451,18 +507,19 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             &resolved.home,
             &resolved.project,
         )
-        .map(|context| context.identity.project)
+        .map(|context| (context.identity.project, context.identity.host))
         .map_err(|error| format!("cannot resolve project event logs: {error}"))
     };
+    let local_host = project.as_ref().ok().map(|(_, host)| host.clone());
     let project_error = project.as_ref().err().cloned();
     let mut pending_index_error = None;
     let event_paths = match project {
-        Ok(project) if !command.targets.is_empty() => command
+        Ok((project, _)) if !command.targets.is_empty() => command
             .targets
             .iter()
             .map(|target| graph_event_path(resolved.roots.state.as_path(), project, &target.name))
             .collect::<Vec<_>>(),
-        Ok(project) if command.prs.is_empty() => {
+        Ok((project, _)) if command.prs.is_empty() => {
             let names = provenant_fabric_runtime::graph::FileJournal::pending_graph_ids(
                 &resolved.roots.state,
                 project,
@@ -509,13 +566,15 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             Err(error) => (None, setup_fallback.unwrap_or_else(|| error.to_string())),
         }
     };
+    let fallback_reason = event_watcher.is_none().then(|| initial_fallback.clone());
     if let Some(watcher) = &event_watcher {
         stop.install_event_wake(watcher.wake_handle());
     }
-    let observation = Arc::new(Mutex::new(observation_text(
+    let observation = Arc::new(Mutex::new(observation_text_with_remote(
         event_watcher.as_ref(),
         interval,
-        Some(&initial_fallback),
+        fallback_reason.as_deref(),
+        false,
     )));
     let mut validation = std::collections::BTreeMap::new();
     if let Err(error) = provenant_sqlite::with_busy_timeout(Duration::ZERO, || {
@@ -664,12 +723,31 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 .iter()
                 .map(|index| (*index, sources[*index].clone()))
                 .collect::<Vec<_>>();
+            let local_host = local_host.clone();
             let mut watcher = event_watcher.take();
+            let mut fallback_reason = fallback_reason.clone();
+            let mut remote_indices = pending
+                .iter()
+                .copied()
+                .filter(|index| {
+                    latest[*index].as_ref().is_none_or(|reading| {
+                        !reading_locally_represented(reading, local_host.as_ref())
+                    })
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            if let Ok(mut current) = observation.lock() {
+                *current = observation_text_with_remote(
+                    watcher.as_ref(),
+                    interval,
+                    fallback_reason.as_deref(),
+                    !remote_indices.is_empty(),
+                );
+            }
             scope.spawn(move || {
                 let mut session = None;
                 let mut pending = pending;
-                // A graph discovered after watcher registration (or an
-                // unreadable graph without a preflight sample) gets one read.
+                // Read once for rows that arrived after preflight or were not
+                // represented in its sample before waiting for an event.
                 for index in initial_reads {
                     let Some((_, source)) = graph_sources
                         .iter()
@@ -685,7 +763,26 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                         pr_read_timeout,
                         &stop.cancel,
                     );
+                    let locally_represented =
+                        reading_locally_represented(&reading, local_host.as_ref());
+                    if locally_represented {
+                        remote_indices.remove(&index);
+                    } else {
+                        remote_indices.insert(index);
+                    }
                     let finished = reading.done();
+                    if finished {
+                        remote_indices.remove(&index);
+                        pending.retain(|candidate| *candidate != index);
+                    }
+                    if let Ok(mut current) = observation.lock() {
+                        *current = observation_text_with_remote(
+                            watcher.as_ref(),
+                            interval,
+                            fallback_reason.as_deref(),
+                            !remote_indices.is_empty(),
+                        );
+                    }
                     if sender
                         .send(Update {
                             target: index,
@@ -695,50 +792,57 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                     {
                         return;
                     }
-                    if finished {
-                        pending.retain(|candidate| *candidate != index);
-                    }
                 }
                 while !pending.is_empty() && !stop.cancel.is_cancelled() {
                     let left = deadline.saturating_duration_since(Instant::now());
                     if left.is_zero() {
                         break;
                     }
-                    let changed = if let Some(source) = watcher.as_mut() {
-                        match source.wait(left) {
-                            Ok(provenant_os::changes::watch::WaitOutcome::Changed) => true,
+                    let wake = if let Some(source) = watcher.as_mut() {
+                        let wait_for = if remote_indices.is_empty() {
+                            left
+                        } else {
+                            left.min(interval)
+                        };
+                        match source.wait(wait_for) {
+                            Ok(provenant_os::changes::watch::WaitOutcome::Changed) => {
+                                Some(GraphWake::Event)
+                            }
                             Ok(provenant_os::changes::watch::WaitOutcome::TimedOut) => {
                                 if deadline.saturating_duration_since(Instant::now()).is_zero() {
                                     break;
                                 }
-                                continue;
+                                Some(GraphWake::NativeTimeout)
                             }
                             Ok(provenant_os::changes::watch::WaitOutcome::Woken) => break,
                             Err(error) => {
                                 watcher = None;
+                                fallback_reason = Some(format!("event source failed: {error}"));
                                 if let Ok(mut current) = observation.lock() {
-                                    *current = observation_text(
+                                    *current = observation_text_with_remote(
                                         None,
                                         interval,
-                                        Some(&format!("event source failed: {error}")),
+                                        fallback_reason.as_deref(),
+                                        !remote_indices.is_empty(),
                                     );
                                 }
+                                let left = deadline.saturating_duration_since(Instant::now());
                                 if !stop.pause(interval.min(left)) {
                                     break;
                                 }
-                                true
+                                Some(GraphWake::PacedFallback)
                             }
                         }
                     } else {
                         if !stop.pause(interval.min(left)) {
                             break;
                         }
-                        true
+                        Some(GraphWake::PacedFallback)
                     };
-                    if !changed {
+                    let Some(wake) = wake else {
                         continue;
-                    }
-                    for index in pending.clone() {
+                    };
+                    for index in graph_reads_for_wake(&pending, &remote_indices, wake) {
                         if stop.cancel.is_cancelled() {
                             break;
                         }
@@ -756,7 +860,26 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                             pr_read_timeout,
                             &stop.cancel,
                         );
+                        let locally_represented =
+                            reading_locally_represented(&reading, local_host.as_ref());
+                        if locally_represented {
+                            remote_indices.remove(&index);
+                        } else {
+                            remote_indices.insert(index);
+                        }
                         let finished = reading.done();
+                        if finished {
+                            remote_indices.remove(&index);
+                            pending.retain(|candidate| *candidate != index);
+                        }
+                        if let Ok(mut current) = observation.lock() {
+                            *current = observation_text_with_remote(
+                                watcher.as_ref(),
+                                interval,
+                                fallback_reason.as_deref(),
+                                !remote_indices.is_empty(),
+                            );
+                        }
                         if sender
                             .send(Update {
                                 target: index,
@@ -765,9 +888,6 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                             .is_err()
                         {
                             return;
-                        }
-                        if finished {
-                            pending.retain(|candidate| *candidate != index);
                         }
                     }
                 }
@@ -901,6 +1021,36 @@ fn write_line(line: &str) -> std::io::Result<()> {
 #[allow(dead_code)] // Also included by the worktree driver without libtest.
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_selection_with_peer_or_relayed_attempts_is_not_locally_represented() {
+        let row = |id: &str| json!({"kind": "attempt", "attempt_id": id});
+        let here = "aa".to_owned();
+        assert!(rows_local(
+            &[row("aa/1"), json!({"kind": "graph"})],
+            Some(&here)
+        ));
+        assert!(!rows_local(&[row("aa/1"), row("bb/2")], Some(&here)));
+        assert!(!rows_local::<String>(&[row("aa/1")], None));
+    }
+
+    #[test]
+    fn graph_events_read_local_sources_and_paced_ticks_cover_peer_sources() {
+        let pending = [0, 1];
+        let remote = [1].into_iter().collect();
+        assert_eq!(
+            graph_reads_for_wake(&pending, &remote, GraphWake::Event),
+            pending
+        );
+        assert_eq!(
+            graph_reads_for_wake(&pending, &remote, GraphWake::NativeTimeout),
+            [1]
+        );
+        assert_eq!(
+            graph_reads_for_wake(&pending, &remote, GraphWake::PacedFallback),
+            pending
+        );
+    }
 
     #[test]
     fn failed_reread_retains_the_last_snapshot_as_stale() {

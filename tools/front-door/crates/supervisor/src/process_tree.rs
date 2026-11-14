@@ -18,8 +18,9 @@ pub const FILE: &str = "process-tree.json";
 pub const MAX_PROCESSES: usize = 4096;
 const MAX_BYTES: u64 = 1024 * 1024;
 const MAX_SAMPLE_MICROS: u64 = 250_000;
+pub const DEFAULT_SAMPLE_INTERVAL_MS: u64 = 5_000;
 pub const DEFAULT_SAMPLE_INTERVAL: std::time::Duration =
-    std::time::Duration::from_secs(5);
+    std::time::Duration::from_millis(DEFAULT_SAMPLE_INTERVAL_MS);
 
 #[derive(Debug, thiserror::Error)]
 #[error("lane process-tree sample unavailable; retry while the supervisor is running")]
