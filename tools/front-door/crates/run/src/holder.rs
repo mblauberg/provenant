@@ -4684,7 +4684,7 @@ mod writer_recovery_tests {
             assert!(result.is_err());
             let report: serde_json::Value = serde_json::from_slice(
                 &read_sealed(&attempt, "policy-write-scope.json", RECORD_LIMIT)?
-                    .ok_or("write scope report")?,
+                    .ok_or_else(|| format!("write scope report missing after {result:?}"))?,
             )?;
             assert_eq!(report["code"], "WRITE_SCOPE");
             assert_eq!(report["strength"], "refuse");

@@ -916,6 +916,9 @@ fn terminal_verifies_private_objects_before_publication()
                     .chain(args.into_iter().map(Into::into))
                     .collect();
                 let mut environment = fixture.environment.clone();
+                environment.retain(|(key, _)| !matches!(key.to_str(), Some(
+                    "GIT_OBJECT_DIRECTORY" | "GIT_COMMON_DIR" | "GIT_DIR" | "GIT_WORK_TREE" | "GIT_INDEX_FILE"
+                )));
                 environment.push((
                     "GIT_OBJECT_DIRECTORY".into(),
                     objects.clone().into_os_string(),

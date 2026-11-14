@@ -423,7 +423,10 @@ impl WriterLaunch {
             return Ok(false);
         }
         let upstream_dir = if native {
-            repo.common_git_dir().to_path_buf()
+            // Branch tracking config can be worktree-local when Git enables
+            // extensions.worktreeConfig; resolve the upstream from this
+            // worktree's private Git directory while refs stay shared.
+            repo.private_git_dir().to_path_buf()
         } else {
             source.refs.current_path()?
         };
@@ -1724,6 +1727,40 @@ mod cargo_setup_tests {
     #[test]
     fn eight_complete_writer_preparations_overlap_config_updates()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
+        const CLEAN_ENV_CHILD: &str = "PROVENANT_WRITER_CONFIG_FIXTURE_CHILD";
+        if std::env::var_os(CLEAN_ENV_CHILD).is_none() {
+            use provenant_os::exec::{
+                ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
+            };
+            use std::{ffi::OsString, time::Duration};
+            let temp = tempfile::tempdir()?;
+            let home = temp.path().join("home");
+            std::fs::create_dir(&home)?;
+            let argv: Vec<OsString> = vec![
+                std::env::current_exe()?.into_os_string(),
+                "--exact".into(),
+                "writer::cargo_setup_tests::eight_complete_writer_preparations_overlap_config_updates".into(),
+                "--nocapture".into(),
+            ];
+            let env: Vec<_> = [
+                ("HOME", home.as_os_str().to_owned()),
+                ("PATH", "/usr/bin:/bin".into()),
+                ("GIT_CONFIG_GLOBAL", "/dev/null".into()),
+                ("GIT_CONFIG_SYSTEM", "/dev/null".into()),
+                ("GIT_CONFIG_NOSYSTEM", "1".into()),
+                (CLEAN_ENV_CHILD, "1".into()),
+            ]
+            .into_iter()
+            .map(|(key, value)| (OsString::from(key), value))
+            .collect();
+            let mut options = ExecOptions::new(&argv, temp.path(), Duration::from_secs(30));
+            options.env = Some(&env);
+            options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
+            options.stderr = StreamPolicy::Capture { limit: 64 * 1024 };
+            let output = SystemExecutor::new(1)?.execute(options)?;
+            assert_eq!(output.termination, Termination::Exit(0), "{output:?}");
+            return Ok(());
+        }
         let temp = tempfile::tempdir()?;
         let root = std::fs::canonicalize(temp.path())?;
         let project = root.join("project");
