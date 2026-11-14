@@ -42,8 +42,8 @@ pub use path_wire::{PathWire, PathWireError, StructuredPathWire};
 pub use source::{SourceDigest, SourceDigestError, SourceInput, source_digest};
 pub use trace::Trace;
 
-pub mod landing;
 pub mod inbox;
+pub mod landing;
 pub mod workflow;
 
 pub use install::{
