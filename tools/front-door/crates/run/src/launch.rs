@@ -1277,22 +1277,7 @@ impl RunStore {
             && evidence.is_ok()
     }
 
-    fn admission_skip(
-        &self,
-        request: &CanonicalRequest,
-        record: &AttemptRecord,
-        call: &Request<'_>,
-    ) -> (AttemptRecord, Option<String>) {
-        self.admission_skip_with_phase(
-            request,
-            record,
-            call,
-            &mut |request, attempt, binding, phase, cancel| {
-                self.run_admission_phase(request, attempt, binding, phase, cancel)
-            },
-        )
-    }
-
+    #[cfg(test)]
     fn admission_skip_with_phase(
         &self,
         request: &CanonicalRequest,

@@ -1,4 +1,4 @@
-//! One native event source multiplexes graph event-log changes for a waiter.
+//! One native event source multiplexes owner observation paths for a waiter.
 use std::{
     io::{self, ErrorKind, Write},
     os::unix::net::UnixStream,
@@ -41,14 +41,14 @@ impl WakeHandle {
     }
 }
 
-/// Watch append-only event logs; notifications only prompt a state reread.
+/// Watch owner observation files or logs; notifications only prompt a state reread.
 pub struct Watcher {
     native: crate::sys::changes::Watcher,
     wake: WakeHandle,
 }
 impl Watcher {
-    /// Register any number of log paths on one host event source. Parent
-    /// directories are watched too, so creation or replacement rearms a log.
+    /// Register any number of observation paths on one host event source. Parent
+    /// directories are watched too, so creation or replacement rearms a path.
     pub fn subscribe<P: AsRef<Path>>(paths: &[P]) -> Result<Self, WatchError> {
         let (reader, writer) = UnixStream::pair().map_err(WatchError::Io)?;
         reader.set_nonblocking(true).map_err(WatchError::Io)?;

@@ -88,6 +88,22 @@ impl RunStore {
     pub fn writer_registry(&self) -> &std::path::Path {
         &self.writer_registry
     }
+
+    /// SQLite and the post-commit host hint files that signal committed run changes.
+    /// Subscribers register all paths before reading records; a hint may be skipped
+    /// under contention, so the database companions remain in the observed set.
+    pub fn observation_paths(&self) -> Vec<std::path::PathBuf> {
+        let database = self.context.state_root.as_path().join("run.sqlite3");
+        vec![
+            database.clone(),
+            database.with_file_name("run.sqlite3-wal"),
+            database.with_file_name("run.sqlite3-journal"),
+            self.context
+                .state_root
+                .as_path()
+                .join(provenant_os::changes::FILE_NAME),
+        ]
+    }
     /// Opens an existing, initialised store without changing durable state.
     /// SQLite may create or update WAL/shared-memory companions.
     /// A missing store or schema is an empty read; unsupported versions fail.
@@ -187,7 +203,14 @@ impl RunStore {
         request: &Request<'_>,
         action: impl Fn(&Connection) -> Result<T>,
     ) -> Result<T> {
-        immediate(&self.db, request, action)
+        let committed = immediate(&self.db, request, action)?;
+        // A host hint follows every successful SQLite commit, so observers can
+        // distinguish a durable commit from early WAL/journal activity.
+        provenant_os::changes::hint(
+            self.context.state_root.as_path(),
+            &[provenant_os::changes::Scope::Board],
+        );
+        Ok(committed)
     }
 }
 /// One immediate transaction. BEGIN IMMEDIATE waits up to the busy timeout.

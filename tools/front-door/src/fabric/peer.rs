@@ -1008,6 +1008,7 @@ pub fn peer(
                                 &context.roots.state,
                                 context.identity.project,
                                 request.actor()?,
+                                context.local_observation.clone(),
                                 &clock,
                                 &backoff,
                                 &cancel,

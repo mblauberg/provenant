@@ -675,10 +675,6 @@ impl RunStore {
             tx.execute("INSERT INTO settlement_receipts(attempt,generation,record) VALUES (?1,?2,?3) ON CONFLICT(attempt) DO UPDATE SET record=excluded.record", params![id.to_string(), sql_int(generation)?, bytes(&receipts)?])?;
             Ok(receipts)
         })?;
-        provenant_os::changes::hint(
-            self.context.state_root.as_path(),
-            &[provenant_os::changes::Scope::Board],
-        );
         Ok(receipts)
     }
     /// Record whether a cancellation was effective, without rewriting the decision.
@@ -707,10 +703,6 @@ impl RunStore {
             if changed != 1 { return Err(RunError::Conflict); }
             Ok(())
         })?;
-        provenant_os::changes::hint(
-            self.context.state_root.as_path(),
-            &[provenant_os::changes::Scope::Board],
-        );
         Ok(())
     }
     /// Reserve the record first, seal the exact request and prompt, then
@@ -873,10 +865,6 @@ impl RunStore {
             call.cancel,
             call.clock,
         )?;
-        provenant_os::changes::hint(
-            self.context.state_root.as_path(),
-            &[provenant_os::changes::Scope::Board],
-        );
         #[cfg(test)]
         crate::tests::crash_at("reserved");
         seal(&dir, "request.json", &bytes(&input.request)?, RECORD_LIMIT)?;
@@ -1911,10 +1899,6 @@ impl RunStore {
             crate::tests::crash_at("transaction");
             Ok(())
         })?;
-        provenant_os::changes::hint(
-            self.context.state_root.as_path(),
-            &[provenant_os::changes::Scope::Board],
-        );
         // A stop accepted after the decision read cancel.json (but before this
         // commit became visible) is acknowledged here from the host-sealed,
         // scope- and requester-checked request, not from mutable lane state.

@@ -845,6 +845,7 @@ mod tests {
             store,
             ProjectId::from_bytes([1; 16]),
             ActorId::from_bytes([2; 16]),
+            crate::test_support::observation_settings(),
             &clock,
             &backoff,
         );

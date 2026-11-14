@@ -274,18 +274,229 @@ enum GraphWake {
     PacedFallback,
 }
 
+/// Distinguishes native notifications from cancellation checkpoints and paced
+/// fallback ticks. Only `PacedFallback` authorizes a state reread without an
+/// event; native timeouts merely let callers check cancellation and deadlines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ObservationWake {
+    Changed,
+    NativeTimeout,
+    Woken,
+    PacedFallback,
+    Cancelled,
+}
+
+/// One host event source for all local observation paths, with an explicit
+/// configured-interval fallback when native registration is unavailable.
+pub(crate) struct LocalObservation {
+    watcher: Option<provenant_os::changes::watch::Watcher>,
+    interval: Duration,
+    fallback: Option<String>,
+    has_local_paths: bool,
+    next_paced: Option<provenant_core::MonoTime>,
+}
+impl LocalObservation {
+    pub(crate) fn subscribe(paths: &[PathBuf], interval: Duration) -> Self {
+        if paths.is_empty() {
+            return Self {
+                watcher: None,
+                interval,
+                fallback: Some("no local event targets".into()),
+                has_local_paths: false,
+                next_paced: None,
+            };
+        }
+        match provenant_os::changes::watch::Watcher::subscribe(paths) {
+            Ok(watcher) => Self {
+                watcher: Some(watcher),
+                interval,
+                fallback: None,
+                has_local_paths: true,
+                next_paced: None,
+            },
+            Err(error) => Self {
+                watcher: None,
+                interval,
+                fallback: Some(error.to_string()),
+                has_local_paths: true,
+                next_paced: None,
+            },
+        }
+    }
+
+    pub(crate) fn paced(interval: Duration, reason: impl Into<String>) -> Self {
+        Self {
+            watcher: None,
+            interval,
+            fallback: Some(reason.into()),
+            has_local_paths: true,
+            next_paced: None,
+        }
+    }
+
+    pub(crate) fn interval(&self) -> Duration {
+        self.interval
+    }
+
+    pub(crate) fn report(&self, remote_pending: bool) -> String {
+        if !self.has_local_paths {
+            return if remote_pending {
+                format!(
+                    "peer statuses reread every {} ms (domains.wait.local_interval_ms); no local event targets",
+                    self.interval.as_millis()
+                )
+            } else {
+                "no local event targets".into()
+            };
+        }
+        observation_text_with_remote(
+            self.watcher.as_ref(),
+            self.interval,
+            self.fallback.as_deref(),
+            remote_pending,
+        )
+    }
+
+    pub(crate) fn wait(
+        &mut self,
+        maximum: Duration,
+        cancel: &CancelToken,
+        clock: &(impl provenant_core::Clock + ?Sized),
+    ) -> Result<ObservationWake, provenant_core::TimeError> {
+        if cancel.is_cancelled() {
+            return Ok(ObservationWake::Cancelled);
+        }
+        let slice = maximum.min(Duration::from_millis(250));
+        let native_deadline = if self.watcher.is_some() {
+            Some(
+                clock
+                    .mono_now()
+                    .checked_add(provenant_core::DurationMicros::from_micros(
+                        slice.as_micros() as u64,
+                    ))?,
+            )
+        } else {
+            None
+        };
+        if let Some(deadline) = native_deadline {
+            let result = match self.watcher.as_mut() {
+                Some(watcher) => watcher.wait(slice),
+                None => return self.wait_paced(maximum, cancel, clock),
+            };
+            if cancel.is_cancelled() {
+                return Ok(ObservationWake::Cancelled);
+            }
+            match result {
+                Ok(provenant_os::changes::watch::WaitOutcome::Changed) => {
+                    return Ok(ObservationWake::Changed);
+                }
+                Ok(provenant_os::changes::watch::WaitOutcome::TimedOut) => {
+                    // Native waits use real kernel time. Advance injected clocks
+                    // to the same pre-wait checkpoint without rereading state.
+                    if !slice.is_zero() {
+                        clock.wait_until(deadline)?;
+                    }
+                    return Ok(ObservationWake::NativeTimeout);
+                }
+                Ok(provenant_os::changes::watch::WaitOutcome::Woken) => {
+                    return Ok(ObservationWake::Woken);
+                }
+                Err(error) => {
+                    // A failed native source becomes an explicit, reported
+                    // paced fallback. Do not reread until its configured tick.
+                    self.watcher = None;
+                    self.fallback = Some(error.to_string());
+                }
+            }
+        }
+        self.wait_paced(maximum, cancel, clock)
+    }
+
+    fn wait_paced(
+        &mut self,
+        maximum: Duration,
+        cancel: &CancelToken,
+        clock: &(impl provenant_core::Clock + ?Sized),
+    ) -> Result<ObservationWake, provenant_core::TimeError> {
+        let interval =
+            provenant_core::DurationMicros::from_micros(self.interval.as_micros() as u64);
+        let due = match self.next_paced {
+            Some(due) => due,
+            None => {
+                let due = clock.mono_now().checked_add(interval)?;
+                self.next_paced = Some(due);
+                due
+            }
+        };
+        let now = clock.mono_now();
+        if now >= due {
+            self.next_paced = Some(now.checked_add(interval)?);
+            return Ok(ObservationWake::PacedFallback);
+        }
+
+        let requested =
+            clock
+                .mono_now()
+                .checked_add(provenant_core::DurationMicros::from_micros(
+                    maximum.as_micros().min(u64::MAX as u128) as u64,
+                ))?;
+        let wake_at = requested.min(due);
+        while !cancel.is_cancelled() {
+            let now = clock.mono_now();
+            if now >= wake_at {
+                break;
+            }
+            let remaining = wake_at.as_micros().saturating_sub(now.as_micros());
+            let slice = Duration::from_micros(remaining).min(Duration::from_millis(250));
+            let slice_deadline = now.checked_add(provenant_core::DurationMicros::from_micros(
+                slice.as_micros() as u64,
+            ))?;
+            clock.wait_until(slice_deadline)?;
+        }
+        if cancel.is_cancelled() {
+            return Ok(ObservationWake::Cancelled);
+        }
+        let now = clock.mono_now();
+        if now >= due {
+            // Start the next period at this observed tick, preserving a single
+            // reread even if a remote wait shortened each preceding call.
+            self.next_paced = Some(now.checked_add(interval)?);
+            Ok(ObservationWake::PacedFallback)
+        } else {
+            Ok(ObservationWake::NativeTimeout)
+        }
+    }
+}
+
 fn graph_reads_for_wake(
     pending: &[usize],
     remote: &std::collections::BTreeSet<usize>,
     wake: GraphWake,
 ) -> Vec<usize> {
     match wake {
-        GraphWake::Event | GraphWake::PacedFallback => pending.to_vec(),
-        GraphWake::NativeTimeout => pending
+        GraphWake::Event => pending
             .iter()
             .copied()
-            .filter(|index| remote.contains(index))
+            .filter(|index| !remote.contains(index))
             .collect(),
+        GraphWake::NativeTimeout => Vec::new(),
+        GraphWake::PacedFallback => pending.to_vec(),
+    }
+}
+
+fn include_due_remote_reads(
+    reads: &mut Vec<usize>,
+    pending: &[usize],
+    remote: &std::collections::BTreeSet<usize>,
+    remote_poll_due: bool,
+) {
+    if remote_poll_due {
+        let due = pending
+            .iter()
+            .copied()
+            .filter(|index| remote.contains(index) && !reads.contains(index))
+            .collect::<Vec<_>>();
+        reads.extend(due);
     }
 }
 
@@ -835,17 +1046,19 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                         return;
                     }
                 }
+                let mut next_remote_poll = Instant::now() + interval;
                 while !pending.is_empty() && !stop.cancel.is_cancelled() {
                     let left = deadline.saturating_duration_since(Instant::now());
                     if left.is_zero() {
                         break;
                     }
                     let wake = if let Some(source) = watcher.as_mut() {
-                        let wait_for = if remote_indices.is_empty() {
+                        let until_remote = if remote_indices.is_empty() {
                             left
                         } else {
-                            left.min(interval)
+                            next_remote_poll.saturating_duration_since(Instant::now())
                         };
+                        let wait_for = left.min(until_remote);
                         match source.wait(wait_for) {
                             Ok(provenant_os::changes::watch::WaitOutcome::Changed) => {
                                 Some(GraphWake::Event)
@@ -883,7 +1096,20 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                     let Some(wake) = wake else {
                         continue;
                     };
-                    for index in graph_reads_for_wake(&pending, &remote_indices, wake) {
+                    // A local event may race with the remote cadence boundary.
+                    // Include remote targets whenever that absolute deadline has
+                    // elapsed, regardless of how often local events arrive.
+                    let remote_poll_due =
+                        !remote_indices.is_empty() && Instant::now() >= next_remote_poll;
+                    let mut reads = graph_reads_for_wake(&pending, &remote_indices, wake);
+                    include_due_remote_reads(
+                        &mut reads,
+                        &pending,
+                        &remote_indices,
+                        remote_poll_due,
+                    );
+                    let polled_remote = reads.iter().any(|index| remote_indices.contains(index));
+                    for index in reads {
                         if stop.cancel.is_cancelled() {
                             break;
                         }
@@ -930,6 +1156,9 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                         {
                             return;
                         }
+                    }
+                    if polled_remote {
+                        next_remote_poll = Instant::now() + interval;
                     }
                 }
             });
@@ -1097,21 +1326,144 @@ mod tests {
     }
 
     #[test]
-    fn graph_events_read_local_sources_and_paced_ticks_cover_peer_sources() {
+    fn local_observation_reports_the_fallback_source_and_reason() {
+        let observation = LocalObservation::paced(
+            Duration::from_millis(40),
+            "fixture has no native event backend",
+        );
+        let report = observation.report(false);
+        assert!(report.contains("domains.wait.local_interval_ms"));
+        assert!(report.contains("fixture has no native event backend"));
+    }
+
+    #[test]
+    fn repeated_short_waits_eventually_reach_one_paced_fallback_tick() {
+        let interval = Duration::from_millis(40);
+        let mut observation = LocalObservation::paced(interval, "fixture event source unavailable");
+        let clock = provenant_core::TestClock::new(
+            provenant_core::WallTime::from_micros(0).expect("valid fixture time"),
+            provenant_core::MonoTime::from_micros(0),
+        );
+        for _ in 0..3 {
+            assert_eq!(
+                observation
+                    .wait(Duration::from_millis(10), &CancelToken::new(), &clock)
+                    .expect("fixture clock can advance"),
+                ObservationWake::NativeTimeout
+            );
+        }
+        assert_eq!(
+            observation
+                .wait(Duration::from_millis(10), &CancelToken::new(), &clock)
+                .expect("fixture clock can advance"),
+            ObservationWake::PacedFallback
+        );
+        assert_eq!(clock.mono_now().as_micros(), 40_000);
+        assert_eq!(
+            observation
+                .wait(Duration::from_millis(10), &CancelToken::new(), &clock)
+                .expect("next cadence remains paced"),
+            ObservationWake::NativeTimeout
+        );
+        assert_eq!(clock.mono_now().as_micros(), 50_000);
+    }
+
+    #[test]
+    fn registration_does_not_create_an_event_log_and_empty_timeout_is_not_a_read() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let log = directory.path().join("graph.events.jsonl");
+        let mut observation = LocalObservation::subscribe(&[log.clone()], Duration::from_secs(1));
+        assert!(!log.exists());
+        let clock = provenant_core::TestClock::new(
+            provenant_core::WallTime::from_micros(0).expect("valid fixture time"),
+            provenant_core::MonoTime::from_micros(0),
+        );
+        let wake = observation
+            .wait(Duration::ZERO, &CancelToken::new(), &clock)
+            .expect("zero deadline does not touch the clock");
+        assert_eq!(wake, ObservationWake::NativeTimeout);
+    }
+
+    #[test]
+    fn a_short_fallback_deadline_is_not_mistaken_for_a_paced_tick() {
+        let mut observation = LocalObservation::paced(
+            Duration::from_secs(1),
+            "fixture has no native event backend",
+        );
+        let clock = provenant_core::TestClock::new(
+            provenant_core::WallTime::from_micros(0).expect("valid fixture time"),
+            provenant_core::MonoTime::from_micros(0),
+        );
+        let wake = observation
+            .wait(Duration::ZERO, &CancelToken::new(), &clock)
+            .expect("zero deadline does not touch the clock");
+        assert_eq!(wake, ObservationWake::NativeTimeout);
+    }
+
+    #[test]
+    fn graph_events_read_only_local_sources_and_remote_deadlines_add_remote_sources() {
+        let pending = [0, 1, 2];
+        let remote = [1, 2].into_iter().collect();
+        let as_set = |indices: Vec<usize>| {
+            indices
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let event_reads = graph_reads_for_wake(&pending, &remote, GraphWake::Event);
+        assert_eq!(as_set(event_reads.clone()), [0].into_iter().collect());
+        let native_timeout = graph_reads_for_wake(&pending, &remote, GraphWake::NativeTimeout);
+        assert!(native_timeout.is_empty());
+        let mut due_event_reads = event_reads;
+        include_due_remote_reads(&mut due_event_reads, &pending, &remote, true);
+        assert_eq!(as_set(due_event_reads), pending.into_iter().collect());
+        let mut due_timeout_reads = native_timeout;
+        include_due_remote_reads(&mut due_timeout_reads, &pending, &remote, true);
+        assert_eq!(as_set(due_timeout_reads), [1, 2].into_iter().collect());
+        assert_eq!(
+            as_set(graph_reads_for_wake(
+                &pending,
+                &remote,
+                GraphWake::PacedFallback
+            )),
+            pending.into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn a_flood_of_local_events_cannot_starve_a_due_remote_poll() {
         let pending = [0, 1];
         let remote = [1].into_iter().collect();
-        assert_eq!(
-            graph_reads_for_wake(&pending, &remote, GraphWake::Event),
-            pending
+        let origin = Instant::now();
+        let interval = Duration::from_millis(100);
+        let next_remote_poll = origin + interval;
+
+        for elapsed in (0..100).step_by(10) {
+            let now = origin + Duration::from_millis(elapsed);
+            let mut reads = graph_reads_for_wake(&pending, &remote, GraphWake::Event);
+            include_due_remote_reads(&mut reads, &pending, &remote, now >= next_remote_poll);
+            assert_eq!(reads, [0]);
+        }
+        let due = origin + interval;
+        let mut due_reads = graph_reads_for_wake(&pending, &remote, GraphWake::Event);
+        include_due_remote_reads(&mut due_reads, &pending, &remote, due >= next_remote_poll);
+        assert_eq!(due_reads, pending);
+        let next_remote_poll = due + interval;
+        let mut next_reads = graph_reads_for_wake(&pending, &remote, GraphWake::Event);
+        include_due_remote_reads(
+            &mut next_reads,
+            &pending,
+            &remote,
+            due + Duration::from_millis(99) >= next_remote_poll,
         );
-        assert_eq!(
-            graph_reads_for_wake(&pending, &remote, GraphWake::NativeTimeout),
-            [1]
+        assert_eq!(next_reads, [0]);
+        let mut second_due_reads = graph_reads_for_wake(&pending, &remote, GraphWake::Event);
+        include_due_remote_reads(
+            &mut second_due_reads,
+            &pending,
+            &remote,
+            due + interval >= next_remote_poll,
         );
-        assert_eq!(
-            graph_reads_for_wake(&pending, &remote, GraphWake::PacedFallback),
-            pending
-        );
+        assert_eq!(second_due_reads, pending);
     }
 
     #[test]

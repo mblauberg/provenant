@@ -1466,14 +1466,61 @@ impl BinaryRunOwner<'_> {
                 if !self.allow_remote && !remote_batches.is_empty() {
                     return Err(FacadeError::ConfinementRefused { resource: None });
                 }
+                let wait_config =
+                    provenant_cli::config_reads::read_for(&self.factory.context.roots, "wait")?;
+                let interval =
+                    std::time::Duration::from_millis(wait_config.domains.wait.local_interval_ms);
                 let local_session = if local_indices.is_empty() {
                     None
                 } else {
                     Some(self.read_session(cancel)?)
                 };
                 let local_call = self.call(cancel);
+                // Subscribe once before the first target read. A settlement
+                // during registration or the first read remains observable.
+                let event_paths = local_session
+                    .as_ref()
+                    .map(|session| session.store.observation_paths())
+                    .unwrap_or_default();
+                let mut observation =
+                    crate::status_wait::LocalObservation::subscribe(&event_paths, interval);
+                let remote_pending = !remote_batches.is_empty();
+                let observation_extra = |observation: &crate::status_wait::LocalObservation| {
+                    let mut extra = provenant_records::ExtraFields::default();
+                    extra.insert(
+                        "observation".into(),
+                        serde_json::Value::String(observation.report(remote_pending)),
+                    );
+                    extra
+                };
+                // SQLite events can precede commit visibility and the shared
+                // hint is lossy under contention; deadline results get one final
+                // committed read from the owning store.
+                let refresh_local = |attempts: &mut Vec<provenant_records::run::AttemptRecord>| {
+                    if let Some(session) = &local_session {
+                        for index in &local_indices {
+                            attempts[*index] = session
+                                .store
+                                .record(targets[*index].attempt, &local_call)
+                                .map_err(run_error)?;
+                        }
+                    }
+                    Ok::<(), FacadeError>(())
+                };
                 let mut last_attempts = None;
-                let mut backoff_micros = 50_000_u64;
+                let mut observed_attempts: Vec<Option<provenant_records::run::AttemptRecord>> =
+                    std::iter::repeat_with(|| None)
+                        .take(targets.len())
+                        .collect();
+                let mut read_local = !local_indices.is_empty();
+                let mut read_remote = !remote_batches.is_empty();
+                let interval_micros = interval.as_micros() as u64;
+                let mut next_remote_poll = self
+                    .factory
+                    .clock
+                    .mono_now()
+                    .checked_add(provenant_core::DurationMicros::from_micros(interval_micros))
+                    .map_err(FacadeError::Time)?;
                 loop {
                     if cancel.is_cancelled() {
                         return Err(FacadeError::Cancelled);
@@ -1481,91 +1528,116 @@ impl BinaryRunOwner<'_> {
                     if budget.remaining(self.factory.clock.mono_now()).as_micros() == 0
                         && !(budget.is_nonblocking() && last_attempts.is_none())
                     {
-                        if let Some(attempts) = last_attempts {
+                        if let Some(mut attempts) = last_attempts {
+                            refresh_local(&mut attempts)?;
+                            let satisfied = provenant_fabric_runtime::runs::wait_satisfied(
+                                condition,
+                                attempts.iter().map(|record| &record.state),
+                            );
                             return Ok(RunResult::Wait {
-                                extra: Default::default(),
+                                extra: observation_extra(&observation),
                                 condition,
                                 attempts,
-                                satisfied: false,
-                                timed_out: true,
+                                satisfied,
+                                timed_out: !satisfied,
                             });
                         }
                         return Err(FacadeError::Timeout);
                     }
-                    let mut attempts: Vec<Option<provenant_records::run::AttemptRecord>> =
-                        std::iter::repeat_with(|| None)
-                            .take(targets.len())
-                            .collect();
-                    if let Some(session) = &local_session {
+                    if read_local {
+                        let Some(session) = &local_session else {
+                            return Err(FacadeError::StateCorrupt);
+                        };
                         for index in &local_indices {
-                            attempts[*index] = Some(
+                            observed_attempts[*index] = Some(
                                 session
                                     .store
                                     .record(targets[*index].attempt, &local_call)
                                     .map_err(run_error)?,
                             );
                         }
+                        read_local = false;
                     }
-                    for (host, batch) in &remote_batches {
-                        let requested = batch
-                            .iter()
-                            .map(|(_, target)| target.clone())
-                            .collect::<Vec<_>>();
-                        let result = match self.peer(
-                            *host,
-                            PeerAction::RunStatuses {
-                                extra: Default::default(),
-                                targets: requested,
-                            },
-                            budget,
-                            cancel,
-                        ) {
-                            Ok(result) => result,
-                            // A poll cut short by the wait's own deadline is a
-                            // timed-out wait, not an unavailable peer.
-                            Err(error) => {
-                                let expired =
-                                    budget.remaining(self.factory.clock.mono_now()).as_micros()
-                                        == 0;
-                                return match last_attempts {
-                                    Some(attempts) if expired => Ok(RunResult::Wait {
-                                        extra: Default::default(),
-                                        condition,
-                                        attempts,
-                                        satisfied: false,
-                                        timed_out: true,
-                                    }),
-                                    None if expired => Err(FacadeError::Timeout),
-                                    _ => Err(error),
-                                };
-                            }
-                        };
-                        let PeerResult::RunStatuses { data: records, .. } = result else {
-                            return Err(FacadeError::StateCorrupt);
-                        };
-                        if records.len() != batch.len() {
-                            return Err(FacadeError::StateCorrupt);
-                        }
-                        for ((index, target), record) in batch.iter().zip(records) {
-                            if record.attempt_id != target.attempt {
+                    if read_remote {
+                        for (host, batch) in &remote_batches {
+                            let requested = batch
+                                .iter()
+                                .map(|(_, target)| target.clone())
+                                .collect::<Vec<_>>();
+                            let result = match self.peer(
+                                *host,
+                                PeerAction::RunStatuses {
+                                    extra: Default::default(),
+                                    targets: requested,
+                                },
+                                budget,
+                                cancel,
+                            ) {
+                                Ok(result) => result,
+                                // A poll cut short by the wait's own deadline is a
+                                // timed-out wait, not an unavailable peer.
+                                Err(error) => {
+                                    let expired =
+                                        budget.remaining(self.factory.clock.mono_now()).as_micros()
+                                            == 0;
+                                    return match last_attempts {
+                                        Some(mut attempts) if expired => {
+                                            refresh_local(&mut attempts)?;
+                                            let satisfied =
+                                                provenant_fabric_runtime::runs::wait_satisfied(
+                                                    condition,
+                                                    attempts.iter().map(|record| &record.state),
+                                                );
+                                            Ok(RunResult::Wait {
+                                                extra: observation_extra(&observation),
+                                                condition,
+                                                attempts,
+                                                satisfied,
+                                                timed_out: !satisfied,
+                                            })
+                                        }
+                                        None if expired => Err(FacadeError::Timeout),
+                                        _ => Err(error),
+                                    };
+                                }
+                            };
+                            let PeerResult::RunStatuses { data: records, .. } = result else {
+                                return Err(FacadeError::StateCorrupt);
+                            };
+                            if records.len() != batch.len() {
                                 return Err(FacadeError::StateCorrupt);
                             }
-                            attempts[*index] = Some(record);
+                            for ((index, target), record) in batch.iter().zip(records) {
+                                if record.attempt_id != target.attempt {
+                                    return Err(FacadeError::StateCorrupt);
+                                }
+                                observed_attempts[*index] = Some(record);
+                            }
                         }
+                        read_remote = false;
+                        next_remote_poll = self
+                            .factory
+                            .clock
+                            .mono_now()
+                            .checked_add(provenant_core::DurationMicros::from_micros(
+                                interval_micros,
+                            ))
+                            .map_err(FacadeError::Time)?;
                     }
-                    let attempts = attempts
-                        .into_iter()
+                    let attempts = observed_attempts
+                        .iter()
+                        .cloned()
                         .collect::<Option<Vec<_>>>()
                         .ok_or(FacadeError::StateCorrupt)?;
                     let satisfied = provenant_fabric_runtime::runs::wait_satisfied(
                         condition,
-                        attempts.iter().map(|r| &r.state),
+                        attempts.iter().map(|record| &record.state),
                     );
                     let timed_out =
                         budget.remaining(self.factory.clock.mono_now()).as_micros() == 0;
                     if satisfied || timed_out {
                         return Ok(RunResult::Wait {
-                            extra: Default::default(),
+                            extra: observation_extra(&observation),
                             condition,
                             attempts,
                             satisfied,
@@ -1573,15 +1645,42 @@ impl BinaryRunOwner<'_> {
                         });
                     }
                     last_attempts = Some(attempts);
-                    provenant_core::Pause::wait(
-                        &self.factory.backoff,
-                        provenant_core::DurationMicros::from_micros(
-                            backoff_micros
-                                .min(budget.remaining(self.factory.clock.mono_now()).as_micros()),
-                        ),
-                        cancel,
+
+                    let remaining = std::time::Duration::from_micros(
+                        budget.remaining(self.factory.clock.mono_now()).as_micros(),
                     );
-                    backoff_micros = backoff_micros.saturating_mul(2).min(500_000);
+                    let until_remote = if remote_batches.is_empty() {
+                        remaining
+                    } else {
+                        std::time::Duration::from_micros(
+                            next_remote_poll
+                                .as_micros()
+                                .saturating_sub(self.factory.clock.mono_now().as_micros()),
+                        )
+                    };
+                    let maximum = remaining.min(until_remote);
+                    let wake = observation
+                        .wait(maximum, cancel, &self.factory.clock)
+                        .map_err(FacadeError::Time)?;
+                    match wake {
+                        crate::status_wait::ObservationWake::Changed
+                        | crate::status_wait::ObservationWake::Woken => {
+                            read_local = !local_indices.is_empty();
+                        }
+                        crate::status_wait::ObservationWake::PacedFallback => {
+                            read_local = !local_indices.is_empty();
+                            read_remote = !remote_batches.is_empty();
+                        }
+                        crate::status_wait::ObservationWake::NativeTimeout => {}
+                        crate::status_wait::ObservationWake::Cancelled => {
+                            return Err(FacadeError::Cancelled);
+                        }
+                    }
+                    if !remote_batches.is_empty()
+                        && self.factory.clock.mono_now() >= next_remote_poll
+                    {
+                        read_remote = true;
+                    }
                 }
             }
             RunInput::Cancel {

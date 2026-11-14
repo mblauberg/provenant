@@ -1,5 +1,7 @@
 //! Settings for the `wait` verb. Source cadence remains overridable.
 use provenant_config::{DomainConfig, DomainSection, FieldMetadata, SectionError};
+use provenant_core::DurationMicros;
+use provenant_fabric_runtime::coordination::{LOCAL_OBSERVATION_INTERVAL_KEY, ObservationSettings};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -28,6 +30,34 @@ impl Default for Settings {
         }
     }
 }
+pub(crate) fn non_wait_observation_settings() -> ObservationSettings {
+    let settings = Settings::default();
+    ObservationSettings {
+        local_interval: DurationMicros::from_micros(settings.local_interval_ms * 1_000),
+        source: provenant_config::Origin::Compiled {
+            profile: provenant_config::Profile::default(),
+        },
+    }
+}
+
+pub(crate) fn observation_settings(
+    resolved: &provenant_config::ResolvedConfig<crate::domains::Domains>,
+) -> ObservationSettings {
+    let source = resolved
+        .origins
+        .get(LOCAL_OBSERVATION_INTERVAL_KEY)
+        .cloned()
+        .unwrap_or(provenant_config::Origin::Compiled {
+            profile: resolved.profile,
+        });
+    ObservationSettings {
+        local_interval: DurationMicros::from_micros(
+            resolved.domains.wait.local_interval_ms * 1_000,
+        ),
+        source,
+    }
+}
+
 impl Settings {
     pub fn timeout(&self, override_seconds: Option<u64>) -> u64 {
         override_seconds
@@ -72,7 +102,6 @@ pub const SECTION: DomainSection = DomainSection::new::<Settings>(
         "timeout_seconds = 300\nlocal_interval_ms = 500\npr_interval_ms = 5000\nmax_targets = 64\npr_read_timeout_seconds = 60\n"
     },
 )
-.with_boundary_checks()
 .with_fields(&[
     FieldMetadata::int("timeout_seconds", 1, 14400),
     FieldMetadata::int("local_interval_ms", 10, 60000),

@@ -11,6 +11,45 @@ use provenant_supervisor::custody::{
 use std::{ffi::OsString, path::Path, time::Duration};
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
+#[test]
+fn run_store_observation_covers_commits_and_publishes_post_commit_hints() -> TestResult {
+    let temporary = tempfile::tempdir()?;
+    let execution = context(temporary.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let request = call(&clock, &cancel);
+    let store = RunStore::open(&execution, &request)?;
+    let paths = store.observation_paths();
+    let state = execution.state_root.as_path();
+    for expected in [
+        state.join("run.sqlite3"),
+        state.join("run.sqlite3-wal"),
+        state.join("run.sqlite3-journal"),
+        state.join(provenant_os::changes::FILE_NAME),
+    ] {
+        assert!(paths.contains(&expected));
+    }
+
+    let before = provenant_os::changes::read(state)?.board;
+    store.write(&request, |tx| {
+        tx.execute_batch("CREATE TABLE observation_fixture (value INTEGER)")?;
+        Ok(())
+    })?;
+    let after = provenant_os::changes::read(state)?.board;
+    assert_ne!(after, before);
+    assert!(after.is_some());
+
+    let before_failed_write = after;
+    let failed: Result<()> =
+        store.write(&request, |_tx| Err(RunError::Validation("fixture abort")));
+    assert!(failed.is_err());
+    assert_eq!(
+        provenant_os::changes::read(state)?.board,
+        before_failed_write
+    );
+    Ok(())
+}
+
 /// Synthetic admission facts, including a process table independent of the host.
 pub(super) struct HostFacts {
     pub(super) available: u64,

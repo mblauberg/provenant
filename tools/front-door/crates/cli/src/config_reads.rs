@@ -25,18 +25,18 @@ reads! {
     "accounts set" => ["accounts", "quota"],
     "accounts sync" => ["accounts", "fabric"],
     "hosts" => ["fabric"],
-    "hosts doctor" => ["fabric", "accounts", "quota", "routing"], "fabric" => ["fabric", "routing", "accounts", "lanes", "run", "quota", "policy"],
-    "fabric context" => ["fabric"],
+    "hosts doctor" => ["fabric", "accounts", "quota", "routing"], "fabric" => ["fabric", "routing", "accounts", "lanes", "run", "quota", "policy", "wait"],
+    "fabric context" => ["fabric", "wait"],
     "install" => ["accounts", "fabric"], "upgrade" => ["accounts", "fabric"],
     "uninstall" => ["accounts", "fabric"],
     "route" => ["routing", "accounts", "quota", "policy", "fabric"],
     "route preferences" => ["routing"],
-    "run" => ["fabric", "run", "routing", "accounts", "quota", "lanes", "policy"],
+    "run" => ["fabric", "run", "routing", "accounts", "quota", "lanes", "policy", "wait"],
     "run admission" => ["policy"],
     "status" => ["fabric"], "wait" => ["wait", "fabric"],
     "land" => ["pr", "routing", "fabric"], "land policy" => ["pr"], "output" => ["fabric"],
-    "trace" => ["fabric"], "stop" => ["fabric"],
-    "retry" => ["fabric", "run", "routing", "accounts", "quota", "lanes", "policy"],
+    "trace" => ["fabric"], "stop" => ["fabric", "wait"],
+    "retry" => ["fabric", "run", "routing", "accounts", "quota", "lanes", "policy", "wait"],
     "steer" => ["fabric"], "edit" => ["fabric", "routing"],
     "templates" => ["fabric", "routing"], "lane" => ["run", "fabric"],
     "reconcile" => ["fabric", "run", "routing", "accounts", "quota", "lanes", "policy"],
@@ -49,7 +49,7 @@ reads! {
     "disk" => [], "cloud" => ["accounts"], "workflow" => ["routing"],
     "tracker" => [], "verify" => [], "check" => [], "check install" => ["accounts"],
     "check providers" => ["accounts", "quota", "wait", "fabric", "run", "routing", "lanes", "policy"], "hook" => ["fabric", "run", "pr"],
-    "internal" => ["fabric", "run", "routing", "accounts", "quota", "lanes", "policy", "steward"],
+    "internal" => ["fabric", "run", "routing", "accounts", "quota", "lanes", "policy", "steward", "wait"],
     "knobs" => []
 }
 
@@ -197,6 +197,28 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn optional_wait_settings_do_not_block_context_observation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let roots = roots(&temporary);
+        std::fs::create_dir_all(roots.state.as_path()).unwrap();
+        std::fs::write(
+            roots.state.as_path().join("config.toml"),
+            "schema_version=1\n[domains.wait]\nlocal_interval_ms=0\n",
+        )
+        .unwrap();
+        let config = read_for(&roots, "fabric context").unwrap();
+        assert_eq!(
+            config.domains.wait.local_interval_ms,
+            crate::wait::Settings::default().local_interval_ms
+        );
+        assert!(!config.warnings.is_empty());
+        assert!(matches!(
+            config.origins.get("domains.wait.local_interval_ms"),
+            Some(provenant_config::Origin::Compiled { .. })
+        ));
+    }
+
     #[test]
     fn scoped_edit_preserves_unrelated_broken_settings() {
         let temp = tempfile::tempdir().unwrap();

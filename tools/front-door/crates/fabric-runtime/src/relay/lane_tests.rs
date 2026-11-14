@@ -69,6 +69,7 @@ fn lane_relay_binds_sender_replays_receipts_and_refreshes_read_only_wal()
         &root,
         project,
         actor,
+        crate::test_support::observation_settings(),
         &clock,
         &ThreadPause,
         &CancelToken::new(),
@@ -77,8 +78,15 @@ fn lane_relay_binds_sender_replays_receipts_and_refreshes_read_only_wal()
     let handler = move |call: ToolCall, cancel: &CancelToken, within: Duration| {
         let clock = self::clock();
         let budget = host_budget(&clock, within)?;
-        let coordination =
-            CoordinationService::open(&host_root, project, actor, &clock, &ThreadPause, cancel)?;
+        let coordination = CoordinationService::open(
+            &host_root,
+            project,
+            actor,
+            crate::test_support::observation_settings(),
+            &clock,
+            &ThreadPause,
+            cancel,
+        )?;
         call.execute_lane_coordination(&coordination, &limits(), budget, cancel)
     };
     let relay_call = |tool: &str, args: Value| -> Result<Value, ServiceError> {
@@ -115,6 +123,7 @@ fn lane_relay_binds_sender_replays_receipts_and_refreshes_read_only_wal()
         store,
         project,
         ActorId::from_bytes([99; 16]),
+        crate::test_support::observation_settings(),
         &clock,
         &ThreadPause,
     );
@@ -146,6 +155,7 @@ fn lane_relay_binds_sender_replays_receipts_and_refreshes_read_only_wal()
         &root,
         project,
         actor,
+        crate::test_support::observation_settings(),
         &clock,
         &ThreadPause,
         &CancelToken::new(),

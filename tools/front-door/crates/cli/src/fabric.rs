@@ -320,6 +320,7 @@ fn execute(
             store,
             ctx.identity.project,
             ctx.identity.inbox.actor,
+            ctx.local_observation.clone(),
             &clock,
             &backoff,
         )
@@ -328,6 +329,7 @@ fn execute(
             &ctx.roots.state,
             &ctx.identity,
             &ctx.config,
+            ctx.local_observation.clone(),
             &ctx.home,
             &ctx.cwd,
             &ctx.executor,

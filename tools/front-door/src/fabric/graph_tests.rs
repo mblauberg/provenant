@@ -210,17 +210,50 @@ mod graph_writer_admission_tests {
     }
 
     #[test]
+    fn native_timeout_rereads_local_state_only_for_launch_retry() {
+        use crate::status_wait::ObservationWake;
+        assert!(super::interface::graph_wait_needs_refresh(
+            ObservationWake::NativeTimeout,
+            true,
+        ));
+        assert!(!super::interface::graph_wait_needs_refresh(
+            ObservationWake::NativeTimeout,
+            false,
+        ));
+        assert!(super::interface::graph_wait_needs_refresh(
+            ObservationWake::Changed,
+            false,
+        ));
+        assert!(super::interface::graph_wait_needs_refresh(
+            ObservationWake::PacedFallback,
+            false,
+        ));
+        assert!(!super::interface::graph_wait_needs_refresh(
+            ObservationWake::Cancelled,
+            true,
+        ));
+    }
+
+    #[test]
+    fn remote_fallback_deadline_survives_local_graph_events() {
+        assert_eq!(
+            super::interface::next_remote_deadline(Some(500), true, false, 450, 100),
+            Some(500),
+        );
+        assert_eq!(
+            super::interface::next_remote_deadline(Some(500), true, true, 550, 100),
+            Some(650),
+        );
+        assert_eq!(
+            super::interface::next_remote_deadline(Some(500), false, false, 550, 100),
+            None,
+        );
+    }
+
+    #[test]
     fn submission_wait_observes_writer_admission_with_a_fake_clock() {
-        use provenant_core::{Clock, DurationMicros, MonoTime, Pause, TestClock, WallTime};
+        use provenant_core::{Clock, MonoTime, TestClock, WallTime};
         use provenant_fabric_runtime::graph::{GraphDocument, GraphStatus, NodeState};
-        struct Advance<'a>(&'a TestClock);
-        impl Pause for Advance<'_> {
-            fn wait(&self, delay: DurationMicros, _: &CancelToken) {
-                self.0
-                    .wait_until(self.0.mono_now().checked_add(delay).unwrap())
-                    .unwrap();
-            }
-        }
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version":1,"graph_id":"cli-wait-lock","nodes":[{
                 "id":"writer","access":"worktree_write","worktree":"lane",
@@ -249,12 +282,17 @@ mod graph_writer_admission_tests {
             };
             let mut journal = MemoryJournal::default();
             let first = advance(&document, &mut owner, &mut journal).unwrap();
-            let waited = super::interface::wait_submission(
+            let mut observation = crate::status_wait::LocalObservation::paced(
+                std::time::Duration::from_millis(250),
+                "test event source unavailable",
+            );
+            let (waited, _observation, _remote_read_allowed) = super::interface::wait_submission(
                 first,
                 budget,
                 &clock,
-                &Advance(&clock),
                 &cancel,
+                &mut observation,
+                None,
                 |_| {
                     owner.now = Some(clock.wall_now().unwrap());
                     if scenario == "release" && clock.mono_now().as_micros() >= 7_000_000 {
@@ -262,6 +300,7 @@ mod graph_writer_admission_tests {
                     }
                     Ok(advance(&document, &mut owner, &mut journal).unwrap())
                 },
+                |_| Ok(()),
             )
             .unwrap();
             let node = &waited.checkpoint.nodes[0];
@@ -291,6 +330,100 @@ mod graph_writer_admission_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn submission_wait_refreshes_peer_state_on_configured_deadlines() {
+        use provenant_core::{Clock, MonoTime, TestClock, WallTime};
+        use provenant_fabric_runtime::graph::{AttemptState, GraphDocument, GraphStatus};
+        use std::cell::Cell;
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"cli-wait-peer-deadline","nodes":[{
+                "id":"writer","access":"worktree_write","worktree":"lane",
+                "prompt":"write code","route":{"adapter":"mock","model":"mock-model"}
+            }]
+        }))
+        .unwrap();
+        let mut owner = MockWriterOwner::default();
+        let mut journal = MemoryJournal::default();
+        let mut pending = advance(&document, &mut owner, &mut journal).unwrap();
+        pending.status = GraphStatus::Pending;
+        let attempt = &mut pending.checkpoint.nodes[0].attempts[0];
+        attempt.state = AttemptState::Starting;
+        attempt.outcome = None;
+        let local_host = provenant_core::HostId::from_bytes([1; 16]);
+        let remote_host = provenant_core::HostId::from_bytes([2; 16]);
+        attempt.attempt_ref = Some(format!("{remote_host}/attempt"));
+
+        let clock = TestClock::new(WallTime::from_micros(0).unwrap(), MonoTime::from_micros(0));
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 1).unwrap();
+        let mut observation = crate::status_wait::LocalObservation::paced(
+            std::time::Duration::from_millis(20),
+            "fixture event source unavailable",
+        );
+        let remote_reads = Cell::new(0);
+        let pending_again = pending.clone();
+        let (_, _, _) = super::interface::wait_submission(
+            pending,
+            budget,
+            &clock,
+            &cancel,
+            &mut observation,
+            Some(local_host),
+            |_| Ok(pending_again.clone()),
+            |_| {
+                remote_reads.set(remote_reads.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(remote_reads.get() >= 2);
+    }
+
+    #[test]
+    fn submission_wait_keeps_peer_source_in_report_after_settlement() {
+        use provenant_core::{Clock, MonoTime, TestClock, WallTime};
+        use provenant_fabric_runtime::graph::{AttemptState, GraphDocument, GraphStatus};
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"cli-wait-peer","nodes":[{
+                "id":"writer","access":"worktree_write","worktree":"lane",
+                "prompt":"write code","route":{"adapter":"mock","model":"mock-model"}
+            }]
+        }))
+        .unwrap();
+        let mut owner = MockWriterOwner::default();
+        let mut journal = MemoryJournal::default();
+        let completed = advance(&document, &mut owner, &mut journal).unwrap();
+        let mut pending = completed.clone();
+        pending.status = GraphStatus::Pending;
+        let attempt = &mut pending.checkpoint.nodes[0].attempts[0];
+        attempt.state = AttemptState::Starting;
+        attempt.outcome = None;
+        let local_host = provenant_core::HostId::from_bytes([1; 16]);
+        let remote_host = provenant_core::HostId::from_bytes([2; 16]);
+        attempt.attempt_ref = Some(format!("{remote_host}/attempt"));
+
+        let clock = TestClock::new(WallTime::from_micros(0).unwrap(), MonoTime::from_micros(0));
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 1).unwrap();
+        let mut observation = crate::status_wait::LocalObservation::paced(
+            std::time::Duration::from_millis(500),
+            "fixture event source unavailable",
+        );
+        let (settled, observation, _remote_read_allowed) = super::interface::wait_submission(
+            pending,
+            budget,
+            &clock,
+            &cancel,
+            &mut observation,
+            Some(local_host),
+            |_| Ok(completed.clone()),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(settled.status, GraphStatus::Complete);
+        assert!(observation.contains("peer/relay or unrepresented rows reread every 500 ms"));
     }
 
     #[test]
