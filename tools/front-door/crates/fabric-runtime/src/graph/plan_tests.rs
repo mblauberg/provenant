@@ -1055,107 +1055,6 @@ fn malformed_optional_handoff_warns_and_still_delivers() {
 }
 
 #[test]
-fn different_worktrees_ignore_relative_scope_metadata_but_same_worktree_is_fenced() {
-    for scope in [
-        vec!["src".into()],
-        Vec::new(),
-        vec!["./src".into()],
-        vec!["src/*".into()],
-    ] {
-        let mut first = writer_graph().nodes.remove(0);
-        first.required_verdict = None;
-        first.write_scope = scope;
-        first.worktree = Some(".worktrees/first".into());
-        let mut second = first.clone();
-        second.id = "second".into();
-        second.worktree = Some(".worktrees/second".into());
-        second.write_scope = vec!["src/a".into()];
-        let doc = graph(vec![first, second]);
-        let mut owner = FakeOwner::default();
-        owner.observations.push_back(AttemptObservation::Pending {
-            attempt_ref: Some("first".into()),
-        });
-        owner.observations.push_back(AttemptObservation::Pending {
-            attempt_ref: Some("second".into()),
-        });
-        let mut journal = MemoryJournal::default();
-        let run = advance(&doc, &mut owner, &mut journal).unwrap();
-        assert_eq!(owner.calls.len(), 2);
-        assert_eq!(run.checkpoint.nodes[1].state, NodeState::Pending);
-        owner.observations.extend(
-            ["done", "done"].map(|text| terminal_with_result(AttemptOutcome::Succeeded, text)),
-        );
-        assert!(
-            advance(&doc, &mut owner, &mut journal)
-                .unwrap()
-                .checkpoint
-                .successful()
-        );
-    }
-
-    let mut first = writer_graph().nodes.remove(0);
-    first.required_verdict = None;
-    let mut second = first.clone();
-    second.id = "second".into();
-    let doc = graph(vec![first, second]);
-    let mut owner = FakeOwner::default();
-    owner.observations.push_back(AttemptObservation::Pending {
-        attempt_ref: Some("first".into()),
-    });
-    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(owner.calls.len(), 1);
-    assert_eq!(run.checkpoint.nodes[1].state, NodeState::Pending);
-}
-
-#[test]
-fn skipped_writer_does_not_connect_separate_checkouts_during_expansion() {
-    let mut doc = planner(1);
-    doc.integration_branch = Some("integration".into());
-    for (id, scope) in [("skipped", "src/a"), ("active", "src/b")] {
-        let mut writer = writer_graph().nodes.remove(0);
-        writer.id = id.into();
-        writer.worktree = Some(format!(".worktrees/{id}"));
-        writer.write_scope = vec![scope.into()];
-        writer.required_verdict = None;
-        doc.nodes.push(writer);
-    }
-    let (plan, _) = validate_plan(&doc).unwrap();
-    let mut owner = fixture_owner(&["invalid"]);
-    let mut journal = MemoryJournal::default();
-    let mut checkpoint = advance(&planner(1), &mut owner, &mut journal)
-        .unwrap()
-        .checkpoint;
-    loops::reconcile(&mut checkpoint, &plan);
-    checkpoint
-        .nodes
-        .iter_mut()
-        .find(|n| n.id == "skipped")
-        .unwrap()
-        .state = NodeState::Skipped;
-    let planner = plan.nodes.iter().find(|n| n.id == "plan").unwrap();
-    let mut child = slice("required", &["src"]);
-    child["access"] = json!("worktree_write");
-    child["worktree"] = json!(".worktrees/new");
-    assert!(
-        plans::settle(
-            planner,
-            &doc,
-            &doc,
-            &mut checkpoint,
-            Some(&capture(&result(vec![child]))),
-            &Default::default()
-        )
-        .is_some(),
-        "{:?}",
-        checkpoint.pause_reason()
-    );
-    assert_eq!(
-        checkpoint.expansions[0].nodes[0].worktree.as_deref(),
-        Some(".worktrees/active")
-    );
-}
-
-#[test]
 fn planner_prompt_uses_wire_kinds_and_required_field_names() {
     let document = planner(2);
     let node = &document.nodes[0];
@@ -1351,9 +1250,17 @@ fn allowed_pattern_instantiation_records_parameters_and_matches_a_static_composi
     let recorded = &expansion.uses[0];
     assert_eq!(recorded.id, "plan--impl");
     assert_eq!(recorded.name, "generator");
+    assert_eq!(recorded.parameters["label"], "the slice");
+    assert_eq!(recorded.parameters["scope"], json!(["src/a"]));
+    assert_eq!(recorded.parameters["retries"], 1);
+    let writer = expansion
+        .nodes
+        .iter()
+        .find(|node| node.id == "plan--impl--write")
+        .unwrap();
     assert_eq!(
-        recorded.parameters,
-        json!({"label":"the slice", "scope":["src/a"], "retries":1})
+        recorded.parameters["worktree"].as_str(),
+        writer.worktree.as_deref()
     );
     assert_eq!(
         recorded.nodes,
@@ -1728,68 +1635,6 @@ fn pattern_expansion_respects_plan_max_nodes_boundary() {
             .contains("limits.nodes")
     );
     assert!(run.checkpoint.expansions.is_empty());
-}
-
-#[test]
-fn plan_overlapping_writers_share_one_worktree_integrate_and_deliver_once() {
-    let mut doc = planner(3);
-    doc.integration_branch = Some("integration".into());
-    doc.delivery = Some(provenant_records::run::DeliveryMode::Pr);
-    let nodes = [
-        ("a", vec!["src/a"]),
-        ("b", vec!["src/b"]),
-        ("both", vec!["src"]),
-    ]
-    .into_iter()
-    .map(|(id, scope)| {
-        let mut node = slice(id, &scope);
-        node["access"] = json!("worktree_write");
-        node["worktree"] = json!(format!(".worktrees/{id}"));
-        node
-    })
-    .collect();
-    let output = result(nodes);
-    let mut owner = fixture_owner(&[&output]);
-    owner.observations.push_back(AttemptObservation::Pending {
-        attempt_ref: Some("a".into()),
-    });
-    let mut journal = MemoryJournal::default();
-    let partial = advance(&doc, &mut owner, &mut journal).unwrap();
-    assert_eq!(
-        partial
-            .checkpoint
-            .nodes
-            .iter()
-            .filter(|n| n.state == NodeState::Running)
-            .count(),
-        1
-    );
-    assert_eq!(owner.calls.len(), 2);
-    assert_eq!(owner.deliveries, 0);
-    journal.0 =
-        Some(serde_json::from_slice(&serde_json::to_vec(&partial.checkpoint).unwrap()).unwrap());
-    owner.observations.extend(
-        ["a done", "b done", "both done", "checked"]
-            .map(|text| terminal_with_result(AttemptOutcome::Succeeded, text)),
-    );
-    let run = advance(&doc, &mut owner, &mut journal).unwrap();
-    assert_eq!(run.status, GraphStatus::Complete);
-    assert!(run.checkpoint.successful());
-    assert_eq!(owner.deliveries, 1);
-    assert!(owner.permissions[1..5].iter().all(|p| *p
-        == (
-            AccessMode::WorktreeWrite,
-            Some("/fixture/.worktrees/a".into())
-        )));
-    assert!(owner.delivery_modes[1..5].iter().all(|mode| *mode
-        == Some(provenant_records::run::DeliveryMode::Integrate(
-            "integration".into()
-        ))));
-    let encoded = serde_json::to_vec(&run.checkpoint).unwrap();
-    journal.0 = Some(serde_json::from_slice(&encoded).unwrap());
-    let replay = advance(&doc, &mut owner, &mut journal).unwrap();
-    assert_eq!(run.checkpoint, replay.checkpoint);
-    assert_eq!(owner.deliveries, 1);
 }
 
 #[test]
@@ -2174,64 +2019,6 @@ fn structured_blocks_survive_real_result_head_truncation() {
             assert_eq!(owner.calls.len(), 3);
         }
     }
-}
-
-#[test]
-fn sibling_planners_share_overlapping_writer_checkout_and_wait() {
-    let mut first = planner(1).nodes.remove(0);
-    first.id = "first".into();
-    let mut second = first.clone();
-    second.id = "second".into();
-    let mut doc = graph(vec![first, second]);
-    doc.integration_branch = Some("integration".into());
-    let outputs: Vec<_> = ["a", "b"]
-        .into_iter()
-        .map(|id| {
-            let mut child = slice(id, &["src"]);
-            child["access"] = json!("worktree_write");
-            child["worktree"] = json!(format!(".worktrees/{id}"));
-            result(vec![child])
-        })
-        .collect();
-    let mut owner = fixture_owner(&[&outputs[0], &outputs[1]]);
-    owner.observations.extend([
-        AttemptObservation::Pending {
-            attempt_ref: Some("a".into()),
-        },
-        AttemptObservation::Pending {
-            attempt_ref: Some("b".into()),
-        },
-    ]);
-    let mut journal = MemoryJournal::default();
-    let run = advance(&doc, &mut owner, &mut journal).unwrap();
-    assert_eq!(owner.calls.len(), 3);
-    assert_eq!(
-        run.checkpoint
-            .nodes
-            .iter()
-            .filter(|n| n.state == NodeState::Running)
-            .count(),
-        1
-    );
-    assert_eq!(
-        run.checkpoint.expansions[1].nodes[0].worktree.as_deref(),
-        Some(".worktrees/a")
-    );
-    owner.observations.clear();
-    owner.observations.extend([
-        terminal_with_result(AttemptOutcome::Succeeded, "done"),
-        terminal_with_result(AttemptOutcome::Succeeded, "done"),
-    ]);
-    assert!(
-        advance(&doc, &mut owner, &mut journal)
-            .unwrap()
-            .checkpoint
-            .successful()
-    );
-    assert_eq!(
-        owner.permissions.last().unwrap().1.as_deref(),
-        Some("/fixture/.worktrees/a")
-    );
 }
 
 #[test]

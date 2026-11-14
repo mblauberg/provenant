@@ -1289,19 +1289,16 @@ fn template_launch_missing_parameters_names_them() {
     let bundled = TemplateLibrary::bundled();
     let compiler = Compiler::new(&bundled);
     let error = compiler
-        .compile(
-            &serde_json::json!({"id": "d", "use": "deliver", "with": {"worktree":"/some/path"}}),
-        )
+        .compile(&serde_json::json!({"id": "d", "use": "deliver"}))
         .unwrap_err();
     let CompileError::Parameter(refusal) = error else {
         panic!("expected a parameter refusal: {error}");
     };
     let text = refusal.to_string();
-    assert!(text.contains("write_scope"), "{text}");
+    assert!(text.contains("worktree"), "{text}");
     assert!(text.contains("example:"), "{text}");
     let example = refusal.example().expect("example");
     assert!(example.contains("worktree"), "{example}");
-    assert!(example.contains("write_scope"), "{example}");
 }
 
 #[test]

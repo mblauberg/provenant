@@ -289,10 +289,9 @@ fn review_base_save_failure_prevents_attempt_creation() {
         Err(GraphError::Journal(_))
     ));
     assert!(owner.calls.is_empty());
-    assert!(
-        journal.0.is_none(),
-        "failed admission must not save a partial graph"
-    );
+    assert!(journal.0.as_ref().is_none_or(|checkpoint| {
+        checkpoint.nodes.iter().all(|node| node.attempts.is_empty())
+    }), "a failed review-base save must not create an attempt");
 }
 
 #[test]

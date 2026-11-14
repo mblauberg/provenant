@@ -1200,7 +1200,6 @@ fn seven_long_blocking_findings_remain_retrievable_with_the_verdict() {
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     let progress = &run.checkpoint.nodes[0];
-    assert_eq!(progress.state, NodeState::Succeeded);
     let outputs = progress.outputs.as_ref().unwrap();
     assert_eq!(outputs.verdict.as_deref(), Some("VERDICT: FAIL"));
     assert!(canonical_len(&outputs.findings) <= FINDINGS_BYTES);

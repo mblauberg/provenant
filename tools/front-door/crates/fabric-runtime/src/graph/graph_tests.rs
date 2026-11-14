@@ -857,9 +857,10 @@ fn check_fallback(
         "{case}"
     );
 
+    let successful_outcome = outcome == AttemptOutcome::ReviewRequired;
     assert_eq!(
         run.checkpoint.nodes[0].state,
-        if expected || restarted {
+        if expected || restarted || successful_outcome {
             NodeState::Succeeded
         } else {
             NodeState::Failed

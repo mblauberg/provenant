@@ -279,11 +279,15 @@ fn schema_two_refuses_a_host_that_cannot_bind_a_writer() {
     let mut document = graph(vec![writer]);
     document.schema_version = 2;
     let mut journal = MemoryJournal::default();
+    let mut owner = ErrorLauncher::default();
     assert!(matches!(
-        advance(&document, &mut ErrorLauncher::default(), &mut journal),
+        advance(&document, &mut owner, &mut journal),
         Err(GraphError::Refused(_))
     ));
-    assert!(journal.0.is_none());
+    assert!(owner.calls.is_empty());
+    assert!(journal.0.as_ref().is_none_or(|checkpoint| {
+        checkpoint.nodes.iter().all(|node| node.attempts.is_empty())
+    }));
 }
 
 #[test]

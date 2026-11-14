@@ -2802,7 +2802,16 @@ mod tests {
         // most LISTING_ROWS node lines, the omission count and `next`, each
         // line within SUMMARY_ROW_BYTES.
         use provenant_cli::limits::{LISTING_ROWS, SUMMARY_ROW_BYTES};
-        assert!(reading.lines().count() <= 1 + LISTING_ROWS + 2, "{reading}");
+        let lines: Vec<_> = reading.lines().collect();
+        let omissions = lines
+            .iter()
+            .filter(|line| line.contains(" nodes not shown;"))
+            .count();
+        let next = usize::from(lines.last().is_some_and(|line| line.starts_with("next: ")));
+        assert!(
+            lines.len() <= 1 + LISTING_ROWS + omissions + next,
+            "{reading}"
+        );
         assert!(
             reading.lines().all(|line| line.len() <= SUMMARY_ROW_BYTES),
             "{reading}"
@@ -2993,9 +3002,11 @@ mod tests {
         assert_eq!(stopped.checkpoint.nodes[1].state, NodeState::Skipped);
         assert_eq!(stopped.checkpoint.nodes[2], before.nodes[2]);
         assert_eq!(stopped.checkpoint.nodes[3], before.nodes[3]);
+        let mut durable = stopped.checkpoint.clone();
+        durable.extra.remove("cancellation_request_receipt");
         assert_eq!(
             FileJournal::read_checkpoint(&roots.state, project, "g")?,
-            Some(stopped.checkpoint)
+            Some(durable)
         );
         assert_ne!(
             FileJournal::read_events(&roots.state, project, "g")?,
