@@ -57,10 +57,18 @@ fn disk_policy_refusal_uses_resource_projection() {
 #[test]
 fn retained_import_refusal_names_worktree_attempt_and_recovery() {
     let attempt = AttemptId::from_bytes([4; 16]);
+    let key = provenant_records::WorkKey::new(
+        provenant_core::ProjectId::from_bytes([5; 16]),
+        "repair",
+        "writer",
+        3,
+    )
+    .unwrap();
     let failure = check_launch_policy(&[run::Started::Refused {
         attempt: AttemptId::from_bytes([1; 16]),
         kind: run::RefusalKind::RetainedImport {
             attempt,
+            key: key.clone(),
             worktree: "/tmp/writer".into(),
         },
         reason: "retained".into(),
@@ -69,11 +77,15 @@ fn retained_import_refusal_names_worktree_attempt_and_recovery() {
     assert_eq!(failure.kind.code(), "WRITER_IMPORT_RETAINED");
     assert!(failure.message.contains("/tmp/writer"));
     assert!(failure.message.contains(&attempt.to_string()));
+    assert!(failure.message.contains(&key.to_string()));
     let diagnostic = failure.projection.expect("diagnostic");
-    // The attempt is named by its work key; the hint says how to find it.
-    assert!(diagnostic.next.iter().any(|next| {
-        next.contains(&attempt.to_string()) && next.contains("reconcile --abandon NAME/NODE#N")
-    }));
+    // The repair command targets the retained writer's resolvable identity.
+    assert!(
+        diagnostic
+            .next
+            .iter()
+            .any(|next| { next.contains(&format!("reconcile --abandon {key}")) })
+    );
 }
 
 #[test]

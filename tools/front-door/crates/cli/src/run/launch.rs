@@ -660,14 +660,24 @@ pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> 
     {
         return Ok(());
     }
-    if let Some((attempt, worktree)) = started.iter().find_map(|started| match started {
+    if let Some((attempt, key, worktree)) = started.iter().find_map(|started| match started {
         run::Started::Refused {
-            kind: run::RefusalKind::RetainedImport { attempt, worktree },
+            kind:
+                run::RefusalKind::RetainedImport {
+                    attempt,
+                    key,
+                    worktree,
+                },
             ..
-        } => Some((*attempt, worktree.clone())),
+        } => Some((*attempt, key.clone(), worktree.clone())),
         _ => None,
     }) {
-        return Err(run::RunError::RetainedWriterImport { attempt, worktree }.into());
+        return Err(run::RunError::RetainedWriterImport {
+            attempt,
+            key,
+            worktree,
+        }
+        .into());
     }
     // Report any all-refused batch using its typed diagnostic where available.
     if let Some((attempt, reason, kind)) = started.iter().find_map(|started| match started {

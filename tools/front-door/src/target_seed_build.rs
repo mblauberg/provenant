@@ -139,6 +139,8 @@ fn origin_main(project: &Path) -> Result<String> {
 /// What a refresh did.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Refresh {
+    /// This project has no selected Cargo workspace; nothing to seed.
+    NotCargo,
     /// The newest complete generation already builds this `origin/main`.
     Current,
     /// Another host seed build holds the build lock; nothing was started.
@@ -161,6 +163,9 @@ pub enum Refresh {
 #[allow(dead_code)]
 pub fn refresh(state: &Path, project: &Path) -> Result<Refresh> {
     refuse_in_lane()?;
+    if target_seed::cargo_build_directory(project)?.is_none() {
+        return Ok(Refresh::NotCargo);
+    }
     let commit = origin_main(project)?;
     refresh_with(state, &marker_name(project), &commit, |stage| {
         build_into(stage, project, &commit)
@@ -289,7 +294,8 @@ pub fn build(state: &Path, project: &Path) -> Result<String> {
 fn build_into(stage: &Path, project: &Path, commit: &str) -> Result<Manifest> {
     let checkout = stage.join("checkout");
     checkout_commit(project, &checkout, commit)?;
-    let worktree = checkout.join("tools/front-door");
+    let worktree = target_seed::cargo_build_directory(&checkout)?
+        .ok_or_else(|| io::Error::other("project has no selected Cargo workspace"))?;
     let target = stage.join("target");
     fs::create_dir(&target)?;
     let (rustc_vv, host_triple) = target_seed::rustc_metadata(&worktree)?;

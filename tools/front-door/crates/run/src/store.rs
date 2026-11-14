@@ -394,12 +394,12 @@ impl RunStore {
     /// the failure hiding every other attempt of the run.
     pub(crate) fn pending_effect_attempts(
         &self,
-        run: AttemptId,
+        attempt: AttemptId,
         call: &Request<'_>,
     ) -> Result<Vec<AttemptId>> {
         let mut query = self.db.prepare("SELECT a.id,r.record FROM attempts a JOIN settlement_receipts r ON r.attempt=a.id WHERE a.id=?1 AND a.project=?2 AND a.terminal=1")?;
         let rows = query.query_map(
-            params![run.to_string(), self.context.project_id.to_string()],
+            params![attempt.to_string(), self.context.project_id.to_string()],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
         )?;
         let mut pending = Vec::new();

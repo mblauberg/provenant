@@ -292,15 +292,12 @@ struct SeedPass {
     built: usize,
     current: usize,
     busy: usize,
-    /// Projects with no front-door manifest, which have nothing to seed.
+    /// Projects with no selected Cargo manifest, which have nothing to seed.
     skipped: usize,
     /// Commits whose last build failed, waiting for `origin/main` to move.
     backed_off: Vec<String>,
     errors: Vec<String>,
 }
-
-/// What `target_seed_build::build` requires of a checkout.
-const SEED_MANIFEST: &str = "tools/front-door/Cargo.lock";
 
 /// Refresh each project in turn. A busy build is a no-op and one project's
 /// failure never stops the others.
@@ -313,12 +310,20 @@ fn refresh_projects(
     use crate::target_seed_build::Refresh;
     let mut pass = SeedPass::default();
     for project in projects {
-        if !project.join(SEED_MANIFEST).is_file() {
-            pass.skipped += 1;
-            continue;
+        match provenant_run::target_seed::cargo_build_directory(project) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                pass.skipped += 1;
+                continue;
+            }
+            Err(error) => {
+                pass.errors.push(format!("{}: {error}", project.display()));
+                continue;
+            }
         }
         match refresh(project) {
             Ok(Refresh::Built(_)) => pass.built += 1,
+            Ok(Refresh::NotCargo) => pass.skipped += 1,
             Ok(Refresh::Current) => pass.current += 1,
             Ok(Refresh::BackedOff(commit)) => pass.backed_off.push(commit),
             Ok(Refresh::Busy) => pass.busy += 1,
@@ -864,9 +869,16 @@ mod tests {
     #[allow(dead_code)] // The worktree driver includes this module without libtest.
     fn seed_project(root: &std::path::Path, name: &str, manifest: bool) -> std::path::PathBuf {
         let project = root.join("projects").join(name);
-        std::fs::create_dir_all(project.join("tools/front-door")).unwrap();
+        let workspace = project.join("arbitrarily/nested/rust");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(project.join(".provenant")).unwrap();
+        std::fs::write(
+            project.join(".provenant/verify.json"),
+            r#"{"workspace":"arbitrarily/nested/rust"}"#,
+        )
+        .unwrap();
         if manifest {
-            std::fs::write(project.join(SEED_MANIFEST), "").unwrap();
+            std::fs::write(workspace.join("Cargo.toml"), "[workspace]\n").unwrap();
         }
         project
     }

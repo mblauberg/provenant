@@ -994,12 +994,15 @@ impl LaunchConfinement {
     /// Prepare shared downloads and a private target while writer custody is held.
     pub(crate) fn seed_cargo(
         &self,
-        environment: &[(OsString, OsString)],
+        environment: &mut Vec<(OsString, OsString)>,
         attempt_dir: &Directory,
         cancel: &CancelToken,
     ) {
         if cancel.is_cancelled() {
             return;
+        }
+        if let AccessMode::WorktreeWrite(authority) = &self.plan.permissions().mode {
+            lane_cargo_environment(&self.home, &authority.cargo_cache().path, environment);
         }
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
         let outcome = match &self.plan.permissions().mode {
@@ -1044,39 +1047,12 @@ impl LaunchConfinement {
             return;
         }
         let target_outcome = match (&self.plan.permissions().mode, writer) {
-            (AccessMode::WorktreeWrite(authority), Some((worktree, _)))
-                if cfg!(unix)
-                    && self.cargo_registry_seed
-                    && let Err(detail) = verified_cargo_config(
-                        worktree.path(),
-                        &authority.cargo_cache().path,
-                        environment,
-                    )
-                    .and_then(|()| {
-                        trusted_lane_toolchain(
-                            &self.home,
-                            worktree.path(),
-                            environment,
-                            &provenant_confinement::write_grants(
-                                self.plan.permissions(),
-                                &self.profile,
-                            ),
-                        )
-                    }) =>
-            {
-                crate::cargo_seed::Outcome::fallback_detail("toolchain_unverified", detail)
-            }
-            (AccessMode::WorktreeWrite(authority), Some((worktree, _))) => {
-                crate::cargo_seed::seed_target(
-                    self.cargo_registry_seed,
-                    &self.state_root,
-                    &authority.cargo_cache().path,
-                    worktree.path(),
-                    &self.home,
-                    environment,
-                    cancel,
-                )
-            }
+            (AccessMode::WorktreeWrite(authority), Some((worktree, _))) => self.seed_cargo_target(
+                worktree.path(),
+                &authority.cargo_cache().path,
+                environment,
+                cancel,
+            ),
             _ => crate::cargo_seed::Outcome::skipped("read_only_lane"),
         };
         if let Some(warning) = target_outcome.fallback_warning("the Cargo target") {
@@ -1092,6 +1068,50 @@ impl LaunchConfinement {
                 "warning: could not record Cargo target setup: {error}"
             );
         }
+    }
+
+    fn seed_cargo_target(
+        &self,
+        worktree: &Path,
+        cache: &Path,
+        environment: &[(OsString, OsString)],
+        cancel: &CancelToken,
+    ) -> crate::cargo_seed::Outcome {
+        use crate::cargo_seed::Outcome;
+        if !self.cargo_registry_seed {
+            return Outcome::skipped("disabled");
+        }
+        let build = match crate::target_seed::cargo_build_directory(worktree) {
+            Ok(Some(build)) => build,
+            Ok(None) => return Outcome::skipped("non_cargo_project"),
+            Err(_) => {
+                return Outcome::fallback_detail(
+                    "toolchain_unverified",
+                    codes::CARGO_WORKSPACE_UNREADABLE,
+                );
+            }
+        };
+        if cfg!(unix)
+            && let Err(detail) = verified_cargo_config(&build, cache, environment).and_then(|()| {
+                trusted_lane_toolchain(
+                    &self.home,
+                    worktree,
+                    environment,
+                    &provenant_confinement::write_grants(self.plan.permissions(), &self.profile),
+                )
+            })
+        {
+            return Outcome::fallback_detail("toolchain_unverified", detail);
+        }
+        crate::cargo_seed::seed_target(
+            true,
+            &self.state_root,
+            cache,
+            worktree,
+            &self.home,
+            environment,
+            cancel,
+        )
     }
     /// Run holds writer custody here: create the derived ref parents and the
     /// private lane cache, before they are anchored or used unsandboxed.
@@ -1450,19 +1470,36 @@ pub(super) fn verify_writer_git_paths(common: &Path, branch: &GitRefName) -> Res
     Ok(())
 }
 
+// Finalise the selectors on the actual launch environment before any seed
+// validation, even when an adapter did not discover Rust on the host. These
+// values are derived from the lane's authority, never inherited Cargo state.
+pub(super) fn lane_cargo_environment(
+    home: &Path,
+    cache: &Path,
+    environment: &mut Vec<(OsString, OsString)>,
+) {
+    let selectors = [
+        ("CARGO_HOME", cache.join("cargo-home").into_os_string()),
+        ("RUSTUP_HOME", home.join(".rustup").into_os_string()),
+        ("RUSTUP_AUTO_INSTALL", OsString::from("0")),
+        ("CARGO_TARGET_DIR", cache.join("target").into_os_string()),
+        (
+            "CARGO_BUILD_BUILD_DIR",
+            cache.join("target").into_os_string(),
+        ),
+    ];
+    environment.retain(|(key, _)| !selectors.iter().any(|(name, _)| key == *name));
+    environment.extend(selectors.map(|(key, value)| (OsString::from(key), value)));
+}
+
 // Cargo configuration can override rustc independently of the rustup pin.
 // Refuse ambiguous configurations without executing or interpreting them.
 // Refusals are stable snake_case codes, recorded as the outcome `detail`.
 fn verified_cargo_config(
-    worktree: &Path,
+    build: &Path,
     cache: &Path,
     environment: &[(OsString, OsString)],
 ) -> std::result::Result<(), &'static str> {
-    for path in [worktree.join("tools"), worktree.join("tools/front-door")] {
-        if !std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
-            return Err(codes::WORKTREE_LAYOUT_UNEXPECTED);
-        }
-    }
     let cargo_home = cache.join("cargo-home");
     let mut values = environment.iter().filter(|(key, _)| key == "CARGO_HOME");
     match (values.next(), values.next()) {
@@ -1486,7 +1523,7 @@ fn verified_cargo_config(
     }
     // A checked-in `.cargo/config.toml` is ordinary (this repository has one).
     // It is read as data and refused only if it can select the compiler.
-    for ancestor in worktree.join("tools/front-door").ancestors() {
+    for ancestor in build.ancestors() {
         for path in present(&ancestor.join(".cargo")) {
             cargo_config_cannot_select_compiler(&path)?;
         }
@@ -2110,12 +2147,10 @@ mod cargo_setup_tests {
         let tmp = tempfile::tempdir().unwrap();
         let worktree = tmp.path().join("worktree");
         let cache = tmp.path().join("cache");
-        std::fs::create_dir_all(worktree.join("tools/front-door")).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
         std::fs::create_dir_all(cache.join("cargo-home")).unwrap();
-        let env = vec![(
-            OsString::from("CARGO_HOME"),
-            cache.join("cargo-home").into_os_string(),
-        )];
+        let mut env = vec![];
+        lane_cargo_environment(tmp.path(), &cache, &mut env);
         assert!(verified_cargo_config(&worktree, &cache, &env).is_ok());
         assert_eq!(
             verified_cargo_config(&worktree, &cache, &[]),
@@ -2186,27 +2221,43 @@ mod cargo_setup_tests {
         let tmp = tempfile::tempdir().unwrap();
         let worktree = tmp.path().join("worktree");
         let cache = tmp.path().join("cache");
-        std::fs::create_dir_all(worktree.join("tools/front-door/.cargo")).unwrap();
+        let nested = worktree.join("any/depth/rust/workspace");
+        std::fs::create_dir_all(nested.join(".cargo")).unwrap();
+        std::fs::create_dir_all(worktree.join(".provenant")).unwrap();
+        std::fs::write(
+            worktree.join(".provenant/verify.json"),
+            r#"{"workspace":"any/depth/rust/workspace"}"#,
+        )
+        .unwrap();
+        std::fs::write(nested.join("Cargo.toml"), "[workspace]\n").unwrap();
+        let build = crate::target_seed::cargo_build_directory(&worktree)
+            .unwrap()
+            .unwrap();
         std::fs::create_dir_all(cache.join("cargo-home")).unwrap();
         let env = vec![(
             OsString::from("CARGO_HOME"),
             cache.join("cargo-home").into_os_string(),
         )];
-        let config = worktree.join("tools/front-door/.cargo/config.toml");
+        let config = nested.join(".cargo/config.toml");
         for text in [
             "# comments only\n",
             "[alias]\nxtask = 'run -p xtask'\n[target.aarch64-apple-darwin]\nrustflags = ['-C', 'link-arg=-s']\n[env]\nFOO = 'bar'\n",
         ] {
             std::fs::write(&config, text).unwrap();
-            assert_eq!(verified_cargo_config(&worktree, &cache, &env), Ok(()));
+            assert_eq!(verified_cargo_config(&build, &cache, &env), Ok(()));
         }
-        std::os::unix::fs::symlink(
-            "/etc/hosts",
-            worktree.join("tools/front-door/.cargo/config"),
-        )
-        .unwrap();
+        // An intermediate config belongs to this Cargo invocation's cone too.
+        let ancestor_config = nested.parent().unwrap().join(".cargo/config.toml");
+        std::fs::create_dir_all(ancestor_config.parent().unwrap()).unwrap();
+        std::fs::write(&ancestor_config, "[build]\nrustc = 'evil'\n").unwrap();
         assert_eq!(
-            verified_cargo_config(&worktree, &cache, &env),
+            verified_cargo_config(&build, &cache, &env),
+            Err(codes::CARGO_CONFIG_SELECTS_COMPILER)
+        );
+        std::fs::remove_file(ancestor_config).unwrap();
+        std::os::unix::fs::symlink("/etc/hosts", nested.join(".cargo/config")).unwrap();
+        assert_eq!(
+            verified_cargo_config(&build, &cache, &env),
             Err(codes::CARGO_CONFIG_UNREADABLE)
         );
     }

@@ -433,10 +433,11 @@ pub enum RunError {
     WorktreeMissing(std::path::PathBuf),
     #[error("worktree {0} is not listed by Git; run `git worktree list --porcelain`")]
     WorktreeUnregistered(std::path::PathBuf),
-    #[error("writer import retained for worktree {}, attempt {attempt}", worktree.display())]
+    #[error("writer import retained for {key}, worktree {}, attempt {attempt}", worktree.display())]
     RetainedWriterImport {
         worktree: std::path::PathBuf,
         attempt: provenant_core::AttemptId,
+        key: provenant_records::WorkKey,
     },
     #[error(transparent)]
     Plan(#[from] provenant_confinement::PlanError),
@@ -782,16 +783,20 @@ impl RunError {
                         .fact(DiagnosticFact::Resource(fact));
                 }
             }
-            Self::RetainedWriterImport { attempt, worktree } => {
+            Self::RetainedWriterImport {
+                attempt,
+                key,
+                worktree,
+            } => {
                 diagnostic = diagnostic
                     .detail(match safe_path(worktree, destination) {
                         Some(path) => {
-                            format!("worktree {path}; retained attempt {attempt}")
+                            format!("worktree {path}; retained work {key}; attempt {attempt}")
                         }
-                        None => format!("retained attempt {attempt}"),
+                        None => format!("retained work {key}; attempt {attempt}"),
                     })
                     .next(format!(
-                        "to release the fence and recover the preserved private Git manually, find attempt {attempt}'s NAME/NODE#N with `provenant status`, then run `provenant reconcile --abandon NAME/NODE#N --reason 'recover retained work manually'`; this stops automatic import"
+                        "to release the fence and recover the preserved private Git manually, run `provenant reconcile --abandon {key} --reason 'recover retained work manually'`; this stops automatic import"
                     ));
             }
             _ => {}

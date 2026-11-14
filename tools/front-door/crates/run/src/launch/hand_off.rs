@@ -339,7 +339,7 @@ impl RunStore {
                 .ok();
             #[cfg(feature = "fixture")]
             hold_seed_for_fixture(&setup_cancel);
-            confinement.seed_cargo(&plan.environment, &seed_attempt, &setup_cancel);
+            confinement.seed_cargo(&mut plan.environment, &seed_attempt, &setup_cancel);
             drop(seeding);
             if setup_cancel.is_cancelled() || local_or_withdraw!(cancel_requested()) {
                 local_or_withdraw!(Err::<(), _>(local("launch", &CANCELLED_BEFORE_LAUNCH)));
@@ -818,6 +818,13 @@ mod tests {
         ));
         let retained = RunError::RetainedWriterImport {
             attempt: provenant_core::AttemptId::from_bytes([4; 16]),
+            key: provenant_records::WorkKey::new(
+                provenant_core::ProjectId::from_bytes([5; 16]),
+                "repair",
+                "writer",
+                3,
+            )
+            .unwrap(),
             worktree: "/tmp/writer".into(),
         };
         assert!(matches!(
