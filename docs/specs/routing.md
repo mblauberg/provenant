@@ -140,7 +140,9 @@ refused. A pin does not switch accounts. Credential custody is owned by
 
 OpenCode models are partitioned by the registered plan, independently of account
 keys and labels. Enumeration keeps one row per registered identity and never
-invents a Zen identity from Go credentials. Free-model pacing and refusals remain
+invents a Zen identity from Go credentials. Plan declarations also own the quota
+source: missing or unrecognised plans retain unknown quota evidence rather than
+using the Go ledger. Free-model pacing and refusals remain
 scoped to the declared free pool.
 
 - Why: misattribution can spend or expose the wrong account.

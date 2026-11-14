@@ -434,25 +434,22 @@ pub(crate) fn capture_source(
     previous: Option<&AccountRecord>,
 ) -> Result<ProbeCapture, ProbeFailure> {
     live.capture_source(plan, previous, None, |live, account, _deadline, details| {
-        let free_account =
-            provenant_records::AdapterSpec::get(&account.scope.adapter).is_some_and(|spec| {
-                spec.is_free_plan(account.options.get("plan").and_then(Value::as_str))
-            });
-        if free_account {
-            details.note =
-                Some("Observed free-limit refusals only; allowance and daily reset unknown".into());
-            Ok(json!({}))
-        } else {
-            details.note = Some(
-                "Local estimate, this machine only; calibrated Go caps, other hosts not counted"
-                    .into(),
-            );
-            capture(
-                &account.identity_dir,
-                &account.options,
-                live.now(),
-                plan.input.deadline_unix_seconds,
-            )
+        let quota = provenant_records::AdapterSpec::get(&account.scope.adapter)
+            .and_then(|spec| spec.account_plan(account.options.get("plan").and_then(Value::as_str)))
+            .map(|plan| plan.quota);
+        match quota {
+            Some(provenant_records::AccountQuota::LocalLedger) => {
+                details.note = Some("Local estimate, this machine only; calibrated Go caps, other hosts not counted".into());
+                capture(&account.identity_dir, &account.options, live.now(), plan.input.deadline_unix_seconds)
+            }
+            Some(provenant_records::AccountQuota::ObservedRefusals) => {
+                details.note = Some("Observed free-limit refusals only; allowance and daily reset unknown".into());
+                Ok(json!({}))
+            }
+            None => {
+                details.note = Some("Registered plan is missing or unrecognised; quota remains unknown".into());
+                Ok(json!({}))
+            }
         }
     })
 }

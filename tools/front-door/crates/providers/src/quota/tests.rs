@@ -254,7 +254,7 @@ fn cursor_uses_usage_summary_and_fills_missing_plan_from_membership() {
 fn opencode_infers_compound_and_second_pool_windows() {
     let snapshot = decode_fixture(
         "opencode",
-        r#"{"payload":{"windows":[{"pool":"1h30m","used_percent":10},{"pool":"30s","used_percent":10}]}}"#,
+        r#"{"payload":{"windows":[{"pool":"1h30m","used_percent":10},{"pool":"30s","used_percent":10}]},"details":{"plan":"go"}}"#,
     );
     assert_eq!(window(&snapshot, "1h30m").window_seconds, Some(5_400));
     assert_eq!(window(&snapshot, "30s").window_seconds, Some(30));

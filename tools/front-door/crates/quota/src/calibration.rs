@@ -43,19 +43,18 @@ impl crate::Settings {
             keys.insert(record.account.account_key.clone());
         }
         for record in records {
-            if !provenant_records::AdapterSpec::get(&record.account.adapter).is_some_and(|spec| {
-                spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
-            }) || provenant_records::AdapterSpec::get(&record.account.adapter).is_some_and(
-                |spec| {
-                    spec.is_free_plan(
+            let local_ledger = provenant_records::AdapterSpec::get(&record.account.adapter)
+                .and_then(|spec| {
+                    spec.account_plan(
                         record
                             .snapshot
                             .as_ref()
                             .and_then(|snapshot| snapshot.details.as_ref())
                             .and_then(|details| details.plan.as_deref()),
                     )
-                },
-            ) {
+                })
+                .is_some_and(|plan| plan.quota == provenant_records::AccountQuota::LocalLedger);
+            if !local_ledger {
                 continue;
             }
             let Some(snapshot) = &mut record.snapshot else {
@@ -128,7 +127,7 @@ mod tests {
         settings
     }
 
-    fn ledger(account: &str, plan: &str) -> AccountRecord {
+    fn ledger(account: &str, plan: Option<&str>) -> AccountRecord {
         let scope = crate::AccountScope {
             adapter: "opencode".into(),
             account_key: account.into(),
@@ -153,7 +152,7 @@ mod tests {
                 })
                 .collect(),
             details: Some(crate::QuotaDetails {
-                plan: Some(plan.into()),
+                plan: plan.map(str::to_owned),
                 ..Default::default()
             }),
         });
@@ -164,7 +163,12 @@ mod tests {
     fn calibration_takes_maximum_and_expires_even_with_cached_ledger() {
         let settings = settings("2026-11-04T00:00:00Z");
         let expiry = settings.calibration["go"].expiry();
-        let raw = vec![ledger("go", "go"), ledger("zen", "zen")];
+        let raw = vec![
+            ledger("go", Some("go")),
+            ledger("zen", Some("zen")),
+            ledger("missing", None),
+            ledger("unknown", Some("unrecognised")),
+        ];
         let mut active = raw.clone();
         settings.apply_calibration(&mut active, expiry - 1);
         let snapshot = active[0].snapshot.as_ref().unwrap();
@@ -180,7 +184,9 @@ mod tests {
             snapshot.details.as_ref().unwrap().calibrated_windows.len(),
             3
         );
-        assert_eq!(active[1], raw[1]);
+        for (before, after) in raw.iter().zip(&active).skip(1) {
+            assert_eq!(before, after);
+        }
         for now in [expiry, expiry + 1] {
             let mut expired = raw.clone();
             settings.apply_calibration(&mut expired, now);
@@ -208,7 +214,7 @@ mod tests {
         settings.calibration.get_mut("go").unwrap().five_hour = Some(101);
         assert!(!settings.validate().is_empty());
         settings.calibration.get_mut("go").unwrap().five_hour = Some(100);
-        let mut records = vec![ledger("go", "go")];
+        let mut records = vec![ledger("go", Some("go"))];
         settings.apply_calibration(&mut records, 1);
         let snapshot = records[0].snapshot.as_ref().unwrap();
         assert_eq!(snapshot.status, QuotaStatus::Available);
@@ -230,7 +236,7 @@ mod tests {
     #[test]
     fn calibration_accepts_unique_label_but_not_ambiguous_label() {
         let settings = settings("2026-11-04T00:00:00Z");
-        let mut first = ledger("opencode-go", "go");
+        let mut first = ledger("opencode-go", Some("go"));
         first.account.label = "go".into();
         first.snapshot.as_mut().unwrap().account.label = "go".into();
         let mut unique = vec![first.clone()];
@@ -239,7 +245,7 @@ mod tests {
             unique[0].snapshot.as_ref().unwrap().windows[0].used_basis_points,
             4300
         );
-        let mut second = ledger("other", "go");
+        let mut second = ledger("other", Some("go"));
         second.account.label = "go".into();
         second.snapshot.as_mut().unwrap().account.label = "go".into();
         let mut ambiguous = vec![first, second];

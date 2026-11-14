@@ -116,11 +116,16 @@ pub struct SkillLocation {
     pub suffix: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountQuota {
+    LocalLedger,
+    ObservedRefusals,
+}
 #[derive(Debug, Clone, Copy)]
 pub struct AccountModelPlan {
     pub plan: &'static str,
     pub model_prefix: &'static str,
-    pub free: bool,
+    pub quota: AccountQuota,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -351,17 +356,20 @@ impl AdapterSpec {
             })
         })
     }
+    pub fn account_plan(&self, plan: Option<&str>) -> Option<&AccountModelPlan> {
+        self.account_model_plans
+            .iter()
+            .find(|row| plan.is_some_and(|plan| row.plan.eq_ignore_ascii_case(plan.trim())))
+    }
     pub fn is_free_plan(&self, plan: Option<&str>) -> bool {
-        self.account_model_plans.iter().any(|row| {
-            row.free && plan.is_some_and(|plan| row.plan.eq_ignore_ascii_case(plan.trim()))
-        })
+        self.account_plan(plan)
+            .is_some_and(|row| row.quota == AccountQuota::ObservedRefusals)
     }
     pub fn account_serves_model(&self, plan: Option<&str>, model: &str) -> bool {
         self.account_model_plans.is_empty()
-            || self.account_model_plans.iter().any(|row| {
-                plan.is_some_and(|plan| row.plan.eq_ignore_ascii_case(plan.trim()))
-                    && model.starts_with(row.model_prefix)
-            })
+            || self
+                .account_plan(plan)
+                .is_some_and(|row| model.starts_with(row.model_prefix))
     }
     /// Whether a quota window governs a model drawing on `model_pool`. Only
     /// adapters with grouped quota pools separate windows by their `group.`
@@ -789,8 +797,8 @@ adapter_specs! { $;
         peer_bootstrap: false,
         quota_model_prefix: Some("opencode-go/"),
         account_model_plans: &[
-            AccountModelPlan { plan: "go", model_prefix: "opencode-go/", free: false },
-            AccountModelPlan { plan: "zen", model_prefix: "opencode/", free: true },
+            AccountModelPlan { plan: "go", model_prefix: "opencode-go/", quota: AccountQuota::LocalLedger },
+            AccountModelPlan { plan: "zen", model_prefix: "opencode/", quota: AccountQuota::ObservedRefusals },
         ],
         free_pool: Some("opencode-free"),
         drop_unsupported_effort: true,
@@ -1218,7 +1226,10 @@ mod account_plan_tests {
             for plan in spec.account_model_plans {
                 let model = format!("{}fixture", plan.model_prefix);
                 assert!(spec.account_serves_model(Some(plan.plan), &model));
-                assert_eq!(spec.is_free_plan(Some(plan.plan)), plan.free);
+                assert_eq!(
+                    spec.is_free_plan(Some(plan.plan)),
+                    plan.quota == super::AccountQuota::ObservedRefusals
+                );
                 assert!(!spec.account_serves_model(None, &model));
                 for other in spec
                     .account_model_plans

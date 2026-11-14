@@ -1497,22 +1497,19 @@ mod tests {
 }
 
 #[cfg(test)]
-mod zen_tests {
+mod account_plan_tests {
     use super::*;
-    use provenant_quota::{QuotaProbeInput, QuotaStatus, Refusal};
+    use provenant_quota::{QuotaProbeInput, QuotaStatus};
 
     #[test]
-    fn registered_zen_uses_refusals_without_reading_go_ledger() {
-        let settings: Settings = serde_json::from_value(json!({
-            "entries": {"paid": {
-                "adapter": "opencode", "label": "go", "key": "go",
-                "directory": "/fixture/opencode", "plan": "go"
-            }, "free": {
-                "adapter": "opencode", "label": "zen", "key": "free-identity",
-                "directory": "/fixture/opencode-zen", "plan": "zen"
-            }}
-        }))
-        .unwrap();
+    fn non_ledger_plans_keep_quota_unknown_without_reading_ledger() {
+        let spec = provenant_records::AdapterSpec::get("opencode").unwrap();
+        let entries = spec.account_model_plans.iter().map(|plan| Some(plan.plan))
+            .chain([None, Some("unrecognised")]).enumerate().map(|(index, plan)| {
+                (format!("entry-{index}"), json!({"adapter":spec.name, "label":"fixture", "key":format!("identity-{index}"),
+                    "directory":format!("/fixture/nonexistent-{index}"), "plan":plan}))
+            }).collect::<serde_json::Map<_, _>>();
+        let settings: Settings = serde_json::from_value(json!({"entries": entries})).unwrap();
         let mut inputs =
             provenant_core::RootInputs::new("/fixture/home".into(), "/fixture/repo".into());
         inputs.state_dir = Some("/fixture/state".into());
@@ -1533,46 +1530,40 @@ mod zen_tests {
                 .map(|entry| entry.key.as_str())
                 .collect()
         );
-        let zen = accounts
-            .iter()
-            .find(|scope| scope.account_key == "free-identity")
-            .unwrap();
-        assert_eq!(zen.label, "zen");
-        let mut previous = AccountRecord::empty(zen.clone());
-        previous.refusals.push(Refusal {
-            extra: Default::default(),
-            account: zen.clone(),
-            model: "opencode/beam-free".into(),
-            pool: Some("opencode-free".into()),
-            observed_unix_seconds: 100,
-            resets_unix_seconds: None,
-        });
-        for at in [101, 3700] {
-            let plan = crate::quota::plan(
-                "opencode",
-                zen,
-                &QuotaProbeInput {
-                    now_unix_seconds: at,
-                    deadline_unix_seconds: at + 30,
-                    authority_ref: None,
-                },
-            )
-            .unwrap();
-            let capture = live.capture(&plan, Some(&previous)).unwrap();
-            let snapshot = crate::REGISTRY
+        for entry in settings.entries.values().filter(|entry| {
+            spec.account_plan(entry.plan.as_deref())
+                .is_none_or(|plan| plan.quota != provenant_records::AccountQuota::LocalLedger)
+        }) {
+            let account = accounts
                 .iter()
-                .filter_map(|registration| registration.quota_source)
-                .find(|source| source.adapter_id() == plan.account.adapter)
-                .unwrap()
-                .decode(&plan, &capture)
+                .find(|scope| scope.account_key == entry.key)
                 .unwrap();
-            assert_eq!(snapshot.status, QuotaStatus::Unknown);
-            assert!(
-                snapshot
-                    .windows
+            for at in [101, 3700] {
+                let plan = crate::quota::plan(
+                    spec.name,
+                    account,
+                    &QuotaProbeInput {
+                        now_unix_seconds: at,
+                        deadline_unix_seconds: at + 30,
+                        authority_ref: None,
+                    },
+                )
+                .unwrap();
+                let capture = live.capture(&plan, None).unwrap();
+                let snapshot = crate::REGISTRY
                     .iter()
-                    .all(|window| window.resets_unix_seconds.is_none())
-            );
+                    .filter_map(|registration| registration.quota_source)
+                    .find(|source| source.adapter_id() == spec.name)
+                    .unwrap()
+                    .decode(&plan, &capture)
+                    .unwrap();
+                assert_eq!(snapshot.status, QuotaStatus::Unknown);
+                assert!(snapshot.windows.is_empty());
+                let details = snapshot.details.unwrap();
+                assert_eq!(details.plan, entry.plan);
+                assert!(details.source.is_none());
+                assert!(details.note.is_some_and(|note| !note.is_empty()));
+            }
         }
     }
 }

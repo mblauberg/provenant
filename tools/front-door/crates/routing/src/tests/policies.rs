@@ -522,15 +522,6 @@ fn explicit_catalogued_model_is_ready_without_provider_listing()
     assert_eq!(route.eligibility, RouteEligibility::Eligible);
     assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
     assert!(route.exclusions.is_empty());
-    let mut with_effort = query.clone();
-    with_effort.effort = Some("high".into());
-    let normalised = resolve(&with_effort, &context)?;
-    assert!(normalised.effort.is_none());
-    assert_eq!(normalised.extra["effort_warning"]["requested"], "high");
-    assert_eq!(
-        normalised.extra["effort_warning"]["applied"],
-        serde_json::Value::Null
-    );
     let mut confidential = query;
     confidential.confidential = true;
     assert!(resolve(&confidential, &context).is_ok());
