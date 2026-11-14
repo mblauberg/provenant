@@ -16,10 +16,6 @@ verifies the package SHA-256 before running anything from it. State defaults to
 `~/.local/share/provenant/v2` and the binary to `~/.local/bin`; override with
 `--state-dir`, `PROVENANT_STATE_DIR` and `--bin-dir` (absolute paths).
 
-Exit codes: 2 invalid arguments or interrupted prompt, 3 toolchain needs
-consent, 4 download or checksum failure, 5 build or package failure;
-installation errors keep the CLI's exit code.
-
 A first install on a terminal prompts for providers, instruction files (replace,
 append or skip), Claude hooks and Claude accounts. `--yes` and any rerun with a
 receipt skip the prompts. A bare `provenant install --source "$RELEASE"` targets
@@ -53,72 +49,6 @@ install.
 host and never prompts while capturing installer output. Keep the fleet
 quiescent for the whole operation; preflight cannot make a multi-host install
 atomic.
-
-### From 1.x to 2.0
-
-2.0 keeps its state in a fresh root, `~/.local/share/provenant/v2`. It never
-writes, moves or deletes the 1.x root, `~/.local/share/provenant/v1`, and
-refuses any state root inside it. The first install at the default root, while
-that root is absent or empty and a 1.x root exists, stops the 1.x launch agents
-and then copies the owner configuration and nothing else:
-
-- `<state>/config.toml`: accounts, routing, presets, Fabric peers, lanes and the shared
-  settings source.
-- `host-id`: this host's Fabric identity, which its peers name.
-- `<state>/install/receipt.json`: the recorded targets, binary directory and hooks, so
-  the install replaces the 1.x links instead of refusing them as foreign.
-
-Run records, stores, ledgers, quota and usage history, worktree records and
-caches stay in the 1.x root; credentials stay with each provider. The JSON
-result names the copy under `state_copy` (`from`, `to`, `files`, `copied`) and
-the human output says it in one line. A dry run or `--upgrade-preflight` reports
-the copy it would make, checks the release and changes nothing. A failed agent
-stop copies nothing. A non-empty 2.0 root is never seeded again, and an explicit
-`--state-dir` or `PROVENANT_STATE_DIR` other than the default is never seeded.
-
-The 1.x and 2.0 agents share the labels `dev.provenant.peer` and
-`dev.provenant.tick` and their plist paths, so the install stops them by label
-(with the retired `dev.provenant.disk-guard` and `dev.provenant.gc`) before the
-copy and starts the 2.0 agents after it. `install.sh` maps a `--state-dir`
-naming the 1.x root, which a 1.x `provenant upgrade` passes, to the 2.0
-default.
-
-On each host, peers included: land or park lane work and finish every lane
-(1.x run records do not carry over), close other sessions, run `provenant
-upgrade` (1.x) or `install.sh --upgrade` (2.0), then `provenant check install`.
-
-Rollback: run `provenant uninstall` with the 2.0 binary, then the 1.x installer
-(`install.sh --tag v1.11.2`, or the last 1.x tag), which finds its 1.x root
-intact. Delete the 2.0 root by hand if you no longer want it.
-
-### Check provider routes before and after a release
-
-Run the candidate binary's `check providers --json` against the scratch format-2
-state root prepared by the installer, then repeat with the installed binary.
-It reads the routing catalogue and configured accounts, including derived free
-accounts, without launching anything. Rows show the harness, recorded sign-in
-state and its source, quota coverage and source, and the model's allowance pools.
-An unobserved login stays unknown. Unknown or partial quota never removes a route
-or fails readiness; Zen and Go currently have unknown or partial coverage.
-
-With the owner's authority to spend quota, run `check providers --live`. This
-starts one ordinary read-only lane per route with a one-word, no-tools prompt,
-waits for settlement, and prints `ROUTE pass|fail CAUSE attempt=ID`. These lanes
-consume quota and follow normal confinement, environment finalisation,
-settlement and retention. Each route is `ADAPTER/ACCOUNT/MODEL`, where ACCOUNT is
-the configured label and MODEL may contain slashes. Repeat `--route ROUTE` to
-select exact rows from the readiness report, for example:
-
-```sh
-provenant check providers --live --route claude/pro/claude-sonnet-5-5 --set timeout_seconds=90 --set concurrency=2 --json
-```
-
-The compiled defaults are 60 seconds of provider runtime per route and two
-concurrent routes. `--set timeout_seconds=N` (1..14400) and `--set concurrency=N`
-(1..16) override them; output shows each effective value and whether it came
-from the default or `--set`. Each route uses exactly one attempt, with no
-fallback or continuation. Exit 0 means every selected route passed; exit 1
-means at least one failed. Retain the JSON and attempt IDs with release evidence.
 
 ### Test a candidate binary
 
@@ -199,75 +129,29 @@ relinquished them until `--hooks on`.
 
 ### Shared settings
 
-```toml
-[domains.accounts.shared_settings]
-source = "/Users/me/.claude/settings.json"   # default: ~/.claude/settings.json when it exists
-keys = ["permissions", "env", "statusLine", "enabledPlugins",
-        "outputStyle", "includeCoAuthoredBy", "cleanupPeriodDays"]   # the default allow-list
-
-[domains.accounts.entries.claude-work.settings]   # wins over the source for this account
-outputStyle = "verbose"
-```
-
-Only listed keys sync, and with no source and no per-account settings nothing
-does. The deny rule refuses identity and credential keys (`apiKeyHelper`,
-`forceLoginMethod`, anything matching token, secret, password, oauth,
-credential and similar words, in key or `env` names) and `hooks`, even when
-listed; it errs towards false positives, names the key and rule, and stops
-install, upgrade and sync but never uninstall.
-
-Each synced key is recorded in the receipt. On the next sync an unedited
-account follows the source. An account that edited a value is a
-`settings_conflict` and is never overwritten. Resolve it with
-`provenant accounts sync --adopt <account>` (copy its values into the source,
-then sync all) or `--force-settings` (overwrite with the source's values). If
-the source changed during `--adopt`, nothing is written: rerun.
+Configure shared settings under `[domains.accounts.shared_settings]`; inspect
+available keys with `provenant config schema`. Credentials and identity are not
+synced. If `provenant check install` reports a settings conflict, use
+`provenant accounts sync --adopt ACCOUNT` to make that account the source, or
+`provenant accounts sync --force-settings` to replace its values from the source.
+Preview with `provenant accounts sync --dry-run` first.
 
 ### Repair and drift
 
-`provenant accounts sync [--dry-run] [--prune-orphans]` reapplies the installed
-release to every account and recorded target. A conflict in any target (an
-unmanaged file where a link belongs) refuses the
-whole command before any write: fix it or use `install --adopt-existing`, then
-rerun. A mid-write failure lists completed and remaining actions; rerun.
-`accounts register` reports `ACCOUNT_SYNC` with the same repair and keeps the
-registration. `--prune-orphans` removes managed content of an unregistered
-account (`orphaned_account`).
-
-Drift is reported per account by `provenant check install`, `provenant accounts
-list` and `provenant hosts doctor`: `unsynced_account`,
-`missing_account_directory`, `unusable_account_directory`,
-`account_missing_entry`, `settings_drift` and `settings_conflict`; each message
-names the repair. A missing account directory is skipped, never recreated.
-
-`~/.agents/AGENTS.md` is a link into the release's instructions. A plain file
-in the way is user content: install refuses it. `check install` reports
-`stale_shared_instructions` (run `provenant install`) or
-`unmanaged_shared_instructions` (run `provenant install --adopt-existing`, or
-move the file aside).
+Run `provenant check install` and follow the reported repair. For account drift,
+preview `provenant accounts sync --dry-run`, resolve any unmanaged conflicts,
+then run `provenant accounts sync`. After a partial write, rerun the command.
 
 ## Background agents
 
-On macOS, an install into the default state root also manages two LaunchAgents
-in `~/Library/LaunchAgents`: `dev.provenant.peer.plist` and
-`dev.provenant.tick.plist`. The tick runs `provenant tick` every 60 seconds:
-due graph deadlines, plus daily [GC](gc.md) of registered projects (result in
-`<state>/tick/gc-result.json`; `[gc] schedule = false` stops scheduled
-collection only). A modified plist is kept and blocks install: move it aside,
-run `launchctl bootout gui/$UID/dev.provenant.peer` (or `.tick`), and rerun
-install. After an upgrade, confirm the tick is loaded with
-`launchctl print gui/$UID/dev.provenant.tick`; `launchctl kickstart -k` it if
-not. `provenant hosts doctor` shows its last exit; an idle exit 0 is normal. Exit 3
-means `provenant tick` reported an error in graph or scheduled work, or failed
-before it could complete the tick (including a result-write failure). Inspect
-that run's tick output and result to identify the underlying cause; upgrading
-only repairs installation drift.
+On macOS, the default-state install manages peer and tick LaunchAgents. Run
+`provenant hosts doctor` to check them. If a modified plist blocks install, move
+it aside, boot out the affected agent with `launchctl`, and rerun install. Check
+the tick output and result if it reports an error. See [Fabric hosts](fabric-hosts.md#macos-peers-and-the-login-keychain)
+for peer setup and [GC](gc.md) for scheduled collection.
 
-On Linux, a default-state install writes `provenant-tick.service` and
-`provenant-tick.timer` under `$XDG_CONFIG_HOME/systemd/user` (else
-`~/.config`) and enables the timer. It needs a login session; run
-`loginctl enable-linger $USER` to keep it running logged out. There is no peer
-agent on Linux.
+On Linux, the default-state install enables a user timer. If it must run while
+logged out, enable lingering for the user with `loginctl enable-linger $USER`.
 
 ## Uninstall
 
@@ -295,12 +179,3 @@ A receipt that fails to decode reports a reinstall error. Move
 existing files and links are no-ops. Links into an older release conflict:
 remove those binary, skill and instruction links first. Use `--adopt-existing`
 for a regular executable that must be replaced.
-Install, uninstall and `check install` ignore pre-1.0 entries and Git
-launchers; remove those by hand.
-
-## Releasing
-
-A `v*` tag on a commit reachable from `origin/main` triggers
-`.github/workflows/release.yml`, which builds, ad-hoc signs, packages and
-checksums the arm64 release. Commit `docs/release-notes/<tag>.md` first; it
-becomes the Release body.
