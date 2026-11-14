@@ -1027,7 +1027,12 @@ pub(super) fn add_git_dirs<'a>(
     }
 }
 
-crate::quota_source!(Claude, "claude");
+crate::quota_source!(
+    Claude,
+    "claude",
+    crate::quota_live::claude::capture_source,
+    crate::quota::claude::decode_source
+);
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 enum Event {

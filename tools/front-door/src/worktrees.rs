@@ -320,10 +320,7 @@ fn execute(
                             },
                         }
                     };
-                    let config = provenant_config::read_with_domains(
-                        roots,
-                        &provenant_cli::domains::SECTIONS,
-                    )?;
+                    let config = provenant_cli::config_reads::read_for(roots, "worktree")?;
                     let output = config
                         .gc
                         .projects
@@ -888,7 +885,7 @@ pub(crate) fn land_cleanup(
         roots::Workspace::Checkout,
         roots::Product::Required,
     )?;
-    let config = provenant_config::read_with_domains(&roots, &provenant_cli::domains::SECTIONS)?;
+    let config = provenant_cli::config_reads::read_for(&roots, "worktree")?;
     with_context(
         &roots,
         &home,
@@ -1051,7 +1048,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     let mut project_ids = Vec::new();
     let mut unobserved_projects = Vec::new();
     let mut skipped_transient = Vec::new();
-    let config = provenant_config::read_with_domains(&roots, &provenant_cli::domains::SECTIONS)?;
+    let config = provenant_cli::config_reads::read_for(&roots, "gc")?;
     if (command.scheduled || command.pressure) && !config.gc.schedule {
         return Ok(GcData {
             report: provenant_confinement::cache::CacheGcReport {

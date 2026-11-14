@@ -512,46 +512,9 @@ fn detect_with_org_inner(
             .ok_or(ProviderError::UnknownIdentity);
     }
     if adapter == "cursor" {
-        let db = directory.join("state.vscdb");
-        if db
-            .try_exists()
-            .map_err(|_| ProviderError::UnknownIdentity)?
-        {
-            let argv: Vec<OsString> = vec![
-                "/usr/bin/sqlite3".into(),
-                "-readonly".into(),
-                db.into(),
-                "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken' LIMIT 1".into(),
-            ];
-            let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(4));
-            options.stdout = StreamPolicy::Capture { limit: 65536 };
-            options.stderr = StreamPolicy::Discard;
-            options.stop_on_output_limit = true;
-            let out = executor.execute(options).map_err(exec_error)?;
-            if out.stdout.truncated || out.timed_out {
-                return Err(ProviderError::UnknownIdentity);
-            }
-            if out.termination == Termination::Exit(0)
-                && let Some(key) = std::str::from_utf8(&out.stdout.bytes)
-                    .ok()
-                    .and_then(|token| crate::identity::cursor_account(token.trim()))
-            {
-                return Ok((key, None));
-            }
-        }
-        let bytes = read_following(
-            &directory.join("cli-config.json"),
-            ReadOptions { limit: 1024 * 1024 },
-        )
-        .map_err(credential_identity_read_error)?;
-        let config: serde_json::Value =
-            serde_json::from_slice(&bytes).map_err(|_| ProviderError::UnknownIdentity)?;
-        // authInfo.authId and the desktop JWT sub are the same subject, verified 27 Oct 2026.
-        let key = config["authInfo"]["authId"]
-            .as_str()
-            .and_then(crate::identity::digest)
-            .ok_or(ProviderError::UnknownIdentity)?;
-        return Ok((format!("cursor-{key}"), None));
+        let identity =
+            crate::cursor::read_identity(directory).map_err(|_| ProviderError::UnknownIdentity)?;
+        return Ok((identity.account_key, None));
     }
     if adapter != "claude" || directory == home.join(".claude") {
         return Err(ProviderError::UnknownIdentity);
@@ -693,7 +656,7 @@ fn detect_agy(
         .map(|fingerprint| format!("agy-{fingerprint}"))
         .ok_or(ProviderError::UnknownIdentity)?;
     let stderr_str = std::str::from_utf8(&out.stderr.bytes).ok();
-    let models = crate::quota::extract_agy_models(Some(&payload), stderr_str);
+    let models = crate::quota::agy::extract_agy_models(Some(&payload), stderr_str);
     Ok((key, models))
 }
 

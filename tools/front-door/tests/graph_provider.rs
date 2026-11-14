@@ -736,46 +736,84 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
         "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.routing.pools]\njunior=[{model='codex/gpt-6-luna',effort='low'}]\n",
     )?;
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let branch_mode = location == "branch";
     for name in ["AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md"] {
         fs::write(rig.project.join(name), "original instructions\n")?;
     }
-    for args in [
-        vec!["add", "."],
-        vec!["commit", "-qm", "instructions"],
-        vec![
+    let mut git_commands = vec![vec!["add", "."], vec!["commit", "-qm", "instructions"]];
+    if !branch_mode {
+        git_commands.push(vec![
             "worktree",
             "add",
             "-qb",
             "writer-cwd",
             ".worktrees/writer-cwd",
-        ],
-    ] {
+        ]);
+    }
+    for args in git_commands {
         let output = rig.execute(&git, &args, None)?;
         assert_eq!(code(&output), 0, "{output:?}");
     }
-    let tree = rig.project.join(".worktrees/writer-cwd");
-    fs::create_dir_all(tree.join("nested/directory"))?;
+    let tree = if branch_mode {
+        rig.project.join(".worktrees/writer-branch")
+    } else {
+        rig.project.join(".worktrees/writer-cwd")
+    };
+    if !branch_mode {
+        fs::create_dir_all(tree.join("nested/directory"))?;
+    }
     // TestRig uses project as the child's cwd; PROVENANT_ROOT selects assets.
     rig.project = match location {
+        "branch" => {
+            let directory = rig.project.join("launch-subdirectory");
+            fs::create_dir_all(&directory)?;
+            directory
+        }
         "worktree" => tree.clone(),
         "subdirectory" => tree.join("nested/directory"),
         _ => rig.project.clone(),
     };
-    let settled = rig.run_and_wait(
-        &[
-            "task",
-            "fixture writer shell",
-            "--route",
-            "junior",
-            "--mode",
-            "worktree-write",
-            "--worktree",
-            tree.to_str().ok_or("tree")?,
-        ],
-        "30s",
-    )?;
+    let settled = if branch_mode {
+        rig.run_and_wait(
+            &[
+                "task",
+                "fixture writer shell",
+                "--route",
+                "junior",
+                "--mode",
+                "worktree-write",
+                "--branch",
+                "writer-branch",
+                "--base",
+                "HEAD",
+            ],
+            "30s",
+        )?
+    } else {
+        rig.run_and_wait(
+            &[
+                "task",
+                "fixture writer shell",
+                "--route",
+                "junior",
+                "--mode",
+                "worktree-write",
+                "--worktree",
+                tree.to_str().ok_or("tree")?,
+            ],
+            "30s",
+        )?
+    };
     let response = json!({"data": {"checkpoint": settled.checkpoint.clone()}});
     let node = &response["data"]["checkpoint"]["nodes"][0];
+    if branch_mode {
+        assert!(
+            tree.is_dir(),
+            "branch launch did not keep its new worktree: {response}"
+        );
+        assert_eq!(node["worktree"], ".worktrees/writer-branch");
+        assert_eq!(node["writer_binding"]["worktree"].as_str(), tree.to_str());
+    }
     assert!(
         node["attempts"][0]["attempt_ref"].is_string(),
         "{location}: {response}; {}",
@@ -809,6 +847,10 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
 
 fn writer_cli_launches_from_worktree_root() -> Result {
     writer_cli_launches_from_cwd("worktree")
+}
+
+fn writer_cli_branch_binds_the_new_worktree() -> Result {
+    writer_cli_launches_from_cwd("branch")
 }
 
 fn writer_cli_launches_from_worktree_subdirectory() -> Result {
@@ -4571,6 +4613,10 @@ fn main() -> ExitCode {
             (
                 "writer_cli_launches_from_worktree_root",
                 writer_cli_launches_from_worktree_root,
+            ),
+            (
+                "writer_cli_branch_binds_the_new_worktree",
+                writer_cli_branch_binds_the_new_worktree,
             ),
             (
                 "writer_cli_launches_from_worktree_subdirectory",

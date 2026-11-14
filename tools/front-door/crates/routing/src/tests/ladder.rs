@@ -41,7 +41,6 @@ struct Case {
     native: Vec<HostNativeRoute>,
     exclusions: Vec<ExclusionRule>,
     intent: RouteIntent,
-    wait: Option<u64>,
 }
 impl Case {
     fn new(facts: Vec<ReadinessFact>) -> Self {
@@ -77,7 +76,6 @@ impl Case {
             native: Vec::new(),
             exclusions: Vec::new(),
             intent: RouteIntent::default(),
-            wait: None,
         }
     }
     fn step(&self) -> DepletionStep {
@@ -93,7 +91,6 @@ impl Case {
             intent: self.intent,
             confidential: false,
             now: provenant_core::WallTime::from_unix_seconds(NOW).unwrap(),
-            wait_bound_seconds: self.wait,
         })
     }
     fn handoff(&self) -> Option<(Rung, Target)> {
@@ -418,84 +415,23 @@ fn policy_orders_the_rungs_and_the_adjacent_tiers() {
 }
 
 #[test]
-fn a_wait_bound_replaces_the_hand_off_only_when_set_and_the_reset_is_inside_it() {
-    let spent = |reset: Option<i64>| {
-        vec![
-            fact(
-                SONNET,
-                "a1",
-                Readiness::Depleted {
-                    resets_unix_seconds: reset,
-                },
-            ),
-            ready(SONNET, "a2"),
-        ]
-    };
-    let hand_off = Some((Rung::SameModelOtherAccount, route(SONNET, "a2")));
-    for (reset, bound, cause, expected_wait) in [
-        (Some(NOW + 300), None, DepletionCause::UsageLimited, None),
-        (Some(NOW + 300), Some(0), DepletionCause::UsageLimited, None),
-        (
-            Some(NOW + 300),
-            Some(600),
-            DepletionCause::UsageLimited,
-            Some(NOW + 300),
+fn depleted_routes_do_not_park_a_ready_alternative_until_reset() {
+    let mut case = Case::new(vec![
+        fact(
+            SONNET,
+            "a1",
+            Readiness::Depleted {
+                resets_unix_seconds: Some(NOW + 300),
+            },
         ),
-        (
-            Some(NOW + 300),
-            Some(300),
-            DepletionCause::UsageLimited,
-            Some(NOW + 300),
-        ),
-        (
-            Some(NOW + 300),
-            Some(299),
-            DepletionCause::UsageLimited,
-            None,
-        ),
-        (None, Some(600), DepletionCause::UsageLimited, None),
-        (Some(NOW - 1), Some(600), DepletionCause::UsageLimited, None),
-        (
-            Some(NOW + 300),
-            Some(600),
-            DepletionCause::AuthRequired,
-            None,
-        ),
-        (
-            Some(NOW + 300),
-            Some(600),
-            DepletionCause::ModelUnavailable,
-            None,
-        ),
-    ] {
-        let mut case = Case::new(spent(reset));
-        case.wait = bound;
-        case.cause = cause;
-        match expected_wait {
-            Some(unix_seconds) => {
-                assert_eq!(case.step(), DepletionStep::WaitUntil { unix_seconds })
-            }
-            None => assert_eq!(case.handoff(), hand_off, "{reset:?} {bound:?} {cause:?}"),
-        }
-    }
-    // Inside the bound the wait applies even when nothing else is eligible,
-    // and outside it the answer is still the chair.
-    let mut lone = Case::new(vec![fact(
-        SONNET,
-        "a1",
-        Readiness::Depleted {
-            resets_unix_seconds: Some(NOW + 50),
-        },
-    )]);
-    lone.wait = Some(10);
-    assert_eq!(lone.step(), DepletionStep::Chair);
-    lone.wait = Some(60);
+        ready(SONNET, "a2"),
+    ]);
     assert_eq!(
-        lone.step(),
-        DepletionStep::WaitUntil {
-            unix_seconds: NOW + 50
-        }
+        case.handoff(),
+        Some((Rung::SameModelOtherAccount, route(SONNET, "a2")))
     );
+    case.facts.pop();
+    assert_eq!(case.step(), DepletionStep::Chair);
 }
 
 #[test]
@@ -623,20 +559,4 @@ fn depletion_facts_judge_each_account_with_the_dispatch_checks()
     // No claude account is registered, so that model has no fact: unknown.
     assert!(facts.iter().all(|fact| fact.model != model(SONNET)));
     Ok(())
-}
-
-#[test]
-fn the_wait_knob_is_off_at_zero_and_unset() {
-    let knobs = |value: serde_json::Value| {
-        std::collections::BTreeMap::from([(
-            "routing.depletion_wait_seconds".to_owned(),
-            provenant_config::KnobValue {
-                value,
-                source: provenant_config::KnobSource::Default,
-            },
-        )])
-    };
-    assert_eq!(depletion_wait_bound(&knobs(0.into())), None);
-    assert_eq!(depletion_wait_bound(&knobs(90.into())), Some(90));
-    assert_eq!(depletion_wait_bound(&Default::default()), None);
 }

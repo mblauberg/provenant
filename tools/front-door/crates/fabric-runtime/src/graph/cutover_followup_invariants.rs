@@ -306,7 +306,6 @@ fn depletion_keeps_the_pinned_account_and_refuses_a_higher_tier_candidate() {
         intent: Default::default(),
         confidential: false,
         now: provenant_core::WallTime::from_unix_seconds(100).unwrap(),
-        wait_bound_seconds: None,
     };
     let eligible = |facts: &next_step::DepletionFacts| {
         provenant_routing::next_after_depletion(&provenant_routing::DepletionInput {
@@ -321,7 +320,6 @@ fn depletion_keeps_the_pinned_account_and_refuses_a_higher_tier_candidate() {
             intent: facts.intent,
             confidential: facts.confidential,
             now: facts.now,
-            wait_bound_seconds: facts.wait_bound_seconds,
         })
     };
     let mut no_pin = facts.clone();

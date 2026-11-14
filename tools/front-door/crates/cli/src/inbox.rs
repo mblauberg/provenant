@@ -203,12 +203,12 @@ pub struct Steer {
     #[arg(
         long,
         value_name = "TEXT",
-        required_unless_present = "brief_file",
+        catalog_required_unless = "brief_file",
         conflicts_with = "brief_file"
     )]
     pub brief: Option<String>,
     /// Read the message from a file, or from standard input given `-`
-    #[arg(long, required_unless_present = "brief", conflicts_with = "brief")]
+    #[arg(long, catalog_required_unless = "brief", conflicts_with = "brief")]
     pub brief_file: Option<PathBuf>,
     #[arg(long)]
     pub operation_id: Option<OperationId>,
@@ -598,7 +598,7 @@ fn chosen_peers(
     roots: &provenant_core::Roots,
     hosts: &str,
 ) -> Result<(Vec<(String, provenant_core::HostId)>, u64), Error> {
-    let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+    let config = crate::config_reads::read_for(roots, "inbox")
         .map_err(crate::fabric::EdgeError::from)?
         .domains
         .fabric;

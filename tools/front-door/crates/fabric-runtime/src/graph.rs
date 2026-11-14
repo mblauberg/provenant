@@ -351,6 +351,11 @@ pub trait AttemptOwner {
         LaunchRetryPolicy::default()
     }
 
+    /// Effective host/project policy for graph admission.
+    fn graph_admission_policy(&self) -> provenant_records::policy::Policy {
+        provenant_records::policy::Policy::default()
+    }
+
     /// Restore a writer's sealed deadline, or start its launch allowance before binding.
     fn begin_launch(
         &mut self,
@@ -1317,6 +1322,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     extensions: &[String],
     observed_ci: &mut std::collections::BTreeSet<String>,
 ) -> Result<GraphRun, GraphError<R::Error, J::Error>> {
+    let mut admission_policy = None::<provenant_records::policy::Policy>;
     let unbounded = crate::config::GraphLimits {
         nodes: usize::MAX,
         edges: usize::MAX,
@@ -2531,6 +2537,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 let mut prepared_inputs = None;
                 if needs_record {
                     let cap = limits.node_prompt_bytes;
+                    let policy =
+                        admission_policy.get_or_insert_with(|| owner.graph_admission_policy());
                     match transitions::admit_attempt(
                         node_index,
                         &plan,
@@ -2538,12 +2546,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         &positions,
                         limits,
                         &effective_budget,
+                        policy,
                     ) {
                         transitions::Admission::Ready => {}
-                        transitions::Admission::WriterBusy
-                        | transitions::Admission::SlotWait { changed: false } => break,
-                        transitions::Admission::SlotWait { changed: true }
-                        | transitions::Admission::SaveAndWait => {
+                        transitions::Admission::WriterBusy => break,
+                        transitions::Admission::PolicyRefused { code, detail } => {
+                            transitions::fail_with(&mut checkpoint.nodes[node_index], code, detail);
+                            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                            continue;
+                        }
+                        transitions::Admission::SaveAndWait => {
                             journal.save(&checkpoint).map_err(GraphError::Journal)?;
                             break;
                         }

@@ -958,7 +958,12 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
     })
 }
 
-crate::quota_source!(OpenCode, "opencode");
+crate::quota_source!(
+    OpenCode,
+    "opencode",
+    crate::quota_live::opencode::capture_source,
+    crate::quota::opencode::decode_source
+);
 
 #[cfg(test)]
 mod tests {

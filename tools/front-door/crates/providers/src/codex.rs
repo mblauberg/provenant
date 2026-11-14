@@ -287,7 +287,12 @@ fn prepare(
     Ok(spec)
 }
 
-crate::quota_source!(Codex, "codex");
+crate::quota_source!(
+    Codex,
+    "codex",
+    crate::quota_live::codex::capture_source,
+    crate::quota::codex::decode_source
+);
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 enum Event {

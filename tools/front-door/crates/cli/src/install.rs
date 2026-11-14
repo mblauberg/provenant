@@ -74,9 +74,12 @@ pub fn configured_targets(
     codex_home: Option<&Path>,
 ) -> Result<Targets, InstallError> {
     let mut targets = Targets::new(roots, home, harnesses);
-    // Validate against every registered domain, so sections other commands
-    // write (accounts, routing, quota) never block installation.
-    config::apply_install_config_with_domains(&mut targets, &crate::domains::SECTIONS)?;
+    // Read installation dependencies only; unrelated domain settings remain
+    // advisory and cannot block installation.
+    config::apply_install_config_with_domains(
+        &mut targets,
+        &crate::config_reads::sections_for("knobs")?,
+    )?;
     targets.apply_environment(claude_config_dir, codex_home)?;
     Ok(targets)
 }

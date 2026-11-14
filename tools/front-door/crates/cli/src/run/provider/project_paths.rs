@@ -834,7 +834,7 @@ mod tests {
             state.join("config.toml"),
             "schema_version = 1\n[domains.lanes.projects.example]\nshared_paths = ['.agent-run/locks']\n",
         )?;
-        let config = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?;
+        let config = crate::config_reads::read_for(&roots, "run")?;
         let settings = config
             .domains
             .lanes

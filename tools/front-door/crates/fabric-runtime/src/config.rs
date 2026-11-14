@@ -287,6 +287,7 @@ pub struct GraphLimits {
     pub graph_prompt_bytes: usize,
     pub expansion_depth: usize,
     pub fan_out_width: usize,
+    /// Advisory start threshold; policy decides whether an occupied cap warns or refuses.
     #[serde(
         deserialize_with = "deserialize_concurrency",
         serialize_with = "serialise_concurrency"

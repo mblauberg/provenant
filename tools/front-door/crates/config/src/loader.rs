@@ -162,7 +162,11 @@ pub(crate) fn validate_edit<T: DeserializeOwned + Serialize>(
         .cloned()
         .unwrap_or_default();
     normalise_tables(&mut domains);
-    for entry in sections.entries {
+    for entry in sections
+        .entries
+        .iter()
+        .filter(|entry| sections.reads(entry.name))
+    {
         let Some(user) = domains.get(entry.name).and_then(Item::as_table) else {
             continue;
         };
@@ -337,6 +341,59 @@ fn inspect<T: DeserializeOwned + Serialize>(
     let user_sites = sites(&user, text.unwrap_or(""), &user_origin, "");
     normalise_tables(&mut user);
     let mut issues = Vec::new();
+    let profile = user
+        .get("profile")
+        .and_then(Item::as_str)
+        .and_then(Profile::from_name)
+        .unwrap_or_default();
+    // A consumer cannot be refused by a domain it does not read. Discard its
+    // overrides before merge, validation and origin attribution, rather than
+    // loading every domain and recovering from somebody else's boundary error.
+    if let Some(domains) = user.get_mut("domains").and_then(Item::as_table_mut) {
+        for entry in sections
+            .entries
+            .iter()
+            .filter(|entry| !sections.reads(entry.name))
+        {
+            if let Some(item) = domains.remove(entry.name) {
+                // Inspect an unused override only for an advisory. It never
+                // enters the resolved configuration or boundary validation.
+                let invalid = if let Some(table) = item.as_table() {
+                    let compiled = Origin::Compiled { profile };
+                    let mut candidate = parse((entry.defaults)(profile), &compiled, "")?;
+                    normalise_tables(&mut candidate);
+                    let replace_tables = entry
+                        .replace_tables
+                        .iter()
+                        .map(|path| format!("domains.{}.{path}", entry.name))
+                        .collect();
+                    merge_table(
+                        &mut candidate,
+                        table,
+                        &mut vec!["domains".into(), entry.name.into()],
+                        &replace_tables,
+                    );
+                    !validate_entry(entry, &candidate).is_empty()
+                } else {
+                    true
+                };
+                if !invalid {
+                    continue;
+                }
+                issues.push(Issue {
+                    location: site(
+                        &user_sites,
+                        &format!("domains.{}", entry.name),
+                        &user_origin,
+                        false,
+                    ),
+                    rule: "unused_domain",
+                    source: None,
+                    rejected: String::new(),
+                });
+            }
+        }
+    }
     let mut install_item = user.remove("install");
     let install = recover_settings::<crate::InstallSettings>(
         &mut install_item,
@@ -429,12 +486,6 @@ fn inspect<T: DeserializeOwned + Serialize>(
             _ => {}
         }
     }
-    // Inspect this single scalar without decoding the header or any domain.
-    let profile = user
-        .get("profile")
-        .and_then(Item::as_str)
-        .and_then(Profile::from_name)
-        .unwrap_or_default();
     let mut knob_boundary = user
         .get("profile")
         .and_then(Item::as_str)
@@ -809,7 +860,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
     })
 }
 fn boundary_issue<T>(issue: &Issue, sections: &DomainSections<T>) -> bool {
-    if issue.rule == "unknown_key" && issue.source.is_none() {
+    if matches!(issue.rule, "unknown_key" | "unused_domain") && issue.source.is_none() {
         return false;
     }
     sections.entries.iter().any(|entry| {
@@ -1283,6 +1334,16 @@ fn repair_semantic(
 
 fn issue_finding(issue: &Issue) -> Result<Finding, ConfigError> {
     let key: String = issue.location.key_path.chars().take(256).collect();
+    if issue.rule == "unused_domain" {
+        return Ok(Finding {
+            rule: issue.rule.into(),
+            path: user_path()?,
+            line: issue.location.line,
+            message: format!(
+                "{key}: invalid configuration in an unused domain; run `provenant check config --json` to inspect it"
+            ),
+        });
+    }
     if issue.rule == "unknown_key"
         && let Some(replacement) = crate::removed::config_key_replacement(&key)
     {

@@ -457,7 +457,40 @@ fn review_substitute_prefers_a_new_family_but_can_use_the_same_family() {
 }
 
 #[test]
-fn concurrency_cap_observes_running_attempts_before_admitting_more() {
+fn configured_graph_concurrency_refusal_uses_the_owner_policy() {
+    use provenant_records::policy::{Policy, Source, Strength};
+    let document = graph(vec![node("one", route("first")), node("two", route("first"))]);
+    let limits = crate::config::GraphLimits {
+        concurrency: Some(1),
+        ..Default::default()
+    };
+    let mut policy = Policy::default();
+    policy.overlay(
+        &[("GRAPH_CONCURRENCY_CAP".to_owned(), Strength::Refuse)].into(),
+        Source::Project,
+    );
+    let mut owner = FakeOwner {
+        admission_policy: Some(policy),
+        observations: VecDeque::from([AttemptObservation::Pending { attempt_ref: None }]),
+        ..Default::default()
+    };
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut MemoryJournal::default(),
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(owner.calls.len(), 1);
+    let refused = run.checkpoint.nodes.iter().find(|node| node.id == "two").unwrap();
+    assert_eq!(refused.state, NodeState::Failed);
+    assert_eq!(refused.advance_error_code.as_deref(), Some("concurrency_cap"));
+    assert!(!refused.extra.contains_key("concurrency_warning"));
+}
+
+#[test]
+fn graph_concurrency_cap_warns_and_admits_the_next_node() {
     let document = graph(vec![
         node("one", route("first")),
         node("two", route("first")),
@@ -468,66 +501,31 @@ fn concurrency_cap_observes_running_attempts_before_admitting_more() {
         ..Default::default()
     };
     let mut owner = FakeOwner {
-        observations: VecDeque::from([
-            AttemptObservation::Pending { attempt_ref: None },
-            AttemptObservation::Pending { attempt_ref: None },
-            AttemptObservation::Pending { attempt_ref: None },
-            terminal(AttemptOutcome::Succeeded),
-            AttemptObservation::Pending { attempt_ref: None },
+        observations: VecDeque::from(vec![
+            AttemptObservation::Pending { attempt_ref: None };
+            3
         ]),
         ..Default::default()
     };
-    let mut journal = MemoryJournal::default();
-    let first = advance_with_budget(
+    let run = advance_with_budget(
         &document,
         &mut owner,
-        &mut journal,
+        &mut MemoryJournal::default(),
         &limits,
         &Default::default(),
     )
     .unwrap();
-    assert_eq!(first.status, GraphStatus::Pending);
-    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(run.status, GraphStatus::Pending);
+    assert_eq!(owner.calls.len(), 3);
     assert_eq!(
-        first
-            .checkpoint
-            .nodes
-            .iter()
-            .filter(|n| n.state == NodeState::Running)
-            .count(),
-        2
+        run.checkpoint.nodes.iter().filter(|n| n.state == NodeState::Running).count(),
+        3
     );
-    assert_eq!(
-        first
-            .checkpoint
-            .nodes
-            .iter()
-            .filter(|n| n.state == NodeState::Pending)
-            .count(),
-        1
-    );
-    let first_keys: Vec<_> = owner.calls.iter().map(|call| call.0.clone()).collect();
-    let second = advance_with_budget(
-        &document,
-        &mut owner,
-        &mut journal,
-        &limits,
-        &Default::default(),
-    )
-    .unwrap();
-    assert_eq!(second.status, GraphStatus::Pending);
-    assert_eq!(owner.calls.len(), 5);
-    assert_eq!(owner.calls[2].0, first_keys[0]);
-    assert_eq!(owner.calls[3].0, first_keys[1]);
-    assert_ne!(owner.calls[4].0, first_keys[0]);
-    assert_ne!(owner.calls[4].0, first_keys[1]);
-    assert_eq!(
-        second
-            .checkpoint
-            .nodes
-            .iter()
-            .filter(|n| n.state == NodeState::Running)
-            .count(),
-        2
-    );
+    let warned = run
+        .checkpoint
+        .nodes
+        .iter()
+        .filter(|node| node.extra.contains_key("concurrency_warning"))
+        .count();
+    assert_eq!(warned, 1);
 }

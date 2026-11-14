@@ -1,9 +1,7 @@
 //! The depletion ladder: where work goes when its account or model is spent.
 //!
 //! A stopped attempt that ran out of quota, lost its model or lost its login
-//! hands the work to another agent at once. Waiting for a reset is slower than
-//! a hand-off, so it happens only when the operator set a wait bound and the
-//! reset falls inside it. The ladder is pure: it reads the catalogue, the
+//! hands the work to another agent at once. The ladder is pure: it reads the catalogue, the
 //! configuration and caller-supplied readiness facts, and performs no I/O.
 //!
 //! The rungs are tried in the order the policy lists them. By default:
@@ -237,9 +235,6 @@ pub struct Handoff {
 pub enum DepletionStep {
     /// Give the work to this agent now.
     Handoff(Handoff),
-    /// Wait for the stopped route's reset. Only with a wait bound that
-    /// contains the reset.
-    WaitUntil { unix_seconds: i64 },
     /// No route is eligible: the chair decides.
     Chair,
 }
@@ -262,26 +257,10 @@ pub struct DepletionInput<'a> {
     pub intent: RouteIntent,
     pub confidential: bool,
     pub now: WallTime,
-    /// The `routing.depletion_wait_seconds` knob. `None` or zero is off.
-    pub wait_bound_seconds: Option<u64>,
-}
-
-/// The wait bound from resolved knobs, in seconds: `None` when
-/// `routing.depletion_wait_seconds` is zero, the default.
-pub fn depletion_wait_bound(
-    knobs: &std::collections::BTreeMap<String, provenant_config::KnobValue>,
-) -> Option<u64> {
-    knobs
-        .get("routing.depletion_wait_seconds")
-        .and_then(|knob| knob.value.as_u64())
-        .filter(|seconds| *seconds > 0)
 }
 
 /// Choose where the stopped work goes next.
 pub fn next_after_depletion(input: &DepletionInput<'_>) -> DepletionStep {
-    if let Some(unix_seconds) = wait_target(input) {
-        return DepletionStep::WaitUntil { unix_seconds };
-    }
     input
         .config
         .depletion
@@ -289,26 +268,6 @@ pub fn next_after_depletion(input: &DepletionInput<'_>) -> DepletionStep {
         .iter()
         .find_map(|rung| rung_handoff(input, *rung))
         .map_or(DepletionStep::Chair, DepletionStep::Handoff)
-}
-
-/// The stopped route's reset, when the operator bounded waiting and it falls
-/// inside the bound. Only a spent quota resets.
-fn wait_target(input: &DepletionInput<'_>) -> Option<i64> {
-    let bound = i64::try_from(input.wait_bound_seconds.filter(|bound| *bound > 0)?).ok()?;
-    if input.cause != DepletionCause::UsageLimited {
-        return None;
-    }
-    let now = input.now.unix_seconds();
-    input
-        .facts
-        .iter()
-        .filter(|fact| fact.model == input.stopped.model && fact.account == input.stopped.account)
-        .find_map(|fact| match fact.state {
-            Readiness::Depleted {
-                resets_unix_seconds: Some(reset),
-            } if reset > now && reset - now <= bound => Some(reset),
-            _ => None,
-        })
 }
 
 fn rung_handoff(input: &DepletionInput<'_>, rung: Rung) -> Option<Handoff> {

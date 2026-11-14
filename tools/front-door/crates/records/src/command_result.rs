@@ -80,6 +80,10 @@ pub struct HelpErrorCode {
 pub struct HelpCommand {
     pub command: String,
     pub description: Option<String>,
+    /// Direct public subcommands, including commands omitted from compact help.
+    pub subcommands: Vec<String>,
+    /// Configuration domains consumed by this command.
+    pub config_domains: Vec<String>,
     pub arguments: Vec<HelpArgument>,
     pub groups: Vec<HelpGroup>,
     pub constraints: Vec<String>,
@@ -104,5 +108,7 @@ pub struct HelpArgument {
     pub values: Vec<String>,
     pub conflicts: Vec<String>,
     pub requires: Vec<String>,
+    /// Arguments whose presence makes this argument optional.
+    pub required_unless: Vec<String>,
     pub bounds: Option<(u64, u64)>,
 }

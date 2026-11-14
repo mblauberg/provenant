@@ -21,26 +21,6 @@ const OUTPUT_CAP: usize = 512 * 1024;
 const LANE_PAGE: &str = "100";
 const LISTING_TIME: Duration = Duration::from_secs(3);
 
-/// Outcomes after which a lane no longer runs. `input_required` is included:
-/// the lane stopped and waits for the chair.
-const TERMINAL: [&str; 15] = [
-    "succeeded",
-    "review_required",
-    "failed",
-    "rejected",
-    "timed_out",
-    "rate_limited",
-    "quota_limited",
-    "auth_required",
-    "model_unavailable",
-    "permission_denied",
-    "quarantined",
-    "lost",
-    "uncommitted",
-    "cancelled",
-    "input_required",
-];
-
 pub struct Want {
     pub worktrees: bool,
     /// Unix seconds; lanes settled after this count as new.
@@ -376,10 +356,12 @@ fn parse_lanes(data: &Value, settled_after_unix: Option<i64>) -> (Vec<LaneLine>,
     let rows = data["lanes"].as_array().map_or(&[][..], Vec::as_slice);
     for lane in rows {
         if let Some(after) = settled_after_unix {
-            if !lane["state"]
-                .as_str()
-                .is_some_and(|state| TERMINAL.contains(&state))
-            {
+            if !lane["state"].as_str().is_some_and(|state| {
+                serde_json::from_value::<provenant_records::AttemptOutcome>(Value::String(
+                    state.to_owned(),
+                ))
+                .is_ok()
+            }) {
                 continue;
             }
             let finished = lane["finished_at"]
@@ -806,8 +788,13 @@ esac
             .unwrap()
             .as_second();
         let (lanes, _) = parse_lanes(&data, Some(after));
-        assert_eq!(lanes.len(), 1);
-        assert_eq!(lanes[0].reason.as_deref(), Some("boom"));
+        assert_eq!(lanes.len(), 2);
+        assert!(
+            lanes
+                .iter()
+                .any(|lane| lane.id == "g/new#1" && lane.reason.as_deref() == Some("boom"))
+        );
+        assert!(lanes.iter().any(|lane| lane.id == "g/unsettled#1"));
     }
 
     #[test]

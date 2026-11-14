@@ -329,8 +329,7 @@ pub(crate) fn prepare(
         crate::roots::Workspace::Checkout,
         crate::roots::Product::Optional,
     )?;
-    let config =
-        provenant_config::read_with_domains(&resolved.roots, &provenant_cli::domains::SECTIONS)?;
+    let config = provenant_cli::config_reads::read_for(&resolved.roots, "land policy")?;
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
     let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
     let project = project_id(

@@ -1,10 +1,10 @@
 use provenant_core::{ActorId, AttemptId, DeliveryId, GitOid, ProjectId, WallTime};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{FileDigest, PathWire, Trace};
 
 /// Terminal attempt outcomes published to workflow, telemetry and the CLI.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttemptOutcome {
     Succeeded,

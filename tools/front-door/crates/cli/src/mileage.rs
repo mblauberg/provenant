@@ -156,7 +156,7 @@ fn human_money(value: &Option<mileage::Money>) -> String {
 }
 
 fn inner(command: &Mileage, edge: &Edge<'_>) -> Result<(Value, String), Failure> {
-    let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
+    let config = crate::config_reads::read_for(edge.roots, "telemetry")
         .map_err(|error| (ErrorKind::Io, error.to_string()))?;
     let accounts = &config.domains.accounts.entries;
     let history = crate::quota_history::read(

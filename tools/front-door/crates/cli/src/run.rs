@@ -377,7 +377,7 @@ impl run::Providers for Registry<'_> {
         let Some(roots) = self.roots else {
             return run::WriteGrantLimit::default();
         };
-        match provenant_config::read_with_domains(roots, &crate::domains::SECTIONS) {
+        match crate::config_reads::read_for(roots, "run") {
             Ok(config) => {
                 let origin = if matches!(
                     config.origins.get("domains.run.write_grant_limit_bytes"),
@@ -408,7 +408,7 @@ impl run::Providers for Registry<'_> {
     }
     fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
         let roots = self.roots.ok_or("routing context is unavailable")?;
-        let priority = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+        let priority = crate::config_reads::read_for(roots, "run")
             .map_err(|error| error.to_string())?
             .domains
             .fabric
@@ -834,9 +834,9 @@ impl Registry<'_> {
         (decoded.outcome, decoded.reason) = match outcome.status() {
             OutcomeStatus::Success => (run::Outcome::Succeeded, None),
             _ if auth && outcome.status() != OutcomeStatus::Success => {
-                let config = self.roots.and_then(|roots| {
-                    provenant_config::read_with_domains(roots, &crate::domains::SECTIONS).ok()
-                });
+                let config = self
+                    .roots
+                    .and_then(|roots| crate::config_reads::read_for(roots, "run").ok());
                 let key = route.account_key.as_deref();
                 // Preparation marks a route that launched on a registered lane
                 // token; a rotating login copy carries no mark.
@@ -1000,7 +1000,7 @@ impl Registry<'_> {
                     || std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_none())
                 && let Some(roots) = self.roots
             {
-                match provenant_config::read_with_domains(roots, &crate::domains::SECTIONS) {
+                match crate::config_reads::read_for(roots, "run") {
                     Ok(config) => {
                         let duration = config.domains.routing.capacity_cooldown_seconds;
                         if duration != 0 {

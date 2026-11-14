@@ -342,6 +342,11 @@ impl AdapterSpec {
             })
         })
     }
+    /// Whether `key` names this adapter's declared synthetic free account.
+    pub fn is_free_account(&self, key: &str) -> bool {
+        self.free_account
+            .is_some_and(|(free_account, _)| key == free_account)
+    }
     pub fn account_serves_model(&self, account: &str, model: &str) -> bool {
         self.free_account.is_none_or(|(free_account, prefix)| {
             if account == free_account {
@@ -1198,6 +1203,16 @@ mod free_account_tests {
         assert!(spec.account_serves_model("go", "opencode-go/mimo-v2.6-flash"));
         assert!(!spec.account_serves_model("zen", "opencode-go/mimo-v2.6-flash"));
         assert!(!spec.account_serves_model("go", "other-provider/model"));
+        for adapter in super::ADAPTER_SPECS {
+            match adapter.free_account {
+                Some((key, _)) => assert!(adapter.is_free_account(key), "{}", adapter.name),
+                None => assert!(
+                    !adapter.is_free_account("free-account-fixture"),
+                    "{}",
+                    adapter.name
+                ),
+            }
+        }
     }
 }
 

@@ -14,6 +14,9 @@ impl ArgExt for PublishedBounds {}
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Requirements(pub Vec<String>);
 impl ArgExt for Requirements {}
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RequiredUnless(pub Vec<String>);
+impl ArgExt for RequiredUnless {}
 
 pub(crate) trait CatalogueArg {
     fn catalog_bounds(self, bounds: (u64, u64)) -> Self;
@@ -25,6 +28,7 @@ pub(crate) trait CatalogueArg {
     fn catalog_i64_range(self, range: impl RangeBounds<i64>) -> Self;
     fn catalog_requires(self, id: &'static str) -> Self;
     fn catalog_requires_all(self, ids: impl IntoIterator<Item = &'static str>) -> Self;
+    fn catalog_required_unless(self, id: &'static str) -> Self;
 }
 fn unsigned_bounds(range: &impl RangeBounds<u64>) -> (u64, u64) {
     let min = match range.start_bound() {
@@ -93,6 +97,11 @@ impl CatalogueArg for Arg {
         let ids: Vec<_> = ids.into_iter().collect();
         requirements.0.extend(ids.iter().map(|id| (*id).to_owned()));
         self.requires_all(ids).add(requirements)
+    }
+    fn catalog_required_unless(self, id: &'static str) -> Self {
+        let mut conditions = self.get::<RequiredUnless>().cloned().unwrap_or_default();
+        conditions.0.push(id.to_owned());
+        self.required_unless_present(id).add(conditions)
     }
 }
 

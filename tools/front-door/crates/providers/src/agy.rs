@@ -534,7 +534,12 @@ fn prepare(
         stream,
     })
 }
-crate::quota_source!(Agy, "agy");
+crate::quota_source!(
+    Agy,
+    "agy",
+    crate::quota_live::agy::capture_source,
+    crate::quota::agy::decode_source
+);
 #[derive(Deserialize)]
 #[serde(tag = "event")]
 enum Event {

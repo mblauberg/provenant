@@ -189,11 +189,8 @@ pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
         };
         write_gc_result(&directory, clock.wall_now()?, "running", None)?;
         let collected = (|| -> Result<(), String> {
-            let config = provenant_config::read_with_domains(
-                &resolved.roots,
-                &provenant_cli::domains::SECTIONS,
-            )
-            .map_err(|error| error.to_string())?;
+            let config = provenant_cli::config_reads::read_for(&resolved.roots, "tick")
+                .map_err(|error| error.to_string())?;
             collect_graph_checkpoints(
                 &resolved.roots.state,
                 provenant_config::registered_projects(&resolved.roots)
@@ -405,10 +402,7 @@ pub(crate) fn seed_worker(globals: &Globals) -> u8 {
             &resolved.roots.state.as_path().join("tick"),
             true,
         )?;
-        let config = provenant_config::read_with_domains(
-            &resolved.roots,
-            &provenant_cli::domains::SECTIONS,
-        )?;
+        let config = provenant_cli::config_reads::read_for(&resolved.roots, "tick")?;
         let state = resolved.roots.state.as_path();
         seed_pass(
             &directory,
@@ -537,8 +531,7 @@ fn tick(
         crate::roots::Workspace::Home,
         crate::roots::Product::Required,
     )?;
-    let config =
-        provenant_config::read_with_domains(&resolved.roots, &provenant_cli::domains::SECTIONS)?;
+    let config = provenant_cli::config_reads::read_for(&resolved.roots, "tick")?;
     let clock = SystemClock;
     let now = clock.wall_now()?;
     let graphs =

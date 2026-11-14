@@ -276,12 +276,35 @@ fn nested_with(env: &[(OsString, OsString)], observer: &dyn ProcessObserver) -> 
 /// Take a slot when `gate.command` compiles, run it and return its exit
 /// code. Busy or unavailable slots warn and the build proceeds immediately.
 pub(crate) fn run(gate: Gate<'_>) -> i32 {
+    let env: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+    let nested = nested(&env);
+    run_with(
+        gate,
+        env,
+        nested,
+        |settings| {
+            BuildSlots::open(&settings.state)
+                .and_then(|slots| slots.try_acquire(settings.slots))
+                .map_err(|error| error.to_string())
+        },
+        |program, args, env| {
+            provenant_os::sys::run_wait(program, args, env).map_err(|error| error.to_string())
+        },
+        |message| warn(&message),
+    )
+}
+
+fn run_with(
+    gate: Gate<'_>,
+    mut env: Vec<(OsString, OsString)>,
+    nested: bool,
+    mut acquire: impl FnMut(&Settings) -> Result<Option<provenant_os::build_slots::SlotGuard>, String>,
+    mut execute: impl FnMut(&Path, &[OsString], &[(OsString, OsString)]) -> Result<i32, String>,
+    mut warning: impl FnMut(&str),
+) -> i32 {
     let Some((program, args)) = gate.command.split_first() else {
         return report("no command to run");
     };
-    let mut env: Vec<(OsString, OsString)> = std::env::vars_os().collect();
-    let mut held = None;
-    let nested = nested(&env);
     // A nested cargo (a build script, a test) runs under a parent the policy
     // already let through.
     if !nested && let Some(message) = gate.local.refusal(args) {
@@ -291,22 +314,16 @@ pub(crate) fn run(gate: Gate<'_>) -> i32 {
     if gate_this && let Err(message) = check_disk(&env) {
         return report(&message);
     }
-    if gate_this && gate.settings.is_none() {
-        warn(&"the host's build slot settings are missing or invalid");
-    }
+    let mut held = None;
     if gate_this && let Some(settings) = &gate.settings {
-        match BuildSlots::open(&settings.state) {
-            Ok(slots) => match slots.try_acquire(settings.slots) {
-                Ok(Some(slot)) => held = Some(slot),
-                Ok(None) => {
-                    warn(&"all configured slots are busy; Cargo manages its own build locks")
-                }
-                Err(error) => warn(&error),
-            },
-            Err(error) => warn(&error),
+        match acquire(settings) {
+            Ok(Some(slot)) => held = Some(slot),
+            Ok(None) => warning("all configured slots are busy; Cargo manages its own build locks"),
+            Err(error) => warning(&error),
         }
+    } else if gate_this {
+        warning("the host's build slot settings are missing or invalid");
     }
-
     if held.is_some()
         && let Some((me, _)) = own(&SystemProcessObserver)
     {
@@ -314,7 +331,7 @@ pub(crate) fn run(gate: Gate<'_>) -> i32 {
         env.push((HELD.into(), me.marker().into()));
     }
     // `held` stays open while the child runs; the descriptor is the slot.
-    let code = match provenant_os::sys::run_wait(Path::new(program), args, &env) {
+    let code = match execute(Path::new(program), args, &env) {
         Ok(code) => code,
         Err(error) => report(&format!("cannot start cargo: {error}")),
     };
@@ -435,6 +452,45 @@ mod tests {
     use super::*;
     use provenant_supervisor::census::{ProcessFact, ProcessIdentity};
     use std::collections::HashMap;
+
+    #[test]
+    fn all_busy_build_slots_warn_once_and_still_run_the_child() {
+        let state = tempfile::tempdir().unwrap();
+        BuildSlots::provision(state.path(), 1).unwrap();
+        let slots = BuildSlots::open(state.path()).unwrap();
+        let held = slots.try_acquire(1).unwrap().unwrap();
+        let command = [OsString::from("cargo"), OsString::from("check")];
+        let gate = Gate {
+            settings: Some(Settings {
+                state: state.path().to_owned(),
+                slots: 1,
+            }),
+            local: Local::All,
+            command: &command,
+        };
+        let mut warnings = Vec::new();
+        let mut ran = false;
+        let code = run_with(
+            gate,
+            Vec::new(),
+            false,
+            |settings| {
+                let slots = BuildSlots::open(&settings.state).map_err(|error| error.to_string())?;
+                slots
+                    .try_acquire(settings.slots)
+                    .map_err(|error| error.to_string())
+            },
+            |_, _, _| {
+                ran = true;
+                Ok(0)
+            },
+            |message| warnings.push(message.to_owned()),
+        );
+        assert_eq!(code, 0);
+        assert!(ran);
+        assert_eq!(warnings.len(), 1);
+        drop(held);
+    }
 
     #[test]
     fn compiling_subcommands_are_gated_whatever_their_options() {

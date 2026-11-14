@@ -38,6 +38,7 @@ struct FakeOwner {
     quota_redraw: bool,
     retry_limit: Option<u8>,
     input_cap_source: Option<InputCapSource>,
+    admission_policy: Option<provenant_records::policy::Policy>,
     retry_budgets: Vec<Option<u8>>,
     deliveries: usize,
     delivery_effects: usize,
@@ -126,6 +127,9 @@ fn reply(option: Option<&str>, text: Option<&str>) -> AskReply {
 
 impl AttemptOwner for FakeOwner {
     type Error = NoObservation;
+    fn graph_admission_policy(&self) -> provenant_records::policy::Policy {
+        self.admission_policy.clone().unwrap_or_default()
+    }
     fn detect_repair_growth(&mut self, _: &str, _: &str) -> Result<bool, String> {
         self.repair_growth_calls += 1;
         Ok(self.repair_growth)

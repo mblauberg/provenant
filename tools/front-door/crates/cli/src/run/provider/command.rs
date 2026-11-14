@@ -61,8 +61,7 @@ pub(super) fn prepare_command(
         .map(|entry| entry.adapter)
         .ok_or_else(|| unavailable(format!("{provider} is not registered")))?;
     let roots = registry.roots.ok_or("routing context is unavailable")?;
-    let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-        .map_err(|error| error.to_string())?;
+    let config = crate::config_reads::read_for(roots, "run").map_err(|error| error.to_string())?;
     let command = config.domains.fabric.commands.get(name).ok_or_else(|| {
         unavailable(format!(
             "command {name} is not configured in domains.fabric.commands"

@@ -539,7 +539,6 @@ fn ladder_facts() -> DepletionFacts {
         intent: Default::default(),
         confidential: false,
         now: provenant_core::WallTime::from_micros(1_000_000).unwrap(),
-        wait_bound_seconds: None,
     }
 }
 

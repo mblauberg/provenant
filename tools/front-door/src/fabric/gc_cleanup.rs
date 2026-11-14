@@ -365,7 +365,7 @@ fn collect_owned_worktree_with(
         if replayed.is_some() {
             return Ok(None);
         }
-        let config = provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)?;
+        let config = provenant_cli::config_reads::read_for(roots, "gc")?;
         let settings = config
             .gc
             .projects

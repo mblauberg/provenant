@@ -5,7 +5,91 @@ use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::
 use provenant_confinement::permissions::{
     AuthenticationProfile, NetworkEndpoint, ProviderProfile, ProviderProfileSpec,
 };
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
+use std::{io::Read, path::Path, time::Duration};
+
+const IDENTITY_LIMIT: usize = 1_048_576;
+
+/// One Cursor identity observation shared by registration and quota capture.
+/// The access token is private and intentionally omitted from Debug.
+pub struct CursorIdentity {
+    pub account_key: String,
+    access_token: Option<String>,
+}
+impl CursorIdentity {
+    pub(crate) fn access_token(&self) -> Option<&str> {
+        self.access_token.as_deref()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum CursorIdentityError {
+    #[error("Cursor identity is unavailable")]
+    Unavailable,
+    #[error("Cursor identity is malformed")]
+    Malformed,
+}
+
+pub fn read_identity(directory: &Path) -> Result<CursorIdentity, CursorIdentityError> {
+    if let Some(token) = read_access_token(directory)? {
+        if token.len() > IDENTITY_LIMIT {
+            return Err(CursorIdentityError::Malformed);
+        }
+        let token = token.trim().to_owned();
+        let account_key =
+            crate::identity::cursor_account(&token).ok_or(CursorIdentityError::Malformed)?;
+        return Ok(CursorIdentity {
+            account_key,
+            access_token: Some(token),
+        });
+    }
+
+    let mut bytes = Vec::new();
+    std::fs::File::open(directory.join("cli-config.json"))
+        .map_err(|_| CursorIdentityError::Unavailable)?
+        .take(IDENTITY_LIMIT as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| CursorIdentityError::Unavailable)?;
+    if bytes.len() > IDENTITY_LIMIT {
+        return Err(CursorIdentityError::Malformed);
+    }
+    let config: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|_| CursorIdentityError::Malformed)?;
+    let account_key = config["authInfo"]["authId"]
+        .as_str()
+        .and_then(crate::identity::digest)
+        .map(|key| format!("cursor-{key}"))
+        .ok_or(CursorIdentityError::Malformed)?;
+    Ok(CursorIdentity {
+        account_key,
+        access_token: None,
+    })
+}
+
+fn read_access_token(directory: &Path) -> Result<Option<String>, CursorIdentityError> {
+    let path = directory.join("state.vscdb");
+    if !path
+        .try_exists()
+        .map_err(|_| CursorIdentityError::Unavailable)?
+    {
+        return Ok(None);
+    }
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|_| CursorIdentityError::Unavailable)?;
+    connection
+        .busy_timeout(Duration::from_millis(250))
+        .map_err(|_| CursorIdentityError::Unavailable)?;
+    connection
+        .query_row(
+            "SELECT substr(value,1,1048577) FROM ItemTable WHERE key='cursorAuth/accessToken' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| CursorIdentityError::Unavailable)
+}
+
 pub struct Cursor;
 
 pub const REGISTRATION: crate::Registration = crate::Registration {
@@ -192,7 +276,12 @@ fn prepare(
         stream,
     })
 }
-crate::quota_source!(Cursor, "cursor");
+crate::quota_source!(
+    Cursor,
+    "cursor",
+    crate::quota_live::cursor::capture_source,
+    crate::quota::cursor::decode_source
+);
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 enum Event {
@@ -298,4 +387,62 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
         }
         _ => vec![],
     })
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use rusqlite::params;
+
+    fn seed_token(directory: &Path) -> String {
+        let token = "header.eyJzdWIiOiJjdXJzb3ItdXNlciJ9.signature";
+        let connection = Connection::open(directory.join("state.vscdb")).unwrap();
+        connection
+            .execute("CREATE TABLE ItemTable (key TEXT, value TEXT)", [])
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO ItemTable (key,value) VALUES ('cursorAuth/accessToken',?1)",
+                params![token],
+            )
+            .unwrap();
+        token.to_owned()
+    }
+
+    #[test]
+    fn identity_reader_returns_the_account_key_and_token_from_one_observation() {
+        let directory = tempfile::tempdir().unwrap();
+        let token = seed_token(directory.path());
+        let identity = read_identity(directory.path()).unwrap();
+        assert_eq!(
+            identity.account_key,
+            format!("cursor-{}", crate::identity::digest("cursor-user").unwrap())
+        );
+        assert_eq!(identity.access_token(), Some(token.as_str()));
+    }
+
+    #[test]
+    fn database_failure_is_distinct_from_absent_desktop_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("state.vscdb"), b"unavailable").unwrap();
+        std::fs::write(
+            directory.path().join("cli-config.json"),
+            r#"{"authInfo":{"authId":"cursor-config-user"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            read_identity(directory.path()),
+            Err(CursorIdentityError::Unavailable)
+        ));
+        std::fs::remove_file(directory.path().join("state.vscdb")).unwrap();
+        let identity = read_identity(directory.path()).unwrap();
+        assert_eq!(
+            identity.account_key,
+            format!(
+                "cursor-{}",
+                crate::identity::digest("cursor-config-user").unwrap()
+            )
+        );
+        assert_eq!(identity.access_token(), None);
+    }
 }

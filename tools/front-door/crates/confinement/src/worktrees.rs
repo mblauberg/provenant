@@ -104,6 +104,12 @@ pub fn lock_repository(
 const WRITER_LOCK: &str = "writer.lock";
 const WORKTREE_ROOT: &str = ".worktrees";
 
+/// The validated checkpoint path for a writer created from a branch name.
+pub fn managed_writer_relative_path(branch: &str) -> Result<PathBuf, WorktreeError> {
+    GitRefName::branch(branch).map_err(|_| WorktreeError::InvalidRequest)?;
+    Ok(Path::new(WORKTREE_ROOT).join(branch.replace('/', "-")))
+}
+
 /// Allocation root for a host-registered Git common directory, including a
 /// bare repository. Protect it before any individual checkout is created.
 pub(crate) fn allocation_directory(common: &Path) -> Result<PathBuf, WorktreeError> {

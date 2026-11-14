@@ -128,6 +128,8 @@ The graph runtime admits a template, document or planner fragment only after
 checking schema capability, structural limits, the fully expanded plan, the
 checkpoint envelope and selected outputs. A launch retry without a wall clock
 leaves the prior checkpoint.
+General launch/read waits and writer provisioning have independent, sourced allowances in `domains.fabric.graph.launch_wait_seconds` and `domains.fabric.graph.writer_provision_seconds`; both default to 55 seconds and accept 1..=14400.
+An occupied concurrency threshold warns and proceeds unless its declared policy refuses; writer custody remains a Git boundary.
 - Why: a graph that starts must be able to finish within its bounds.
 - Test: `crates/fabric-runtime/src/graph/graph_launch_retry_tests.rs::launch_retry_without_a_wall_clock_keeps_the_prior_checkpoint`;
   `crates/fabric-runtime/src/graph/plan_tests.rs::plan_validates_host_limits_before_saving`
@@ -219,9 +221,10 @@ Graph landing uses the [landing authority policy](cli.md#landing-adds-no-merge-a
 
 Settled outputs are bounded and passed to dependants as untrusted data. Invalid
 verdict evidence fails a consuming gate; full findings remain retrievable.
+Oversized findings use content-addressed graph text while the checkpoint retains a bounded summary and reference.
 
 - Why: dependants need evidence without copying or trusting transcripts.
-- Test: `crates/fabric-runtime/src/graph/graph_inputs_and_outputs_tests.rs::outputs_feed_direct_dependants_and_survive_replay`; `crates/fabric-runtime/src/graph/graph_review_contract_tests.rs::seven_long_blocking_findings_remain_retrievable_with_the_verdict`; `crates/fabric-runtime/src/graph/graph_delivery_and_routes_tests.rs::matched_required_contract_cannot_override_ambiguous_verdict_evidence`
+- Test: `crates/fabric-runtime/src/graph/graph_inputs_and_outputs_tests.rs::outputs_feed_direct_dependants_and_survive_replay`; `crates/fabric-runtime/src/graph/graph_review_contract_tests.rs::oversized_blocking_findings_remain_retrievable_with_the_verdict`; `crates/fabric-runtime/src/graph/graph_delivery_and_routes_tests.rs::matched_required_contract_cannot_override_ambiguous_verdict_evidence`
 
 ### Checkpoint before launch
 

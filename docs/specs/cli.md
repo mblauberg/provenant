@@ -17,6 +17,7 @@ reported, never resolved by guessing; conflicting manifest settings are refused.
 
 Help and version inspection require no project state. Paths retain their native
 bytes, and invalid or conflicting arguments are rejected.
+The catalogue derives flag relationships and child commands from the parser, and declares each command's configuration domains.
 
 - Why: inspection must be safe outside a checkout and paths must not change in transit.
 - Test: `tests/parser.rs::help_and_version_need_no_roots_and_catalogue_help_drives_every_leaf`; `crates/cli/src/lib.rs::byte_paths_survive_clap_without_text_conversion`
@@ -25,6 +26,7 @@ bytes, and invalid or conflicting arguments are rejected.
 
 Console reads do not allocate product state. Peer observations retain local
 results and identify incomplete coverage rather than presenting it as complete.
+At most eight peer reads run concurrently under one shared deadline, retaining configured host order.
 
 - Why: a partial observation must not hide available work or imply complete coverage.
 - Test: `crates/cli/src/console/peer.rs::peer_board_coverage`; `tests/catalogue_read_only.rs::catalogue_read_only`
@@ -53,6 +55,7 @@ valid indexed rows, and missing usage remains distinct from zero.
 
 A result is whole or refused before output. Paged reads bind the cursor to the
 input, and terminal text escapes control sequences. Unknown facts stay unknown.
+Compact output uses semantic owner summaries and a detail command; JSON preserves the complete envelope.
 
 - Why: consumers must not mistake partial or forged output for a complete result.
 - Test: `crates/cli/src/render.rs::oversize_is_rejected_before_any_stdout_and_lf_counts`; `crates/cli/src/render.rs::terse_quotes_and_escapes_anything_that_could_mislead_a_terminal`
@@ -72,6 +75,7 @@ command catalogue owns the list of codes and their meanings.
 Waiting observes work; timeout or cancellation does not stop it. A target
 settles by its own state, so an older settlement cannot satisfy a wait for new
 work. Settlement events are emitted as they are observed.
+With `--json`, wait emits JSONL events followed by a terminal command-result envelope, including without `--follow`.
 
 - Why: a reader must neither terminate healthy work nor wake on stale evidence.
 - Test: `src/status_wait.rs::a_target_settles_by_its_own_row`; `src/status_wait.rs::any_returns_at_the_first_settlement_and_takes_its_verdict`; `crates/supervisor/tests/custody.rs::cancelled_reader_preserves_healthy_custody_and_cancel_escalates`
@@ -103,6 +107,7 @@ Transfer to a named session is deferred.
 
 Output and steering resolve the same numbered attempt. Output reads are bounded
 and a clamped tail reports its effective bound.
+By default, `output` shows result text whole up to 12 KiB, then marked head and tail; `--full` shows complete text.
 
 - Why: a reader must be able to inspect the intended attempt safely.
 - Test: `crates/cli/src/target.rs::steer_and_output_reach_the_same_numbered_attempt`; `crates/cli/src/run/tests_access.rs::paged_output_never_splits_a_character`
@@ -155,6 +160,7 @@ a builtin publisher while their outcome remains uncertain.
 
 Cleanup after merge preserves moved branches, dirty worktrees and work that is
 not proven merged; incomplete cleanup is reported.
+Approval sources default to Provenant review then forge and are overridable by project and tier; the first usable proof still covers the exact head.
 
 - Why: routine landing must not widen approval or delete unmerged work.
 - Test: `src/pr_land_tests.rs::pr_land_merges_then_fetches_fast_forwards_and_prunes`; `crates/confinement/src/worktrees/lifecycle_tests/worktree_operations.rs::named_removal_refuses_a_head_that_moved_after_the_callers_check`

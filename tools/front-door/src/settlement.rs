@@ -131,7 +131,7 @@ pub(crate) fn post_refusal_notice(
     let Some(chair) = &record.refusal_chair else {
         return Ok(());
     };
-    let config = provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)?;
+    let config = provenant_cli::config_reads::read_for(roots, "fabric context")?;
     let notice = record
         .extra
         .get("refusal_notice")
@@ -301,7 +301,7 @@ fn drain_run_with_prices(
         read_prompts: false,
     };
     let store = provenant_run::RunStore::open(&context, &call)?;
-    let config = provenant_config::read_with_domains(&roots, &provenant_cli::domains::SECTIONS)?;
+    let config = provenant_cli::config_reads::read_for(&roots, "fabric context")?;
     let settings = config.domains.fabric.lanes.settlement;
     store.drain_reactions(subject.attempt, &clock, &cancel, &mut |reaction, save| {
         react(

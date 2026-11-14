@@ -10,6 +10,7 @@ pub enum GraphEventKind {
     NodeState,
     Attempt,
     Wait,
+    Warning,
     Gate,
     Join,
     Cancellation,
@@ -246,16 +247,15 @@ pub(super) fn append_changes(
                 }
             }
         }
-        if old.and_then(|node| node.extra.get("slot_wait")) != node.extra.get("slot_wait") {
+        if old.and_then(|node| node.extra.get("concurrency_warning"))
+            != node.extra.get("concurrency_warning")
+            && node.extra.contains_key("concurrency_warning")
+        {
             events.push(event(
-                GraphEventKind::Wait,
+                GraphEventKind::Warning,
                 &node.id,
-                if node.extra.contains_key("slot_wait") {
-                    "slot"
-                } else {
-                    "slot_acquired"
-                },
-                &node.state,
+                "concurrency_cap",
+                &node.extra["concurrency_warning"],
             )?);
         }
         if super::relay::yields_slot(node) != old.is_some_and(super::relay::yields_slot) {
@@ -499,31 +499,27 @@ mod tests {
     }
 
     #[test]
-    fn trace_explains_failure_and_slot_wait_without_brief_text() {
+    fn trace_explains_failure_and_concurrency_warning_without_brief_text() {
         let temp = tempfile::tempdir().unwrap();
         let directory = Directory::open_anchor(temp.path()).unwrap();
         let before: GraphCheckpoint = serde_json::from_value(serde_json::json!({
             "schema_version":1,"graph_id":"g","plan_digest":"digest",
-            "nodes":[{"id":"build","state":"pending","worktree":null,"attempts":[],"slot_wait":true}]
-        })).unwrap();
+            "nodes":[{"id":"build","state":"pending","worktree":null,"attempts":[]}]
+        }))
+        .unwrap();
         append_changes(&directory, "g", None, &before, None).unwrap();
         let mut after = before.clone();
-        after.nodes[0].extra.remove("slot_wait");
+        after.nodes[0]
+            .extra
+            .insert("concurrency_warning".into(), "cap occupied".into());
         after.nodes[0].state = NodeState::Failed;
         after.nodes[0].advance_error_code = Some("required_input_unavailable".into());
         after.nodes[0].advance_error = Some("private brief or secret text".into());
         append_changes(&directory, "g", Some(&before), &after, None).unwrap();
         let records = read(&directory, "g").unwrap();
-        assert!(
-            records
-                .iter()
-                .any(|event| event.subject == "build" && event.code == "slot")
-        );
-        assert!(
-            records
-                .iter()
-                .any(|event| event.subject == "build" && event.code == "slot_acquired")
-        );
+        assert!(records.iter().any(|event| event.subject == "build"
+            && event.kind == GraphEventKind::Warning
+            && event.code == "concurrency_cap"));
         let failure = records.iter().find(|event| event.code == "failed").unwrap();
         assert_eq!(
             failure.details.as_ref().unwrap()["cause"],

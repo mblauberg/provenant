@@ -953,7 +953,7 @@ pub(super) fn apply_source_commit(
 pub(super) enum Admission {
     Ready,
     WriterBusy,
-    SlotWait { changed: bool },
+    PolicyRefused { code: &'static str, detail: String },
     SaveAndWait,
 }
 
@@ -964,6 +964,7 @@ pub(super) fn admit_attempt(
     positions: &std::collections::BTreeMap<String, usize>,
     limits: &crate::config::GraphLimits,
     effective_budget: &crate::config::GraphBudget,
+    policy: &provenant_records::policy::Policy,
 ) -> Admission {
     let node = &plan.nodes[node_index];
     let cap = limits.node_prompt_bytes;
@@ -980,7 +981,7 @@ pub(super) fn admit_attempt(
     {
         return Admission::WriterBusy;
     }
-    if limits.concurrency.is_some_and(|cap| {
+    let over_concurrency_cap = limits.concurrency.is_some_and(|cap| {
         checkpoint
             .nodes
             .iter()
@@ -996,14 +997,33 @@ pub(super) fn admit_attempt(
             })
             .count()
             >= cap
-    }) {
-        let changed = checkpoint.nodes[node_index]
-            .extra
-            .insert("slot_wait".into(), serde_json::Value::Bool(true))
-            .is_none();
-        return Admission::SlotWait { changed };
+    });
+    checkpoint.nodes[node_index]
+        .extra
+        .remove("concurrency_warning");
+    if over_concurrency_cap {
+        use provenant_records::policy::{Effect, Facts};
+        let effect = policy.check(
+            "GRAPH_CONCURRENCY_CAP",
+            Facts::violation("configured graph concurrency cap is occupied"),
+        );
+        match effect {
+            Effect::Proceed => {}
+            Effect::Warn(message) => {
+                checkpoint.nodes[node_index]
+                    .extra
+                    .insert("concurrency_warning".into(), message.into());
+            }
+            Effect::Refuse(diagnostic) => {
+                return Admission::PolicyRefused {
+                    code: "concurrency_cap",
+                    detail: diagnostic
+                        .detail
+                        .unwrap_or_else(|| "configured graph concurrency cap is occupied".into()),
+                };
+            }
+        }
     }
-    checkpoint.nodes[node_index].extra.remove("slot_wait");
     update_usage_warnings(checkpoint);
     if checkpoint.pause.is_none()
         && let Some(reason) = budget_reason(checkpoint, effective_budget)

@@ -133,8 +133,6 @@ pub struct DepletionFacts {
     pub intent: provenant_routing::RouteIntent,
     pub confidential: bool,
     pub now: provenant_core::WallTime,
-    /// `routing.depletion_wait_seconds`; `None` never parks.
-    pub wait_bound_seconds: Option<u64>,
 }
 
 /// The host's routing facts for one depleted stop: `Ok(None)` when the host
@@ -148,11 +146,9 @@ use provenant_routing as ladder;
 /// The adapter id a host-native graph route names.
 const HOST_NATIVE: &str = "host-native";
 
-/// Where a depleted stop goes: routes to restart on, and the reset to wait
-/// for before the first of them launches.
+/// Where a depleted stop goes: routes to restart on.
 struct Successor {
     routes: Vec<GraphRoute>,
-    wake: Option<provenant_core::WallTime>,
     /// What the ladder chose, when it handed the work off.
     choice: Option<patch::LadderChoice>,
 }
@@ -208,9 +204,8 @@ fn target_route(target: &ladder::Target, effort: Option<String>) -> GraphRoute {
 
 /// The routes that take over from a depleted stop (`usage_limited`,
 /// `model_unavailable`, `auth_required`), from the routing depletion ladder.
-/// A hand-off restarts on the agent it names; a wait restarts on the stopped
-/// route once its quota resets, and only when `routing.depletion_wait_seconds`
-/// allows it; the chair gets no route. Nothing the node already ran is offered
+/// A hand-off restarts on the agent it names; the chair gets no route.
+/// Nothing the node already ran is offered
 /// again. A host without routing facts keeps the node's declared routes.
 fn depletion_successor(
     node: &PlannedNode,
@@ -221,7 +216,6 @@ fn depletion_successor(
     debug_assert!(cause.depleted());
     let declared = || Successor {
         routes: restart_routes(node, progress),
-        wake: None,
         choice: None,
     };
     // The ladder reads readiness only for the adapters the stopped attempt
@@ -308,7 +302,6 @@ fn depletion_successor(
         intent: facts.intent,
         confidential: facts.confidential,
         now: facts.now,
-        wait_bound_seconds: facts.wait_bound_seconds,
     });
     match step {
         ladder::DepletionStep::Handoff(handoff) => {
@@ -358,31 +351,16 @@ fn depletion_successor(
             }
             Successor {
                 routes,
-                wake: None,
                 choice: Some(choice),
             }
         }
-        ladder::DepletionStep::WaitUntil { unix_seconds } if facts.wait_bound_seconds.is_some() => {
-            let stopped = ladder::Target::Route {
-                model: facts.stopped.model.clone(),
-                account: facts.stopped.account.clone(),
-            };
-            Successor {
-                routes: vec![target_route(&stopped, facts.stopped.effort.clone())],
-                wake: unix_seconds
-                    .checked_mul(1_000_000)
-                    .and_then(|micros| provenant_core::WallTime::from_micros(micros).ok()),
-                choice: None,
-            }
-        }
-        ladder::DepletionStep::WaitUntil { .. } | ladder::DepletionStep::Chair => chair(),
+        ladder::DepletionStep::Chair => chair(),
     }
 }
 
 enum Settle {
     Restart {
         routes: Vec<GraphRoute>,
-        wake: Option<provenant_core::WallTime>,
         restart: patch::Restart,
     },
     Pause(String),
@@ -409,7 +387,6 @@ fn decide(
     }
     let pause = |reason: String| declared(progress).then_some(Settle::Pause(reason));
     let step = cause.next_step(&node.on_stop, facts(&node.id, cause, checkpoint));
-    let mut wake = None;
     let mut ladder = None;
     let routes = match step {
         NextStep::Chair => {
@@ -461,7 +438,6 @@ fn decide(
         }
         NextStep::NewRoute if cause.depleted() => {
             let successor = depletion_successor(node, progress, cause, ladder_facts);
-            wake = successor.wake;
             ladder = successor.choice;
             successor.routes
         }
@@ -506,7 +482,6 @@ fn decide(
     };
     Some(Settle::Restart {
         routes,
-        wake,
         restart: patch::Restart {
             node: node.id.clone(),
             cause,
@@ -561,7 +536,7 @@ pub(super) fn settle_stop(
 ) -> Option<(usize, GraphCheckpoint)> {
     let (index, node, settle) = select(plan, checkpoint, limits, ladder_facts)?;
     let mut next = checkpoint.clone();
-    let (routes, wake, restart) = match settle {
+    let (routes, restart) = match settle {
         Settle::Chair => {
             fence_stopped(&mut next.nodes[index]);
             return Some((index, next));
@@ -570,11 +545,7 @@ pub(super) fn settle_stop(
             plans::set_expansion_pause(&mut next, index, reason, false, None);
             return Some((index, next));
         }
-        Settle::Restart {
-            routes,
-            wake,
-            restart,
-        } => (routes, wake, restart),
+        Settle::Restart { routes, restart } => (routes, restart),
     };
     let progress = &checkpoint.nodes[index];
     let brief = restart_brief(node, progress);
@@ -598,22 +569,6 @@ pub(super) fn settle_stop(
         Ok(_) => {
             plans::clear_expansion_pause(&mut next, index, true);
             transitions::retain_automatic_retry_accounting(progress, &mut next.nodes[index]);
-            if let Some(wake) = wake {
-                // Waiting for the stopped route's reset holds the restart's
-                // first launch, as a launch wait does.
-                next.nodes[index].launch_retry = Some(LaunchRetry {
-                    extra: Default::default(),
-                    policy: LaunchRetryPolicy::default(),
-                    failures: 0,
-                    deadline: None,
-                    wake_at: Some(wake),
-                    reason: Some(format!(
-                        "node {} waits for its quota to reset (routing.depletion_wait_seconds)",
-                        node.id
-                    )),
-                });
-                asks::refresh_wake(&mut next);
-            }
             unblock_dependants(plan, &mut next, &node.id);
             Some((index, next))
         }

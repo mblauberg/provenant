@@ -270,11 +270,6 @@ pub(super) fn evaluate<O: AttemptOwner>(
         truncated: observation.truncated,
         elapsed_seconds,
     });
-    if reanchors > 3 {
-        return Ok(Evaluation::Settled(Some(
-            "timeout: clock re-anchor limit (3) exceeded".into(),
-        )));
-    }
     if prior.is_some() && !superseded && elapsed_seconds >= *timeout_seconds {
         return Ok(Evaluation::Settled(Some(if unscheduled {
             format!("timeout: {NOT_SCHEDULED}")

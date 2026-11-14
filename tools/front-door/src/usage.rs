@@ -7,7 +7,7 @@ use provenant_records::{CommandResult, Outcome};
 use provenant_telemetry::usage::{self, EVENT_KINDS};
 
 pub fn attribution_enabled(roots: &Roots) -> bool {
-    provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
+    provenant_cli::config_reads::read_for(roots, "knobs")
         .ok()
         .and_then(|config| config.knobs.get("usage.project_attribution").cloned())
         .and_then(|knob| knob.value.as_bool())
@@ -96,7 +96,7 @@ pub fn ingest_native(
     deadline: Option<std::time::Instant>,
 ) -> Result<provenant_telemetry::ingest::Report, String> {
     use provenant_telemetry::ingest;
-    let config = provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
+    let config = provenant_cli::config_reads::read_for(roots, "telemetry")
         .map_err(|error| error.to_string())?;
     let accounts: Vec<(String, Vec<std::path::PathBuf>)> = config
         .domains

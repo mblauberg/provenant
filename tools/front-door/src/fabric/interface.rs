@@ -369,7 +369,9 @@ fn bind_launch_controls(input: &Value, node: &mut Value, cwd: &Path) -> Result<(
             None => "refs/remotes/origin/HEAD",
         };
         provenant_confinement::repo::GitRevision::new(base).map_err(|_| invalid("base"))?;
-        node["worktree"] = json!(format!(".worktrees/{}", branch.replace('/', "-")));
+        let worktree = provenant_confinement::worktrees::managed_writer_relative_path(branch)
+            .map_err(|_| invalid("branch"))?;
+        node["worktree"] = json!(worktree);
         if node.get("attempt").is_none() {
             node["attempt"] = json!({});
         }
@@ -549,11 +551,8 @@ impl Factory {
         document: Option<&Value>,
         route: Option<&RouteChoice>,
     ) -> Result<BTreeMap<String, Vec<String>>, FacadeError> {
-        let config = provenant_config::read_with_domains(
-            &self.context.roots,
-            &provenant_cli::domains::SECTIONS,
-        )
-        .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        let config = provenant_cli::config_reads::read_for(&self.context.roots, "run")
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         // An unknown tier is refused before panel resolution, so advisory and
         // strict diversity both give this usage error instead of a compile error.
         for name in route
@@ -901,8 +900,21 @@ impl Factory {
     }
 
     fn confine_node(&self, node: &mut Value) -> Result<(), FacadeError> {
+        let worktrees = match crate::graph_support::project_worktrees(&self.cwd) {
+            crate::graph_support::ProjectWorktrees::Registered(paths) => paths,
+            crate::graph_support::ProjectWorktrees::NotRepository => vec![self.cwd.clone()],
+            crate::graph_support::ProjectWorktrees::Unavailable(reason) => {
+                use std::io::Write;
+                let reason = provenant_records::diagnostic::safe_text(&reason);
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: repository worktree inventory unavailable ({reason}); read roots are limited to the current directory"
+                );
+                vec![self.cwd.clone()]
+            }
+        };
         let policy = provenant_fabric_runtime::read_roots::ReadRoots::new(
-            crate::graph_support::project_worktrees(&self.cwd),
+            worktrees,
             &self.context.config.graph.allowed_read_roots,
         );
         crate::graph_support::confine_pattern_roots(node, &policy)
@@ -2901,7 +2913,11 @@ mod tests {
     #[test]
     fn branch_without_base_uses_the_remote_default_branch() -> Result {
         let mut node = json!({"use":"task"});
-        bind_launch_controls(&json!({"branch":"topic"}), &mut node, Path::new("/repo"))?;
+        bind_launch_controls(
+            &json!({"branch":"topic"}),
+            &mut node,
+            Path::new("/repo/src"),
+        )?;
         assert_eq!(
             node["attempt"]["new_worktree"]["base"],
             "refs/remotes/origin/HEAD"
@@ -3467,7 +3483,15 @@ mod tests {
         let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
         assert_eq!(document.nodes.len(), 1);
         let node = &document.nodes[0];
-        assert_eq!(node.worktree.as_deref(), Some(".worktrees/fix-parser"));
+        assert_eq!(
+            node.worktree.as_deref(),
+            Some(
+                rig.project
+                    .join(".worktrees/fix-parser")
+                    .to_str()
+                    .ok_or("path")?
+            )
+        );
         let target = node
             .attempt
             .as_ref()
@@ -3617,6 +3641,25 @@ mod tests {
             cwd,
         )?;
         assert_eq!(node["worktree"], ".worktrees/fix-parser");
+        let mut explicit = json!({"id":"task","use":"task"});
+        bind_launch_controls(
+            &json!({"worktree":".worktrees/fix-parser"}),
+            &mut explicit,
+            Path::new("/fixture/project"),
+        )?;
+        let branch_path =
+            Path::new("/fixture/project").join(node["worktree"].as_str().ok_or("branch path")?);
+        assert_eq!(
+            branch_path.to_str().ok_or("branch path")?,
+            explicit["worktree"].as_str().ok_or("explicit worktree")?
+        );
+        let mut relative = json!({"id":"task","use":"task"});
+        bind_launch_controls(
+            &json!({"worktree":"writer"}),
+            &mut relative,
+            Path::new("/fixture/project/src"),
+        )?;
+        assert_eq!(relative["worktree"], "/fixture/project/src/writer");
         assert_eq!(
             node["attempt"]["new_worktree"],
             json!({"branch":"fix/parser","base":"origin/main"})
