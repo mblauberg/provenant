@@ -83,12 +83,7 @@ impl RootInputs {
         let state = StateRoot::resolve(self, resolver)?;
         let mut credential_roots = CredentialRoots::default();
         for root in self.credential_roots.entries() {
-            let path = resolver
-                .resolve_existing_ancestor(&root.path)
-                .map_err(|source| RootError::Resolution {
-                    path: root.path.clone(),
-                    source,
-                })?;
+            let path = bind_declared(resolver, &root.path)?;
             credential_roots.add(path, root.scope, root.source.clone(), root.kind.clone());
         }
         Ok(Roots {
@@ -193,10 +188,9 @@ impl StateRoot {
         let bound_protected = protected
             .into_iter()
             .map(|root| {
-                Ok(ProtectedRoot {
-                    path: resolve(&root.path)?,
-                    ..root
-                })
+                let path = bind_declared(resolver, &root.path)?;
+                absolute_normal(&path)?;
+                Ok(ProtectedRoot { path, ..root })
             })
             .collect::<Result<Vec<_>, RootError>>()?;
         let bound = resolve(&candidate)?;
@@ -223,6 +217,19 @@ impl AsRef<Path> for StateRoot {
     }
 }
 
+/// Bind a declared protected location. A file where a directory is expected
+/// means nothing can exist below it, so the declared literal stays protected;
+/// every other resolution failure is still an error.
+fn bind_declared(resolver: &impl PathResolver, path: &Path) -> Result<PathBuf, RootError> {
+    match resolver.resolve_existing_ancestor(path) {
+        Ok(bound) => Ok(bound),
+        Err(error) if error.kind() == io::ErrorKind::NotADirectory => Ok(path.to_owned()),
+        Err(source) => Err(RootError::Resolution {
+            path: path.into(),
+            source,
+        }),
+    }
+}
 fn absolute_normal(path: &Path) -> Result<(), RootError> {
     if !path.is_absolute()
         || crate::paths::has_dot_or_nul(path)

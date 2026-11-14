@@ -48,14 +48,7 @@ pub fn resolve_existing_ancestor(path: &Path) -> io::Result<std::path::PathBuf> 
                 }
                 return Ok(bound);
             }
-            // A file where a directory is expected leaves the rest of the
-            // path unreachable, exactly as a missing component does.
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-                ) =>
-            {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let name = existing.file_name().ok_or(error)?;
                 if !matches!(
                     existing.components().next_back(),
