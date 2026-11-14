@@ -442,7 +442,9 @@ fn assert_lane_user_skills(adapter: &str) -> Result<(), Box<dyn std::error::Erro
         std::fs::create_dir_all(opencode_config.parent().unwrap())?;
         std::fs::write(&opencode_config, "{}")?;
     }
-    let target = home.join(".local/share/provenant/v1/releases/digest/skill");
+    let target = home
+        .join(provenant_core::DEFAULT_STATE_SUFFIX)
+        .join("releases/digest/skill");
     std::fs::create_dir_all(&target)?;
     let resource = home.join("shared/reference.md");
     std::fs::create_dir_all(resource.parent().unwrap())?;

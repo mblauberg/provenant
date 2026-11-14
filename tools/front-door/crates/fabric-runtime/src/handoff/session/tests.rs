@@ -36,7 +36,7 @@ fn delivery(dir: &Path, launch: bool) -> Delivery<'static> {
     Delivery {
         dir: operation_dir(dir, &OperationId::parse("handoff-1").unwrap()),
         project: Path::new("/Users/me/Repos/project"),
-        state: Path::new("/Users/me/.local/share/provenant/v1"),
+        state: Path::new("/Users/me/.local/share/provenant/v2"),
         account_label: "work",
         account: PathBuf::from("/Users/me/.claude-work"),
         model: Some("opus"),

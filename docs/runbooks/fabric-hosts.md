@@ -46,7 +46,7 @@ login-required refusal (Codex keeps its credential in a file and is
 unaffected). `provenant install` for the account's own home and the default
 state root therefore writes and starts the LaunchAgent
 `~/Library/LaunchAgents/dev.provenant.peer.plist`, which runs each peer call in
-the login session over `~/.local/share/provenant/v1/peer-agent/peer.sock`. When
+the login session over `~/.local/share/provenant/v2/peer-agent/peer.sock`. When
 the agent is not listening, `fabric peer` handles the call itself.
 
 - Re-running install is idempotent and restarts the agent on the new binary.

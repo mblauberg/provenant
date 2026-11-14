@@ -306,7 +306,9 @@ mod tests {
         std::fs::write(source.join("SKILL.md"), b"local")?;
         std::fs::write(external.join("SKILL.md"), b"external")?;
         std::fs::write(&secret, b"secret-sentinel")?;
-        let installed = home.join(".local/share/provenant/v1/releases/example/skill");
+        let installed = home
+            .join(provenant_core::DEFAULT_STATE_SUFFIX)
+            .join("releases/example/skill");
         std::fs::create_dir_all(&installed)?;
         std::fs::write(installed.join("SKILL.md"), b"installed")?;
         symlink(source.join("SKILL.md"), source.join("internal"))?;
@@ -377,9 +379,11 @@ mod tests {
             .iter()
             .filter(|spec| spec.skills.is_some())
         {
+            let releases = Path::new(provenant_core::DEFAULT_STATE_SUFFIX).join("releases");
             assert!(
                 spec.skill_install_roots
-                    .contains(&".local/share/provenant/v1/releases")
+                    .iter()
+                    .any(|root| Path::new(root) == releases)
             );
         }
     }

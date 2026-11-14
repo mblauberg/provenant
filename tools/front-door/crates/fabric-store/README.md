@@ -34,7 +34,7 @@ their optional closure, with one immutable answer and one outbox record.
 outbox, addressed response message and receipt together. Migration 8 adds these
 tables without changing existing mail or tasks. Schema 16 replaces the
 run-keyed chair table with the immutable `graph_chairs` table keyed by project
-and graph name; earlier stores are refused and require `install --reset-state`.
+and graph name; earlier stores are refused; move one aside to start it fresh.
 The runtime opens it only through `HostStore::open`
 at `<StateRoot>/fabric/host.sqlite3`, with the same safe opening, companion checks
 and migrations, without opening the lane-writable `fabric/locks` directory.

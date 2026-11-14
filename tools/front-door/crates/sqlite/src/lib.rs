@@ -274,7 +274,7 @@ impl std::fmt::Display for VersionError {
         match self {
             Self::Refused { found, expected } => write!(
                 f,
-                "{RESET_CODE}: store schema version {found} is not {expected}; run `install --reset-state` to discard it"
+                "{RESET_CODE}: store schema version {found} is not {expected}; move the store aside to start it fresh"
             ),
             Self::Sqlite(error) => error.fmt(f),
         }

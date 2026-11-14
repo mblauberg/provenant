@@ -22,7 +22,7 @@ test ! -s "$tmp/err"
 # shellcheck disable=SC2016,SC2088
 for citation in '/tmp/plan' '/private/tmp/plan' '/var/folders/xx/plan' \
   '$TMPDIR/plan' '${TMPDIR}/plan' '.agent-run/result.md' \
-  '~/.local/share/provenant/v1/runs/run/result.md' \
+  '~/.local/share/provenant/v2/runs/run/result.md' \
   'state/runs/run/attempts/attempt/result.md' '~/.claude/plans/example.md' \
   '~/.codex/plans/example.md' 'Plan code: amber-river' \
   'Plan ID: amber-river' 'PLAN_CODE=amber-river'; do

@@ -224,7 +224,7 @@ without stepping on each other. See the
 ## Customise
 
 Settings, routes and accounts live in one validated file, `config.toml` in the
-state root (`~/.local/share/provenant/v1` by default), and the CLI edits it.
+state root (`~/.local/share/provenant/v2` by default), and the CLI edits it.
 
 ```sh
 provenant config set profile economy                    # balanced or economy

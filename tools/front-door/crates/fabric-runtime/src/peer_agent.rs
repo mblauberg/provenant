@@ -605,7 +605,7 @@ pub fn owns_default_state(state: &Path, home: &Path) -> bool {
         .ok()
         .flatten()
         .and_then(|account| fs::canonicalize(PathBuf::from(account.home)).ok());
-    account_home.as_deref() == Some(home) && state == home.join(".local/share/provenant/v1")
+    account_home.as_deref() == Some(home) && provenant_core::default_state_home(state) == Some(home)
 }
 
 pub fn install(state: &Path, home: &Path, changed: bool) -> Installed {
@@ -1662,7 +1662,7 @@ mod tests {
         use super::*;
         let plist = render(
             Path::new("/Users/a&b/.local/bin/provenant"),
-            Path::new("/Users/a&b/.local/share/provenant/v1"),
+            Path::new("/Users/a&b/.local/share/provenant/v2"),
             OsStr::new("/opt/homebrew/bin:/usr/bin"),
         )
         .unwrap();
@@ -1701,14 +1701,14 @@ mod tests {
             );
             assert_eq!(
                 value["EnvironmentVariables"]["PROVENANT_STATE_DIR"],
-                "/Users/a&b/.local/share/provenant/v1"
+                "/Users/a&b/.local/share/provenant/v2"
             );
             assert_eq!(value["RunAtLoad"], true);
             assert_eq!(value["KeepAlive"], true);
             assert_eq!(value["AbandonProcessGroup"], true);
             assert_eq!(
                 value["StandardErrorPath"],
-                "/Users/a&b/.local/share/provenant/v1/peer-agent/agent.log"
+                "/Users/a&b/.local/share/provenant/v2/peer-agent/agent.log"
             );
         }
         #[cfg(not(target_os = "macos"))]

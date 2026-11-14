@@ -8,7 +8,35 @@ use thiserror::Error;
 pub const RUN_STATE_DIRECTORY_ENV: &str = "PROVENANT_RUN_STATE_DIR";
 
 pub const STATE_DIRECTORY_ENV: &str = "PROVENANT_STATE_DIR";
-const DEFAULT_STATE_SUFFIX: &str = ".local/share/provenant/v1";
+
+/// The home-relative default state root, as a literal for `concat!`. Every
+/// other spelling of the default root derives from this one.
+#[macro_export]
+macro_rules! default_state_suffix {
+    () => {
+        ".local/share/provenant/v2"
+    };
+}
+/// The home-relative default state root.
+pub const DEFAULT_STATE_SUFFIX: &str = default_state_suffix!();
+/// The 1.x default state root. 2.0 never writes it: install copies owner
+/// configuration out of it once, and no state root may lie inside it.
+pub const LEGACY_V1_STATE_SUFFIX: &str = ".local/share/provenant/v1";
+
+/// The home whose default state root is `state`, when it is one.
+pub fn default_state_home(state: &Path) -> Option<&Path> {
+    home_with_suffix(state, DEFAULT_STATE_SUFFIX)
+}
+/// The home whose 1.x default state root is `state`, when it is one.
+pub fn legacy_state_home(state: &Path) -> Option<&Path> {
+    home_with_suffix(state, LEGACY_V1_STATE_SUFFIX)
+}
+fn home_with_suffix<'a>(state: &'a Path, suffix: &str) -> Option<&'a Path> {
+    let home = state
+        .ancestors()
+        .nth(Path::new(suffix).components().count())?;
+    (state == home.join(suffix)).then_some(home)
+}
 
 /// The sole filesystem seam for root binding. Implementations resolve existing
 /// ancestor aliases and append only normal missing components; they must fail
@@ -78,6 +106,7 @@ impl StateRoot {
             inputs.home.join(".agents"),
             inputs.home.join(".local/state/agent-harness"),
             inputs.home.join(".local/state/provenant"),
+            inputs.home.join(LEGACY_V1_STATE_SUFFIX),
         ];
         protected.extend(inputs.workspaces.iter().map(|p| p.join(".agent-run")));
         protected.extend(inputs.old_roots.iter().cloned());
@@ -157,7 +186,7 @@ mod tests {
         let mut input = inputs();
         assert_eq!(
             input.resolve(&Resolver).unwrap().state.as_path(),
-            Path::new("/fixture/home/.local/share/provenant/v1")
+            Path::new("/fixture/home").join(DEFAULT_STATE_SUFFIX)
         );
         input.environment_state_dir = Some("/fixture/env".into());
         assert_eq!(
@@ -199,6 +228,15 @@ mod tests {
                 matches!(input.resolve(&Resolver), Err(RootError::Protected { .. })),
                 "{forbidden}"
             );
+        }
+        // 2.0 never writes the 1.x root, so no state root may lie inside it.
+        let legacy = Path::new("/fixture/home").join(LEGACY_V1_STATE_SUFFIX);
+        for forbidden in [legacy.clone(), legacy.join("nested")] {
+            input.state_dir = Some(forbidden);
+            assert!(matches!(
+                input.resolve(&Resolver),
+                Err(RootError::Protected { .. })
+            ));
         }
         input.state_dir = Some("/explicit/old-sibling".into());
         assert!(input.resolve(&Resolver).is_ok());

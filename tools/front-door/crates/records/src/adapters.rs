@@ -366,7 +366,10 @@ impl AdapterSpec {
 
 // The installed Provenant release carries the common portfolio used by each
 // provider. Linked skill targets outside these roots remain eligible too.
-const SKILL_INSTALL_ROOTS: &[&str] = &[".local/share/provenant/v1/releases"];
+const SKILL_INSTALL_ROOTS: &[&str] = &[concat!(
+    provenant_core::default_state_suffix!(),
+    "/releases"
+)];
 
 // Keep the rows in Harness order. CLI installation also uses this order.
 adapter_specs! { $;

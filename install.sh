@@ -1,7 +1,6 @@
 #!/bin/sh
 # Bootstrap a verified release. Exit: 2 usage, 3 toolchain consent, 4 download/checksum,
-# 5 build/package, 6 state-format acknowledgement required; other installation
-# failures retain the CLI's exit code.
+# 5 build/package; other installation failures retain the CLI's exit code.
 # Parse the entire download before executing any of it.
 main() {
 set -eu
@@ -18,18 +17,20 @@ ask() {
 }
 
 yes=false
-reset=false
 preflight_only=false
 non_interactive=false
 source_dir=
 tag=
-state=${PROVENANT_STATE_DIR:-"$HOME/.local/share/provenant/v1"}
+# 2.0 runs from a fresh root. The first install copies the 1.x owner
+# configuration out of the 1.x root and never writes that root.
+default_state=$HOME/.local/share/provenant/v2
+legacy_state=$HOME/.local/share/provenant/v1
+state=${PROVENANT_STATE_DIR:-"$default_state"}
 bin_dir=
 upgrade=false
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --yes) yes=true; shift ;;
-        --reset-state) reset=true; shift ;;
         --source)
             source_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
             shift
@@ -42,7 +43,7 @@ while [ "$#" -gt 0 ]; do
         --preflight-only) preflight_only=true; shift ;;
         --non-interactive) non_interactive=true; shift ;;
         --help)
-            printf '%s\n' 'Usage: install.sh [--yes] [--reset-state] [--upgrade] [--source [DIR]] [--tag TAG] [--state-dir DIR] [--bin-dir DIR]'
+            printf '%s\n' 'Usage: install.sh [--yes] [--upgrade] [--source [DIR]] [--tag TAG] [--state-dir DIR] [--bin-dir DIR]'
             exit 0 ;;
         *) die 2 "Unknown option: $1" ;;
     esac
@@ -56,13 +57,22 @@ if [ -z "$source_dir" ]; then
         *) die 4 'only macOS arm64 release packages are published; use --source' ;;
     esac
 fi
+# A 1.x upgrade names the 1.x root; 2.0 installs at its own default instead.
+if [ "$state" = "$legacy_state" ]; then
+    printf '%s\n' "Provenant 2 keeps its state in $default_state; $legacy_state stays in place and its configuration is copied." >&2
+    state=$default_state
+fi
 receipt=$state/install/receipt.json
-if "$upgrade" && [ ! -f "$receipt" ]; then die 2 'No install receipt; run install first'; fi
+# The 1.x receipt counts until the first 2.0 install copies it.
+installed() {
+    [ -f "$receipt" ] || { [ "$state" = "$default_state" ] && [ -f "$legacy_state/install/receipt.json" ]; }
+}
+if "$upgrade" && ! installed; then die 2 'No install receipt; run install first'; fi
 
 if "$preflight_only" && ! "$upgrade"; then die 2 '--preflight-only requires --upgrade'; fi
 
 guided=false
-if ! "$non_interactive" && ! "$yes" && [ ! -f "$receipt" ]; then
+if ! "$non_interactive" && ! "$yes" && ! installed; then
     if { [ -t 1 ] && ( : </dev/tty ) 2>/dev/null; } || [ "${PROVENANT_INSTALL_TTY:-}" = 1 ]; then guided=true; fi
 fi
 umask 077
@@ -263,31 +273,12 @@ fi
 [ -x "$release/bin/provenant" ] || die 4 'Release binary is missing'
 
 if "$upgrade"; then
-    # A format break is never passed by --yes: it needs --reset-state or the
-    # typed word below. The staged binary prints what will be dropped and kept.
-    preflight() {
-        set -- --state-dir "$state" install --source "$release" --upgrade-preflight
-        if "$reset"; then set -- "$@" --reset-state; fi
-        "$release/bin/provenant" "$@" </dev/null
-    }
-    if preflight; then
+    # The staged binary previews every target and checks the release first.
+    if "$release/bin/provenant" --state-dir "$state" install --source "$release" --upgrade-preflight </dev/null; then
         :
     else
         preflight_status=$?
-        [ "$preflight_status" -eq 6 ] || die "$preflight_status" 'Upgrade preflight could not inspect state'
-        if ! "$non_interactive" && ! "$reset" && { { [ -t 0 ] && [ -t 2 ]; } || [ "${PROVENANT_INSTALL_TTY:-}" = 1 ]; }; then
-            ask "Type reset to delete the dropped state listed above" no
-            [ "$answer" = reset ] && reset=true
-        fi
-        if ! "$reset"; then
-            die 6 "Upgrade stopped by preflight for state directory '$state'. Rerun your original install command with --reset-state; see docs/runbooks/install.md, Upgrade section."
-        fi
-        if preflight; then
-            :
-        else
-            preflight_status=$?
-            die "$preflight_status" 'Upgrade preflight failed after acknowledgement'
-        fi
+        die "$preflight_status" 'Upgrade preflight failed; nothing was changed'
     fi
 fi
 if "$preflight_only"; then exit 0; fi
@@ -295,7 +286,6 @@ if "$preflight_only"; then exit 0; fi
 # Existing receipts always use their recorded selection, paths and hooks, and
 # every registered account directory is installed too.
 set -- --state-dir "$state" install --source "$release"
-if "$reset"; then set -- "$@" --reset-state; fi
 if [ -n "$bin_dir" ]; then set -- "$@" --bin-dir "$bin_dir"; fi
 providers=
 register=false

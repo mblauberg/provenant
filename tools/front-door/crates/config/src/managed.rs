@@ -2,7 +2,7 @@
 //! snapshots; every publication rechecks identity and bytes under owner locks.
 use crate::inspection::InspectionEvidence;
 use crate::release::{FILE_LIMIT, Release};
-use provenant_core::{CancelToken, Clock, RelativePath, Roots, WaitBudget};
+use provenant_core::{CancelToken, Clock, RelativePath, Roots, WaitBudget, default_state_home};
 use provenant_os::fs::{
     Directory, FileKind, FsError, LockMode, Metadata, Publication, PublishMode,
 };
@@ -783,9 +783,7 @@ pub fn release_root(state: &Path, digest: provenant_records::SourceDigest) -> Pa
 
 /// The single per-user agent belongs only to an account's default state root.
 pub fn peer_agent_plist(state: &Path) -> Option<PathBuf> {
-    let home = state.ancestors().nth(4)?;
-    (state == home.join(".local/share/provenant/v1"))
-        .then(|| home.join("Library/LaunchAgents/dev.provenant.peer.plist"))
+    default_state_home(state).map(|home| home.join("Library/LaunchAgents/dev.provenant.peer.plist"))
 }
 
 const MACOS_TICK: &str = "Library/LaunchAgents/dev.provenant.tick.plist";
@@ -804,11 +802,6 @@ pub fn user_dir_in(home: &Path, config_home: Option<std::ffi::OsString>) -> Path
         Some(dir) if dir.is_absolute() => dir.join("systemd/user"),
         _ => home.join(".config/systemd/user"),
     }
-}
-
-fn default_state_home(state: &Path) -> Option<&Path> {
-    let home = state.ancestors().nth(4)?;
-    (state == home.join(".local/share/provenant/v1")).then_some(home)
 }
 
 /// The host tick shares the per-user default-state ownership scope.
@@ -1840,13 +1833,15 @@ fn read_receipt_inspected(
 struct Decoded {
     receipt: InstallReceipt,
     moved: Option<PathBuf>,
+    /// The move is the 1.x hand-off, which install reports on its own.
+    handed_off: bool,
     stale: Vec<OwnedEntry>,
     stale_targets: BTreeSet<TargetId>,
 }
 impl Decoded {
     fn findings(&self) -> Result<Vec<InstallFinding>, InstallError> {
         let mut findings = Vec::new();
-        if let Some(old_state) = &self.moved {
+        if let Some(old_state) = self.moved.as_ref().filter(|_| !self.handed_off) {
             findings.push(InstallFinding {
                 rule: "state_root_moved".into(),
                 detail: None,
@@ -1928,6 +1923,13 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
         }
     };
     let moved = (old_state != state_root).then_some(old_state);
+    // The first 2.0 install copies the 1.x receipt into the fresh default root
+    // of the same home on purpose, so the links that receipt owns are replaced.
+    // Any other moved root keeps its old links for manual cleanup.
+    let handed_off = moved
+        .as_deref()
+        .and_then(provenant_core::legacy_state_home)
+        .is_some_and(|old_home| default_state_home(state_root) == Some(old_home));
     let home =
         provenant_os::fs::canonicalize(&targets.home).unwrap_or_else(|_| targets.home.clone());
     let bin_dir = receipt.bin_dir.to_path_buf()?;
@@ -1949,7 +1951,7 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
         before_tail(&bin_dir, Path::new(".local/bin")),
         moved
             .as_deref()
-            .and_then(|root| before_tail(root, Path::new(".local/share/provenant/v1"))),
+            .and_then(|root| before_tail(root, Path::new(provenant_core::DEFAULT_STATE_SUFFIX))),
     ];
     let defaults = Targets::new(targets.roots.clone(), &home, &receipt.harnesses);
     for recorded in &receipt.harness_targets {
@@ -1998,20 +2000,20 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
         }
         let shared = entry.selector == "shared-instruction";
         let permitted = permitted_entry(entry, &receipt, state_root, &targets.shared_instruction)?;
-        if !permitted
-            && !shared
-            && !moved
+        let permitted_moved = !permitted
+            && moved
                 .as_deref()
                 .map(|root| permitted_entry(entry, &receipt, root, &targets.shared_instruction))
                 .transpose()?
-                .unwrap_or(false)
-        {
+                .unwrap_or(false);
+        if !permitted && !shared && !permitted_moved {
             return Err(InstallError::Manifest(
                 "receipt entry outside resolved targets",
             ));
         }
         // A shared path under a former home is stale, never a schema error.
-        if !permitted
+        // An entry the hand-off moved from the 1.x root stays owned.
+        if !(permitted || handed_off && permitted_moved)
             || old_home.is_some_and(|old| path.starts_with(old) && !path.starts_with(&home))
         {
             stale.push(entry.clone());
@@ -2023,6 +2025,7 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
     Ok(Decoded {
         receipt,
         moved,
+        handed_off,
         stale,
         stale_targets,
     })
@@ -2584,6 +2587,7 @@ pub fn uninstall(
     let Decoded {
         mut receipt,
         moved,
+        handed_off: _,
         stale,
         stale_targets: _,
     } = decoded;
