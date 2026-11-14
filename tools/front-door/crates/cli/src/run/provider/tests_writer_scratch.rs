@@ -180,8 +180,11 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         account: None,
         authority_digest: Digest::from_bytes([4; 32]),
         writer: Some(run::WriterRequest {
-            extra: [("custody_project".into(), serde_json::json!(binding.project_id()))]
-                .into(),
+            extra: [(
+                "custody_project".into(),
+                serde_json::json!(binding.project_id()),
+            )]
+            .into(),
             project: project.clone(),
             worktree: project.join(".worktrees/writer"),
         }),
@@ -965,10 +968,14 @@ printf 'agy 1.0.0\n'
             );
         }
         let receipt = &prepared.route.extra["user_skills"];
-        // The linked target is an empty, safe directory: discovery stages
-        // an empty tree without granting its original location.
-        assert_eq!(receipt["exposed"], expected, "{settings}");
-        assert_eq!(receipt["staged_file_count"], 0);
+        // Policy selection is independent of whether the platform stages skills.
+        // Unsandboxed launches use the user's own skill tree without staging it.
+        assert_eq!(receipt["mode"], if expected { "discover" } else { "off" });
+        assert_eq!(
+            receipt["exposed"],
+            expected && confinement.sandboxed,
+            "{settings}"
+        );
         assert!(receipt["warnings"].as_array().unwrap().is_empty());
         if source == "route" {
             assert!(receipt["source"]["route_policy"].is_array());

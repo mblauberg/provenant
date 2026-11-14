@@ -52,7 +52,7 @@ fn fixture_git(rig: &TestRig, args: &[&str]) -> Result<String> {
 
 /// A real PR with local and remote refs for the landing repository adapter.
 fn live_pr_origin(rig: &TestRig) -> Result<String> {
-    fixture_git(rig, &["init", "-q", "--initial-branch=main"])?;
+    fixture_git(rig, &["branch", "-M", "main"])?;
     fixture_git(rig, &["config", "user.name", "Fixture"])?;
     fixture_git(rig, &["config", "user.email", "fixture@example.invalid"])?;
     fixture_git(rig, &["config", "maintenance.auto", "false"])?;

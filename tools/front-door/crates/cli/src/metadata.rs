@@ -64,7 +64,7 @@ impl CatalogueArg for Arg {
     }
     fn catalog_duration(self) -> Self {
         self.value_parser(crate::grammar::duration_seconds)
-            .add(NumericBounds((1, provenant_core::MAX_LANE_RUNTIME_SECONDS)))
+            .catalog_bounds((1, provenant_core::MAX_LANE_RUNTIME_SECONDS))
     }
     fn catalog_observation_wait(self) -> Self {
         self.value_parser(crate::grammar::observation_wait_seconds)

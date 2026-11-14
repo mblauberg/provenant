@@ -939,9 +939,9 @@ fn rerun_in_clean_environment(test: &str) -> Result<bool, Box<dyn std::error::Er
     Ok(true)
 }
 
-/// Prepare one unpinned (or pinned) OpenCode Go launch over two registered
-/// accounts, `spent` being recorded with a full allowance window.
-fn prepare_over_two_accounts(
+/// Prepare one unpinned (or pinned) OpenCode Go launch over three registered
+/// accounts, `spent` carrying advisory local-ledger usage estimates.
+fn prepare_with_partial_account_estimates(
     spent: &[&str],
     pin: Option<&str>,
 ) -> Result<Result<run::PreparedLaunch, PrepareError>, Box<dyn std::error::Error>> {
@@ -960,8 +960,7 @@ fn prepare_over_two_accounts(
     }
     let executor = SystemExecutor::new(1)?;
     let git = init_fixture_repository(&executor, &project, &git_home)?;
-    // `ready` registers first and sorts first. Pacing scores each spent account
-    // 0, so an unpinned lane draws an unspent account before any spent one.
+    // Local-ledger estimates remain advisory, including at the reported limit.
     let mut config = String::from("schema_version=1\n");
     for label in ["ready", "spent-a", "spent-b"] {
         let directory = home.join(format!("opencode-{label}"));
@@ -1099,80 +1098,26 @@ fn prepare_over_two_accounts(
 }
 
 #[test]
-fn an_exhausted_account_stands_by_while_an_unspent_one_remains()
+fn partial_account_estimates_allow_launch_without_swapping_a_pinned_account()
 -> Result<(), Box<dyn std::error::Error>> {
-    if rerun_in_clean_environment("an_exhausted_account_stands_by_while_an_unspent_one_remains")? {
+    if rerun_in_clean_environment(
+        "partial_account_estimates_allow_launch_without_swapping_a_pinned_account",
+    )? {
         return Ok(());
     }
-    let prepared =
-        prepare_over_two_accounts(&["spent-a"], None)?.map_err(|error| format!("{error}"))?;
-    // Pacing scores the spent account 0, so the walk never draws it while an
-    // unprobed account remains. Either unprobed account is a valid pick; the
-    // router breaks the tie between them, so the test does not pin which one.
-    assert!(
-        matches!(
-            prepared.route.account_key.as_deref(),
-            Some("ready" | "spent-b")
-        ),
-        "{:?}",
-        prepared.route.account_key
-    );
-    assert!(
-        !prepared
-            .skipped_routes
-            .iter()
-            .any(|skipped| skipped.detail.contains("account spent-a")),
-        "{:?}",
-        prepared.skipped_routes
-    );
-    Ok(())
-}
-
-#[test]
-fn every_refused_account_is_named_when_the_lane_is_usage_limited()
--> Result<(), Box<dyn std::error::Error>> {
-    if rerun_in_clean_environment("every_refused_account_is_named_when_the_lane_is_usage_limited")?
-    {
-        return Ok(());
-    }
-    let refused = prepare_over_two_accounts(&["ready", "spent-a", "spent-b"], None)?;
-    let Err(PrepareError::Candidates {
-        fallback_outcome,
-        message,
-        ..
-    }) = refused
-    else {
-        return Err("every account is spent, so no launch is prepared".into());
-    };
-    assert_eq!(
-        fallback_outcome,
-        Some(provenant_records::run::PreparationFailure::UsageLimited)
-    );
-    // The message lists each refused account as `accounts skipped: <label>: …`.
-    for label in ["ready", "spent-a", "spent-b"] {
-        assert!(message.contains(&format!("{label}: ")), "{message}");
-    }
-    Ok(())
-}
-
-#[test]
-fn a_pinned_account_is_not_swapped_when_its_allowance_is_refused()
--> Result<(), Box<dyn std::error::Error>> {
-    if rerun_in_clean_environment("a_pinned_account_is_not_swapped_when_its_allowance_is_refused")?
-    {
-        return Ok(());
-    }
-    match prepare_over_two_accounts(&["spent-a"], Some("spent-a"))? {
-        Ok(prepared) => Err(format!(
-            "the pinned account is spent, yet the lane ran on {:?}",
-            prepared.route.account_key
-        )
-        .into()),
-        Err(PrepareError::Candidates { message, .. }) => {
-            assert!(message.contains("allowance is exhausted"), "{message}");
-            assert!(!message.contains("account ready"), "{message}");
-            Ok(())
+    for (at_limit, pin) in [
+        (&["spent-a"][..], None),
+        (&["ready", "spent-a", "spent-b"][..], None),
+        (&["spent-a"][..], Some("spent-a")),
+    ] {
+        let prepared = prepare_with_partial_account_estimates(at_limit, pin)?
+            .map_err(|error| format!("{error}"))?;
+        if let Some(pin) = pin {
+            assert_eq!(prepared.route.account_key.as_deref(), Some(pin));
         }
-        Err(other) => Err(format!("{other}").into()),
+        assert!(prepared.skipped_routes.iter().all(|route| {
+            route.cause != Some(provenant_records::RouteExclusionReason::Exhausted)
+        }));
     }
+    Ok(())
 }

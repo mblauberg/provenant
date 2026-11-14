@@ -1163,12 +1163,10 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
                     .find(|(name, _)| name == key)
                     .map(|(_, value)| value)
             };
-            let expected_home = if sandboxed {
-                Some(std::ffi::OsString::from("/fixture/home"))
-            } else {
-                std::env::var_os("HOME")
-            };
-            assert_eq!(env("HOME"), expected_home.as_ref());
+            assert_eq!(
+                env("HOME"),
+                Some(&std::ffi::OsString::from("/fixture/home"))
+            );
             for (key, expected) in [
                 ("XDG_CONFIG_HOME", "/fixture/state/config"),
                 ("XDG_DATA_HOME", "/fixture/state/data"),
@@ -1598,7 +1596,9 @@ fn every_adapter_finalises_missing_lane_environment() -> Result<(), ProviderErro
             assert_bindings(&spec);
             spec.env.retain(|(key, _)| key != "HOME");
             crate::launch::finalise_provider_env(&input, &mut spec);
-            let homes: Vec<_> = spec.env.iter()
+            let homes: Vec<_> = spec
+                .env
+                .iter()
                 .filter(|(key, _)| key == "HOME")
                 .map(|(_, value)| value.as_os_str())
                 .collect();
