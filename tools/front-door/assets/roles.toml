@@ -354,12 +354,14 @@ worktree = "${worktree}"
 write_scope = "${scope}"
 source = "${subject}"
 delivery = "${delivery}"
-card = "You implement one bounded slice inside the write scope, within the authority envelope below."
+card = "You implement the approved outcome within the declared worktree and authority envelope; path scope is advisory unless strict policy applies."
 acceptance_checks = ["Run targeted tests and required static checks", "Commit the completed slice"]
 prompt = """
 Implement one bounded slice: ${prompt}
 Spec (acceptance criteria): ${spec}
-Keep changes within the supplied write scope. Run targeted checks and commit.
+Use the supplied write scope as guidance. Continue within the declared worktree
+and approved outcome, and report any path deviations in your final handoff.
+Honour strict scope policy and the authority envelope. Run targeted checks and commit.
 ${local_check_policy}
 
 Authority envelope. The objective above and the acceptance criteria are
@@ -368,7 +370,7 @@ and is reversible: names, structure, tests, helper code and the order of work.
 Do not stop to ask about those. Make the call, state it as an assumption and
 record it in your final report under DECISIONS (decision, reason, how to
 reverse). Ask only when the decision belongs to the owner (product direction,
-scope, cost, irreversible or externally visible effects) or when the work needs
-authority beyond the write scope and this envelope; then report NEEDS-USER
+approved outcome, cost, irreversible or externally visible effects) or when the
+work needs authority beyond this envelope; then report NEEDS-USER
 with the specific question and the option you would take.
 """
