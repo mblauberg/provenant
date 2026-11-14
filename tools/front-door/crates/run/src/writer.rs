@@ -626,11 +626,7 @@ fn in_progress_note(operation: &str) -> &'static str {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct ImportFence {
-    schema_version: u64,
-    scope: provenant_supervisor::custody::Scope,
-}
+use provenant_supervisor::custody::ImportFence;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2278,16 +2274,11 @@ impl crate::RunStore {
             .parent()
             .ok_or(RunError::Validation("writer evidence missing"))?;
         let evidence = Directory::open_anchor(parent)?;
-        let Some(raw) =
-            crate::artifacts::read_sealed(&evidence, "import-retained.json", crate::RECORD_LIMIT)?
-        else {
-            return Ok(false);
-        };
-        let marker: ImportFence = crate::db::decode(&raw)?;
-        if marker.schema_version != 1 || marker.scope != scope {
-            return Err(RunError::Conflict);
-        }
-        Ok(true)
+        Ok(matches!(
+            provenant_supervisor::custody::retained_import_decision(&evidence, scope)
+                .map_err(error("classify retained import", None))?,
+            Some(provenant_supervisor::custody::CustodyDecision::Pending(_))
+        ))
     }
 
     pub(crate) fn retain_import_fence(&self, record: &crate::AttemptRecord) -> Result<()> {
@@ -2307,6 +2298,8 @@ impl crate::RunStore {
             &crate::db::bytes(&ImportFence {
                 schema_version: 1,
                 scope: Self::scope(record),
+                lane: record.key.clone(),
+                run_attempt: self.attempt_dir(record.attempt_id, false)?.current_path()?,
             })?,
             crate::RECORD_LIMIT,
         )
@@ -2336,37 +2329,8 @@ impl crate::RunStore {
         let mut retained_scope = None;
         let checked = (|| -> Result<()> {
             call.check()?;
-            let listing = provenant_supervisor::custody::list_writer_reservations_in_slot(&slot)
-                .map_err(error("list predecessor writer reservations", None))?;
-            if !listing.issues.is_empty() {
-                return Err(RunError::Validation(
-                    "predecessor writer fence is unreadable",
-                ));
-            }
-            let slot_path = slot.current_path()?;
-            for mut fence in listing.reservations {
-                if fence.scope == scope {
-                    continue;
-                }
-                fence.reservation = slot_path.join(fence.reservation);
-                let parent = fence
-                    .reservation
-                    .parent()
-                    .ok_or(RunError::Validation("writer fence evidence missing"))?;
-                let evidence = Directory::open_anchor(parent)?;
-                if let Some(raw) = crate::artifacts::read_sealed(
-                    &evidence,
-                    "import-retained.json",
-                    crate::RECORD_LIMIT,
-                )? {
-                    let retained: ImportFence = crate::db::decode(&raw)?;
-                    if retained.schema_version != 1 || retained.scope != fence.scope {
-                        return Err(RunError::Conflict);
-                    }
-                    retained_scope = Some(fence.scope);
-                    return Ok(());
-                }
-            }
+            retained_scope = provenant_supervisor::custody::pending_import(&slot)
+                .map_err(error("classify predecessor writer custody", None))?;
             Ok(())
         })();
         if let Err(error) = checked {
@@ -2383,9 +2347,8 @@ impl crate::RunStore {
             ));
         }
         if let Some(retained) = retained_scope {
-            let admission = provenant_supervisor::custody::CustodyError::ImportRetained {
-                attempt: retained.attempt,
-            };
+            let admission =
+                provenant_supervisor::custody::CustodyError::ImportRetained { fence: retained };
             lease
                 .withdraw_unlaunched()
                 .map_err(|release| WriterCustodyError::Withdrawal {
@@ -3127,6 +3090,8 @@ mod custody_admission_tests {
             &crate::db::bytes(&ImportFence {
                 schema_version: 1,
                 scope: predecessor,
+                lane: provenant_records::WorkKey::new(source_project, "retained", "writer", 1)?,
+                run_attempt: temp.path().join("retained-run"),
             })?,
             crate::RECORD_LIMIT,
         )?;
@@ -3166,7 +3131,7 @@ mod custody_admission_tests {
             &call,
         );
         assert!(
-            matches!(refused, Err(WriterCustodyError::Admission(custody::CustodyError::ImportRetained {attempt})) if attempt == predecessor.attempt)
+            matches!(refused, Err(WriterCustodyError::Admission(custody::CustodyError::ImportRetained {fence})) if fence.scope == predecessor)
         );
         assert!(custody::reservation_present(
             &Directory::open_anchor(&slot)?,

@@ -712,10 +712,26 @@ impl RunStore {
         } else {
             directory
         };
-        Ok(matches!(
-            provenant_supervisor::custody::reservation_present(&slot, Self::scope(record)),
-            Ok(false)
-        ))
+        let scope = Self::scope(record);
+        match provenant_supervisor::custody::reservation_present(&slot, scope) {
+            Ok(false) => Ok(true),
+            Ok(true) => {
+                // WorkKey restart resolves this retained attempt first. It uses
+                // the same scoped decision as worktree admission and observation.
+                let decision = provenant_supervisor::custody::attempt_evidence(&slot, scope)
+                    .ok()
+                    .and_then(|evidence| {
+                        provenant_supervisor::custody::retained_import_decision(&evidence, scope)
+                            .ok()
+                            .flatten()
+                    });
+                Ok(matches!(
+                    decision,
+                    Some(provenant_supervisor::custody::CustodyDecision::Settled(_))
+                ))
+            }
+            Err(_) => Ok(false),
+        }
     }
     fn record_row(
         &self,

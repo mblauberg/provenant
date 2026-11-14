@@ -5965,8 +5965,8 @@ mod writer_recovery_tests {
                 assert!(matches!(
                     refusal,
                     crate::writer::WriterCustodyError::Admission(
-                        custody::CustodyError::ImportRetained { attempt }
-                    ) if attempt == scope.attempt
+                        custody::CustodyError::ImportRetained { fence }
+                    ) if fence.scope == scope
                 ));
                 let found = store.reconcile_with_observer(
                     run.attempt_id,

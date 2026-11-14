@@ -433,10 +433,10 @@ pub enum RunError {
     WorktreeMissing(std::path::PathBuf),
     #[error("worktree {0} is not listed by Git; run `git worktree list --porcelain`")]
     WorktreeUnregistered(std::path::PathBuf),
-    #[error("writer import retained for worktree {}, attempt {attempt}", worktree.display())]
+    #[error("writer import retained for worktree {}, lane {} (attempt {}), fence {}; run `{}` or `{}`", worktree.display(), fence.lane, fence.scope.attempt, fence.fence.display(), fence.reconcile(), fence.abandon())]
     RetainedWriterImport {
         worktree: std::path::PathBuf,
-        attempt: provenant_core::AttemptId,
+        fence: provenant_supervisor::custody::PendingImport,
     },
     #[error(transparent)]
     Plan(#[from] provenant_confinement::PlanError),
@@ -782,16 +782,29 @@ impl RunError {
                         .fact(DiagnosticFact::Resource(fact));
                 }
             }
-            Self::RetainedWriterImport { attempt, worktree } => {
+            Self::RetainedWriterImport { fence, worktree } => {
+                let path = safe_path(&fence.fence, destination);
+                diagnostic.extra.insert(
+                    "custody".into(),
+                    serde_json::json!({
+                        "scope": fence.scope,
+                        "fence": path,
+                        "lane": fence.lane,
+                        "reconcile": fence.reconcile(),
+                        "abandon": fence.abandon(),
+                    }),
+                );
                 diagnostic = diagnostic
-                    .detail(match safe_path(worktree, destination) {
-                        Some(path) => {
-                            format!("worktree {path}; retained attempt {attempt}")
-                        }
-                        None => format!("retained attempt {attempt}"),
-                    })
+                    .detail(format!(
+                        "lane {}; retained attempt {}; fence {}; worktree {}",
+                        fence.lane,
+                        fence.scope.attempt,
+                        path.as_deref().unwrap_or("[redacted]"),
+                        safe_path(worktree, destination).as_deref().unwrap_or("[redacted]")
+                    ))
                     .next(format!(
-                        "to release the fence and recover the preserved private Git manually, find attempt {attempt}'s NAME/NODE#N with `provenant status`, then run `provenant reconcile --abandon NAME/NODE#N --reason 'recover retained work manually'`; this stops automatic import"
+                        "run `{}` to resume import, or `{}` to release custody and recover the preserved private Git manually",
+                        fence.reconcile(), fence.abandon()
                     ));
             }
             _ => {}

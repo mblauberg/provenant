@@ -751,7 +751,7 @@ enum HandOff {
     /// No guardian was contacted, but custody remains protected.
     Protected(String),
     RetainedImport {
-        attempt: AttemptId,
+        fence: provenant_supervisor::custody::PendingImport,
         worktree: std::path::PathBuf,
     },
     /// The guardian may have received the launch.
@@ -796,7 +796,7 @@ pub enum RefusalKind {
     HandoffBoundary(provenant_records::diagnostic::BoundaryClass),
     HandoffResource(provenant_records::diagnostic::ResourceFact),
     RetainedImport {
-        attempt: AttemptId,
+        fence: provenant_supervisor::custody::PendingImport,
         worktree: std::path::PathBuf,
     },
 }
@@ -1392,13 +1392,13 @@ impl RunStore {
                                 format!("launch preparation failed: {message}"),
                                 RefusalKind::HandoffResource(fact),
                             ),
-                            HandOff::RetainedImport { attempt, worktree } => (
+                            HandOff::RetainedImport { fence, worktree } => (
                                 RunError::RetainedWriterImport {
-                                    attempt,
+                                    fence: fence.clone(),
                                     worktree: worktree.clone(),
                                 }
                                 .to_string(),
-                                RefusalKind::RetainedImport { attempt, worktree },
+                                RefusalKind::RetainedImport { fence, worktree },
                             ),
                             _ => unreachable!(),
                         };

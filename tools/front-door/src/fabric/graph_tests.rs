@@ -640,7 +640,14 @@ mod graph_writer_admission_tests {
         for kind in [
             provenant_run::RefusalKind::Policy,
             provenant_run::RefusalKind::PacingReserve,
-            provenant_run::RefusalKind::RetainedImport { attempt, worktree:rig.project.clone() },
+            provenant_run::RefusalKind::RetainedImport {
+                fence: provenant_supervisor::custody::PendingImport {
+                    scope: provenant_supervisor::custody::Scope { attempt, generation: lanes[0].generation },
+                    fence: rig.project.join("reservation.json"),
+                    lane: lanes[0].key.clone(),
+                },
+                worktree: rig.project.clone(),
+            },
         ] {
             let started = [provenant_run::Started::Refused { attempt, reason:"HOST_DISK_ERROR_SENTINEL".into(), kind }];
             let lane = sealed(provenant_records::run::TerminalCause::DiskFloor)?;
