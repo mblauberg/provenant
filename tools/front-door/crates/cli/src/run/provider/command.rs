@@ -440,8 +440,8 @@ pub(super) fn configure_build_slots(
         let slots = settings.build_limit(total);
         match provenant_os::build_slots::BuildSlots::provision(state, slots) {
             Ok(()) => {
-                let disk_floor = provenant_config::GcSettings::read(state)
-                    .and_then(|gc| gc.free_floor_bytes(state))
+                let disk_limits = provenant_config::GcSettings::read(state)
+                    .and_then(|gc| gc.disk_limits(state))
                     .ok();
                 if let Err(error) = spec.configure_build_slots(
                     scratch,
@@ -449,7 +449,7 @@ pub(super) fn configure_build_slots(
                         provenant: runtime,
                         state,
                         slots,
-                        disk_floor,
+                        disk_limits,
                         cargo: &cargo,
                         local_cargo: local_cargo(knobs),
                     },

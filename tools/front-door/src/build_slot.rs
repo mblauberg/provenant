@@ -346,43 +346,28 @@ fn check_disk(env: &[(OsString, OsString)]) -> Result<(), String> {
             .find(|(key, _)| key == OsStr::new(name))
             .and_then(|(_, value)| value.to_str())
     };
-    let (Some(floor), Some(rule)) = (
-        value("PROVENANT_BUILD_DISK_FLOOR"),
-        value("PROVENANT_BUILD_DISK_RULE"),
-    ) else {
+    let Some(limits) = value("PROVENANT_BUILD_DISK_LIMITS") else {
         return Ok(());
     };
     let observed = (|| {
-        let floor = floor.parse::<u64>().map_err(|error| error.to_string())?;
-        let rule: provenant_records::policy::EffectiveRule =
-            serde_json::from_str(rule).map_err(|error| error.to_string())?;
-        if rule.rule.code != "BUILD_DISK" {
-            return Err(format!("unexpected disk rule {}", rule.rule.code));
-        }
+        let limits: provenant_config::DiskLimits =
+            serde_json::from_str(limits).map_err(|error| error.to_string())?;
         let target = value("CARGO_TARGET_DIR").map_or_else(|| Path::new("."), Path::new);
         let mut root = target;
         while !root.exists() {
             root = root.parent().unwrap_or(Path::new("."));
         }
         let free = provenant_os::fs::available_bytes_at(root).map_err(|error| error.to_string())?;
-        let facts = provenant_records::policy::Facts {
-            violated: free < floor,
-            detail: format!("free={free} bytes, gc.free_floor={floor} bytes"),
-        };
-        let effect =
-            provenant_records::policy::Policy { rules: vec![rule] }.check("BUILD_DISK", facts);
-        Ok::<_, String>(effect)
+        Ok::<_, String>((limits.level(free), limits.detail(free)))
     })();
-    use provenant_records::policy::Effect;
+    use provenant_config::DiskLevel;
     match observed {
-        Ok(Effect::Refuse(diagnostic)) => Err(diagnostic
-            .detail
-            .unwrap_or_else(|| "BUILD_DISK refused a new build".into())),
-        Ok(Effect::Warn(message)) => {
-            say(&format!("{message}; building"));
+        Ok((DiskLevel::Critical, detail)) => Err(detail),
+        Ok((DiskLevel::Warning, detail)) => {
+            say(&format!("warning: {detail}; building"));
             Ok(())
         }
-        Ok(_) => Ok(()),
+        Ok((DiskLevel::Ready, _)) => Ok(()),
         Err(error) => {
             say(&format!(
                 "disk policy observation failed: {error}; building"

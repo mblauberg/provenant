@@ -45,3 +45,17 @@ deletion authority: GC revalidates its own conditions.
 
 Collection belongs to [worktrees](supervisor.md#worktrees) and
 [state retention](state.md#retention-keeps-evidence).
+
+## Dispatch and new-build pressure
+
+Dispatch and new builds share `GcSettings::disk_limits` and `DiskLimits::level`.
+Below `gc.free_floor`, warn and proceed. Only below `gc.critical_free` (default
+2 GiB; `0B` disables it) refuse new work. Diagnostics report available bytes,
+both thresholds and their configuration or shipped-default sources. Running
+builds continue. Advisory policy strengths cannot turn the free floor into a
+refusal or bypass the separate critical threshold.
+- Why: a collection target must not prevent ordinary lane work; critical
+  exhaustion can compromise output integrity.
+- Test: `crates/config/src/gc.rs::disk_limit_tests::disk_levels_follow_the_declared_thresholds_and_keep_their_sources`;
+  `crates/run/src/dispatch_disk_admission_tests.rs::admission_uses_only_the_critical_threshold_for_refusal`;
+  `tests/build_slot.rs::disk_policy_applies_before_starting_a_new_build`

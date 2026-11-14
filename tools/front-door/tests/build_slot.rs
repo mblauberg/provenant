@@ -319,21 +319,26 @@ fn busy_slot_never_blocks_a_build() -> Result {
 
 #[test]
 fn disk_policy_applies_before_starting_a_new_build() -> Result {
-    use provenant_records::policy::{Policy, Source, Strength};
-    for strength in [Strength::Warn, Strength::Refuse, Strength::Off] {
+    use provenant_records::diagnostic::SettingSource;
+    for (critical, starts) in [(0, true), (u64::MAX, false)] {
         let rig = Rig::new()?;
         rig.provision(1)?;
-        let mut rule = Policy::default().rule("BUILD_DISK").clone();
-        rule.rule.strength = strength;
-        rule.source = Source::Host;
+        let limits = provenant_config::DiskLimits {
+            free_floor: u64::MAX,
+            free_floor_source: SettingSource::Configuration,
+            critical_free: critical,
+            critical_free_source: SettingSource::Configuration,
+        };
         let mut child = rig
             .command(1, &["build"])
-            .env("PROVENANT_BUILD_DISK_FLOOR", u64::MAX.to_string())
-            .env("PROVENANT_BUILD_DISK_RULE", serde_json::to_string(&rule)?)
+            .env(
+                "PROVENANT_BUILD_DISK_LIMITS",
+                serde_json::to_string(&limits)?,
+            )
             .spawn()?;
         let completed = finish(&mut child, Duration::from_secs(10))?;
-        assert_eq!(completed, strength != Strength::Refuse);
-        assert_eq!(rig.started("start"), strength != Strength::Refuse);
+        assert_eq!(completed, starts);
+        assert_eq!(rig.started("start"), starts);
     }
     Ok(())
 }

@@ -19,8 +19,10 @@ uncertain.
 - Why: an unobserved provider may still be writing.
 - Test: none (gap)
 
-Success requires an observed successful exit, matching provider identity and a
-validated non-empty result. Capture bytes alone are not completion evidence. A
+Success normally requires an observed successful exit, matching provider identity and a
+validated non-empty result. A valid complete handoff before a host token-budget
+stop also succeeds when no unfinished-work signal remains; it retains the typed
+host stop and its handoff, and releases graph dependants. Capture bytes alone are not completion evidence. A
 complete read-only answer can succeed without a handoff; a writer with
 non-exempt uncommitted work does not deliver it.
 - Why: a crash, truncation or wrong identity must not read as success.
@@ -35,8 +37,9 @@ remains visible for delivery or review.
 
 One settlement classification derives the terminal outcome, sealed stop and graph outcome from terminal evidence, reason and handoff.
 A missing required writer handoff seals `handoff_missing` and goes to the chair; graph dependants cannot treat it as success.
-- Why: all readers need the same cause for the next decision.
-- Test: `crates/records/src/format2_tests.rs::each_record_round_trips_and_keeps_an_unknown_field`
+- Why: all readers need the same cause for the next decision; host stops must
+  preserve valid handoffs and never count as negative provider-quality evidence.
+- Test: `crates/records/src/format2_tests.rs::one_terminal_classification_binds_reason_stop_source_and_graph_result`; `crates/records/src/format2_tests.rs::host_stops_preserve_complete_handoffs_and_completed_budgets_succeed`
 
 ## Continuation
 

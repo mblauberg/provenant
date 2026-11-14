@@ -615,7 +615,8 @@ impl RunStore {
             .disk(attempt)
             .inspect_err(|error| eprintln!("admission: disk probe failed: {}", probe_error(error)))
             .ok();
-        let floor = disk_floor(&self.writer_registry)
+        let limits = provenant_config::GcSettings::read(&self.writer_registry)
+            .and_then(|settings| settings.disk_limits(&self.writer_registry))
             .inspect_err(|error| {
                 eprintln!("admission: disk floor unavailable: {error}; proceeding")
             })
@@ -640,35 +641,24 @@ impl RunStore {
             clock,
         )
         .filter(|left| *left > 0);
-        let low_disk = disk.zip(floor).filter(|(free, (floor, _))| free < floor);
-        if ticket.lane_class == LaneClass::ReadOnly
-            && let Some((free, (floor, origin))) = low_disk
-            && let Some(warning) = read_only_disk_warning(&mut false, free, floor, origin)
-        {
-            eprintln!(
-                "admission warning [{}]: {}; next: {}",
-                warning.code,
-                warning
-                    .detail
-                    .as_deref()
-                    .unwrap_or("free disk space is low"),
-                warning.next.as_deref().unwrap_or("free disk space")
-            );
-        }
-        let writer_disk = low_disk.filter(|_| ticket.lane_class == LaneClass::Writer);
-        let observed = |error: RunError| (error.to_string(), error);
-        // Each observation names its typed refusal; the policy decides its effect.
-        let observations: [(&str, Option<(String, RunError)>); 4] = [
-            (
-                "ADMISSION_DISK",
-                writer_disk.map(|(free, (floor, origin))| {
-                    observed(RunError::Admission(AdmissionError::Disk {
+        if let Some((free, limits)) = disk.zip(limits) {
+            match limits.level(free) {
+                provenant_config::DiskLevel::Critical => {
+                    eprintln!("admission: {}", limits.detail(free));
+                    return Err(RunError::Admission(AdmissionError::Disk {
                         free,
-                        floor,
-                        origin,
-                    }))
-                }),
-            ),
+                        floor: limits.critical_free,
+                        origin: limits.critical_free_source,
+                    }));
+                }
+                provenant_config::DiskLevel::Warning => {
+                    eprintln!("admission warning: {}; proceeding", limits.detail(free))
+                }
+                provenant_config::DiskLevel::Ready => {}
+            }
+        }
+        let observed = |error: RunError| (error.to_string(), error);
+        let observations: [(&str, Option<(String, RunError)>); 3] = [
             (
                 "ADMISSION_PRESSURE",
                 pressure.map(|level| {
@@ -916,42 +906,6 @@ fn deadline(from: WallTime, seconds: u64) -> Result<WallTime> {
         .map_err(|_| RunError::Validation("admission deadline"))
 }
 
-/// Resolve the live host disk floor and its source for admission and status.
-fn disk_floor(
-    registry: &std::path::Path,
-) -> std::io::Result<(u64, provenant_records::diagnostic::SettingSource)> {
-    use provenant_records::diagnostic::SettingSource;
-    let settings = provenant_config::GcSettings::read(registry)?;
-    let floor = settings.free_floor_bytes(registry)?;
-    let origin = if settings.free_floor.is_some() {
-        SettingSource::Configuration
-    } else {
-        SettingSource::ShippedDefault
-    };
-    Ok((floor, origin))
-}
-
-/// A read-only lane writes little enough to proceed, warning once per admission.
-fn read_only_disk_warning(
-    warned: &mut bool,
-    free: u64,
-    floor: u64,
-    origin: provenant_records::diagnostic::SettingSource,
-) -> Option<provenant_records::diagnostic::Diagnostic> {
-    if *warned || free >= floor {
-        return None;
-    }
-    *warned = true;
-    Some(
-        ErrorKind::DiskFloor.diagnostic().category("warning")
-            .detail(format!(
-                "disk space: {free} bytes available; gc.free_floor is {floor} bytes (source: {}); read-only lane is proceeding",
-                origin.description()
-            ))
-            .next("free disk space or run `provenant gc --apply`"),
-    )
-}
-
 /// The shipped memory floor has no host setting, so it can only warn.
 fn memory_floor_warning(
     sample: std::io::Result<MemorySample>,
@@ -1033,30 +987,6 @@ mod process_wait_tests {
             !serde_json::to_string(&warning)
                 .unwrap()
                 .contains("TOKEN_SENTINEL")
-        );
-    }
-
-    #[test]
-    fn read_only_disk_floor_warns_once_with_setting_and_source() {
-        use provenant_records::diagnostic::SettingSource;
-        let mut warned = false;
-        assert!(
-            read_only_disk_warning(&mut warned, 100, 100, SettingSource::Configuration).is_none()
-        );
-        assert!(!warned);
-        let warning =
-            read_only_disk_warning(&mut warned, 99, 100, SettingSource::Configuration).unwrap();
-        assert_eq!(warning.code, "DISK_FLOOR");
-        assert_eq!(warning.category.as_deref(), Some("warning"));
-        assert_eq!(
-            warning.detail.as_deref(),
-            Some(
-                "disk space: 99 bytes available; gc.free_floor is 100 bytes (source: host configuration); read-only lane is proceeding"
-            )
-        );
-        assert!(warning.next.is_some());
-        assert!(
-            read_only_disk_warning(&mut warned, 0, 100, SettingSource::Configuration).is_none()
         );
     }
 

@@ -532,6 +532,7 @@ pub struct GcSettings {
     pub idle_days: u64,
     pub graph_checkpoint_days: u64,
     pub free_floor: Option<String>,
+    pub critical_free: Option<String>,
     /// Total lane Cargo cache cap; defaults to 32 GiB.
     pub lane_cargo_cache_max: Option<String>,
     pub alert_below: Option<String>,
@@ -545,6 +546,7 @@ impl Default for GcSettings {
             idle_days: 7,
             graph_checkpoint_days: 90,
             free_floor: None,
+            critical_free: None,
             lane_cargo_cache_max: None,
             alert_below: None,
             projects: BTreeMap::new(),
@@ -552,7 +554,66 @@ impl Default for GcSettings {
     }
 }
 
+/// Resolved once by the host and shared by dispatch and new builds.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct DiskLimits {
+    pub free_floor: u64,
+    pub free_floor_source: provenant_records::diagnostic::SettingSource,
+    pub critical_free: u64,
+    pub critical_free_source: provenant_records::diagnostic::SettingSource,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiskLevel {
+    Ready,
+    Warning,
+    Critical,
+}
+impl DiskLimits {
+    pub fn level(&self, free: u64) -> DiskLevel {
+        if free < self.critical_free {
+            DiskLevel::Critical
+        } else if free < self.free_floor {
+            DiskLevel::Warning
+        } else {
+            DiskLevel::Ready
+        }
+    }
+    pub fn detail(&self, free: u64) -> String {
+        format!(
+            "{free} bytes available; gc.free_floor is {} bytes (source: {}); gc.critical_free is {} bytes (source: {})",
+            self.free_floor,
+            self.free_floor_source.description(),
+            self.critical_free,
+            self.critical_free_source.description()
+        )
+    }
+}
+
 impl GcSettings {
+    pub fn disk_limits(&self, state: &Path) -> std::io::Result<DiskLimits> {
+        use provenant_records::diagnostic::SettingSource::{Configuration, ShippedDefault};
+        Ok(DiskLimits {
+            free_floor: self.free_floor_bytes(state)?,
+            free_floor_source: if self.free_floor.is_some() {
+                Configuration
+            } else {
+                ShippedDefault
+            },
+            critical_free: self
+                .critical_free
+                .as_deref()
+                .map(parse_cache_size)
+                .transpose()
+                .map_err(std::io::Error::other)?
+                .unwrap_or(2 * 1024_u64.pow(3)),
+            critical_free_source: if self.critical_free.is_some() {
+                Configuration
+            } else {
+                ShippedDefault
+            },
+        })
+    }
+
     /// Resolve a project's explicit settings, or its language-specific default.
     pub fn project_settings(&self, project: &str, root: &Path) -> ProjectGcSettings {
         self.projects.get(project).cloned().unwrap_or_else(|| {
@@ -614,6 +675,9 @@ impl GcSettings {
         }
         if !(1..=3650).contains(&self.graph_checkpoint_days) {
             return Err("graph_checkpoint_days_range");
+        }
+        if let Some(size) = &self.critical_free {
+            parse_cache_size(size)?;
         }
         if let Some(size) = &self.free_floor {
             parse_cache_size(size)?;
@@ -1153,5 +1217,48 @@ mod build_tests {
         assert!(settings.invalid_keys().is_empty());
         let invalid: LaneBuildSettings = toml_edit::de::from_str("cargo_debug = \"loud\"").unwrap();
         assert_eq!(invalid.invalid_keys(), ["cargo_debug"]);
+    }
+}
+
+#[cfg(test)]
+mod disk_limit_tests {
+    use super::*;
+    #[test]
+    fn disk_levels_follow_the_declared_thresholds_and_keep_their_sources() -> std::io::Result<()> {
+        let temp = tempfile::tempdir()?;
+        for (floor, critical) in [(100, 50), (100, 0), (50, 100)] {
+            let settings = GcSettings {
+                free_floor: Some(format!("{floor}B")),
+                critical_free: Some(format!("{critical}B")),
+                ..Default::default()
+            };
+            let limits = settings.disk_limits(temp.path())?;
+            for free in [0, 49, 50, 99, 100, u64::MAX] {
+                let expected = if free < critical {
+                    DiskLevel::Critical
+                } else if free < floor {
+                    DiskLevel::Warning
+                } else {
+                    DiskLevel::Ready
+                };
+                assert_eq!(limits.level(free), expected);
+            }
+            let encoded = serde_json::to_vec(&limits)?;
+            let decoded: DiskLimits = serde_json::from_slice(&encoded)?;
+            assert_eq!(
+                decoded.free_floor_source,
+                provenant_records::diagnostic::SettingSource::Configuration
+            );
+            assert_eq!(
+                decoded.critical_free_source,
+                provenant_records::diagnostic::SettingSource::Configuration
+            );
+        }
+        let defaults = GcSettings::default().disk_limits(temp.path())?;
+        assert_eq!(
+            defaults.critical_free_source,
+            provenant_records::diagnostic::SettingSource::ShippedDefault
+        );
+        Ok(())
     }
 }

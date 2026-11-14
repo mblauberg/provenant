@@ -44,7 +44,9 @@ fn every_settlement_reason_has_one_source_and_node_outcome() {
         assert_eq!(rule.reason, *reason);
         let stop = Stop::sealed(None, crate::run::Outcome::ReviewRequired, *reason, None).unwrap();
         let stop_cause = stop.as_ref().map(Stop::cause);
-        let expected = if stop_cause.is_some() {
+        let expected = if stop_cause.is_some()
+            && rule.terminal_outcome != crate::run::SettlementTerminalOutcome::Succeeded
+        {
             crate::run::SettlementNodeOutcome::Failed
         } else {
             rule.node_outcome
@@ -169,6 +171,44 @@ fn one_terminal_classification_binds_reason_stop_source_and_graph_result() {
                 SettlementReason::Completed.node_outcome(Some(cause)),
                 SettlementNodeOutcome::Failed
             );
+        }
+    }
+}
+
+#[test]
+fn host_stops_preserve_complete_handoffs_and_completed_budgets_succeed() {
+    use crate::run::{
+        CauseSource, Outcome, SettlementNodeOutcome, SettlementReason, TerminalCause,
+        TerminalEvidence,
+    };
+    let handoff: Handoff = serde_json::from_value(json!({
+        "schema_version": 2, "status": "done", "note": "Delivered and pushed",
+        "remaining": [], "decisions": [], "verify": ["Reviewed"]
+    }))
+    .unwrap();
+    for cause in StopCause::ALL
+        .into_iter()
+        .filter(|cause| cause.source() == CauseSource::Host)
+    {
+        let stop = Stop::new(cause, Some(handoff.clone())).unwrap();
+        assert_eq!(stop.handoff(), Some(&handoff));
+    }
+    for partial in [vec![], vec![crate::run::PartialSignal::UncommittedWork]] {
+        let classified = SettlementReason::classify(
+            Outcome::Failed,
+            Some(&TerminalEvidence::ProcessExit),
+            &partial,
+            Some(TerminalCause::TokenBudget),
+            Some(&handoff),
+        )
+        .unwrap();
+        assert_eq!(classified.source, CauseSource::Host);
+        assert_eq!(classified.stop.as_ref().unwrap().handoff(), Some(&handoff));
+        if partial.is_empty() {
+            assert_eq!(classified.outcome, Outcome::Succeeded);
+            assert_eq!(classified.node_outcome, SettlementNodeOutcome::Succeeded);
+        } else {
+            assert_eq!(classified.node_outcome, SettlementNodeOutcome::Failed);
         }
     }
 }

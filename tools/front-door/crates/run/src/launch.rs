@@ -430,6 +430,11 @@ fn check_launch_policy(
     let Err(refusal) = providers.check_policy(task) else {
         return Ok(());
     };
+    // DiskFloor is emitted only by the shared critical-space decision.
+    // Advisory pressure has already warned and continued at that core.
+    if refusal.terminal_cause == TerminalCause::DiskFloor {
+        return Err(refusal);
+    }
     let owned = refusal.policy_code.clone();
     let code = if let Some(code) = owned.as_deref() {
         code

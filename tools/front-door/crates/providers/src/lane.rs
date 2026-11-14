@@ -119,12 +119,17 @@ impl crate::LaunchSpec {
             return Err(ProviderError::Malformed);
         }
         let bin = scratch.join("bin");
-        // The shim checks a new build against this launch's own resolved rule.
-        let rule = serde_json::to_string(self.policy.rule("BUILD_DISK"))
-            .map_err(|_| ProviderError::Malformed)?;
-        let disk = gate.disk_floor.map_or_else(String::new, |floor| format!(
-            "PROVENANT_BUILD_DISK_FLOOR={} PROVENANT_BUILD_DISK_RULE={}\nexport PROVENANT_BUILD_DISK_FLOOR PROVENANT_BUILD_DISK_RULE\n", floor, shell_quote(&rule)
-        ));
+        let disk = gate
+            .disk_limits
+            .map(|limits| {
+                let json = serde_json::to_string(&limits).map_err(|_| ProviderError::Malformed)?;
+                Ok::<_, ProviderError>(format!(
+                    "PROVENANT_BUILD_DISK_LIMITS={}\nexport PROVENANT_BUILD_DISK_LIMITS\n",
+                    shell_quote(&json)
+                ))
+            })
+            .transpose()?
+            .unwrap_or_default();
         let script = format!(
             "#!/bin/sh\n{disk}PROVENANT_BUILD_SLOT_STATE={} PROVENANT_BUILD_SLOTS={} PROVENANT_LOCAL_CARGO={}\nexport PROVENANT_BUILD_SLOT_STATE PROVENANT_BUILD_SLOTS PROVENANT_LOCAL_CARGO\nexec {} internal build-slot -- {} \"$@\"\n",
             text(gate.state)?,
@@ -747,8 +752,8 @@ pub struct BuildSlotGate<'a> {
     pub state: &'a Path,
     /// How many builds the host runs at once.
     pub slots: u64,
-    /// Resolved free floor, sealed by the host; the rule is the launch's `BUILD_DISK`.
-    pub disk_floor: Option<u64>,
+    /// Resolved advisory and critical limits, with their host configuration sources.
+    pub disk_limits: Option<provenant_config::DiskLimits>,
     /// The real `cargo` the shim runs once it holds a slot.
     pub cargo: &'a Path,
     /// Cargo commands the lane may run: `all`, `check` or `none`. The shim
@@ -2361,7 +2366,7 @@ mod tests {
         spec.cwd = root.clone();
         let provenant = root.join("fake provenant");
         let gate = BuildSlotGate {
-            disk_floor: None,
+            disk_limits: None,
             provenant: &provenant,
             state: &state,
             slots: 3,
@@ -2452,7 +2457,7 @@ mod tests {
         input.provenant.state = &state;
         let mut spec = Codex.prepare(input).unwrap();
         let gate = BuildSlotGate {
-            disk_floor: None,
+            disk_limits: None,
             provenant: Path::new("/fixture/bin/provenant"),
             state: &state,
             slots: 2,
@@ -2485,7 +2490,7 @@ mod tests {
         for (state, slots) in [("/s", 0), ("/s", 65)] {
             let mut spec = bare_spec("/usr/bin");
             let gate = BuildSlotGate {
-                disk_floor: None,
+                disk_limits: None,
                 provenant: Path::new("/p"),
                 state: Path::new(state),
                 slots,
@@ -2502,7 +2507,7 @@ mod tests {
         for state in ["relative", "/s\nx"] {
             let mut spec = bare_spec("/usr/bin");
             let gate = BuildSlotGate {
-                disk_floor: None,
+                disk_limits: None,
                 provenant: Path::new("/p"),
                 state: Path::new(state),
                 slots: 1,
@@ -2520,7 +2525,7 @@ mod tests {
     #[test]
     fn unrepresentable_build_slot_shim_is_skipped_without_mutating_launch() {
         let gate = BuildSlotGate {
-            disk_floor: None,
+            disk_limits: None,
             provenant: Path::new("/runtime"),
             state: Path::new("/state"),
             slots: 1,

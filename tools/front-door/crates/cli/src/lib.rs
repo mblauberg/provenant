@@ -2474,7 +2474,10 @@ mod tests {
             else {
                 panic!("wait command")
             };
-            assert_eq!(wait.timeout, Some(provenant_core::MAX_LANE_RUNTIME_SECONDS));
+            assert_eq!(
+                crate::wait::Settings::default().timeout(wait.timeout),
+                provenant_core::MAX_LANE_RUNTIME_SECONDS
+            );
         }
         for timeout in ["0", "-1", "1.5"] {
             invalid(&["wait", "fix-login", "--timeout", timeout]);

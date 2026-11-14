@@ -341,8 +341,8 @@ impl ResourceFact {
     pub fn project(&self, diagnostic: Diagnostic) -> Diagnostic {
         match self {
             Self::Disk { free, floor, origin } => diagnostic
-                .detail(format!("disk space: {free} bytes available; gc.free_floor is {floor} bytes (source: {})", origin.description()))
-                .next("free disk space above gc.free_floor before retrying"),
+                .detail(format!("disk space: {free} bytes available; gc.critical_free is {floor} bytes (source: {})", origin.description()))
+                .next("free disk space above gc.critical_free before retrying"),
             Self::ArgvPromptLimit { limit, origin } => diagnostic
                 .detail(format!("argv prompt exceeds domains.run.argv_prompt_limit_bytes ({limit} bytes; source: {})", origin.description()))
                 .next("shorten the prompt or adjust domains.run.argv_prompt_limit_bytes"),
