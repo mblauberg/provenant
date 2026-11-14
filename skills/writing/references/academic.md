@@ -82,7 +82,7 @@ bibliography, glossary and acronym commands.
 
 ## Check
 
-`provenant check writing PATH --rules academic` is a review prompt; it can't
+The academic rule set in `provenant check writing --help` is a review prompt; it can't
 see flat rhythm, comma-gloss definitions or implicit-completion tense. Final
 scrub: Australian spelling; no em dashes or prose `---`; no `TODO`, `TBD` or
 `insert result`; no conclusion beyond the evidence. Then ask once what still

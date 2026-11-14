@@ -1,4 +1,4 @@
-# Core: function, locks, house style, bans
+# Legal drafting rules
 
 ## Legal Function Test
 
@@ -36,30 +36,15 @@ user-authority conditions.
 
 ## Condense
 
-- Put the operative point first. Reverse-outline by function; move detail to the
-  chronology, annexure index or affidavit rather than deleting it.
-- Stop before losing an anchor, party label, status, qualifier, exhibit label,
-  pinpoint, forum wording or safety boundary. There is no percentage target; if
-  the result is longer, re-run the function test.
-- Integrity check: set-diff figures, dates, amounts, pinpoints, labels,
-  authorities and defined terms, then an independent qualitative read. A premise
-  moved away from its contention, or a numbered particular folded into prose,
-  can cost identifiability.
-- Final scrub adds no argument, fact, authority, history or courtesy closer.
-  Finish by naming the single remaining defect (overclaim, missing source, wrong
-  home, unsafe disclosure, lost negative); if none, stop.
+Use `writing` for the condense and integrity check. Move detail to its proper
+legal document without losing a source anchor, status, qualifier or safety
+boundary; check that particulars remain identifiable.
 
 ## House style
 
-Defaults marked **(default)** are drafting conventions, not forum rules; the
-form or template governs.
+Apply `writing` for shared style. The form or template governs these legal
+defaults:
 
-- Australian English, single quotation marks, day-month-year dates. A quotation
-  over about three lines is an indented block without marks. Figures exact with
-  separator and two decimals where exactness matters (`$14,132.18`); preserve
-  competing figures.
-- No em dash anywhere (a lint blocker). En dash only for closed ranges. Do not
-  use a spaced hyphen as a clause separator.
 - 'self-represented litigant' or 'litigant in person', never `pro se`. Use
   'filed', 'served', 'lodged', 'affirmed', 'sworn', 'annexure', 'exhibit' only as
   the forum or form does. Keep older words (`pursuant to`) inside quotations,
@@ -73,33 +58,12 @@ form or template governs.
   written literally in Markdown source. A cited paragraph number is the rendered
   number: adding a whole paragraph breaks later references, so prefer sentence
   edits or fix every reference and check the render.
-- Every Markdown heading needs a blank line before it for pandoc.
-- Average about 20 words; over about 24, or three or more list items, is a
-  prompt to split or tabulate. Active voice unless the actor is unknown or less
-  important than the act.
+## Filing-facing text
 
-## Bans in filing-facing text
-
-The lint fails on a subset and warns on the rest; this list is the standard.
-
-- Internal markers (`TODO`, `TBD`, `TBC`, `FIXME`, `drafting note`,
-  `agent note`, `AI-generated`) and any internal path or id, including in HTML
-  comments: `.work/`, `docs/audits/`, scratch or absolute repo paths, task ids.
-- US dates and US legalese (`COMES NOW`, `wherefore`, `herein`, `heretofore`,
-  `aforementioned`, `Honorable Court`, `esq.`).
-- Process language in filing text (`agent summary`, `review set`, `render check`,
-  `source pack`): cite the source or the legal act instead.
-- Correspondence filler: `I trust this email finds you well`,
-  `please be advised`, `kindly`, `for the avoidance of doubt`,
-  `we reserve all rights` (state the next step, or omit unless instructed), and
-  `without prejudice` unless that effect is intended and instructed.
-- Affidavit overreach, which belongs in submissions: `jurisdictional error`,
-  `plainly wrong`, `bad faith`, `abuse of process`, `the Court should find`,
-  relief in the body (`I seek`), calling another forum's order an error (use
-  'disputed', 'under appeal', 'unable to reconcile'), self-diagnosis without
-  medical evidence, and 'can be produced if required' repeated per paragraph.
-- `clearly` and `obviously` (omit); `currently` and `recent` (give the date);
-  'proved family violence' (name the dated source at its true status).
+Use the legal writing lint and review its warnings. Keep internal markers,
+paths and process language out of filing text. Preserve the intended effect of
+correspondence protections, and keep affidavit argument in submissions. Name
+safety instruments at their verified status rather than treating them as findings.
 
 ## Persuasion and register
 
@@ -135,9 +99,3 @@ copied in; relief sought from a decision-maker who cannot grant it; an
 allegation from one proceeding stated as proof in another; a subsisting order
 called wrong without a verified basis, especially while review or appeal is
 pending; and a safety instrument framed as a final finding.
-
-## Lint
-
-`provenant check writing PATH --rules legal` on explicit paths. Failures block a
-filing-facing document; warnings are review prompts. Source checks, render
-checks and user gates still apply.

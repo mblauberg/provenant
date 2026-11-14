@@ -20,7 +20,7 @@ variable under test. Do not touch credentials, user data or external systems
 without separate authority.
 
 Harvest into the spec, then retire the code. A spike never graduates to production;
-rebuild the smallest production version through `deliver`.
+rebuild the production version the spec requires through `deliver`.
 
 ```markdown
 **Spike:** <question> (date, timebox)

@@ -1,16 +1,7 @@
 # Session checkpoint
 
-Rewrite the current context near 2 KiB. The continuity reference owns the
-content contract; this template supplies headings only.
-
----
-provenant_standing:
-  schema_version: 1
-  goal: ""
-  grants: []
-  obligations: []
-  waiting_on_owner: []
----
+Use the standing record in the [continuity contract](../references/continuity.md)
+above these headings.
 
 ## Goal
 Outcome, done-criteria and the tracker or project document that owns them.

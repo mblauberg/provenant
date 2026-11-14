@@ -20,7 +20,7 @@ resolves every citation and warns when a page passes 2,000 words.
 
 The binary is the reference: `provenant help --all` for commands and
 `provenant config schema` for config keys. `scripts/generate-reference` renders
-them as Markdown under the untracked `docs/reference/`.
+them as Markdown under the untracked `<repository>/docs/reference/`.
 
 ## Area specs
 
@@ -29,7 +29,11 @@ them as Markdown under the untracked `docs/reference/`.
 - [State](state.md): roots, records, config and managed install
 - [Supervisor](supervisor.md): custody, confinement and worktrees
 - [Routing](routing.md): routes, providers, accounts, quota and readiness
-- [Run](run.md): admission, attempts, publication and reconcile
+- [Run](run.md): operation IDs, stop handling and the run contracts below
+  - [Launch](run-launch.md): admission, confinement and lane environment
+  - [Settlement](run-settlement.md): outcomes, continuation and retention
+  - [Git and delivery](run-git.md): Git custody, worktrees and publication
+  - [Attribution](run-attribution.md): PR contributions and work correlation
 - [Retry owner](retry-owner.md): lineage, budgets, admission and recovery
 - [Fabric](fabric.md): coordination store, lane relay, graphs and peer hosts
 - [Telemetry](telemetry.md): usage ledger, cost and outcomes
@@ -49,7 +53,7 @@ a cross-cutting rule.
 | Wait budgets and observation | [CLI](cli.md#waits-are-readers) |
 | Command grammar and checks | [CLI](cli.md), `provenant help --all` |
 | Selection, accounts, quota and readiness | [Routing](routing.md) |
-| Admission, attempts and publication | [Run](run.md), [retry owner](retry-owner.md) |
+| Admission, attempts and publication | [Run](run.md), its [launch](run-launch.md), [settlement](run-settlement.md) and [Git](run-git.md) specs, [retry owner](retry-owner.md) |
 | Coordination, graph execution and peer hosts | [Fabric](fabric.md) |
 | Configuration and managed installation | [State](state.md#configuration) |
 | Records and digests | [State](state.md#records) |

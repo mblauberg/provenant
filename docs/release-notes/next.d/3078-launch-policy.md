@@ -1,4 +1,4 @@
-## Behaviour changes
+## Breaking changes
 ### Lanes and settlement
 
-- Launch policy now reports each rule's strength, source and override in `provenant config show` and the lane preamble. Resource thresholds and writer census warn by default; use `policy.CODE=refuse` for strict enforcement. Writer scope remains writable across the worktree, with out-of-scope paths reported at settlement. (#3078, #3208, #3275)
+- **Build wait settings are removed.** Remove the old build and slot wait settings; busy build slots and resource admission warn by default. Launch policy reports its source and override, and strict enforcement is configurable. Writer scope remains writable across the worktree, with out-of-scope paths reported at settlement. (#3078, #3208, #3275)

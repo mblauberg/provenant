@@ -64,7 +64,7 @@ launch again.
 - Why: losing the caller must not lose custody or double-launch a writer.
 - Test: `crates/supervisor/tests/custody.rs::owner_death_keeps_guardian_and_writer_live`;
   `crates/os/src/exec/tests.rs::secret_input_arrives_by_descriptor_with_eof_and_no_token_environment`.
-  The unknown-launch rule has no test (gap).
+
 - Owner: `crates/supervisor/src/guardian/`
 
 ### Quiescence before release
@@ -93,6 +93,7 @@ open writer-lock paths, with a reconcile action. An open path is not proof of
 flock ownership and grants no signal authority. Unknown or unreadable holders
 remain explicit uncertainty. The guardian continues retaining unresolved
 custody; a timeout alone never authorises settlement or an unrelated signal.
+- Why: detached services must not hold a lease or cause unsafe release.
 - Test: `crates/supervisor/src/process_os/provider.rs::lane_descriptors_are_cloexec`;
   `::orphaned_provider_descendant_does_not_retain_writer_flock`;
   `crates/supervisor/tests/custody.rs::unsandboxed_detached_service_does_not_block_settlement`;
@@ -142,9 +143,7 @@ fabricated terminal event.
 ## Permission policy
 
 Lane profiles start open and deny the boundaries
-([ADR 0040](../adr/0040-open-lane-policy-with-explicit-boundaries.md)); rendered
-profiles are pinned by
-`crates/providers/src/seatbelt_snapshots.rs::seatbelt_profiles_match_snapshots`.
+([ADR 0040](../adr/0040-open-lane-policy-with-explicit-boundaries.md)).
 
 ### Plans refuse unsafe roots
 
@@ -173,7 +172,7 @@ compare-and-swap.
 
 Unsandboxed lanes inherit the host environment, PATH, tool caches and
 credentials in place. Provider account selectors still choose the registered
-account; agy uses that account's HOME when its keychain requires it. Environment
+account and its required credentials. Environment
 values stay in the live launch, never in prompts or receipts. Native launches
 skip skill copies, tool dependency discovery, credential symlink inventory and
 the private Cargo home, target directory and build-slot shim.
@@ -204,10 +203,9 @@ separate OS user or VM.
 
 ### Lane process-tree memory interface
 
-`provenant process-tree --root PID --json` reads a host-sampled snapshot of the
-lane's own descendants; the lane gets one exact read grant and no process-listing
-authority. A missing, stale, incomplete or unsupported sample is exit 4
-`PROCESS_TREE_UNAVAILABLE` with null data, never a partial tree or zero memory.
+The process-tree interface reads a host-sampled snapshot of the lane's own
+descendants without process-listing authority. A missing, stale, incomplete or
+unsupported sample is unavailable, never a partial tree or zero memory.
 The sample is periodic observation, not an atomic census or a memory limit.
 - Why: a memory guard that reads lost observation as zero would approve a
   runaway build.
@@ -237,7 +235,7 @@ refuses credential-bearing URLs.
 Git's own inventory is the worktree registry. One writer holds each linked
 worktree, and custody outlives the requesting call. `worktree remove` refuses
 the primary, a dirty tree, a live writer or observed process, and has no force;
-it deletes a branch only when merged or named by `--discard`.
+it deletes a branch only when merged or explicitly selected for discard.
 - Why: removing a tree under a live writer destroys its work.
 - Test: `src/worktree_tests/writer_cases.rs::second_writer_is_refused_while_first_holds_the_worktree`;
   `crates/confinement/src/worktrees/lifecycle_tests/gc_safety.rs::detached_removal_keeps_dirty_unmerged_and_live_work`

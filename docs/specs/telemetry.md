@@ -22,18 +22,9 @@ nothing.
 
 ## The usage ledger outlives the run store
 
-One append-only format-2 ledger row per terminal attempt, priced at settlement
-and kept with no age limit. The settlement reaction appends it, so a retried
-settlement adds nothing; an unreadable price table leaves the reaction pending
-rather than writing an unpriced row. Unrecognised lines are reported, never
-skipped. `telemetry cost` and `telemetry value` are the only producers of cost
-and read only this ledger. Each row carries its required work graph and node.
-The format-1 reset must discard `usage-ledger/`, the prior schema-1 `ingest/`
-segments and `ingest-cursors.json`. Format 2 reads only the format-2 ledger and
-schema-2 ingest rows. Removing the old ingest cursors lets later requests replay
-transcripts they select instead of skipping them by a matching old cursor digest;
-any `since` bound on that request still applies. The reset may also remove the
-inert single-file `ingest.jsonl` and `ingest.jsonl.unmigrated` paths.
+The append-only ledger retains one priced row per terminal attempt. Retried
+settlement adds nothing, an unreadable price table leaves settlement pending,
+and unrecognised lines are reported. Cost reports read the ledger.
 - Why: lane usage cannot be regenerated once run history is dropped, and one
   reader of one ledger cannot disagree with itself.
 - Test: `crates/telemetry/src/ledger/tests.rs::a_settled_attempt_appends_one_row_even_when_settlement_is_retried`;
@@ -45,7 +36,7 @@ inert single-file `ingest.jsonl` and `ingest.jsonl.unmigrated` paths.
 
 ## Bounded, honest totals
 
-The reducer refuses over-limit input with `TooLarge`, never partial totals.
+The reducer refuses over-limit input, never partial totals.
 Known values and missing coverage are reported separately: partial coverage is
 a lower bound, all-unknown is unknown, and only a measured zero is zero. An
 unpriced subscription is not free; an attempt with no account is
@@ -80,7 +71,6 @@ Historical context is never filled from the current release or instructions.
 - Test: `tests/chair.rs::chair_on_an_unregistered_config_directory_is_recorded_as_unattributed`;
   `crates/telemetry/src/ingest/tests.rs::rerun_adds_nothing_and_accounts_stay_distinct`;
   `::enrichment_preserves_existing_token_buckets_and_excludes_text`;
-  `::a_single_file_store_over_the_old_cap_is_split_on_first_open`;
   `crates/telemetry/src/tests.rs::lane_context_fixture_joins_existing_chair_and_graph`
 
 ## Offline post-merge outcomes and suggestions
@@ -103,8 +93,4 @@ the event.
 - Test: `tests/usage.rs::cli_usage_records_exclude_arguments_prompts_and_results`;
   `crates/telemetry/src/usage/tests.rs::recording_on_a_missing_root_creates_nothing`
 
-## Quota display stays honest
-
-A failed refresh keeps the last snapshot marked stale; stale is never shown as
-zero usage.
-- Test: `tests/quota.rs::failed_auth_refresh_shows_last_known_usage_age_and_auth_marker`
+Quota freshness belongs to [routing](routing.md#unknown-never-means-ready).

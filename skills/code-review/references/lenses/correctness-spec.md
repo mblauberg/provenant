@@ -12,5 +12,5 @@ against the author's account of it.
   input a real sequence can produce.
 - Follow failure paths: ordering, cancellation, timeouts, re-entry, partial
   writes and errors that are converted to success.
-- Check public API, schema and protocol compatibility against the base.
+- Check public API, schema and protocol changes against the spec; move callers and remove old shapes.
 - For refactors, check that intended behaviour and failure handling are preserved.

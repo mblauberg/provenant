@@ -1,17 +1,9 @@
 # Maintaining Provenant
 
-Read [`AGENTS.md`](AGENTS.md), [`GLOBAL-AGENTS.md`](GLOBAL-AGENTS.md) and
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) before changing the harness.
-Inspect the live diff and preserve unrelated work. `GLOBAL-AGENTS.md` owns
-authority, the real boundaries and user gates; code owns risk tiers and review
-floors, and skills own orchestration;
-[`docs/worktrees.md`](docs/worktrees.md) owns branch and linked-worktree
-operation. Use the repository process declaration below for issue intake,
-workflow state and pull-request linking.
-
-Agent merges are authorised for this repository; mechanics remain in the
-GitHub work-item workflow. This is Provenant-local process, not harness
-doctrine.
+Read [AGENTS.md](AGENTS.md), [GLOBAL-AGENTS.md](GLOBAL-AGENTS.md) and the
+[architecture](docs/ARCHITECTURE.md). The global rules own authority and
+boundaries; [worktrees](docs/worktrees.md) owns Git isolation and operations.
+Preserve unrelated work and follow the repository process below.
 
 ## Repository process
 
@@ -25,11 +17,8 @@ doctrine.
 - Canonical home: issue-tracker
 - Pointer: <https://github.com/mblauberg/provenant/issues>
 
-Change scope and stories live in the parent issue when the repository declares
-`issue-tracker`; project documents retain durable intent, decisions and
-invariants. A repository declaring `project-docs` uses its documented scope or
-story home instead. A link-only map is a fallback for unavailable or
-cross-tracker routes, not a second current-work owner.
+Scope and stories live in the parent issue; project docs retain durable intent,
+decisions and invariants.
 
 ### Workflow state
 
@@ -42,29 +31,20 @@ cross-tracker routes, not a second current-work owner.
 
 ### Change history
 
-- Owns: `git log` for what changed and when; [`docs/adr/`](docs/adr/) for why
-- Living docs are edited in place, not appended to; see
-  [engineering-docs](skills/engineering-docs/SKILL.md#rules)
-- Release notes: each user-visible change adds a fragment under
-  [`docs/release-notes/next.d/`](docs/release-notes/next.d/). Fragment authors
-  and the release collator follow the
-  `writing` release-notes guidance
-  and the fragment rules in the [release-notes index](docs/release-notes/README.md#writing-a-fragment).
-  Each fragment's second line tags an area from the index; the collator decides whether to render it. The no-stability-promise policy lives only in that index; release notes do not repeat it. Before releasing,
-  read the collated preview (`scripts/collate-release-notes`) end to end, merge
-  entries on one topic, align tense and terms, and write `_intro.md` last.
-  To release, run `scripts/collate-release-notes vX.Y.Z`, which writes
-  `docs/release-notes/vX.Y.Z.md` and deletes the fragments but `_intro.md`;
-  add the released version to the index and reset `_intro.md` for the next
-  release.
+- Owns: `git log` for what changed and when; [ADRs](docs/adr/) for why
+
+Edit living docs in place. Each user-visible change adds a fragment under
+[release notes](docs/release-notes/next.d/), following the
+[fragment rules](docs/release-notes/README.md#writing-a-fragment). Before a
+release, read the collated preview, merge related entries, align terms and
+write `_intro.md` last. Run `scripts/collate-release-notes vX.Y.Z`, then reset
+`_intro.md` for the next release. GitHub Releases holds published history.
 
 ### Specifications
 
 - Owns: `non-derivable-intent`
-- Drift gate: `scripts/check-doc-truth` checks spec indexes, Owner/Anchor
-  headers, Anchor paths, Test citations and diagram metadata, and warns when a
-  spec passes 2,000 words; harness asset
-  checks cover retained runtime-graph projections. Other prose is review-checked
+- Drift gate: `scripts/check-doc-truth` checks spec indexes, headers, anchors,
+  citations and diagram metadata; other prose is review-checked.
 
 ### Merge policy
 
@@ -74,196 +54,40 @@ cross-tracker routes, not a second current-work owner.
 
 - Pointer: [`docs/runbooks/github-workflow.md`](docs/runbooks/github-workflow.md)
 
-This repository is loaded by multiple agent platforms. A convenient
-Claude-only or Codex-only change is a regression unless the approved scope is
-platform-specific.
+## How Provenant is built
 
-Changes to the ambient `GLOBAL-AGENTS.md` apply from the next session.
-A live session retains the prior constitution until restart.
+The [deliver skill](skills/deliver/SKILL.md) owns the engineering stance.
 
-## Documentation tiers
+- Fix root causes and the class of defect; prefer long-term structure to patches.
+- Build extensible, configurable, modular mechanisms with one declared core
+  and one owner per concern. Generalise where it makes change easier.
+- Use explicit typed failures and catch mistakes before runtime. Checks allow or
+  warn by default; hard holds protect credentials, Git isolation, data integrity
+  and authority. When busy, skip and retry.
+- Move callers to the new shape and remove compatibility code. Tests pin
+  invariants derived from declarations; see [test-design](skills/test-design/SKILL.md).
 
-Documentation claims sit in three tiers, and the third is deliberate:
+## Documentation and skills
 
-1. **Code-checked.** Runtime schema and migration structure is owned by code
-   and tests. Relative Markdown links in `docs/` and each `SKILL.md` are
-   machine-checked. `scripts/check-doc-truth` requires every runbook and spec
-   `Anchor:` to resolve to a source file and compares the delivery
-   table with the code it projects. It fails on a `provenant` command or flag
-   that `help --all --json` does not list, in runbooks, skills and the ambient
-   instruction files; specs stay advisory. `scripts/check-harness` rejects
-   a skill `references/` path named outside its skill.
-2. **Review-checked.** The README skill count and architecture risk factors are
-   maintained from current files and code; no harness check binds those regions
-   to a source file. Specification prose, fenced commands, placeholders,
-   unbound projections and other links remain review-owned.
-   [`GLOBAL-AGENTS.md`](GLOBAL-AGENTS.md) stays under 800 words because every
-   session of every project loads it.
-3. **Unchecked prose.** Design intent and rationale carry no machine gate,
-   on purpose; review keeps them honest, not tooling.
+Use [engineering-docs](skills/engineering-docs/SKILL.md) for placement and
+[improve](skills/improve/SKILL.md) for skill changes. Code and schemas own
+implemented fields and defaults; specs own non-derivable invariants, runbooks
+own procedures, and ADRs own decisions and reasons.
 
-## Ambient doctrine rules
+The harness checks ambient doctrine and installed skills. `GLOBAL-AGENTS.md`
+is the ambient source, installed as `AGENTS.md`; provider import shims add no
+policy. Nothing outside a skill names a file under its `references/` directory.
+Installed skill links stay inside that skill. Ambient rules avoid repository
+paths and dates; Git records provenance.
 
-These rules keep the always-loaded files small. They are review-owned; the
-Harness asset checks enforce the machine-checkable subset.
-
-1. `GLOBAL-AGENTS.md` is the one ambient doctrine source, installed as
-   `AGENTS.md`. It holds the standing rules a skill, `--help` or code does not
-   already own. A provider-bootstrap import shim, such as `CLAUDE.md`, may
-   point only to it and adds no policy.
-2. Operational depth has one skill owner: compaction and checkpoints in
-   `session`, routing and degradation in `orchestrate`, and receipt detail in
-   `deliver`. Ambient files name skills, then load depth only when triggered.
-3. Nothing outside an owning skill names a file under its `references/`
-   directory. Cross-skill references use the skill name only.
-4. `GLOBAL-AGENTS.md` contains no repository-relative `docs/`, `config/` or
-   `scripts/` paths and does not name `MAINTAINING.md`. Installed skills
-   keep local Markdown links within their own directory; use a skill-local
-   reference, a `provenant` command or the consuming repository's runbook for
-   other guidance. `scripts/check-harness` enforces this for skill entrypoints and
-   supporting Markdown. Runnable commands are PATH-resolved. Fabric
-   identity derives from the working directory.
-5. `GLOBAL-AGENTS.md` is the sole ambient skill resolver and names neither an
-   installed root nor an instance skill directory. A named skill loads its
-   `SKILL.md` and is binding, while provider-native discovery may implement
-   resolution.
-6. Ambient files carry no dates. Git records revision provenance.
-7. `orchestrate` remains one skill. Skill changes use targeted,
-   evidence-backed pruning; no new catalogue entry or duplicate policy is
-   introduced without its own accepted scope and ownership boundary.
-8. The repository process and GitHub mechanics live on repository-scoped
-   surfaces. Durable decisions and specifications precede dependent
-   implementation; `session` owns temporary handoff lifecycle.
-
-## Change a skill
-
-1. Confirm the capability belongs globally and is not better kept in a project.
-2. Use `improve` to audit or author a skill; `deliver` owns end-to-end
-   delivery and verification.
-3. Use a consistent kebab-case capability name.
-4. Keep portable frontmatter to `name` and `description`. Keep required
-   third-party notices with copied material and provider UI metadata in a
-   validated sidecar. Metadata and tool lists may narrow invocation but never
-   grant authority.
-5. Keep the description to one line of trigger terms. Add a `Not for` clause
-   only where two skills would genuinely both take the same request, and keep
-   all descriptions together under 250 words. Keep the complete canonical catalogue at or below 8,000
-   characters, targeting 7,600 for wrapper and version headroom.
-6. Keep `SKILL.md` roughly 500 words or less. Move depth into narrowly named
-   references loaded only when needed and deterministic behaviour into scripts.
-7. A contract test is mandatory only where the change
-   introduces or alters an invariant a script, validator or CI gate evaluates at
-   runtime, so that violating it fails a command rather than a reviewer's
-   reading. A change confined to wording,
-   ordering, examples or explanation adds no contract test; the harness gates
-   carry it. Assert parsed structure (JSON policy values, resolved paths) or a script's output, exit code or side
-   effect. Never assert the text of a document. See `test-design` for the
-   exclusion list.
-8. A skill behaviour change that matters runs a few representative prompts
-   with and without the change and records the difference for the reviewer.
-   See [improve](skills/improve/SKILL.md).
-9. Re-run `scripts/check-harness` and the applicable targeted checks.
-
-Split a skill when its triggers, artifacts or completion gates differ
-meaningfully and a single-entrypoint branch selector cannot keep them
-behaviourally separate at runtime. A branched skill may unify procedures of
-differing authority under one frontmatter when each branch enforces its own
-authority gate: for example an audit branch that can never write without an
-explicit envelope naming the acting lifecycle owner. The runtime authority
-boundary, not the file boundary, is what must hold. Merge skills when they
-compete for the same request and lack a stable boundary. Retain only rules that
-change behaviour or prevent observed failures.
-
-Choose the smallest correct owner: an always-loaded project rule, occasional
-skill, deterministic script or hook, external MCP or app capability, or stable
-independently versioned plugin. Do not import popular packs wholesale. Extract
-only licensed, evidence-backed mechanisms into the nearest owner; create a skill
-only when its trigger, authority, artefact and gate remain distinct.
-
-Nothing outside a skill may name a file under that skill's `references/`
-directory. Cross-skill references use the skill name only; `scripts/check-harness`
-enforces this. Required licence notices may name the files they cover.
-
-`writing` owns the shared prose doctrine (mechanism catalogue,
-Australian-English house style, condense pass and claim discipline) and its
-engineering and academic overlays; `legal-writing` keeps only its domain
-overlay. Change shared doctrine in `writing`, not in `legal-writing`.
-`skills/writing/lint-rules.json` owns the general and academic rule
-vocabulary; `skills/legal-writing/lint-rules.json` owns legal rules and filing
-blocker severities. Run `provenant check writing <paths> [--rules general|academic|legal]`.
-Rules and exclusions are skill data, outside policy, configuration and records.
-
-## Promote and retire
-
-Promote a project skill when a clear reusable trigger, artifact, fixture and
-ownership boundary justify it. When evidence is limited, start opt-in and
-provisional. Generalise project-specific values into knobs, leave a thin local
-override, and keep project rules authoritative inside their workspace.
-
-Audit usage periodically. Retire zero-use skills that add no durable capability,
-but preserve required third-party notices and use repository history instead of
-live backup folders as the normal safety boundary.
-
-The `provenant-config` crate owns source stamping, typed `release.json`,
-immutable release installation and the managed-file receipt. Its library
-supports dry-run previews, digest checks and removal of unchanged owned entries.
-The Rust CLI ships `install`, `check install` and `uninstall`.
-
-## Change the delivery kernel
-
-Keep delivery invariants in `crates/workflow`. A new domain should compose the existing workflow
-and a domain skill first. Add a workflow check or receipt kind only when its
-artefacts, deterministic gates, judgement gates and release meaning are
-materially distinct.
-
-Trigger fixtures remain mandatory. Contract tests follow the
-machine-enforced-invariant test in **Change a skill** step 7. The eval
-triggers under **Change a skill** apply unchanged.
-
-## Public and third-party hygiene
-
-- Exclude personal absolute paths, private project names, credentials, local
-  plugin caches, matter facts and private symlink targets.
-- Import copyrightable expression only with a redistribution licence. Preserve
-  applicable licence, copyright, notice and modification requirements. Ideas,
-  methods, taxonomies, numeric thresholds and rubric weights do not by themselves
-  require a third-party notice.
-- Prefer source links and small adaptations to large generated bundles. Record
-  why each third-party component is present.
-- Treat plugins as supply-chain packages: before execution or installation,
-  pin the source and ref, then inventory manifests, scripts, hooks, binaries,
-  MCP or app endpoints, network and data flows, permissions, update and rollback,
-  and component licences.
-- Keep runtime examples synthetic and visibly placeholder-based.
-
-## What a test may pin
-
-- Invariants and properties at public boundaries first: pin observable contracts, authority boundaries, and machine-checkable properties. Avoid rigid tests, example snapshots, exact strings, or incidental counts that go stale as code evolves.
-- Regression tests minimal: add at most one small test per real defect, and only where no invariant covers it. Pruning redundant, duplicate, rigid, or implementation-pinned tests is normal, welcome work.
-- On any test failure: first decide whether the test pins implementation details. Rewrite it as an invariant or delete it; never bend product code or bump expected values around brittle tests.
-
-Three advisory test-strength signals run in `.github/workflows/test-signals.yml`.
-They always exit 0, so they only warn:
-
-- `scripts/assertion-diff` flags Rust test assertions that a diff removes or
-  loosens.
-- `scripts/run-mutants` mutation-tests the source lines a diff changed.
-- `scripts/find-changed-tests` lists the Rust tests a change adds or alters.
+This repository supports multiple agent platforms. Platform-specific scope
+must be explicit. Changes to ambient rules apply to new sessions.
 
 ## Verify and release
 
-Test tiers are T0 (touched crates), T1 (selected integration binaries),
-T2 (full suite), and T3 (stress and native tests). In a lane, run one cheap
-compile check, push the commit and run `scripts/lane-check <branch-or-sha>`,
-and let CI run the tiers; `scripts/verify-tier` is for a person or a host with
-spare capacity, and T2 and T3 run in CI or on a suitable host. The host can
-enforce this with `lanes.local_cargo`.
-The [test tiers runbook](docs/runbooks/test-tiers.md) describes the selector,
-runner configuration and current limits.
-
-Run the checkout gates, or require exact-head `ci-status`:
-
-For a pull request branch, run only focused Rust crate tests. Hosted CI runs the workspace gates on the exact PR head.
+Use the [CI runbook](docs/runbooks/ci.md), [test tiers](docs/runbooks/test-tiers.md)
+and [release skill](skills/release/SKILL.md) for the relevant checks. Run the
+checkout gates or require exact-head CI evidence:
 
 ```sh
 provenant check config
@@ -273,27 +97,8 @@ provenant check release
 git diff --check
 ```
 
-Generated contract reference is not tracked. Read `provenant help --all`,
-`provenant config schema` and `--json` output; `scripts/generate-reference`
-renders the same sources into the ignored `docs/reference/`, and CI runs it
-(`--strict`) to prove they still render and uploads the result as an artefact.
-
-The harness check requires Python 3 and PyYAML (`python3 -m pip install PyYAML==6.0.2`). It scans repository assets, not installed skill roots. Run `scripts/test-check-harness` to exercise its fixture tests.
-
-Use `provenant check writing PATHS --rules general` for prose, with
-`--rules academic` or `--rules legal` where they apply. Git pre-push
-protection uses `provenant hook git pre-push REMOTE LOCATION`, and
-`install --hooks on` owns hook registration. Follow the
-[GitHub workflow](docs/runbooks/github-workflow.md) when preparing changes.
-
-Each check returns ordered findings, exits 1 for findings, 2 for malformed
-command input and 3 for unreadable evidence. Use `--limit N` and the returned
-`--cursor TOKEN` for further pages. Changing inputs or rules invalidates a
-cursor. Hosted CI runs the full test suites. Run release scans by hand before
-publication.
-
-Before publication, scan an exact nonempty ancestor range as well as the
-tracked working files and raw HEAD. Pin both endpoints:
+Before publication, scan the exact nonempty ancestor range as well as the
+working tree and HEAD:
 
 ```sh
 provenant check release \
@@ -301,14 +106,6 @@ provenant check release \
   --head "$(git rev-parse --verify --end-of-options 'HEAD^{commit}')"
 ```
 
-The check includes every selected commit's raw author, committer and message
-bytes and every blob in its tree, including files added and deleted within
-the range. It also checks publication heads for required legal files and
-rejects private paths, symlinks, secrets, personal home paths and evidence
-that cannot be read within the byte bounds. It reads no unrelated refs and
-never fetches, publishes or rewrites history.
-
-Publication used a fresh root commit, `a39c7b7e`. Rewriting `main` or any other
-shared branch, locally or by push, stays gated behind explicit user authority;
-only a writer's own unmerged branches may be rewritten freely. Never push
-private pre-publication refs merely because the current tree is clean.
+Keep secrets, private paths and inappropriate third-party material out of
+published files and history. Follow the [GitHub workflow](docs/runbooks/github-workflow.md)
+for review and landing.

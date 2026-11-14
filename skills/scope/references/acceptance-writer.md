@@ -1,19 +1,6 @@
 # Acceptance writer
 
-Use when a scope needs testable acceptance criteria.
-
-Write 2 to 5 observable criteria for a task and about 10 for a feature; more means
-an epic. Each criterion:
-- is one statement of behaviour a reviewer can check, `When <event>, <behaviour>`;
-- names its evidence type: `[test]`, `[command]`, `[capture]` or `[review]`;
-- names the check that proves it, runnable locally and fast where possible.
-
-Add non-goals, the verify command and any Boundaries, each citing a recorded hard
-boundary or its reason. Do not restate the
-design. If a criterion cannot be checked, rewrite it until it can, or park it as a
-decision. A verification step beyond the stated outcome names the failure it
-prevents and how likely that failure is; otherwise leave it out. The criteria are
-the best current statement of the outcome: the implementer may not silently weaken
-or delete one, and raises a flaw with evidence in handoff `decisions`, including
-an insight that is not a failure. A risky item keeps one held-back check outside
-the writer's context.
+Use when a scope needs testable acceptance criteria. Follow the criteria and
+authority rules in `scope`. Add non-goals, verification and boundaries without
+restating the design. A risky item keeps a held-back check outside the writer's
+context.

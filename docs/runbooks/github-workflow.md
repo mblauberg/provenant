@@ -29,32 +29,19 @@ stay open. Link a pull request with `Closes #N` only when merge leaves no user
 or external-action gate; otherwise `References #N`. Commits never carry a
 closing keyword.
 
-Project `2` (owner `mblauberg`) holds Status. To set it:
-
-```sh
-item=$(gh project item-list 2 --owner mblauberg --limit 200 --format json \
-  --jq '.items[] | select(.content.number == 148) | .id')
-gh project item-edit --project-id PVT_kwHOBiwkrc4BdU1c --id "$item" \
-  --field-id PVTSSF_lAHOBiwkrc4BdU1czhX3Kn4 --single-select-option-id 5c9ddb06
-```
-
-Option IDs: `Backlog` `c764d63a`, `Ready` `a5ebd55b`, `In progress`
-`5c9ddb06`, `In review` `27873f75`, `Awaiting user` `129da224`, `Done`
-`93d6cd26`. If one stops matching, re-derive it with `gh project field-list 2
---owner mblauberg --format json`.
+Use `gh project item-list`, `gh project field-list` and `gh project item-edit`
+to find the project item and current Status options before changing it.
 
 ## Branch, commit, pull request
 
-Name the branch `<type>/<area>-<slug>`, at most 48 characters, `<type>` one of
-`feat fix refactor perf test docs chore ci build`; no issue number and no run
-vocabulary (batch, wave, lane, model name). Create it with
+Name the branch `<type>/<area>-<slug>` without an issue number or run
+vocabulary. Create it with
 `provenant worktree create BRANCH --base main`; to record the issue link on
 GitHub, create the branch first with `gh issue develop N --name BRANCH`.
 `worktree remove NAME` refuses dirty worktrees; `--discard` also deletes an
 unmerged branch.
 
-Push with `git push -u origin BRANCH`; a writer pushes its own branch unless
-`lanes.publish=false`, when the `deliver` template's host delivery does it.
+See [lane delivery](lane-lifecycle.md#delivery) for publishing.
 
 `gh pr create --body` bypasses
 [the template](../../.github/pull_request_template.md): fill a copy (evidence
@@ -88,49 +75,19 @@ branches outside authorised merges.
 
 ### Land
 
-```sh
-provenant land 148 149              # one landing request, two members
-provenant land 148 --head SHA       # pin the head that may land
-provenant land 148 --wait=30m       # wait up to 30 minutes for CI this call
-provenant land 148 --shadow         # gate and record without publishing
-provenant land --tier substantial --explain --json
-```
-
-Every publisher submits to one landing owner (`src/pr/landing/owner.rs`):
-`land`, graph land nodes and the graph delivery PR they land. The owner pins
-each member's head and base, builds one merge commit per PR onto the fetched
-target, gates the exact candidate and publishes it
-([ADR 0037](../adr/0037-batched-exact-candidate-landing.md)), then runs local
-clean-up. Its record, `landing/requests/<id>.json`, keeps one outcome per
-member (`landed`, `pending`, `unknown`, `refused`). Resubmitting the same
-request is idempotent: landed members are never landed again, and pending ones
-resume. `integration = "single"` lands one PR per candidate. No call blocks
-past its bound: CI still running at `gate.timeout_seconds` (or `--wait`) ends
-the call with `LAND_PENDING`; another lander holding the lock gives
-`LAND_BUSY`; a rate-limited read skips one poll with a warning. Rerun the same
-`land` to resume. `--explain --json` shows the effective policy and its
-sources; settings live under `[domains.pr.land]` (`config schema` lists the
-keys).
+Use `provenant land --help` for options and `provenant land --explain` for
+the effective policy and its sources. The landing owner gates the exact
+candidate; see [ADR 0037](../adr/0037-batched-exact-candidate-landing.md).
+Rerun the same request when a landing is pending or busy.
 
 Sharp edges:
 
 - Changing `candidate_ref_prefix` needs a matching CI trigger (the bundled one
   covers `land/**`). A command gate runs without `GH_TOKEN`, `GITHUB_TOKEN` and
   `GH_ENTERPRISE_TOKEN` unless `gate.env_passthrough` names them.
-- Approval. `approval_sources = ["provenant_review", "forge"]` is the compiled
-  default under `[domains.pr.land]`; the first satisfied source approves.
-  `provenant_review` reads a passing, independent review-lane settlement on the
-  exact PR head. The review execution must be separate from the writer; sharing
-  a GitHub account does not make those executions the same reviewer.
-  `forge` reads an approving GitHub review on that head from a different login
-  to the PR author. Any head change invalidates the old approval.
-  Override the list for a project or tier with the same `approval_sources` key;
-  `land --explain --json` shows the effective list and configuration source.
-  The landing receipt records the approving source, record ID or reviewer, and
-  covered head. `land N --accept-delta REASON` remains the explicit owner override.
-  `approval_tier = "auto"` needs no review for changes touching only tests,
-  docs or review-exempt paths; `none` is CI only, while `carry` and `delta`
-  require approval on the exact head.
+- Review must be independent of the writer and cover the exact head. Inspect
+  `land --explain` for the effective approval policy and its sources; a changed
+  head needs fresh evidence.
 - `LAND_PENDING` and `LAND_BUSY` exit as `pending`; rerun the same `land`.
   `LAND_CONFLICT`: the PR conflicts with the target; rebase or merge, then push.
   `LAND_PUBLICATION_UNKNOWN`: rerun `land` (see below).

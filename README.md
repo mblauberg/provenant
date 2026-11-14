@@ -12,306 +12,89 @@
   <br>with quota-aware routing, confined worktrees, full run records and messaging between sessions.
 </p>
 
-<p align="center">
-  <a href="https://github.com/mblauberg/provenant/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/mblauberg/provenant/actions/workflows/ci.yml/badge.svg?branch=main"></a>
-  <a href="LICENSE"><img alt="MIT licence" src="https://img.shields.io/github/license/mblauberg/provenant"></a>
-  <a href="tools/front-door/rust-toolchain.toml"><img alt="Rust 1.99.1" src="https://img.shields.io/badge/Rust-1.99.1-orange?logo=rust"></a>
-  <img alt="macOS" src="https://img.shields.io/badge/platform-macOS-lightgrey?logo=apple">
-</p>
+Provenant helps a coding-agent session delegate work to other agents using your
+existing provider accounts. It routes work, tracks quota, isolates writers in
+Git worktrees and keeps records of runs. The session you started stays in charge
+of the work and its review.
 
-<p align="center">
-  <a href="#why-provenant">Why</a> ·
-  <a href="#what-you-get">Features</a> ·
-  <a href="#install">Install</a> ·
-  <a href="#quick-start">Quick start</a> ·
-  <a href="#how-it-works">How it works</a> ·
-  <a href="#documentation">Docs</a>
-</p>
-
-Provenant lets the coding agent you are already talking to hand work to other
-agents safely. From a Claude Code, Codex or other supported session, you ask for
-a task to be delegated; Provenant picks a model, checks that one of your
-accounts has quota left, runs the agent in its own Git worktree (writers on
-trusted routes run like the CLI started by hand; read-only work and untrusted
-routes run in a sandbox), records everything it did and can push the result to
-a branch for review.
-
-It is for developers who run several coding agents at once on their own
-subscriptions and want that to stay organised: no two agents writing in the same
-worktree, no lane started on an exhausted account, and a record of every run.
-
-```mermaid
-flowchart TB
-    subgraph H["Your harness sessions"]
-        direction LR
-        CC["Claude Code"] ~~~ CX["Codex"] ~~~ H3["Cursor · Agy · OpenCode"]
-    end
-    subgraph P["Provenant"]
-        direction LR
-        RT["Pick a model<br/>by route"] --> QA["Check quota<br/>pick an account"] --> CF["Launch<br/>the lane"] --> RC["Record<br/>the run"]
-    end
-    subgraph A["Your signed-in accounts"]
-        direction LR
-        A1["Claude<br/>one or more"] ~~~ A2["Codex<br/>one or more"] ~~~ A3["Cursor · Agy<br/>OpenCode"]
-    end
-    FB["Fabric<br/>messages · tasks<br/>peer hosts"]
-    MB["Menu bar<br/>quota meter"]
-    H ==>|"delegate a task"| P
-    P ==>|"run the agent"| A
-    H <-.->|"coordinate"| FB
-    P -.-|"shows quota"| MB
-```
-
-Each delegated task runs as a **lane**: one agent, one access mode, one record.
-**Fabric** is the shared message and task store that lets sessions, and other
-machines you configure, coordinate. The `provenant` CLI is a single Rust binary,
-and agents reach the same features through its shell commands.
+A delegated task is a **lane**: an agent working with a defined scope and
+access mode. **Fabric** coordinates sessions through messages, tasks and
+claims, including across configured hosts. Provenant provides a CLI and skills
+that agents can use from their existing harnesses.
 
 ## Why Provenant
 
-Many orchestration tools ask you to describe the work up front as a fixed graph
-of steps, or to script each agent's behaviour so every run follows the same
-path. That suits work whose shape is known in advance. Coding work often is not:
-the right next step depends on what the last one found.
+Coding work rarely follows a fixed sequence. An investigation can change the
+implementation, and a review can expose another problem. Provenant lets the
+session decide what to delegate and what to do with the result, while the
+harness handles routing, execution and records.
 
-Provenant leaves those decisions with the agents. The session you started stays
-in charge and decides what to split, which tier of model to use, how much
-review a change needs and when to stop. The harness supplies the parts that
-should not depend on judgement:
+Routes select models and accounts with quota headroom. A writer works in its
+own registered worktree, so parallel changes have separate Git state. Run
+records preserve the work and its outcome for inspection and continuation.
+Permission policy and the trust placed in a route matter: review the
+[configuration](docs/runbooks/configuration.md#lane-sandbox-mode) and grant
+only the authority the work needs.
 
-- **Routing** that spreads work across models and providers by weight and
-  remaining quota.
-- **Quota** checks before launch, so a lane does not start on an exhausted
-  account.
-- **Confinement** that fixes what each lane may read and write.
-- **Records** of every attempt, its output, cost and final state.
-- **Coordination** between sessions through durable messages, tasks and claims.
-
-Templates expand into graphs: `provenant run TEMPLATE BRIEF` starts a bundled,
-user or repository template. `provenant run task BRIEF` runs the `task`
-template for one bounded assignment. `provenant run --file GRAPH` submits a
-hand-written graph; `--explain` inspects it before launch.
-
-## What you get
-
-| Area | What Provenant does |
-| --- | --- |
-| **Subscription quota and API** | Drives each provider's own CLI with your existing sign-in, so lanes draw on the subscriptions you already have. Pay-per-token API models are available through OpenCode routes such as OpenRouter; OpenCode's own configuration holds the key, never Provenant. |
-| **Many accounts** | Register several accounts per provider. Dispatch resolves an account with headroom unless you pin one, and a quota refusal cools only the account that hit it. |
-| **Usage meter** | `provenant quota` and an optional macOS menu bar app show every account's windows, reset times, credits and staleness in one place. |
-| **Your harnesses** | One install wires skills and instructions into Claude Code, Codex, Cursor, Agy and OpenCode. Claude Code also gets managed hooks and automatic account switching. |
-| **Routing** | Named pools (`utility`, `junior`, `senior`, `principal`, `writing`, `design`) choose among models by weight, scaled by each provider's pacing. |
-| **Lane modes** | Each lane runs `read-only` or `worktree-write`. Lanes run unsandboxed by default and share host caches; `--sandbox` opts into a macOS Seatbelt sandbox profile, and `--no-sandbox` overrides route, network and parent floors. Writers get one registered worktree. |
-| **Host-side delivery** | The host verifies a writer's final commit, pushes it to the branch you name and can open a pull request. |
-| **Fabric** | Messages, claims and activity between sessions and agents, plus dispatch to configured peer hosts over SSH. |
-| **Records and history** | Every run, task and attempt is stored with its route, account, knobs and output. Lanes can be listed, read, resumed or cancelled later. |
-| **Telemetry** | Local cost and token reports, CLI usage counts, and timeline export for Perfetto, with no collector. |
-| **Skills** | 15 workflow skills (scope, deliver, code review, diagnose, orchestrate and more) plus 3 library skills for specific tools and stacks, installed into each harness. |
-
-## Requirements
-
-- **macOS** for dispatch. Sandboxed lanes use the macOS sandbox, and Linux
-  has no confinement backend, so it refuses dispatch. CI builds and tests the
-  workspace on Linux.
-- **Rust 1.99.1**, pinned by
-  [`rust-toolchain.toml`](tools/front-door/rust-toolchain.toml), and Git.
-- **At least one provider CLI**, installed and signed in: Claude Code, Codex,
-  Cursor, Agy or OpenCode.
-- **macOS 14 or later and Swift** for the optional
-  [menu bar app](apps/quota-menubar/README.md).
-
-## Install
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/mblauberg/provenant/main/install.sh | sh
-```
-
-The installer verifies the release checksum, sets up detected harnesses and
-Claude account directories, and checks the installation. A rerun upgrades the
-recorded selection. Output summarises changes and targets, for example:
-
-```text
-install: 86 changes (78 links, 4 hooks); 2 targets
-```
-
-Counts depend on the release and installed harnesses. Findings and manual
-includes appear only when action is needed. Use `--json` for detailed records.
-Active lanes supervise disk pressure using `gc.free_floor`; settlement and
-worktree removal reclaim eligible data, with a daily GC backstop.
-
-**Installing with a coding agent.** In a checkout, ask the agent to run
-`./install.sh --yes`. Use `./install.sh --from-source --yes` to build locally.
-Run `sh install.sh` in a terminal for guided first-time setup. The
-[install runbook](docs/runbooks/install.md) covers manual installation,
-packages and upgrades.
-
-## Quick start
-
-Check what Provenant can see. These commands read state only:
-
-```sh
-provenant quota                    # every account's quota windows
-provenant route list                    # pools, weights and pacing
-provenant route resolve --route junior  # which model a junior lane would get
-```
-
-Start a read-only lane:
-
-> [!NOTE]
-> This starts a real agent and uses quota on whichever account is chosen.
-
-```sh
-provenant run task 'Summarise this repository structure in three bullets.' --route junior
-provenant status                        # active and recent lanes
-```
-
-A writer lane gets its own worktree:
-
-```sh
-provenant run implement --brief-file BRIEF.md \
-  --route senior --branch fix/example --base origin/main
-```
-
-Inside a harness, agents do the same through `provenant` shell commands, so in practice
-you ask your session to delegate and it dispatches for you. Run
-`provenant help <command>` for every flag.
+The optional [macOS quota menu](apps/quota-menubar/README.md) presents account
+usage and opens the console. Local telemetry helps inspect usage and runs;
+see the [telemetry runbook](docs/runbooks/telemetry.md).
 
 ## How it works
 
-Every lane follows the same path. The host makes each decision before launch and
-records it, so a lane can be inspected, resumed or audited later.
+The host resolves a route and account, launches the lane and records its
+attempt. A writer's work is kept in a separate worktree; the host can verify
+and deliver its result for review. Read-only assignments and writing
+assignments have different purposes and authority. Check the result and its
+review evidence before accepting a change.
 
-```mermaid
-flowchart LR
-    subgraph S1["1 · Choose"]
-        direction TB
-        R["Resolve route<br/>weight × pacing"] --> Q["Admit on quota<br/>pick an account"]
-    end
-    subgraph S2["2 · Run"]
-        direction TB
-        L["Confined launch<br/>read-only or worktree"] --> C["Record attempt<br/>output, cost, state"]
-    end
-    subgraph S3["3 · Deliver"]
-        direction TB
-        D["Host verifies and<br/>pushes the branch"] --> V["Pull request,<br/>review and CI"]
-    end
-    S1 --> S2 --> S3
-```
+Fabric runs alongside the lanes. Sessions can exchange messages, share tasks
+and claim work without relying on a single conversation's context. Configured
+peer hosts extend that coordination to other machines. Run records make it
+possible to inspect the outcome and continue work when an attempt stops.
 
-1. **Choose.** The resolver draws a model from the route's pool, weighting each
-   member by its configured weight and its provider's pacing. `pace` compares
-   remaining quota with the time left in the window. Admission then picks a
-   registered account with headroom.
-2. **Run.** A writer on a trusted route starts like the CLI started by hand,
-   in its own worktree with hosted-cloud keys stripped from its environment.
-   Read-only lanes, lanes with a narrowed network and listed routes start under
-   a sandbox profile built from their access mode: read-only lanes cannot
-   write, sandboxed writers write only to their worktree and granted roots, and
-   profiles deny access to SSH keys. See
-   [lane sandbox mode](docs/runbooks/configuration.md#lane-sandbox-mode). Output, exit state,
-   tokens and cost go into the run record.
-3. **Deliver.** For a writer, the host fetches before launch and, afterwards,
-   verifies the final commit and pushes it with its own Git authority.
-   `provenant lane deliver ATTEMPT --deliver pr` opens a pull request.
-   `provenant pr status` watches CI, and `provenant land` checks CI and merges
-   the verified head. `provenant run review BRIEF` plans review coverage from configurable path floors.
+Routes and account settings can be adapted to your providers and priorities.
+The [routing runbook](docs/runbooks/routing-and-templates.md) explains how to
+configure them; the [configuration runbook](docs/runbooks/configuration.md)
+explains where settings come from. CLI help and the configuration schema are
+the reference for the available options.
 
-Fabric runs alongside this path. Sessions on one machine, or on peer hosts,
-exchange messages, share tasks and claim work, so two harnesses can split a job
-without stepping on each other. See the
-[architecture overview](docs/ARCHITECTURE.md) for the crate map and state layout.
+## Install
 
-## Customise
+Follow the [installation runbook](docs/runbooks/install.md) for requirements,
+installation and account setup. Dispatch runs on macOS; Linux supports builds
+and CI checks.
 
-Settings, routes and accounts live in one validated file, `config.toml` in the
-state root (`~/.local/share/provenant/v2` by default), and the CLI edits it.
+## Quick start
 
-```sh
-provenant config set profile economy                    # balanced or economy
-provenant config set lanes.max_concurrency 4
-provenant route set senior claude/claude-sonnet-5-5 --weight 6
-provenant route pacing codex spend                      # pace, spend or max
-provenant route reset senior                            # back to the bundled pool
-```
+After installation, run `provenant help` to explore the CLI and
+`provenant help COMMAND` for a command's options. Ask your coding-agent session
+to delegate a bounded task, or use the CLI directly. Start with a task whose
+output you can review: a lane invokes a real agent under the authority you
+provide.
 
-- **Profiles and knobs** set lane concurrency, nesting depth, review strength
-  and more. `provenant config show` lists each value and where it came from, and
-  every attempt records the knobs it ran with.
-- **Routes** are yours to reshape: add models, change weights or pin an exact
-  model with `--model`. `--confidential` excludes models that train on input
-  or are unclassified.
-- **Accounts** take an optional plan, priority and billing anchor, and the
-  menu bar app lets you rename, reorder or hide them.
-- **Claude Code account switching** is opt-in. When the current account passes
-  a quota threshold, a managed hook checkpoints the session and continues it in
-  a fresh session on an allowed account with headroom.
-
-## Telemetry and history
-
-Reports are built from records on your machine; no collector or upload is
-involved. Usage counters never log arguments, prompts or results.
-
-| Command | Shows |
-| --- | --- |
-| `provenant telemetry stats` | Tokens by run and attempt |
-| `provenant telemetry cost [TARGET]` | API-equivalent cost from the usage ledger, priced from [`config/telemetry-prices.toml`](config/telemetry-prices.toml) |
-| `provenant telemetry value` | Each account's usage against its plan price and quota readings, and cost per accepted outcome |
-| `provenant telemetry stats --usage` | How often each CLI verb is used, including installed ones never called |
-| `provenant telemetry trace` | A timeline of attempts across hosts, for [Perfetto](https://ui.perfetto.dev) |
-| `provenant status` | Active and recent lanes; `--all` and `--json` show full records |
-| `provenant output <attempt>` | A lane's recorded output |
-| `provenant retry <attempt>` | Continue an attempt with a new prompt |
-| `provenant workflow session` | Save, show or hand off a session checkpoint |
-
-Use these to tune your setup with evidence: shift route weights towards models
-whose lanes succeed, spot commands nobody calls, and see where
-quota actually goes. The `improve` skill helps turn what you
-find into process changes and repeatable evaluations.
+Use `provenant status` to inspect work and its outcome. The
+[architecture](docs/ARCHITECTURE.md) explains the lifecycle and boundaries;
+the [work-item workflow](docs/runbooks/github-workflow.md) covers changes
+intended for a repository.
 
 ## Documentation
 
-| Document | Covers |
-| --- | --- |
-| [Architecture](docs/ARCHITECTURE.md) | Components, crate map, state root and lifecycle |
-| [`GLOBAL-AGENTS.md`](GLOBAL-AGENTS.md) | The standing rules every harness loads |
-| [Specifications](docs/specs/README.md) | Contracts for each subsystem |
-| [Install](docs/runbooks/install.md) | Build, package, install, uninstall and account sync |
-| [Configuration](docs/runbooks/configuration.md) | Profiles, knobs, quota display and account switching |
-| [Routing and templates](docs/runbooks/routing-and-templates.md) | Pools, pacing, model policy, review panels and templates |
-| [Providers](docs/runbooks/providers.md) | Launch notes for each provider |
-| [Cloud launch](docs/runbooks/cloud-launch.md) | Hand a brief to a provider cloud session and collect its branch |
-| [Fabric hosts](docs/runbooks/fabric-hosts.md) | Peer hosts and remote dispatch |
-| [Worktrees](docs/worktrees.md) | Worktree policy and writer dispatch |
-| [Telemetry](docs/runbooks/telemetry.md) | Usage, cost and trace export |
-| [Human inbox](docs/runbooks/human-inbox.md) | Inbox use and message delivery to sessions |
-| [Claude hooks](docs/runbooks/claude-hooks.md) | Managed Claude Code session and worktree hooks |
-| [Disk and garbage collection](docs/runbooks/gc.md) | Inspecting storage; collecting caches and expired provider state |
-| [CI](docs/runbooks/ci.md) | Checks, test inventory and reproducing failures |
-| [Replay bench](docs/runbooks/bench.md) | Mining, verifying and running replay tasks |
-| [Release notes](docs/release-notes/README.md) | Released versions and pending changes |
-| [Quota menu bar](apps/quota-menubar/README.md) | Build and run the macOS app |
-| [Skills](skills/) and [library](library/) | The workflow and tool skills installed into each harness |
-| [Glossary](docs/glossary.md) | Terms used across the docs |
+The [documentation index](docs/README.md) links the architecture, specifications,
+decisions and runbooks. [GLOBAL-AGENTS.md](GLOBAL-AGENTS.md) contains the
+cross-project rules installed for agent sessions.
 
 ## Contributing
 
-Read [`AGENTS.md`](AGENTS.md) for repository instructions and
-[`GLOBAL-AGENTS.md`](GLOBAL-AGENTS.md) for the global rules,
-[`MAINTAINING.md`](MAINTAINING.md) for the change process and the
-[GitHub workflow](docs/runbooks/github-workflow.md) for branches, issues and
-delivery. Rust code lives under [`tools/front-door/`](tools/front-door); keep a
-change inside the crate that owns it, and follow the accepted specification
-before changing a public command or record. Pull requests run the tests for the
-changed crates and their dependents; the full workspace runs on pushes to `main`
-and for changes outside a crate. See the [CI runbook](docs/runbooks/ci.md).
+Read [AGENTS.md](AGENTS.md) and [MAINTAINING.md](MAINTAINING.md) before making
+a change. The [GitHub workflow](docs/runbooks/github-workflow.md) describes
+branches, review and landing.
 
 ## Security
 
-Report vulnerabilities privately through
-[GitHub private vulnerability reporting](https://github.com/mblauberg/provenant/security/advisories/new).
-[`SECURITY.md`](SECURITY.md) covers scope and safe use.
+Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
 ## Licence
 
-Released under the [MIT licence](LICENSE). See [acknowledgements](ACKNOWLEDGEMENTS.md)
-for influences on the skills and workflows.
+Provenant is available under the [MIT licence](LICENSE). See
+[ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md) for credits.

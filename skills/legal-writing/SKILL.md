@@ -27,7 +27,7 @@ plain-language explanation about law goes to `writing`.
    redactions.
 4. Draft the minimum complete text: relief or answer first, one proposition per
    paragraph, exact pinpoints, no internal agent language.
-5. Lint with `provenant check writing --help` (the legal rule set), then check
+5. Lint with `provenant check writing PATHS --rules legal`, then check
    what the lint cannot see.
 
 ## Fixed points
@@ -39,12 +39,11 @@ plain-language explanation about law goes to `writing`.
   at the status its verified text supports. It is not a finding.
 - Never weaken a threshold, drop an anchor or change forum wording to make text
   read more naturally.
-- House style: Australian English, single quotation marks, day-month-year dates,
-  en dashes for ranges only, no em dashes.
+- Apply `writing` for shared house style.
 
 ## References
 
-- [core](references/core.md): function test, locks, house style, bans. All prose.
+- [core](references/core.md): function test, legal locks and register. All prose.
 - [evidence and safety](references/evidence-and-safety.md): sources, claim
   status, verification, redaction. Any factual assertion.
 - [instruments](references/instruments.md): forum adapter, orders, affidavits,

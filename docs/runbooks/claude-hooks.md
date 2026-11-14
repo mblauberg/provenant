@@ -3,8 +3,7 @@ Owner: provenant
 Anchor: [`hooks_session.rs`](../../tools/front-door/tests/hooks_session.rs)
 
 `provenant install --harness claude --hooks on` registers these hooks in the
-Claude settings (see [install](install.md)); rerun it after an upgrade to
-register new handlers. Every handler exits 0 on its own failure, except the
+Claude settings (see [install](install.md)). Every handler exits 0 on its own failure, except the
 worktree hooks and the guard's exit-2 denial, and prints only the protocol
 response on stdout.
 
@@ -27,29 +26,10 @@ offers answers.
 
 ## SessionStart output
 
-Read-only, under 8 KiB in total (the checkpoint excerpt shrinks first), with a
-4-second budget; a section that could not be read is listed as unavailable,
-never empty. In order:
-
-- `## Standing`: the checkpoint's typed `provenant_standing` record (goal,
-  grants, open obligations, what waits on the owner). A grant with an
-  `owner:<ref>` or `rule:<ref>` source is listed active; without one, or with an
-  unreadable expiry, unverified; an expired one is counted only. It points at
-  authority and never creates any. After an account switch `chair-start` appends
-  the source session's standing section to its handoff.
-- `## Intent`: the checkpoint's intent section (3 KiB cap, shared with standing),
-  plus the host transcript path for exact words. No intent section gets an
-  `Intent:` diagnostic line.
-- The digest (3 KiB): lanes in flight, lanes settled since the last chair save
-  (24 hours with no checkpoint), and pull requests named in the checkpoint
-  (`PR #12`, `pr/12`, `pull/12`; the sixteen most recent), each from
-  `provenant pr status N`. Write delivered PRs into the checkpoint that way.
-  Lane listings read one page of 100; a trailing `+` marks a partial count and
-  the section gives the command for the next page.
-- The chair's checkpoint, then `autosave.md`.
-
-Every printed command repeats the hook's non-default `--state-dir` so it reads
-the same store; a hint that cannot round-trip is shown as a note.
+The hook reports checkpoint and lane state. An unavailable section is not an
+empty one; inspect the source before acting. The checkpoint points to authority
+but does not create it. Record delivered PRs in the checkpoint so the digest can
+find them.
 
 ## Autosave and compaction
 
@@ -86,8 +66,7 @@ prints the new worktree's absolute path and nothing else on stdout.
   exit 2 and the worktree stays; use `provenant worktree remove` yourself once
   the cause is cleared. Declared regenerable output is reclaimed; any other
   ignored file, such as an undeclared `target/`, keeps the tree.
-- A failure means no worktree is created: fix the cause or run
-  `provenant install --hooks off` to return to Claude's own worktrees.
+- If a hook fails, inspect and resolve the reported cause.
 
 Check with `provenant hook claude --help`; the fixture tests are
 `cargo test -p provenant --test hooks_session` from `tools/front-door`.
