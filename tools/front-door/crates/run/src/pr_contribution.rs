@@ -45,10 +45,10 @@ pub(crate) fn read_only_branch(
 
 impl crate::RunStore {
     /// Attribution must never change the result of an already accepted run.
-    pub(crate) fn contribution_diagnostic(&self, run: AttemptId, result: Result<()>) {
+    pub(crate) fn contribution_diagnostic(&self, attempt: AttemptId, result: Result<()>) {
         if let Err(error) = result {
             let message = format!("PR contribution capture failed: {error}\n");
-            if let Ok(dir) = self.attempt_dir(run, false) {
+            if let Ok(dir) = self.attempt_dir(attempt, false) {
                 let _ = crate::artifacts::seal(
                     &dir,
                     "pr-contribution-diagnostic.txt",
@@ -62,7 +62,7 @@ impl crate::RunStore {
     }
     pub(crate) fn contribution_attempts(
         &self,
-        run: provenant_core::AttemptId,
+        attempt: provenant_core::AttemptId,
         call: &Request<'_>,
     ) -> Result<Vec<crate::AttemptRecord>> {
         let mut query = self.db.prepare(
@@ -70,7 +70,7 @@ impl crate::RunStore {
         )?;
         let ids = query
             .query_map(
-                params![run.to_string(), self.context.project_id.to_string()],
+                params![attempt.to_string(), self.context.project_id.to_string()],
                 |row| row.get::<_, String>(0),
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -90,7 +90,7 @@ impl crate::RunStore {
     pub(crate) fn inherit_contribution(
         &self,
         prior: AttemptId,
-        run: provenant_core::AttemptId,
+        attempt: provenant_core::AttemptId,
         replacement_branch: Option<&str>,
         call: &Request<'_>,
     ) -> Result<()> {
@@ -107,7 +107,7 @@ impl crate::RunStore {
             .optional()?;
         if let Some((branch, role, generation)) = branch {
             let replacement = replacement_branch.filter(|replacement| *replacement != branch);
-            for attempt in self.contribution_attempts(run, call)? {
+            for attempt in self.contribution_attempts(attempt, call)? {
                 db.capture_generation(
                     &attempt,
                     replacement.unwrap_or(&branch),

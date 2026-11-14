@@ -2195,8 +2195,8 @@ impl ResumeRequest {
     clippy::print_stderr,
     reason = "report the run-level registry failure without suppressing judgeable queued rows"
 )]
-fn report_registry_error(run: provenant_core::AttemptId, error: &RunError) {
-    eprintln!("warning: writer fence listing failed for {run}: {error}");
+fn report_registry_error(attempt: provenant_core::AttemptId, error: &RunError) {
+    eprintln!("warning: writer fence listing failed for {attempt}: {error}");
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2212,15 +2212,15 @@ struct WorkerProcessRefusal {
 impl crate::RunStore {
     pub(crate) fn recovery_process_wait(
         &self,
-        run: provenant_core::AttemptId,
+        attempt: provenant_core::AttemptId,
         call: &crate::Request<'_>,
     ) -> Option<String> {
-        let directory = self.attempt_dir(run, false).ok()?;
+        let directory = self.attempt_dir(attempt, false).ok()?;
         let raw =
             read_sealed(&directory, "settlement-process-refusal.json", RECORD_LIMIT).ok()??;
         let refusal: WorkerProcessRefusal = crate::db::decode(&raw).ok()?;
         if refusal.schema_version != 1
-            || refusal.attempt != run
+            || refusal.attempt != attempt
             || call.clock.wall_now().ok()? >= refusal.expires
         {
             return None;
@@ -2235,27 +2235,27 @@ impl crate::RunStore {
 impl crate::RunStore {
     pub(crate) fn queue_reconcile(
         &self,
-        run: provenant_core::AttemptId,
+        attempt: provenant_core::AttemptId,
         call: &crate::Request<'_>,
     ) -> Result<Vec<(provenant_core::AttemptId, crate::Reconciled)>> {
-        self.queue_reconcile_mode(run, call, provenant_os::exec::spawn_detached, true)
+        self.queue_reconcile_mode(attempt, call, provenant_os::exec::spawn_detached, true)
     }
 
     pub(crate) fn queue_reconcile_with(
         &self,
-        run: provenant_core::AttemptId,
+        attempt: provenant_core::AttemptId,
         call: &crate::Request<'_>,
         spawn: impl FnOnce(
             &[std::ffi::OsString],
             &std::path::Path,
         ) -> std::result::Result<(), provenant_os::exec::ExecError>,
     ) -> Result<Vec<(provenant_core::AttemptId, crate::Reconciled)>> {
-        self.queue_reconcile_mode(run, call, spawn, false)
+        self.queue_reconcile_mode(attempt, call, spawn, false)
     }
 
     fn queue_reconcile_mode(
         &self,
-        run: provenant_core::AttemptId,
+        attempt: provenant_core::AttemptId,
         call: &crate::Request<'_>,
         spawn: impl FnOnce(
             &[std::ffi::OsString],
@@ -2263,14 +2263,14 @@ impl crate::RunStore {
         ) -> std::result::Result<(), provenant_os::exec::ExecError>,
         explicit: bool,
     ) -> Result<Vec<(provenant_core::AttemptId, crate::Reconciled)>> {
-        self.queue_reconcile_mode_with_probe(run, call, spawn, explicit, &|directory, scope| {
+        self.queue_reconcile_mode_with_probe(attempt, call, spawn, explicit, &|directory, scope| {
             self.supervisor_stalled(directory, scope, call)
         })
     }
 
     fn queue_reconcile_mode_with_probe(
         &self,
-        run: provenant_core::AttemptId,
+        attempt: provenant_core::AttemptId,
         call: &crate::Request<'_>,
         spawn: impl FnOnce(
             &[std::ffi::OsString],
@@ -2284,7 +2284,7 @@ impl crate::RunStore {
         // those records independently so one corrupt record cannot hide siblings.
         let exists: bool = self.db.query_row(
             "SELECT EXISTS(SELECT 1 FROM attempts WHERE id=?1 AND project=?2 AND refused=0)",
-            rusqlite::params![run.to_string(), self.context.project_id.to_string()],
+            rusqlite::params![attempt.to_string(), self.context.project_id.to_string()],
             |row| row.get(0),
         )?;
         if !exists {
@@ -2292,7 +2292,7 @@ impl crate::RunStore {
         }
         let mut query = self.db.prepare("SELECT id FROM attempts WHERE id=?1 AND project=?2 AND refused=0 AND (terminal=0 OR tmp_retained=1) ORDER BY sequence")?;
         let rows = query.query_map(
-            rusqlite::params![run.to_string(), self.context.project_id.to_string()],
+            rusqlite::params![attempt.to_string(), self.context.project_id.to_string()],
             |row| row.get::<_, String>(0),
         )?;
         let mut ids = rows
@@ -2305,7 +2305,7 @@ impl crate::RunStore {
             Ok(fences) => {
                 for fence in fences
                     .into_iter()
-                    .filter(|fence| fence.scope.attempt == run)
+                    .filter(|fence| fence.scope.attempt == attempt)
                 {
                     if !ids.contains(&fence.scope.attempt) {
                         ids.push(fence.scope.attempt);
@@ -2314,11 +2314,11 @@ impl crate::RunStore {
                 None
             }
             Err(error) => {
-                report_registry_error(run, &error);
+                report_registry_error(attempt, &error);
                 Some(error)
             }
         };
-        for id in self.pending_effect_attempts(run, call)? {
+        for id in self.pending_effect_attempts(attempt, call)? {
             if !ids.contains(&id) {
                 ids.push(id);
             }
@@ -2326,9 +2326,9 @@ impl crate::RunStore {
         // Reactions need the same retry gates, but are internal work rather
         // than custody recovery rows. Report them only if recovery is uncertain.
         let mut reaction_only = Vec::new();
-        if self.reaction_pending(run, call)? && !ids.contains(&run) {
-            ids.push(run);
-            reaction_only.push(run);
+        if self.reaction_pending(attempt, call)? && !ids.contains(&attempt) {
+            ids.push(attempt);
+            reaction_only.push(attempt);
         }
         if ids.is_empty()
             && let Some(error) = listing_error
@@ -2347,12 +2347,12 @@ impl crate::RunStore {
         let mut candidates = Vec::new();
         for id in ids {
             let inspected = crate::controls::retry_reconcile(&self.db, call, || -> Result<_> {
-                let attempt = self.record(id, call)?;
-                if attempt.attempt_id != run {
+                let record = self.record(id, call)?;
+                if record.attempt_id != attempt {
                     return Err(RunError::Validation("writer fence run mismatch"));
                 }
                 let directory = self.attempt_dir(id, false)?;
-                let scope = Self::scope(&attempt);
+                let scope = Self::scope(&record);
                 let journal = read(&directory, scope)?;
                 if let Some(abandonment) = &journal.abandonment {
                     return Ok((
@@ -2364,10 +2364,10 @@ impl crate::RunStore {
                         false,
                     ));
                 }
-                let queued = matches!(attempt.state, crate::AttemptState::Queued { .. });
+                let queued = matches!(record.state, crate::AttemptState::Queued { .. });
                 // A supervisor in uninterruptible sleep is never respawned.
                 if !queued
-                    && !matches!(attempt.state, crate::AttemptState::Terminal { .. })
+                    && !matches!(record.state, crate::AttemptState::Terminal { .. })
                     && stalled(&directory, scope)
                 {
                     return Ok((
@@ -2432,7 +2432,7 @@ impl crate::RunStore {
                 Err(error) => found.push((id, failed(error.to_string()))),
             }
         }
-        let queued = self.attempt_dir(run, false)?;
+        let queued = self.attempt_dir(attempt, false)?;
         let spawn_lock =
             match queued.try_lock(OsStr::new("settlement-spawn.lock"), LockMode::Exclusive) {
                 Ok(lock) => Some(lock),
@@ -2446,7 +2446,7 @@ impl crate::RunStore {
                 Err(error) => return Err(error.into()),
             };
         let pending = read_sealed(&queued, "settlement-queued.json", RECORD_LIMIT)?
-            .map(|raw| QueuedWorker::decode(&raw, run))
+            .map(|raw| QueuedWorker::decode(&raw, attempt))
             .transpose()?
             .is_some_and(|request| wall < request.expires);
         if !candidates.is_empty() && spawn_lock.is_some() && worker_lock.is_some() && !pending {
@@ -2490,7 +2490,7 @@ impl crate::RunStore {
                 },
                 project: self.context.project_id,
                 actor: self.context.actor_id,
-                attempt: run,
+                attempt,
                 registry: self.writer_registry.clone(),
             };
             let executable = std::env::current_exe()?;
@@ -2508,7 +2508,7 @@ impl crate::RunStore {
                     ".settlement-",
                     &crate::db::bytes(&QueuedWorker {
                         schema_version: 2,
-                        attempt: run,
+                        attempt,
                         expires: wall
                             .checked_add(provenant_core::DurationMicros::from_micros(
                                 UNKNOWN_OWNER_LIMIT_MS * 1000,
@@ -2531,7 +2531,7 @@ impl crate::RunStore {
                             .checked_add(provenant_core::DurationMicros::from_micros(60_000_000))
                             && let Ok(bytes) = crate::db::bytes(&WorkerProcessRefusal {
                                 schema_version: 1,
-                                attempt: run,
+                                attempt,
                                 expires,
                                 used,
                                 limit,
@@ -2563,7 +2563,9 @@ impl crate::RunStore {
                     && (!matches!(
                         state,
                         crate::Reconciled::Uncertain { .. } | crate::Reconciled::Settling { .. }
-                    ) || !self.reconcile_is_settled(run, *id, call).unwrap_or(false))
+                    ) || !self
+                        .reconcile_is_settled(attempt, *id, call)
+                        .unwrap_or(false))
             })
             .collect())
     }
@@ -2577,7 +2579,7 @@ struct QueuedWorker {
 }
 
 impl QueuedWorker {
-    fn decode(raw: &[u8], run: provenant_core::AttemptId) -> Result<Self> {
+    fn decode(raw: &[u8], attempt: provenant_core::AttemptId) -> Result<Self> {
         let marker: Self = provenant_records::decode(
             raw,
             provenant_records::Limits {
@@ -2585,7 +2587,7 @@ impl QueuedWorker {
                 ..Default::default()
             },
         )?;
-        if marker.schema_version != 2 || marker.attempt != run {
+        if marker.schema_version != 2 || marker.attempt != attempt {
             return Err(RunError::Validation(
                 "settlement queue marker run or version mismatch",
             ));

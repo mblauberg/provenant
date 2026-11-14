@@ -141,7 +141,7 @@ fn lane_waits_report_a_running_lane_waiting_for_a_build_slot() -> TestResult {
     let other = store
         .claim(other_id, &at(20_000), &call)?
         .ok_or("other starts")?;
-    let attempt = |id: AttemptId, _run: AttemptId| {
+    let attempt = |id: AttemptId, _attempt: AttemptId| {
         store
             .context
             .state_root

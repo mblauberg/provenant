@@ -16,23 +16,23 @@ type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
 fn rewrite_child_request(
     store: &RunStore,
-    run: AttemptId,
+    attempt: AttemptId,
     request: &CanonicalRequest,
     call: &Request<'_>,
 ) -> TestResult {
-    store.attempt_dir(run, false)?.atomic_write(
+    store.attempt_dir(attempt, false)?.atomic_write(
         std::ffi::OsStr::new("request.json"),
         ".swap-",
         &crate::db::bytes(request)?,
         provenant_os::fs::PublishMode::Replace,
     )?;
-    let mut operation = store.attempt_operation(run, call)?;
+    let mut operation = store.attempt_operation(attempt, call)?;
     operation.request_digest = request.digest()?;
     store.db.execute(
         "UPDATE attempts SET operation_record=?1 WHERE id=?2",
-        rusqlite::params![crate::db::bytes(&operation)?, run.to_string()],
+        rusqlite::params![crate::db::bytes(&operation)?, attempt.to_string()],
     )?;
-    assert_eq!(&store.request(run, call)?, request);
+    assert_eq!(&store.request(attempt, call)?, request);
     Ok(())
 }
 

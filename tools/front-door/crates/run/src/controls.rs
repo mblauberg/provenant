@@ -2850,27 +2850,27 @@ impl RunStore {
     /// only after reservations are released; removal failures are reported.
     pub fn reconcile(
         &self,
-        run: AttemptId,
+        attempt: AttemptId,
         providers: &dyn Providers,
         call: &Request<'_>,
     ) -> Result<Vec<(AttemptId, Reconciled)>> {
         let _ = providers;
-        self.queue_reconcile(run, call)
+        self.queue_reconcile(attempt, call)
     }
     /// Execute the supervisor recovery entry with fixture-owned providers.
     /// Installed builds expose only the asynchronous public control.
     #[cfg(feature = "fixture")]
     pub fn reconcile_for_fixture(
         &self,
-        run: AttemptId,
+        attempt: AttemptId,
         providers: &dyn Providers,
         call: &Request<'_>,
     ) -> Result<Vec<(AttemptId, Reconciled)>> {
-        self.reconcile_with_observer(run, providers, call, &SystemProcessObserver)
+        self.reconcile_with_observer(attempt, providers, call, &SystemProcessObserver)
     }
     pub(crate) fn reconcile_with_observer(
         &self,
-        run: AttemptId,
+        attempt: AttemptId,
         providers: &dyn Providers,
         call: &Request<'_>,
         observer: &dyn ProcessObserver,
@@ -2881,7 +2881,7 @@ impl RunStore {
                 .db
                 .prepare("SELECT id FROM attempts WHERE id=?1 AND project=?2 AND (terminal=0 OR tmp_retained=1) ORDER BY sequence")?;
             let rows = query.query_map(
-                params![run.to_string(), self.context.project_id.to_string()],
+                params![attempt.to_string(), self.context.project_id.to_string()],
                 |r| r.get(0),
             )?;
             rows.collect::<std::result::Result<_, _>>()?
@@ -2889,8 +2889,8 @@ impl RunStore {
         let (fences, listing_error) = match self.writer_fence_listing() {
             Ok(listing) => (listing.reservations, None),
             Err(error) => {
-                if self.reaction_pending(run, call)? && !ids.contains(&run.to_string()) {
-                    ids.push(run.to_string());
+                if self.reaction_pending(attempt, call)? && !ids.contains(&attempt.to_string()) {
+                    ids.push(attempt.to_string());
                 }
                 if ids.is_empty() {
                     return Err(error);
@@ -2898,13 +2898,13 @@ impl RunStore {
                 (Vec::new(), Some(error.to_string()))
             }
         };
-        for id in self.pending_effect_attempts(run, call)? {
+        for id in self.pending_effect_attempts(attempt, call)? {
             if !ids.contains(&id.to_string()) {
                 ids.push(id.to_string());
             }
         }
         for fence in fences {
-            if fence.scope.attempt == run && !ids.contains(&fence.scope.attempt.to_string()) {
+            if fence.scope.attempt == attempt && !ids.contains(&fence.scope.attempt.to_string()) {
                 ids.push(fence.scope.attempt.to_string());
             }
         }
@@ -2916,7 +2916,8 @@ impl RunStore {
             }) {
                 Ok(state) => state,
                 Err(error) => Some(reconcile_failure(error, || {
-                    self.reconcile_is_settled(run, id, call).unwrap_or(false)
+                    self.reconcile_is_settled(attempt, id, call)
+                        .unwrap_or(false)
                 })),
             };
             if let Some(error) = &listing_error
@@ -2939,14 +2940,16 @@ impl RunStore {
             !matches!(
                 state,
                 Reconciled::Uncertain { .. } | Reconciled::Settling { .. }
-            ) || !self.reconcile_is_settled(run, *id, call).unwrap_or(false)
+            ) || !self
+                .reconcile_is_settled(attempt, *id, call)
+                .unwrap_or(false)
         });
         Ok(found)
     }
 
     pub(crate) fn reconcile_is_settled(
         &self,
-        run: AttemptId,
+        attempt: AttemptId,
         id: AttemptId,
         call: &Request<'_>,
     ) -> Result<bool> {
@@ -2960,7 +2963,7 @@ impl RunStore {
             && !temporary
             && self.import_release_permitted(&record, call)?
             && self.custody_released(&record, call)?
-            && !self.pending_effect_attempts(run, call)?.contains(&id))
+            && !self.pending_effect_attempts(attempt, call)?.contains(&id))
     }
     /// Progress is advisory: a broken attempt must not hide its peers' results.
     fn track_reconcile_progress(

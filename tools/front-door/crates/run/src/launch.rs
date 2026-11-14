@@ -883,13 +883,18 @@ pub fn access_root_allowed(root: &std::path::Path, state: &std::path::Path, read
 
 impl RunStore {
     /// Refuse queued proposals without touching any launched provider.
-    pub fn refuse_queued(&self, run: AttemptId, reason: &str, call: &Request<'_>) -> Result<()> {
+    pub fn refuse_queued(
+        &self,
+        attempt: AttemptId,
+        reason: &str,
+        call: &Request<'_>,
+    ) -> Result<()> {
         let ids: Vec<String> = {
             let mut query = self
                 .db
                 .prepare("SELECT id FROM attempts WHERE id=?1 AND project=?2 AND terminal=0")?;
             let rows = query.query_map(
-                rusqlite::params![run.to_string(), self.context.project_id.to_string()],
+                rusqlite::params![attempt.to_string(), self.context.project_id.to_string()],
                 |row| row.get(0),
             )?;
             rows.collect::<std::result::Result<_, _>>()?
@@ -913,21 +918,25 @@ impl RunStore {
         }
         Ok(())
     }
-    pub fn request(&self, run: AttemptId, call: &Request<'_>) -> Result<CanonicalRequest> {
-        Ok(self.request_with_digest(run, call)?.0)
+    pub fn request(&self, attempt: AttemptId, call: &Request<'_>) -> Result<CanonicalRequest> {
+        Ok(self.request_with_digest(attempt, call)?.0)
     }
     /// The request and the digest of its stored bytes. Callers compare this
     /// digest, never a reserialised request, because its schema may have
     /// evolved since the run was written.
     pub(crate) fn request_with_digest(
         &self,
-        run: AttemptId,
+        attempt: AttemptId,
         call: &Request<'_>,
     ) -> Result<(CanonicalRequest, provenant_core::Digest)> {
-        let raw = read_sealed(&self.attempt_dir(run, false)?, "request.json", RECORD_LIMIT)?
-            .ok_or(RunError::NotFound)?;
+        let raw = read_sealed(
+            &self.attempt_dir(attempt, false)?,
+            "request.json",
+            RECORD_LIMIT,
+        )?
+        .ok_or(RunError::NotFound)?;
         let digest = provenant_records::stored_record_digest("run-request", 1, &raw)?;
-        let stored = self.attempt_operation(run, call)?.request_digest;
+        let stored = self.attempt_operation(attempt, call)?.request_digest;
         if digest != stored {
             return Err(RunError::artifact_mismatch(
                 ArtifactCheck::RequestDigest,
@@ -945,13 +954,13 @@ impl RunStore {
     /// requester.
     pub fn start(
         &self,
-        run: AttemptId,
+        attempt: AttemptId,
         providers: &dyn Providers,
         context: &dyn Fn(&AttemptRecord, ActorId) -> Result<Vec<u8>>,
         call: &Request<'_>,
     ) -> Result<Vec<Started>> {
         self.start_inner(
-            run,
+            attempt,
             providers,
             context,
             &|directory, scope, binding| {
@@ -970,14 +979,14 @@ impl RunStore {
     }
     pub fn start_checked(
         &self,
-        run: AttemptId,
+        attempt: AttemptId,
         expected: &CanonicalRequest,
         providers: &dyn Providers,
         context: &dyn Fn(&AttemptRecord, ActorId) -> Result<Vec<u8>>,
         call: &Request<'_>,
     ) -> Result<Vec<Started>> {
         self.start_inner(
-            run,
+            attempt,
             providers,
             context,
             &|directory, scope, binding| {
@@ -1000,7 +1009,7 @@ impl RunStore {
     #[allow(clippy::too_many_arguments)]
     pub fn start_with_writer_lease(
         &self,
-        run: AttemptId,
+        attempt: AttemptId,
         providers: &dyn Providers,
         context: &dyn Fn(&AttemptRecord, ActorId) -> Result<Vec<u8>>,
         acquire_writer: &dyn Fn(
@@ -1012,7 +1021,7 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<Vec<Started>> {
         self.start_inner(
-            run,
+            attempt,
             providers,
             context,
             acquire_writer,
@@ -1023,7 +1032,7 @@ impl RunStore {
     #[allow(clippy::too_many_arguments)]
     fn start_inner(
         &self,
-        run: AttemptId,
+        attempt: AttemptId,
         providers: &dyn Providers,
         context: &dyn Fn(&AttemptRecord, ActorId) -> Result<Vec<u8>>,
         acquire_writer: &dyn Fn(
@@ -1035,7 +1044,7 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<Vec<Started>> {
         // Every later use reads this one value, never the store again.
-        let request = self.request(run, call)?;
+        let request = self.request(attempt, call)?;
         if let Some(digest) = expected
             && request.digest()? != digest
         {
@@ -1043,7 +1052,7 @@ impl RunStore {
                 "request changed after launch validation",
             ));
         }
-        let operation = self.attempt_operation(run, call)?;
+        let operation = self.attempt_operation(attempt, call)?;
         let requester = operation.actor_id;
         let resume = request
             .parent
@@ -1055,7 +1064,7 @@ impl RunStore {
                 "SELECT id FROM attempts WHERE id=?1 AND project=?2 AND terminal=0 ORDER BY sequence",
             )?;
             let rows = query.query_map(
-                params![run.to_string(), self.context.project_id.to_string()],
+                params![attempt.to_string(), self.context.project_id.to_string()],
                 |r| r.get(0),
             )?;
             rows.collect::<std::result::Result<_, _>>()?
@@ -1159,10 +1168,10 @@ impl RunStore {
                 .as_path()
                 .join(format!("attempts/{id}"));
             let prompt = output_prompt(&directory, &prompt);
-            let attempt = self.attempt_dir(id, false)?;
-            crate::artifacts::subdir(&attempt, std::ffi::OsStr::new("scratch"), true)?;
-            crate::artifacts::subdir(&attempt, std::ffi::OsStr::new("provider-state"), true)?;
-            crate::artifacts::subdir(&attempt, std::ffi::OsStr::new("tmp"), true)?;
+            let attempt_dir = self.attempt_dir(id, false)?;
+            crate::artifacts::subdir(&attempt_dir, std::ffi::OsStr::new("scratch"), true)?;
+            crate::artifacts::subdir(&attempt_dir, std::ffi::OsStr::new("provider-state"), true)?;
+            crate::artifacts::subdir(&attempt_dir, std::ffi::OsStr::new("tmp"), true)?;
             let base = self
                 .context
                 .state_root
@@ -1180,7 +1189,7 @@ impl RunStore {
                 scratch: base.join("scratch"),
                 provider_state: base.join("provider-state"),
                 temporary: base.join("tmp"),
-                temporary_alias: crate::short_temporary::ensure(&attempt),
+                temporary_alias: crate::short_temporary::ensure(&attempt_dir),
             };
             let priority = providers.priority(task).unwrap_or_else(|reason| {
                 let fallback = provenant_records::run::default_lane_priority(task.writer.is_some(), task.build_heavy);
@@ -1259,7 +1268,7 @@ impl RunStore {
                         },
                         call,
                     ) {
-                        Ok(Some(_)) => crate::writer::settle_launch_staging(&attempt)?,
+                        Ok(Some(_)) => crate::writer::settle_launch_staging(&attempt_dir)?,
                         Ok(None) => continue,
                         // Another launcher or cancellation changed the attempt
                         // while provider preparation was in progress.
@@ -1303,7 +1312,7 @@ impl RunStore {
                         },
                         call,
                     ) {
-                        Ok(Some(_)) => crate::writer::settle_launch_staging(&attempt)?,
+                        Ok(Some(_)) => crate::writer::settle_launch_staging(&attempt_dir)?,
                         Ok(None) => continue,
                         // Another launcher or cancellation changed the attempt
                         // while write grants were being recorded.
@@ -1325,7 +1334,7 @@ impl RunStore {
             self.seal_work(&record, &plan, call)?;
             // Establish launcher liveness before publishing Starting. Reaping can
             // then distinguish a live pre-custody handoff from an abandoned one.
-            let _launcher = match attempt.try_lock(
+            let _launcher = match attempt_dir.try_lock(
                 std::ffi::OsStr::new("launcher.lock"),
                 provenant_os::fs::LockMode::Exclusive,
             ) {
@@ -1453,11 +1462,11 @@ impl RunStore {
                         }
                     }
                     Err(HandOff::Uncertain(error)) => {
-                        self.launch_unknown(run, call)?;
+                        self.launch_unknown(attempt, call)?;
                         Started::Unknown { attempt: id, error }
                     }
                     Err(HandOff::Protected(error)) => {
-                        self.launch_blocked(run, &error, call)?;
+                        self.launch_blocked(attempt, &error, call)?;
                         Started::Blocked { attempt: id, error }
                     }
                 },
@@ -1470,18 +1479,18 @@ impl RunStore {
     fn run_operation(
         &self,
         tx: &rusqlite::Connection,
-        run: AttemptId,
+        attempt: AttemptId,
     ) -> Result<(OperationRecord, bool)> {
         let (raw, settled): (Vec<u8>, bool) = tx.query_row(
             "SELECT operation_record, terminal FROM attempts WHERE id=?1 AND project=?2 AND refused=0",
-            params![run.to_string(), self.context.project_id.to_string()],
+            params![attempt.to_string(), self.context.project_id.to_string()],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         Ok((decode(&raw)?, settled))
     }
-    fn launch_unknown(&self, run: AttemptId, call: &Request<'_>) -> Result<()> {
+    fn launch_unknown(&self, attempt: AttemptId, call: &Request<'_>) -> Result<()> {
         self.write(call, |tx| {
-            let (mut op, settled) = self.run_operation(tx, run)?;
+            let (mut op, settled) = self.run_operation(tx, attempt)?;
             if settled {
                 return Ok(());
             }
@@ -1490,16 +1499,16 @@ impl RunStore {
                 "UPDATE attempts SET operation_record=?1 WHERE id=?2 AND project=?3",
                 params![
                     crate::db::bytes(&op)?,
-                    run.to_string(),
+                    attempt.to_string(),
                     self.context.project_id.to_string()
                 ],
             )?;
             Ok(())
         })
     }
-    fn launch_blocked(&self, run: AttemptId, reason: &str, call: &Request<'_>) -> Result<()> {
+    fn launch_blocked(&self, attempt: AttemptId, reason: &str, call: &Request<'_>) -> Result<()> {
         self.write(call, |tx| {
-            let (mut op, settled) = self.run_operation(tx, run)?;
+            let (mut op, settled) = self.run_operation(tx, attempt)?;
             if settled {
                 return Err(RunError::Conflict);
             }
@@ -1509,7 +1518,7 @@ impl RunStore {
                 "UPDATE attempts SET operation_record=?1 WHERE id=?2 AND project=?3",
                 params![
                     crate::db::bytes(&op)?,
-                    run.to_string(),
+                    attempt.to_string(),
                     self.context.project_id.to_string()
                 ],
             )?;
