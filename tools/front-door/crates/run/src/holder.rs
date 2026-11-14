@@ -1614,6 +1614,8 @@ impl RunStore {
             }
             (None, false) => return Err(RunError::Validation("running attempt lacks a route")),
         };
+        // Advisory: the lane's gh wrapper count, beside its budget.
+        crate::gh_usage::record(attempt, record.limits.as_ref(), &mut decoded.usage);
         if record
             .applied_route
             .as_ref()

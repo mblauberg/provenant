@@ -286,6 +286,10 @@ pub struct LaneLimits {
     /// Review and repair rounds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repair_cycles: Option<Limit>,
+    /// `gh` invocations after which the lane's gh wrapper warns. Always
+    /// advisory: it never stops the lane and is not an API request cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gh_invocations: Option<Limit>,
 }
 
 impl LaneLimits {
@@ -296,6 +300,7 @@ impl LaneLimits {
             ("context_handoff", &self.context_handoff),
             ("deadline_seconds", &self.deadline_seconds),
             ("repair_cycles", &self.repair_cycles),
+            ("gh_invocations", &self.gh_invocations),
         ]
         .into_iter()
         .filter_map(|(name, limit)| limit.as_ref().map(|limit| (name, limit)))
@@ -309,6 +314,7 @@ impl LaneLimits {
             "context_handoff" => &mut self.context_handoff,
             "deadline_seconds" => &mut self.deadline_seconds,
             "repair_cycles" => &mut self.repair_cycles,
+            "gh_invocations" => &mut self.gh_invocations,
             _ => return None,
         };
         let current = limit.as_ref()?;
@@ -347,7 +353,12 @@ impl LaneLimits {
                 "deadline_seconds" => {
                     format!("The host stops this lane after {} seconds.", limit.value)
                 }
-                _ => format!("At most {} review and repair rounds run.", limit.value),
+                "repair_cycles" => {
+                    format!("At most {} review and repair rounds run.", limit.value)
+                }
+                // Advisory limits are never enforced; the lane preamble
+                // states the gh budget with the CI scope.
+                _ => continue,
             };
             text.push_str(&line);
             text.push('\n');

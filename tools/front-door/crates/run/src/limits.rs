@@ -76,6 +76,7 @@ pub fn lane_limits(
             .flatten(),
         deadline_seconds,
         repair_cycles: knob("lanes.max_repair_cycles", LimitSource::Template),
+        gh_invocations: gh_budget(&task.profile),
     };
     // Raises the owner asked for with `retry --extend`; the command refused a
     // ceiling already, and one that arrives here anyway stays as it is.
@@ -118,14 +119,7 @@ pub fn writer_budget_limits(
     let source = |field: &str, knob: &str| -> LimitSource {
         context
             .and_then(|context| context.budget_sources.get(field).copied())
-            .or_else(|| {
-                profile
-                    .extra
-                    .get("budget_knob_sources")
-                    .and_then(|sources| sources.get(knob))
-                    .and_then(|source| serde_json::from_value(source.clone()).ok())
-            })
-            .unwrap_or(LimitSource::Default)
+            .unwrap_or_else(|| knob_source(profile, knob))
     };
     let source_budget = source("token_budget", "lanes.token_budget");
     if source_budget != LimitSource::Default
@@ -172,6 +166,31 @@ pub fn writer_budget_limits(
         policy.action_source = LimitSource::Launch;
     }
     (budget.filter(|budget| budget.value > 0), policy)
+}
+
+/// The layer that set knob `name` for this profile (`launch`, `host` or
+/// `default`), as `dispatch_profile` recorded it.
+pub(crate) fn knob_source(profile: &HarnessProfile, name: &str) -> LimitSource {
+    profile
+        .extra
+        .get(provenant_config::KNOB_SOURCES)
+        .and_then(|sources| sources.get(name))
+        .and_then(|source| serde_json::from_value(source.clone()).ok())
+        .unwrap_or(LimitSource::Default)
+}
+
+/// The advisory `gh` invocation budget, from `lanes.gh_budget`. 0 is off.
+pub fn gh_budget(profile: &HarnessProfile) -> Option<Limit> {
+    let value = profile
+        .knob_u64("lanes.gh_budget")
+        .unwrap_or(provenant_config::DEFAULT_GH_BUDGET);
+    (value > 0).then(|| {
+        Limit::new(
+            value,
+            knob_source(profile, "lanes.gh_budget"),
+            LimitStrength::Advisory,
+        )
+    })
 }
 
 /// Limits with only a deadline, for tests that need an allowance.

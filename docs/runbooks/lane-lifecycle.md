@@ -55,6 +55,12 @@ writer is on by default and gives it your GitHub credential; set
 `lanes.publish=false` to withhold it so the chair publishes through host-side
 delivery. An advisory `gh` deny list (`deny_verbs`, `deny_labels`) goes in
 `projects/PROJECT_ID/github.json`; it guards against accident, not as a boundary.
+The provider receipt's `github_credential` names the identity, source and
+delivery each lane got. The `gh` shim warns at every `lanes.gh_budget` calls
+(default 100, 0 off) and settlement records the count; it never stops a call.
+Writers follow `lanes.ci_scope` (default `none`: push and report, the chair runs
+CI once for the batch); set `--set attempt.ci_scope=targeted` or `full` for a
+lane that must wait for CI. `run --explain` shows both values and their sources.
 
 GitHub login lookup uses the host-recorded executable search path and GitHub
 configuration paths for initial launches and background retries alike. Missing

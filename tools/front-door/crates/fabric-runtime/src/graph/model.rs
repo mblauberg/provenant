@@ -247,6 +247,11 @@ pub struct AttemptSpec {
     /// inherits the run's and the host's setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_cargo: Option<String>,
+    /// What CI this node's writer runs or waits for: `none`, `targeted` or
+    /// `full`. Sets the `lanes.ci_scope` knob for this node alone; omitted
+    /// inherits the run's and the host's setting. Advisory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_scope: Option<String>,
     /// Bundled lane preset applied to this node: `light`. Fills the settings
     /// below that the node leaves unset; an explicit setting always wins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -355,6 +360,9 @@ impl AttemptSpec {
         if let Some(sandbox) = &self.sandbox {
             knobs.push(format!("lanes.sandbox={sandbox}"));
         }
+        if let Some(scope) = &self.ci_scope {
+            knobs.push(format!("lanes.ci_scope={scope}"));
+        }
         knobs
     }
 
@@ -381,6 +389,7 @@ impl AttemptSpec {
             && !self.build_heavy
             && self.write_roots.is_empty()
             && self.local_cargo.is_none()
+            && self.ci_scope.is_none()
             && self.preset.is_none()
             && self.isolation.is_none()
             && self.supervision.is_none()

@@ -34,7 +34,12 @@ mod store;
 mod telemetry_context;
 pub use telemetry_context::set_build_identity;
 mod limits;
-pub use limits::{EXTENSIONS as LIMIT_EXTENSIONS, HostCaps, lane_limits, writer_budget_limits};
+pub use limits::{
+    EXTENSIONS as LIMIT_EXTENSIONS, HostCaps, gh_budget, lane_limits, writer_budget_limits,
+};
+mod ci_scope;
+pub use ci_scope::{CiScope, ResolvedCiScope};
+mod gh_usage;
 pub mod token_budget;
 mod transcript;
 pub use service::{DispatchRequest, DispatchTask, ErrorKind, RefusalContext, Service};

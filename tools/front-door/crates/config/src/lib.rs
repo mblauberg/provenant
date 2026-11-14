@@ -17,7 +17,9 @@ pub use gc::{
     PROJECT_WRITER_LANES_CEILING, ProjectGcSettings, STORE_BUSY_TIMEOUT_CEILING_MS, StoreSettings,
     WRITER_LANES_CEILING, deserialize_auto, parse_cache_size,
 };
-pub use github_policy::GithubPolicy;
+pub use github_policy::{
+    DEFAULT_GH_BUDGET, GH_INVOCATIONS_FILE, GithubPolicy, label_events_trigger_ci,
+};
 mod harness;
 mod hooks;
 pub use hooks::{CLAUDE_HOOKS, claude_lane_settings};
@@ -54,7 +56,7 @@ pub use domains::{
 };
 pub use edit::{EditOptions, Edited, edit_config, revision_of, show};
 pub use history::{FieldChange, HistoryEntry, HistoryLimits, history};
-pub use knobs::{KnobEdit, KnobSource, KnobValue};
+pub use knobs::{KNOB_SOURCES, KnobEdit, KnobSource, KnobValue};
 pub use loader::{
     config_show, inspect_config, load, load_with_domains, read, read_knobs, read_with_domains,
 };
