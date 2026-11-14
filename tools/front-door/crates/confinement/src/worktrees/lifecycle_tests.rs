@@ -670,6 +670,39 @@ impl Executor for FailsFirstGcSettlement<'_> {
     }
 }
 
+#[test]
+fn creation_uses_a_nested_project_worktree_layout() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    fs::create_dir_all(fixture.root.join(".provenant"))?;
+    let mut ports = provenant_config::PortTable::builtin();
+    ports.worktree_layout.roots = vec![
+        PathBuf::from(".worktrees"),
+        PathBuf::from(".claude/worktrees"),
+    ];
+    ports.worktree_layout.default = PathBuf::from(".claude/worktrees/<branch>");
+    fs::write(
+        fixture.root.join(provenant_config::PORTS_CONFIG),
+        serde_json::to_vec(&ports)?,
+    )?;
+
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let created = create(
+        &context,
+        WorktreeCreate {
+            branch: "custom-layout".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    assert_eq!(
+        created.path,
+        fixture.root.join(".claude/worktrees/custom-layout"),
+    );
+    assert!(created.path.join(".git").exists());
+    Ok(())
+}
+
 /// Worktree creation and writer setup use one common-directory mutation owner.
 #[test]
 fn worktree_creation_excludes_writer_configuration_updates() -> Result<(), Box<dyn Error>> {

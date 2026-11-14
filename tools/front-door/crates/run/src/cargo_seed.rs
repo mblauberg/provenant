@@ -791,9 +791,11 @@ mod tests {
         let build = worktree.join("arbitrary/nested/cargo/workspace");
         std::fs::create_dir_all(&build).unwrap();
         std::fs::create_dir_all(worktree.join(".provenant")).unwrap();
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.verify.workspace = "arbitrary/nested/cargo/workspace".into();
         std::fs::write(
-            worktree.join(".provenant/verify.json"),
-            r#"{"workspace":"arbitrary/nested/cargo/workspace"}"#,
+            worktree.join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&ports).unwrap(),
         )
         .unwrap();
         std::fs::write(build.join("Cargo.toml"), "[workspace]\n").unwrap();

@@ -64,6 +64,7 @@ use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io;
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
@@ -102,43 +103,67 @@ pub fn lock_repository(
     }
 }
 const WRITER_LOCK: &str = "writer.lock";
-const WORKTREE_ROOT: &str = ".worktrees";
 
-/// The validated checkpoint path for a writer created from a branch name.
-pub fn managed_writer_relative_path(branch: &str) -> Result<PathBuf, WorktreeError> {
+/// The configured path for a writer created from a validated branch name.
+pub fn managed_writer_relative_path(
+    project: &Path,
+    branch: &str,
+) -> Result<PathBuf, WorktreeError> {
     GitRefName::branch(branch).map_err(|_| WorktreeError::InvalidRequest)?;
-    Ok(Path::new(WORKTREE_ROOT).join(branch.replace('/', "-")))
+    let ports = provenant_config::PortTable::read_project(project)
+        .map_err(WorktreeError::PortConfiguration)?;
+    ports
+        .managed_writer_path(branch)
+        .map_err(WorktreeError::PortConfiguration)
 }
 
-/// Allocation root for a host-registered Git common directory, including a
-/// bare repository. Protect it before any individual checkout is created.
-pub(crate) fn allocation_directory(common: &Path) -> Result<PathBuf, WorktreeError> {
+/// Resolve a relative path against the configured layout roots.
+pub fn managed_writer_branch(
+    project: &Path,
+    relative: &Path,
+) -> Result<Option<String>, WorktreeError> {
+    let ports = provenant_config::PortTable::read_project(project)
+        .map_err(WorktreeError::PortConfiguration)?;
+    Ok(ports.managed_writer_branch(relative).map(str::to_owned))
+}
+
+/// Configured allocation roots for a host-registered Git common directory.
+/// Project roots use their sourced layout; bare/common-only repositories use
+/// the compiled declaration while retaining the same common-dir anchoring.
+pub(crate) fn allocation_directories(common: &Path) -> Result<Vec<PathBuf>, WorktreeError> {
     let parent = common.parent().ok_or(WorktreeError::InvalidRequest)?;
-    if common.file_name() == Some(OsStr::new(".git")) {
-        return Ok(parent.join(WORKTREE_ROOT));
-    }
-    // The lifecycle also supports a primary whose gitfile names a separate
-    // common directory inside that checkout. A bare location has no such
-    // backlink and retains its own allocation root.
-    let directory = Directory::open_anchor(parent)?;
-    match directory.metadata_at(OsStr::new(".git"), false) {
-        Ok(metadata) if metadata.kind == provenant_os::fs::FileKind::Regular => {
-            let bytes = inventory::read_bounded(&directory, OsStr::new(".git"), 4096)?;
-            let target = crate::repo::parse_git_path(&bytes, b"gitdir: ")
-                .ok_or(WorktreeError::InvalidRequest)?;
-            let target = crate::repo::resolve_git_path(parent, &target)?;
-            if crate::permissions::resolve_boundary_path(&target)
-                .map_err(|_| WorktreeError::InvalidRequest)?
-                == common
-            {
-                return Ok(parent.join(WORKTREE_ROOT));
+    let (base, project) = if common.file_name() == Some(OsStr::new(".git")) {
+        (parent, Some(parent))
+    } else {
+        // A primary may have a gitfile that names a separate common directory
+        // inside the checkout. Keep its allocation base and project source.
+        let directory = Directory::open_anchor(parent)?;
+        match directory.metadata_at(OsStr::new(".git"), false) {
+            Ok(metadata) if metadata.kind == provenant_os::fs::FileKind::Regular => {
+                let bytes = inventory::read_bounded(&directory, OsStr::new(".git"), 4096)?;
+                let target = crate::repo::parse_git_path(&bytes, b"gitdir: ")
+                    .ok_or(WorktreeError::InvalidRequest)?;
+                let target = crate::repo::resolve_git_path(parent, &target)?;
+                if crate::permissions::resolve_boundary_path(&target)
+                    .map_err(|_| WorktreeError::InvalidRequest)?
+                    == common
+                {
+                    (parent, Some(parent))
+                } else {
+                    (common, None)
+                }
             }
+            Ok(_) => (common, None),
+            Err(error) if error.is_not_found() => (common, None),
+            Err(error) => return Err(error.into()),
         }
-        Ok(_) => {}
-        Err(error) if error.is_not_found() => {}
-        Err(error) => return Err(error.into()),
-    }
-    Ok(common.join(WORKTREE_ROOT))
+    };
+    let ports = match project {
+        Some(project) => provenant_config::PortTable::read_project(project)
+            .map_err(WorktreeError::PortConfiguration)?,
+        None => provenant_config::PortTable::builtin(),
+    };
+    Ok(ports.worktree_roots_under(base))
 }
 
 impl From<provenant_config::ConfigError> for WorktreeError {
@@ -151,6 +176,8 @@ impl From<provenant_config::ConfigError> for WorktreeError {
 pub enum WorktreeError {
     #[error("worktree census configuration refused: {0}")]
     Configuration(#[from] Box<provenant_config::ConfigError>),
+    #[error("worktree port configuration refused: {0}")]
+    PortConfiguration(#[source] io::Error),
     #[error("worktree request is invalid")]
     InvalidRequest,
     #[error("worktree name {name} matches more than one checkout")]
@@ -247,7 +274,7 @@ pub enum WorktreeError {
     #[error("worktree creation failed: {cause}; {}", if *.rolled_back {
         "the partial checkout and new branch were removed, so it is safe to retry"
     } else {
-        "the partial checkout or branch it made could not be fully removed; inspect .worktrees and the branch before retrying"
+        "the partial checkout or branch it made could not be fully removed; inspect the configured worktree layout and branch before retrying"
     })]
     CreateFailed {
         cause: Box<WorktreeError>,
@@ -897,5 +924,70 @@ mod tests {
         let duplicate_head = b"worktree /tmp/tree\0HEAD 0000000000000000000000000000000000000000\0HEAD 0000000000000000000000000000000000000000\0branch refs/heads/topic\0\0";
         assert!(parse_worktree_list(missing_head).is_err());
         assert!(parse_worktree_list(duplicate_head).is_err());
+    }
+}
+
+#[cfg(test)]
+mod worktree_layout_tests {
+    use super::*;
+
+    #[test]
+    fn managed_writer_paths_use_the_project_layout_declaration() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".provenant")).unwrap();
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.worktree_layout.roots = vec![
+            PathBuf::from(".worktrees"),
+            PathBuf::from(".claude/worktrees"),
+        ];
+        ports.worktree_layout.default = PathBuf::from(".claude/worktrees/<branch>");
+        std::fs::write(
+            project.path().join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&ports).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            managed_writer_relative_path(project.path(), "feature/topic").unwrap(),
+            PathBuf::from(".claude/worktrees/feature-topic"),
+        );
+        assert_eq!(
+            managed_writer_branch(project.path(), Path::new(".worktrees/other")).unwrap(),
+            Some("other".to_owned()),
+        );
+        assert_eq!(
+            managed_writer_branch(
+                project.path(),
+                Path::new(".claude/worktrees/feature-topic"),
+            )
+            .unwrap(),
+            Some("feature-topic".to_owned()),
+        );
+    }
+
+    #[test]
+    fn allocation_roots_use_every_project_layout_root() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".git")).unwrap();
+        std::fs::create_dir(project.path().join(".provenant")).unwrap();
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.worktree_layout.roots = vec![
+            PathBuf::from("trees"),
+            PathBuf::from(".claude/worktrees"),
+        ];
+        ports.worktree_layout.default = PathBuf::from("trees/topic-<branch>/checkout");
+        std::fs::write(
+            project.path().join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&ports).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            allocation_directories(&project.path().join(".git")).unwrap(),
+            vec![
+                project.path().join("trees"),
+                project.path().join(".claude/worktrees"),
+            ],
+        );
     }
 }

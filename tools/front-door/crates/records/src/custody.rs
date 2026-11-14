@@ -151,6 +151,43 @@ pub struct LandedEvidence {
     pub predicate: LandingPredicate,
     pub source: LandingSource,
 }
+
+macro_rules! removal_uncertainties {
+    ($($variant:ident => $wire:literal),+ $(,)?) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        pub enum RemovalUncertainty {
+            $(#[serde(rename = $wire)] $variant),+
+        }
+        impl RemovalUncertainty {
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+        }
+    };
+}
+removal_uncertainties! {
+    ShallowClone => "shallow_clone",
+    ConflictedMergeTree => "conflicted_merge_tree",
+    OfflineForge => "offline_forge",
+    RewrittenDefaultBranch => "rewritten_default_branch",
+    UnprovenLanding => "unproven_landing",
+    MissingCommit => "missing_commit",
+}
+
+/// The outcome of considering one subject and tip for removal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RemovalOutcome {
+    Removed { evidence: LandedEvidence },
+    Kept { cause: RemovalUncertainty },
+}
+
+/// Evidence emitted by collection for a removed or uncertainty-retained subject.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemovalRecord {
+    pub project: ProjectId,
+    pub subject: Subject,
+    pub tip: provenant_core::GitOid,
+    pub outcome: RemovalOutcome,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum CustodyState {
@@ -266,6 +303,62 @@ pub struct CustodyStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn removal_records_round_trip_every_predicate_source_and_uncertainty() {
+        let oid = provenant_core::GitOid::parse(&"a".repeat(40)).unwrap();
+        let target = provenant_core::GitOid::parse(&"b".repeat(40)).unwrap();
+        let project = ProjectId::from_bytes([7; 16]);
+        let sources = [
+            LandingSource::RetainedRef {
+                reference: "refs/heads/feature".into(),
+                commit: oid,
+            },
+            LandingSource::TreeEquivalent {
+                head: oid,
+                target,
+                tree: oid,
+            },
+            LandingSource::IntegrationTarget {
+                reference: "refs/remotes/origin/main".into(),
+                commit: target,
+            },
+            LandingSource::ForgeMerged {
+                pr: "42".into(),
+                head: oid,
+                merge_commit: Some(target),
+            },
+        ];
+        for predicate in [LandingPredicate::Subsumed, LandingPredicate::Landed] {
+            for source in &sources {
+                let record = RemovalRecord {
+                    project,
+                    subject: Subject::new(SubjectKind::Worktree, "feature"),
+                    tip: oid,
+                    outcome: RemovalOutcome::Removed {
+                        evidence: LandedEvidence {
+                            predicate,
+                            source: source.clone(),
+                        },
+                    },
+                };
+                let encoded = serde_json::to_vec(&record).unwrap();
+                let decoded: RemovalRecord = serde_json::from_slice(&encoded).unwrap();
+                assert_eq!(decoded, record);
+            }
+        }
+        for &cause in RemovalUncertainty::ALL {
+            let record = RemovalRecord {
+                project,
+                subject: Subject::new(SubjectKind::Worktree, "feature"),
+                tip: oid,
+                outcome: RemovalOutcome::Kept { cause },
+            };
+            let encoded = serde_json::to_vec(&record).unwrap();
+            let decoded: RemovalRecord = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(decoded, record);
+        }
+    }
+
     #[test]
     fn every_declared_subject_kind_round_trips() {
         for &kind in SubjectKind::ALL {

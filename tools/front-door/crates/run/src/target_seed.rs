@@ -22,24 +22,7 @@ pub struct Manifest {
 /// as the verification tiers. Read only data here: lane preparation must never
 /// invoke Cargo (or a writer-controlled compiler) outside confinement.
 pub fn cargo_build_directory(project: &Path) -> io::Result<Option<PathBuf>> {
-    #[derive(serde::Deserialize)]
-    struct Selection {
-        #[serde(default = "default_workspace")]
-        workspace: PathBuf,
-    }
-    fn default_workspace() -> PathBuf {
-        PathBuf::from(".")
-    }
-    let selection = project.join(".provenant/verify.json");
-    let workspace = match std::fs::read(&selection) {
-        Ok(bytes) => {
-            serde_json::from_slice::<Selection>(&bytes)
-                .map_err(io::Error::other)?
-                .workspace
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => default_workspace(),
-        Err(error) => return Err(error),
-    };
+    let workspace = provenant_config::PortTable::read_project(project)?.verify.workspace;
     if workspace.is_absolute()
         || workspace.components().any(|component| {
             !matches!(
@@ -346,9 +329,11 @@ mod lane_probe_tests {
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(nested.join("Cargo.toml"), "[workspace]\n").unwrap();
         std::fs::create_dir(root.path().join(".provenant")).unwrap();
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.verify.workspace = PathBuf::from("any/depth/workspace");
         std::fs::write(
-            root.path().join(".provenant/verify.json"),
-            r#"{"workspace":"any/depth/workspace"}"#,
+            root.path().join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&ports).unwrap(),
         )
         .unwrap();
         assert_eq!(

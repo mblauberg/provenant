@@ -13,9 +13,10 @@ mod github_policy;
 mod history;
 mod schema;
 pub use gc::{
-    ForeignWorktrees, GcSettings, LaneBuildSettings, MemoryPressureThreshold,
-    PROJECT_WRITER_LANES_CEILING, ProjectGcSettings, RETENTION_CLASSES, RetentionClass,
-    RetentionKind, RetentionTrigger, STORE_BUSY_TIMEOUT_CEILING_MS, StoreSettings,
+    ByteObservation, ForeignWorktrees, GcSettings, LaneBuildSettings, MemoryPressureThreshold,
+    PROJECT_WRITER_LANES_CEILING, ProjectGcSettings, RETENTION_CLASSES, RetentionBytes,
+    RetentionClass, RetentionEligibility, RetentionKind, RetentionTrigger,
+    STORE_BUSY_TIMEOUT_CEILING_MS, StoreSettings,
     WRITER_LANES_CEILING, deserialize_auto, parse_cache_size, retention_schedule,
 };
 pub use github_policy::{
@@ -34,6 +35,8 @@ mod presets;
 mod providers;
 pub use providers::{ProviderSettings, ProviderUpdate};
 mod project_binding;
+mod ports;
+pub use ports::{CommandExitCodes, ExitDisposition, LandBackend, LandPort, PackagePath, Integration, Port, PortBackend, PortBackendKind, PortCommand, PortSource, PortTable, VerifyPort, VerifySelection, VerifyTier, WorktreeLayoutPort, PORTS_CONFIG, PORTS_SCHEMA_VERSION};
 mod release;
 mod repository_policy;
 pub use repository_policy::{REPOSITORY_CONFIG, RepositoryPolicy, read_land};

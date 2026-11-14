@@ -673,7 +673,12 @@ fn recover_provisioning(
             });
             journal.save(checkpoint).map_err(journal_error)?;
         }
-        let result = match path.strip_prefix(".worktrees/") {
+        let branch = provenant_confinement::worktrees::managed_writer_branch(
+            &context.cwd,
+            std::path::Path::new(&path),
+        )
+        .map_err(provisioning_refusal)?;
+        let result = match branch.as_deref() {
             Some(branch) => {
                 provision_writer_checked(context, &path, branch, &source, launch, cancel)
             }
@@ -1011,10 +1016,13 @@ pub fn provision_child_with_budget(
     budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<(), ServiceError> {
-    let branch = path
-        .strip_prefix(".worktrees/")
-        .ok_or_else(|| refused("writer_worktree", "invalid managed worktree path"))?;
-    provision_writer(context, path, branch, source, budget, cancel)
+    let branch = provenant_confinement::worktrees::managed_writer_branch(
+        &context.cwd,
+        std::path::Path::new(path),
+    )
+    .map_err(provisioning_refusal)?
+    .ok_or_else(|| refused("writer_worktree", "invalid managed worktree path"))?;
+    provision_writer(context, path, &branch, source, budget, cancel)
 }
 
 /// Provision a graph-owned writer at its checkpointed source commit.
@@ -1089,7 +1097,7 @@ fn resolve_managed_writer_path(
     if !project_root.is_absolute() {
         return Err(WorktreeError::InvalidRequest);
     }
-    let expected = worktrees::managed_writer_relative_path(branch)?;
+    let expected = worktrees::managed_writer_relative_path(project_root, branch)?;
     if std::path::Path::new(path) == expected.as_path() {
         Ok(project_root.join(expected))
     } else {

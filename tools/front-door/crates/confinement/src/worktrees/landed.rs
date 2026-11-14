@@ -183,13 +183,23 @@ pub fn commit_parents(raw: &[u8]) -> Result<Vec<GitOid>, WorktreeError> {
 
 /// Ancestry of the target the caller just read, with no receipts: the check
 /// lifecycle removal and GC share.
+pub(super) fn landing_on(
+    context: &WorktreeContext<'_>,
+    tip: GitOid,
+    root: &LandingTarget,
+    cancel: &CancelToken,
+) -> Result<Landing, WorktreeError> {
+    landed(&RepoGraph { context, cancel }, tip, root, &[])
+}
+
+/// Ancestry of the target the caller just read, with no receipts.
 pub(super) fn landed_on(
     context: &WorktreeContext<'_>,
     tip: GitOid,
     root: &LandingTarget,
     cancel: &CancelToken,
 ) -> Result<bool, WorktreeError> {
-    Ok(landed(&RepoGraph { context, cancel }, tip, root, &[])?.is_landed())
+    Ok(landing_on(context, tip, root, cancel)?.is_landed())
 }
 
 #[cfg(test)]

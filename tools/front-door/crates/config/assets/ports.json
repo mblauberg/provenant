@@ -1,0 +1,102 @@
+{
+  "schema_version": 2,
+  "verify": {
+    "source": "builtin",
+    "backend": {
+      "kind": "builtin"
+    },
+    "base": "origin/main",
+    "workspace": ".",
+    "remote": "origin",
+    "load_per_cpu": 1.0,
+    "package_paths": [],
+    "quarantine_command": [],
+    "tiers": {
+      "0": {
+        "commands": [
+          "cargo fmt {packages} -- --check",
+          "cargo check --locked {packages}",
+          "scripts/verify-nextest --profile lane --locked {packages} --lib --bins"
+        ],
+        "selection": "packages",
+        "warn_for_host_load": false
+      },
+      "1": {
+        "commands": [
+          "scripts/verify-nextest --profile lane --locked {integration_args}"
+        ],
+        "selection": "integrations",
+        "warn_for_host_load": false
+      },
+      "2": {
+        "commands": [
+          "scripts/verify-nextest --profile ci --workspace --locked"
+        ],
+        "selection": "all",
+        "warn_for_host_load": true
+      },
+      "3": {
+        "commands": [
+          "scripts/verify-nextest --profile ci --workspace --locked --stress-count 20"
+        ],
+        "selection": "all",
+        "warn_for_host_load": true
+      }
+    },
+    "integrations": [],
+    "runners": {},
+    "default_tier": "0"
+  },
+  "land": {
+    "source": "builtin",
+    "backend": {
+      "kind": "builtin"
+    }
+  },
+  "ci_observation": {
+    "source": "builtin",
+    "backend": {
+      "kind": "builtin"
+    }
+  },
+  "worktree_layout": {
+    "source": "builtin",
+    "backend": {
+      "kind": "builtin"
+    },
+    "roots": [
+      ".worktrees"
+    ],
+    "default": ".worktrees/<branch>"
+  },
+  "naming": {
+    "source": "builtin",
+    "backend": {
+      "kind": "builtin"
+    }
+  },
+  "post_create": {
+    "source": "builtin",
+    "backend": {
+      "kind": "builtin"
+    }
+  },
+  "tracker": {
+    "source": "builtin",
+    "backend": {
+      "kind": "builtin"
+    }
+  },
+  "release": {
+    "source": "builtin",
+    "backend": {
+      "kind": "builtin"
+    }
+  },
+  "admission": {
+    "source": "builtin",
+    "backend": {
+      "kind": "builtin"
+    }
+  }
+}

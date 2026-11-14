@@ -14,7 +14,10 @@ use provenant_os::{
     exec::SystemExecutor,
     fs::{Directory, FileKind, FsError},
 };
-use provenant_records::{CommandResult, Outcome};
+use provenant_records::{
+    CommandResult, Outcome,
+    custody::{LandedEvidence, LandingPredicate, LandingSource, RemovalRecord, Subject, SubjectKind},
+};
 use serde::Serialize;
 use std::{
     cell::RefCell,
@@ -406,6 +409,43 @@ struct GcData {
     notice: Option<String>,
 }
 
+fn gc_retention_bytes(data: &GcData) -> Vec<provenant_config::RetentionBytes> {
+    use provenant_config::{ByteObservation, RetentionKind, RETENTION_CLASSES};
+
+    RETENTION_CLASSES
+        .iter()
+        .map(|class| {
+            let measured = match class.class {
+                RetentionKind::LaneCargoCaches => Some(data.report.bytes_freed),
+                RetentionKind::TargetSeeds => Some(data.target_seeds.bytes),
+                RetentionKind::BuildDirectories => Some(data.build_dirs.bytes),
+                RetentionKind::PayloadCap => Some(data.provider_state.payload.reclaimed_bytes),
+                RetentionKind::AttemptScratch => Some(
+                    data.provider_state
+                        .attempt_tmp
+                        .iter()
+                        .map(|item| item.bytes)
+                        .fold(0, u64::saturating_add),
+                ),
+                _ => None,
+            };
+            provenant_config::RetentionBytes {
+                class: class.class,
+                observation: measured
+                    .map(|bytes| ByteObservation::Measured { bytes })
+                    .unwrap_or(ByteObservation::Unknown),
+            }
+        })
+        .collect()
+}
+
+fn gc_removal_records(data: &GcData) -> Vec<RemovalRecord> {
+    data.worktree_cleanup
+        .iter()
+        .flat_map(|report| report.removals.iter().cloned())
+        .collect()
+}
+
 const GC_REPAIR: &str =
     "Run `provenant gc --apply --json` to inspect failed paths and retry incomplete collection.";
 
@@ -723,9 +763,16 @@ fn retained_exception(reason: RetainReason) -> bool {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum GcOutput<'a> {
-    Detailed(&'a GcData),
+    Detailed {
+        #[serde(flatten)]
+        data: &'a GcData,
+        retention_bytes: Vec<provenant_config::RetentionBytes>,
+        removal_records: Vec<RemovalRecord>,
+    },
     Summary {
         dry_run: bool,
+        retention_bytes: Vec<provenant_config::RetentionBytes>,
+        removal_records: Vec<RemovalRecord>,
         removed: usize,
         kept: usize,
         bytes_freed: u64,
@@ -740,12 +787,69 @@ enum GcOutput<'a> {
         notice: &'a Option<String>,
     },
 }
+fn append_gc_removal_records(
+    report: &mut worktrees::WorktreeGcReport,
+    project: provenant_core::ProjectId,
+    upstream: Option<&(String, GitOid)>,
+) {
+    if !report.dry_run {
+        if let Some((reference, commit)) = upstream {
+            let evidence = LandedEvidence {
+                predicate: LandingPredicate::Landed,
+                source: LandingSource::IntegrationTarget {
+                    reference: reference.clone(),
+                    commit: *commit,
+                },
+            };
+            for lane in &report.worktrees.removed {
+                report.removals.push(RemovalRecord {
+                    project,
+                    subject: Subject::new(
+                        SubjectKind::Worktree,
+                        lane.path.to_string_lossy(),
+                    ),
+                    tip: lane.head,
+                    outcome: provenant_records::custody::RemovalOutcome::Removed {
+                        evidence: evidence.clone(),
+                    },
+                });
+                if let Some(branch) = lane.branch.as_deref()
+                    && branch
+                        .strip_prefix("refs/heads/")
+                        .is_some_and(|short| report.worktrees.pruned_refs.iter().any(|name| name == short))
+                {
+                    report.removals.push(RemovalRecord {
+                        project,
+                        subject: Subject::new(SubjectKind::Branch, branch),
+                        tip: lane.head,
+                        outcome: provenant_records::custody::RemovalOutcome::Removed {
+                            evidence: evidence.clone(),
+                        },
+                    });
+                }
+            }
+        }
+    }
+    report.removals.extend(
+        report
+            .refs
+            .iter()
+            .filter_map(|outcome| outcome.removal.clone()),
+    );
+}
+
 fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
     if detailed {
-        return GcOutput::Detailed(data);
+        return GcOutput::Detailed {
+            data,
+            retention_bytes: gc_retention_bytes(data),
+            removal_records: gc_removal_records(data),
+        };
     }
     GcOutput::Summary {
         dry_run: data.report.dry_run,
+        retention_bytes: gc_retention_bytes(data),
+        removal_records: gc_removal_records(data),
         removed: data.report.removed.len(),
         kept: data.report.kept.len(),
         bytes_freed: data.report.bytes_freed,
@@ -1284,6 +1388,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                         cancel,
                     );
                 }
+                append_gc_removal_records(&mut report, context.binding.project_id(), upstream.as_ref());
                 Ok(report)
             },
         );
@@ -1439,7 +1544,15 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             RetentionKind::GitWorktrees
             | RetentionKind::ObservationLedgers
             | RetentionKind::QuotaHistory
-            | RetentionKind::Usage => {}
+            | RetentionKind::Usage
+            // Payload and scratch collection is owned by the ProviderState pass.
+            | RetentionKind::PayloadCap
+            | RetentionKind::AttemptScratch
+            // These owners run at their existing checkpoint/install boundaries,
+            // or have no behaviour declared yet.
+            | RetentionKind::GraphCheckpoints
+            | RetentionKind::ManagedReleases
+            | RetentionKind::DiscardArchives => {}
         }
     }
     // Observe after every collection class, including a partially failed sweep.
@@ -1839,6 +1952,129 @@ mod gc_preview_tests {
             "would_remove"
         );
     }
+    #[test]
+    fn gc_reports_every_retention_class_and_only_existing_byte_measurements() {
+        use provenant_config::{ByteObservation, RetentionKind, RETENTION_CLASSES};
+        let mut data = GcData::default();
+        data.report.bytes_freed = 19;
+        data.target_seeds.bytes = 23;
+        data.build_dirs.bytes = 29;
+        data.provider_state.payload.reclaimed_bytes = 31;
+        data.provider_state.attempt_tmp.extend([
+            provenant_run::AttemptTmpRemoval {
+                path: "/state/attempt/a".into(),
+                bytes: 37,
+            },
+            provenant_run::AttemptTmpRemoval {
+                path: "/state/attempt/b".into(),
+                bytes: 41,
+            },
+        ]);
+
+        let rows = gc_retention_bytes(&data);
+        assert_eq!(rows.len(), RETENTION_CLASSES.len());
+        assert!(RETENTION_CLASSES.iter().all(|declared| {
+            rows.iter().filter(|row| row.class == declared.class).count() == 1
+        }));
+        let observation = |kind| {
+            rows.iter()
+                .find(|row| row.class == kind)
+                .map(|row| row.observation)
+                .unwrap()
+        };
+        assert_eq!(
+            observation(RetentionKind::LaneCargoCaches),
+            ByteObservation::Measured { bytes: 19 }
+        );
+        assert_eq!(
+            observation(RetentionKind::TargetSeeds),
+            ByteObservation::Measured { bytes: 23 }
+        );
+        assert_eq!(
+            observation(RetentionKind::BuildDirectories),
+            ByteObservation::Measured { bytes: 29 }
+        );
+        assert_eq!(
+            observation(RetentionKind::PayloadCap),
+            ByteObservation::Measured { bytes: 31 }
+        );
+        assert_eq!(
+            observation(RetentionKind::AttemptScratch),
+            ByteObservation::Measured { bytes: 78 }
+        );
+        assert_eq!(
+            observation(RetentionKind::GraphCheckpoints),
+            ByteObservation::Unknown
+        );
+
+        let summary = serde_json::to_value(gc_result_data(&data, false)).unwrap();
+        let detailed = serde_json::to_value(gc_result_data(&data, true)).unwrap();
+        assert_eq!(summary["retention_bytes"].as_array().unwrap().len(), rows.len());
+        assert_eq!(detailed["retention_bytes"].as_array().unwrap().len(), rows.len());
+    }
+
+    #[test]
+    fn gc_records_project_bound_actual_removals_and_no_previews() {
+        use provenant_records::custody::{RemovalOutcome, SubjectKind};
+        let project = provenant_core::ProjectId::from_bytes([9; 16]);
+        let tip = GitOid::parse(&"a1".repeat(20)).unwrap();
+        let target = (
+            "refs/remotes/origin/main".to_owned(),
+            GitOid::parse(&"b2".repeat(20)).unwrap(),
+        );
+        let lane = worktrees::WorktreeInfo {
+            warnings: Vec::new(),
+            path: PathBuf::from("/repo/.worktrees/topic"),
+            branch: Some("refs/heads/topic".into()),
+            head: tip,
+            dirty: worktrees::WorktreeCondition::Clean,
+            occupancy: worktrees::Occupancy::Available,
+            owner: Ok(None),
+            primary: false,
+        };
+        let mut report = worktrees::WorktreeGcReport::default();
+        report.worktrees.removed.push(lane.clone());
+        report.worktrees.pruned_refs.push("topic".into());
+        append_gc_removal_records(&mut report, project, Some(&target));
+        assert_eq!(report.removals.len(), 2);
+        assert!(report.removals.iter().all(|record| record.project == project));
+        let worktree = report.removals.iter().find(|record| record.subject.kind == SubjectKind::Worktree).unwrap();
+        assert_eq!(worktree.subject.id, "/repo/.worktrees/topic");
+        assert_eq!(worktree.tip, tip);
+        let branch = report.removals.iter().find(|record| record.subject.kind == SubjectKind::Branch).unwrap();
+        assert_eq!(branch.subject.id, "refs/heads/topic");
+        let expected_source = provenant_records::custody::LandingSource::IntegrationTarget {
+            reference: target.0.clone(),
+            commit: target.1,
+        };
+        assert!(report.removals.iter().all(|record| match &record.outcome {
+            RemovalOutcome::Removed { evidence } => {
+                evidence.predicate == provenant_records::custody::LandingPredicate::Landed
+                    && evidence.source == expected_source
+            }
+            RemovalOutcome::Kept { .. } => false,
+        }));
+
+        let mut preview = worktrees::WorktreeGcReport {
+            dry_run: true,
+            ..Default::default()
+        };
+        preview.worktrees.removed.push(lane);
+        preview.worktrees.pruned_refs.push("topic".into());
+        append_gc_removal_records(&mut preview, project, Some(&target));
+        assert!(preview.removals.is_empty());
+
+        let mut output = GcData::default();
+        output.worktree_cleanup.push(report);
+        assert_eq!(
+            serde_json::to_value(gc_result_data(&output, false)).unwrap()["removal_records"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
     #[test]
     fn gc_default_output_aggregates_routine_rows_and_keeps_exceptions() {
         use provenant_confinement::cache::{CacheGcEntry, CacheGcReason};

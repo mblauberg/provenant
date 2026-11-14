@@ -12,9 +12,13 @@ use crate::gc_support::host_git_with_stderr;
 use provenant_confinement::repo::GitRefName;
 use provenant_confinement::worktrees::{
     self, Artefact, ArtefactOutcome, ArtefactState, IntegrationEdge, LandingTarget, RefDeletion,
-    RefEndpoint, RefLedger, RefOrigin, RefRecord, WorktreeContext,
+    Landing, RefEndpoint, RefLedger, RefOrigin, RefRecord, Unproven, WorktreeContext,
 };
 use provenant_core::{CancelToken, GitOid};
+use provenant_records::custody::{
+    LandedEvidence, LandingPredicate, LandingSource, RemovalOutcome, RemovalRecord,
+    RemovalUncertainty, Subject, SubjectKind,
+};
 use provenant_os::exec::Termination;
 use std::time::Duration;
 
@@ -39,12 +43,10 @@ enum Verdict {
     Keep(&'static str),
 }
 
-fn verdict(landed: Option<bool>) -> Verdict {
-    match landed {
-        Some(true) => Verdict::Landed,
-        Some(false) => Verdict::Keep("not_landed"),
-        None => Verdict::Keep("target_unavailable"),
-    }
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LandingDecision {
+    verdict: Verdict,
+    removal: RemovalOutcome,
 }
 
 fn reason(verdict: Verdict) -> &'static str {
@@ -52,6 +54,81 @@ fn reason(verdict: Verdict) -> &'static str {
         Verdict::Landed => "landed",
         Verdict::Keep(reason) => reason,
     }
+}
+
+fn landing_evidence(target: &LandingTarget) -> Option<LandedEvidence> {
+    Some(LandedEvidence {
+        predicate: LandingPredicate::Landed,
+        source: LandingSource::IntegrationTarget {
+            reference: target.reference.as_ref()?.as_str().to_owned(),
+            commit: target.tip,
+        },
+    })
+}
+
+fn ref_removal(
+    project: provenant_core::ProjectId,
+    reference: &GitRefName,
+    tip: GitOid,
+    outcome: RemovalOutcome,
+) -> RemovalRecord {
+    RemovalRecord {
+        project,
+        subject: Subject::new(SubjectKind::Branch, reference.as_str()),
+        tip,
+        outcome,
+    }
+}
+
+fn kept_decision(reason: &'static str, cause: RemovalUncertainty) -> LandingDecision {
+    LandingDecision {
+        verdict: Verdict::Keep(reason),
+        removal: RemovalOutcome::Kept { cause },
+    }
+}
+
+fn landed_on_any(
+    context: &WorktreeContext<'_>,
+    tip: GitOid,
+    targets: &[LandingTarget],
+    chain: &[IntegrationEdge],
+    cancel: &CancelToken,
+) -> LandingDecision {
+    if targets.is_empty() {
+        return kept_decision("target_unavailable", RemovalUncertainty::UnprovenLanding);
+    }
+    let mut observed_unproven = false;
+    let mut missing_commit = false;
+    for target in targets {
+        match worktrees::landing_in_repo(context, tip, target, chain, cancel) {
+            Ok(Landing::Landed(_)) => {
+                if let Some(evidence) = landing_evidence(target) {
+                    return LandingDecision {
+                        verdict: Verdict::Landed,
+                        removal: RemovalOutcome::Removed { evidence },
+                    };
+                }
+            }
+            Ok(Landing::Unproven(Unproven::MissingCommit { .. })) => {
+                observed_unproven = true;
+                missing_commit = true;
+            }
+            Ok(Landing::Unproven(_)) => observed_unproven = true,
+            Err(_) => {}
+        }
+    }
+    kept_decision(
+        if observed_unproven {
+            "not_landed"
+        } else {
+            "target_unavailable"
+        },
+        if missing_commit {
+            RemovalUncertainty::MissingCommit
+        } else {
+            RemovalUncertainty::UnprovenLanding
+        },
+    )
 }
 
 fn warn(outcome: &ArtefactOutcome) {
@@ -64,27 +141,6 @@ fn warn(outcome: &ArtefactOutcome) {
             outcome.reason.as_deref().unwrap_or("unknown error")
         );
     }
-}
-
-fn landed_on_any(
-    context: &WorktreeContext<'_>,
-    tip: GitOid,
-    targets: &[LandingTarget],
-    chain: &[IntegrationEdge],
-    cancel: &CancelToken,
-) -> Option<bool> {
-    if targets.is_empty() {
-        return None;
-    }
-    let mut observed = false;
-    for target in targets {
-        match worktrees::landing_in_repo(context, tip, target, chain, cancel) {
-            Ok(landing) if landing.is_landed() => return Some(true),
-            Ok(_) => observed = true,
-            Err(_) => {}
-        }
-    }
-    observed.then_some(false)
 }
 
 /// Remove one local branch Provenant created, when it has landed on one of
@@ -144,21 +200,25 @@ fn local_outcome(
         Ok(true) => return out(ArtefactState::Retained).with_reason("checked_out"),
         Err(error) => return out(ArtefactState::Failed).with_reason(error.to_string()),
     }
-    let verdict = verdict(landed_on_any(context, tip, targets, &[], cancel));
-    if let Verdict::Keep(why) = verdict {
-        return out(ArtefactState::Retained).with_reason(why).with_head(tip);
+    let decision = landed_on_any(context, tip, targets, &[], cancel);
+    if let Verdict::Keep(why) = decision.verdict {
+        return out(ArtefactState::Retained)
+            .with_reason(why)
+            .with_head(tip)
+            .with_removal(ref_removal(context.binding.project_id(), &reference, tip, decision.removal));
     }
     if sweep.dry_run {
         return out(ArtefactState::WouldRemove)
-            .with_reason(reason(verdict))
+            .with_reason(reason(decision.verdict))
             .with_head(tip);
     }
     match worktrees::delete_ref_leased(context, &reference, tip, cancel) {
         Ok(RefDeletion::Removed) => {
             let _ = ledger.forget(record, context.clock, cancel);
             out(ArtefactState::Removed)
-                .with_reason(reason(verdict))
+                .with_reason(reason(decision.verdict))
                 .with_head(tip)
+                .with_removal(ref_removal(&reference, tip, decision.removal))
         }
         Ok(RefDeletion::Absent) => {
             let _ = ledger.forget(record, context.clock, cancel);
@@ -224,7 +284,9 @@ fn remote_outcomes(
         }
         let mut outcomes = vec![out(ArtefactState::Absent)];
         if let Some(tracking) = &tracking {
-            outcomes.extend(stale_tracking(context, remote, tracking, sweep, cancel));
+            outcomes.extend(stale_tracking(
+                context, remote, tracking, target, chain, sweep, cancel,
+            ));
         }
         return outcomes;
     };
@@ -235,20 +297,24 @@ fn remote_outcomes(
                 .with_head(tip),
         ];
     }
-    let landed = target.and_then(|target| {
-        worktrees::landing_in_repo(context, tip, target, chain, cancel)
-            .ok()
-            .map(|landing| landing.is_landed())
-    });
-    let verdict = verdict(landed);
-    if let Verdict::Keep(why) = verdict {
-        return vec![out(ArtefactState::Retained).with_reason(why).with_head(tip)];
+    let decision = landed_on_any(
+        context,
+        tip,
+        target.map(std::slice::from_ref).unwrap_or(&[]),
+        chain,
+        cancel,
+    );
+    if let Verdict::Keep(why) = decision.verdict {
+        return vec![out(ArtefactState::Retained)
+            .with_reason(why)
+            .with_head(tip)
+            .with_removal(ref_removal(&reference, tip, decision.removal))];
     }
     let mut outcomes = Vec::new();
     if sweep.dry_run {
         outcomes.push(
             out(ArtefactState::WouldRemove)
-                .with_reason(reason(verdict))
+                .with_reason(reason(decision.verdict))
                 .with_head(tip),
         );
         if let Some(tracking) = &tracking
@@ -271,11 +337,14 @@ fn remote_outcomes(
             let _ = ledger.forget(record, context.clock, cancel);
             outcomes.push(
                 out(ArtefactState::Removed)
-                    .with_reason(reason(verdict))
-                    .with_head(tip),
+                    .with_reason(reason(decision.verdict))
+                    .with_head(tip)
+                    .with_removal(ref_removal(context.binding.project_id(), &reference, tip, decision.removal.clone())),
             );
             if let Some(tracking) = &tracking {
-                outcomes.extend(stale_tracking(context, remote, tracking, sweep, cancel));
+                outcomes.extend(stale_tracking(
+                    context, remote, tracking, target, chain, sweep, cancel,
+                ));
             }
         }
         Err(error) => outcomes.push(out(ArtefactState::Failed).with_reason(error).with_head(tip)),
@@ -289,6 +358,8 @@ fn stale_tracking(
     context: &WorktreeContext<'_>,
     remote: &str,
     tracking: &GitRefName,
+    target: Option<&LandingTarget>,
+    chain: &[IntegrationEdge],
     sweep: &Sweep,
     cancel: &CancelToken,
 ) -> Option<ArtefactOutcome> {
@@ -300,13 +371,27 @@ fn stale_tracking(
         Ok(None) => return None,
         Err(error) => return Some(out(ArtefactState::Failed).with_reason(error.to_string())),
     };
+    let decision = landed_on_any(
+        context,
+        held,
+        target.map(std::slice::from_ref).unwrap_or(&[]),
+        chain,
+        cancel,
+    );
+    if let Verdict::Keep(why) = decision.verdict {
+        return Some(out(ArtefactState::Retained)
+            .with_reason(why)
+            .with_head(held)
+            .with_removal(ref_removal(context.binding.project_id(), tracking, held, decision.removal)));
+    }
     if sweep.dry_run {
         return Some(out(ArtefactState::WouldRemove).with_head(held));
     }
     let outcome = match worktrees::delete_ref_leased(context, tracking, held, cancel) {
         Ok(RefDeletion::Removed) => out(ArtefactState::Removed)
             .with_reason("remote_branch_gone")
-            .with_head(held),
+            .with_head(held)
+            .with_removal(ref_removal(tracking, held, decision.removal)),
         Ok(RefDeletion::Absent) => out(ArtefactState::Absent),
         Ok(_) => out(ArtefactState::Retained).with_reason("changed"),
         Err(error) => out(ArtefactState::Failed).with_reason(error.to_string()),
@@ -783,6 +868,12 @@ mod tests {
                 assert_eq!(outcomes[0].reason.as_deref(), Some("not_landed"));
                 assert_eq!(outcomes[0].head, Some(fixture.unlanded));
                 assert_eq!(
+                    outcomes[0].removal.as_ref().map(|record| &record.outcome),
+                    Some(&RemovalOutcome::Kept {
+                        cause: RemovalUncertainty::UnprovenLanding,
+                    })
+                );
+                assert_eq!(
                     ledger.load(&endpoint, &GitRefName::branch("lane/old").unwrap())?,
                     Some(record)
                 );
@@ -876,6 +967,109 @@ mod tests {
     }
 
     #[test]
+    fn removed_ref_records_the_exact_landing_target() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = CleanupFixture::new()?;
+        fixture.with_context(|context, cancel| {
+            let ledger = RefLedger::for_context(context)?;
+            let record = record_old_ref(
+                context,
+                &ledger,
+                RefEndpoint::Local,
+                "lane/changed",
+                fixture.base,
+                cancel,
+            )?;
+            let target = LandingTarget {
+                reference: Some(GitRefName::branch("main").unwrap()),
+                tip: fixture.landed,
+            };
+            let outcome = sweep_local(
+                context,
+                &ledger,
+                &record,
+                std::slice::from_ref(&target),
+                &Sweep::new(false),
+                cancel,
+            );
+            assert_eq!(outcome.outcome, ArtefactState::Removed);
+            assert_eq!(
+                outcome.removal,
+                Some(RemovalRecord {
+                    project: context.binding.project_id(),
+                    subject: Subject::new(SubjectKind::Branch, "refs/heads/lane/changed"),
+                    tip: fixture.base,
+                    outcome: RemovalOutcome::Removed {
+                        evidence: LandedEvidence {
+                            predicate: LandingPredicate::Landed,
+                            source: LandingSource::IntegrationTarget {
+                                reference: "refs/heads/main".into(),
+                                commit: fixture.landed,
+                            },
+                        },
+                    },
+                })
+            );
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    fn stale_tracking_ref_is_kept_when_the_gone_remote_tip_is_unlanded()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = CleanupFixture::new()?;
+        provenant_os::fixture::run_git(&fixture.project, &["fetch", "bound"])?;
+        provenant_os::fixture::run_git(
+            &fixture.remote,
+            &["update-ref", "-d", "refs/heads/lane/old"],
+        )?;
+        fixture.with_context(|context, cancel| {
+            let ledger = RefLedger::for_context(context)?;
+            let record = record_old_ref(
+                context,
+                &ledger,
+                fixture.endpoint(),
+                "lane/old",
+                fixture.unlanded,
+                cancel,
+            )?;
+            let target = LandingTarget {
+                reference: Some(GitRefName::branch("main").unwrap()),
+                tip: fixture.landed,
+            };
+            let tracking = GitRefName::remote_tracking("bound/lane/old").unwrap();
+            let outcomes = sweep_remote(
+                context,
+                &ledger,
+                &record,
+                Some(&target),
+                &[],
+                &Sweep::new(false),
+                cancel,
+            );
+            let remote = outcomes.iter().find(|outcome| outcome.artefact == Artefact::RemoteBranch).unwrap();
+            assert_eq!(remote.outcome, ArtefactState::Absent);
+            let tracking_outcome = outcomes.iter().find(|outcome| outcome.artefact == Artefact::TrackingRef).unwrap();
+            assert_eq!(tracking_outcome.outcome, ArtefactState::Retained);
+            assert_eq!(tracking_outcome.head, Some(fixture.unlanded));
+            let kept = tracking_outcome.removal.as_ref().unwrap();
+            assert_eq!(kept.project, context.binding.project_id());
+            assert_eq!(
+                kept.outcome,
+                RemovalOutcome::Kept {
+                    cause: RemovalUncertainty::UnprovenLanding,
+                }
+            );
+            assert_eq!(
+                worktrees::ref_tip(context, &tracking, cancel)?,
+                Some(fixture.unlanded)
+            );
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
     fn unknown_landing_target_and_unreachable_remote_preserve_ancient_work()
     -> Result<(), Box<dyn std::error::Error>> {
         let fixture = CleanupFixture::new()?;
@@ -957,10 +1151,23 @@ mod tests {
     }
 
     #[test]
-    fn unlanded_and_unknown_refs_are_never_expired() {
-        assert_eq!(verdict(Some(true)), Verdict::Landed);
-        assert_eq!(verdict(Some(false)), Verdict::Keep("not_landed"));
-        assert_eq!(verdict(None), Verdict::Keep("target_unavailable"));
+    fn unproven_ref_decisions_keep_typed_causes() {
+        let missing = kept_decision("not_landed", RemovalUncertainty::MissingCommit);
+        assert_eq!(missing.verdict, Verdict::Keep("not_landed"));
+        assert_eq!(
+            missing.removal,
+            RemovalOutcome::Kept {
+                cause: RemovalUncertainty::MissingCommit
+            }
+        );
+        let unknown = kept_decision("target_unavailable", RemovalUncertainty::UnprovenLanding);
+        assert_eq!(unknown.verdict, Verdict::Keep("target_unavailable"));
+        assert_eq!(
+            unknown.removal,
+            RemovalOutcome::Kept {
+                cause: RemovalUncertainty::UnprovenLanding
+            }
+        );
     }
 
     #[test]

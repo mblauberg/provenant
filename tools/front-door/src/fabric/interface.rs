@@ -369,7 +369,7 @@ fn bind_launch_controls(input: &Value, node: &mut Value, cwd: &Path) -> Result<(
             None => "refs/remotes/origin/HEAD",
         };
         provenant_confinement::repo::GitRevision::new(base).map_err(|_| invalid("base"))?;
-        let worktree = provenant_confinement::worktrees::managed_writer_relative_path(branch)
+        let worktree = provenant_confinement::worktrees::managed_writer_relative_path(cwd, branch)
             .map_err(|_| invalid("branch"))?;
         node["worktree"] = json!(worktree);
         if node.get("attempt").is_none() {
@@ -2907,6 +2907,32 @@ mod tests {
         );
         let restored: FacadeError = serde_json::from_value(serde_json::to_value(&error)?)?;
         assert_eq!(restored.diagnostic(), diagnostic);
+        Ok(())
+    }
+
+    #[test]
+    fn branch_control_uses_the_project_worktree_layout() -> Result {
+        let project = tempfile::tempdir()?;
+        std::fs::create_dir(project.path().join(".provenant"))?;
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.worktree_layout.roots = vec![
+            std::path::PathBuf::from(".claude/worktrees"),
+            std::path::PathBuf::from(".worktrees"),
+        ];
+        ports.worktree_layout.default =
+            std::path::PathBuf::from(".claude/worktrees/<branch>");
+        std::fs::write(
+            project.path().join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&ports)?,
+        )?;
+
+        let mut node = json!({"use":"task"});
+        bind_launch_controls(
+            &json!({"branch":"feature/topic"}),
+            &mut node,
+            project.path(),
+        )?;
+        assert_eq!(node["worktree"], ".claude/worktrees/feature-topic");
         Ok(())
     }
 

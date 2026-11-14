@@ -323,9 +323,13 @@ pub fn prune_owned(
 ) -> Result<RemoveOutcome, WorktreeError> {
     let verified = verify_worktree(context.repo, path)?;
     let owner = load_owner(&verified)?.ok_or(WorktreeError::UnknownWriter)?;
+    let relative = path
+        .strip_prefix(context.repo.root_path())
+        .map_err(|_| WorktreeError::UnknownWriter)?;
+    let managed = managed_writer_branch(context.repo.root_path(), relative)?.is_some();
     if owner.origin != WorktreeOrigin::Lane
         || owner.attempt_id != Some(attempt)
-        || !path.starts_with(context.repo.root_path().join(WORKTREE_ROOT))
+        || !managed
     {
         return Err(WorktreeError::UnknownWriter);
     }

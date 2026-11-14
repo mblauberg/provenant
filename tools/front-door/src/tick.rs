@@ -865,9 +865,11 @@ mod tests {
         let workspace = project.join("arbitrarily/nested/rust");
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::create_dir_all(project.join(".provenant")).unwrap();
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.verify.workspace = "arbitrarily/nested/rust".into();
         std::fs::write(
-            project.join(".provenant/verify.json"),
-            r#"{"workspace":"arbitrarily/nested/rust"}"#,
+            project.join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&ports).unwrap(),
         )
         .unwrap();
         if manifest {

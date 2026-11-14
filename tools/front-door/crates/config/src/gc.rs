@@ -5,121 +5,203 @@ use std::{
     path::{Component, Path},
 };
 
-/// Retention policy routing. Owners alone interpret custody and delete bytes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RetentionKind {
-    GitWorktrees,
-    ObservationLedgers,
-    Staging,
-    LaneCargoCaches,
-    ProviderState,
-    ChairLogs,
-    TargetSeeds,
-    BuildDirectories,
-    QuotaHistory,
-    Usage,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Retention policy routing. Owners alone interpret eligibility and remove bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RetentionTrigger {
     Custody,
     Gc,
     FullGc,
+    Settlement,
+    Install,
     Append,
     Never,
+}
+
+/// Whether the current owner has declared the conditions for removing a class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetentionEligibility {
+    Declared,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ByteObservation {
+    Measured { bytes: u64 },
+    Unknown,
+}
+
+/// A GC byte total. Unknown is explicit when an owner has no measurement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetentionBytes {
+    pub class: RetentionKind,
+    pub observation: ByteObservation,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct RetentionClass {
     pub class: RetentionKind,
     pub owner: &'static str,
-    pub custody_proof: &'static str,
-    /// Effective config keys, interpreted by the owner; None forbids ageing.
-    pub age_rule: Option<&'static str>,
-    pub trigger: RetentionTrigger,
+    pub eligibility: RetentionEligibility,
+    pub eligibility_detail: &'static str,
+    /// Effective config keys, interpreted by the owner.
+    pub settings: &'static [&'static str],
+    pub triggers: &'static [RetentionTrigger],
 }
 
-pub const RETENTION_CLASSES: &[RetentionClass] = &[
-    RetentionClass {
-        class: RetentionKind::LaneCargoCaches,
+const GC: &[RetentionTrigger] = &[RetentionTrigger::Gc];
+const FULL_GC: &[RetentionTrigger] = &[RetentionTrigger::FullGc];
+const GC_SETTLEMENT: &[RetentionTrigger] =
+    &[RetentionTrigger::Gc, RetentionTrigger::Settlement];
+const INSTALL: &[RetentionTrigger] = &[RetentionTrigger::Install];
+const APPEND: &[RetentionTrigger] = &[RetentionTrigger::Append];
+const NEVER: &[RetentionTrigger] = &[RetentionTrigger::Never];
+const CUSTODY: &[RetentionTrigger] = &[RetentionTrigger::Custody];
+
+macro_rules! retention_classes {
+    ($($kind:ident => {
+        owner: $owner:literal,
+        eligibility: $eligibility:ident,
+        detail: $detail:literal,
+        settings: [$($setting:literal),* $(,)?],
+        triggers: $triggers:ident
+    }),+ $(,)?) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum RetentionKind { $($kind),+ }
+
+        /// The single declaration of every retained byte class, owner and effective policy.
+        pub const RETENTION_CLASSES: &[RetentionClass] = &[
+            $(RetentionClass {
+                class: RetentionKind::$kind,
+                owner: $owner,
+                eligibility: RetentionEligibility::$eligibility,
+                eligibility_detail: $detail,
+                settings: &[$($setting),*],
+                triggers: $triggers,
+            }),+
+        ];
+    };
+}
+
+retention_classes! {
+    LaneCargoCaches => {
         owner: "confinement/cache",
-        custody_proof: "verified cache owner; free writer custody; atomic detachment",
-        age_rule: Some("gc.idle_days"),
-        trigger: RetentionTrigger::Gc,
+        eligibility: Declared,
+        detail: "settled lane; verified cache owner and free writer custody",
+        settings: ["gc.idle_days", "gc.lane_cargo_cache_max"],
+        triggers: GC_SETTLEMENT
     },
-    RetentionClass {
-        class: RetentionKind::GitWorktrees,
+    GitWorktrees => {
         owner: "confinement/worktrees",
-        custody_proof: "terminal writer; clean Git; landed unchanged tip",
-        age_rule: None,
-        trigger: RetentionTrigger::Custody,
+        eligibility: Declared,
+        detail: "terminal writer; clean Git; landed unchanged tip",
+        settings: ["gc.idle_days"],
+        triggers: CUSTODY
     },
-    RetentionClass {
-        class: RetentionKind::ObservationLedgers,
+    ObservationLedgers => {
         owner: "telemetry/ledger",
-        custody_proof: "permanent attempt evidence",
-        age_rule: None,
-        trigger: RetentionTrigger::Never,
+        eligibility: Declared,
+        detail: "permanent attempt evidence",
+        settings: [],
+        triggers: NEVER
     },
-    RetentionClass {
-        class: RetentionKind::Staging,
+    Staging => {
         owner: "staging_gc",
-        custody_proof: "free ingest/install item lock",
-        age_rule: Some("gc.idle_days"),
-        trigger: RetentionTrigger::Gc,
+        eligibility: Declared,
+        detail: "free ingest/install item lock and idle age",
+        settings: ["gc.idle_days"],
+        triggers: GC
     },
-    RetentionClass {
-        class: RetentionKind::ProviderState,
+    ProviderState => {
         owner: "run/retention",
-        custody_proof: "terminal; free publication/writer custody; no retained private Git",
-        age_rule: Some("retention.provider_state_days, retention.logs_days"),
-        trigger: RetentionTrigger::Gc,
+        eligibility: Declared,
+        detail: "terminal; free publication/writer custody; no retained private Git",
+        settings: ["retention.provider_state_days", "retention.logs_days"],
+        triggers: GC
     },
-    RetentionClass {
-        class: RetentionKind::ChairLogs,
+    ChairLogs => {
         owner: "workflow/log",
-        custody_proof: "owner transaction; replay horizon",
-        age_rule: Some("retention.chair_log_days"),
-        trigger: RetentionTrigger::FullGc,
+        eligibility: Declared,
+        detail: "owner transaction after replay horizon",
+        settings: ["retention.chair_log_days", "retention.chair_log_replay_days", "retention.chair_log_entries", "retention.chair_log_bytes"],
+        triggers: FULL_GC
     },
-    RetentionClass {
-        class: RetentionKind::TargetSeeds,
+    TargetSeeds => {
         owner: "run/target_seed_gc",
-        custody_proof: "free store/clone and staging build locks",
-        age_rule: None,
-        trigger: RetentionTrigger::Gc,
+        eligibility: Declared,
+        detail: "free store/clone and staging build locks",
+        settings: ["domains.fabric.lanes.cargo_seed.max_generations", "domains.fabric.lanes.cargo_seed.max_bytes"],
+        triggers: GC
     },
-    RetentionClass {
-        class: RetentionKind::BuildDirectories,
+    BuildDirectories => {
         owner: "run/build_dir_gc",
-        custody_proof: "GC boundary; free Cargo profile locks",
-        age_rule: Some("domains.fabric.lanes.build_dir_grace_seconds"),
-        trigger: RetentionTrigger::Gc,
+        eligibility: Declared,
+        detail: "GC boundary and free Cargo profile locks",
+        settings: ["domains.fabric.lanes.build_dir_max_bytes", "domains.fabric.lanes.build_dir_grace_seconds", "gc.free_floor"],
+        triggers: GC
     },
-    RetentionClass {
-        class: RetentionKind::QuotaHistory,
+    QuotaHistory => {
         owner: "cli/quota_history",
-        custody_proof: "whole-line append and rename",
-        age_rule: None,
-        trigger: RetentionTrigger::Append,
+        eligibility: Declared,
+        detail: "whole-line append and atomic rotation",
+        settings: [],
+        triggers: APPEND
     },
-    RetentionClass {
-        class: RetentionKind::Usage,
+    Usage => {
         owner: "telemetry/usage",
-        custody_proof: "whole-line append and rename",
-        age_rule: None,
-        trigger: RetentionTrigger::Append,
+        eligibility: Declared,
+        detail: "whole-line append and atomic rotation",
+        settings: [],
+        triggers: APPEND
     },
-];
+    GraphCheckpoints => {
+        owner: "fabric-runtime/graph/journal",
+        eligibility: Declared,
+        detail: "terminal checkpoint older than configured retention",
+        settings: ["gc.graph_checkpoint_days"],
+        triggers: FULL_GC
+    },
+    ManagedReleases => {
+        owner: "install",
+        eligibility: Declared,
+        detail: "inactive managed release not in use",
+        settings: [],
+        triggers: INSTALL
+    },
+    PayloadCap => {
+        owner: "run/retention",
+        eligibility: Declared,
+        detail: "unpinned payload above the configured cap",
+        settings: ["retention.payload_cap_bytes"],
+        triggers: GC
+    },
+    AttemptScratch => {
+        owner: "run/retention",
+        eligibility: Declared,
+        detail: "terminal attempt scratch older than the retention cutoff",
+        settings: ["retention.provider_state_days"],
+        triggers: GC
+    },
+    DiscardArchives => {
+        owner: "confinement/worktrees/removal",
+        eligibility: Unknown,
+        detail: "archive writer and retention policy are not yet declared",
+        settings: [],
+        triggers: NEVER
+    },
+}
 
 /// One scheduler for retention adapters. Full GC includes regular GC classes;
-/// pressure GC excludes the full-only history pass. Never ages custody fences.
+/// pressure GC excludes full-only history and checkpoints. Never ages custody fences.
 pub fn retention_schedule(
     trigger: RetentionTrigger,
 ) -> impl Iterator<Item = &'static RetentionClass> {
     RETENTION_CLASSES.iter().filter(move |class| {
-        class.trigger == trigger
-            || (trigger == RetentionTrigger::FullGc && class.trigger == RetentionTrigger::Gc)
+        class.triggers.contains(&trigger)
+            || (trigger == RetentionTrigger::FullGc && class.triggers.contains(&RetentionTrigger::Gc))
     })
 }
 
@@ -613,26 +695,40 @@ pub fn parse_cache_size(text: &str) -> Result<u64, &'static str> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn retention_never_ages_git_fences_or_observation_evidence() {
+    fn retention_declarations_round_trip_and_each_gc_class_is_reachable() {
         use super::*;
-        for kind in [
-            RetentionKind::GitWorktrees,
-            RetentionKind::ObservationLedgers,
-        ] {
-            let class = RETENTION_CLASSES
-                .iter()
-                .find(|class| class.class == kind)
-                .unwrap();
-            assert!(class.age_rule.is_none());
+        for class in RETENTION_CLASSES {
+            let encoded = serde_json::to_vec(&class.eligibility).unwrap();
+            let decoded: RetentionEligibility = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(decoded, class.eligibility);
+            let encoded = serde_json::to_vec(&class.class).unwrap();
+            let decoded: RetentionKind = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(decoded, class.class);
+            assert!(!class.owner.is_empty() && !class.eligibility_detail.is_empty());
+            for trigger in class.triggers {
+                let encoded = serde_json::to_vec(trigger).unwrap();
+                let decoded: RetentionTrigger = serde_json::from_slice(&encoded).unwrap();
+                assert_eq!(decoded, *trigger);
+                assert!(retention_schedule(*trigger).any(|entry| entry.class == class.class));
+            }
+            let bytes = RetentionBytes {
+                class: class.class,
+                observation: ByteObservation::Measured { bytes: 0 },
+            };
+            let encoded = serde_json::to_vec(&bytes).unwrap();
+            let decoded: RetentionBytes = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(decoded, bytes);
+        }
+        for kind in [RetentionKind::GitWorktrees, RetentionKind::ObservationLedgers] {
             assert!(!retention_schedule(RetentionTrigger::FullGc).any(|entry| entry.class == kind));
         }
         for class in retention_schedule(RetentionTrigger::Gc) {
-            assert!(
-                retention_schedule(RetentionTrigger::FullGc)
-                    .any(|entry| entry.class == class.class)
-            );
-            assert!(!class.owner.is_empty() && !class.custody_proof.is_empty());
+            assert!(retention_schedule(RetentionTrigger::FullGc).any(|entry| entry.class == class.class));
         }
+        let unknown = ByteObservation::Unknown;
+        let encoded = serde_json::to_vec(&unknown).unwrap();
+        let decoded: ByteObservation = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, unknown);
     }
 
     #[test]

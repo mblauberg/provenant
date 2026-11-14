@@ -5,6 +5,7 @@
 //! it adopted, or never observed, is retained. Each deletion is leased on the
 //! tip the caller just checked, so a ref that moved meanwhile is kept.
 use super::*;
+use provenant_records::custody::RemovalRecord;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -42,6 +43,9 @@ pub struct ArtefactOutcome {
     pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub head: Option<GitOid>,
+    /// Exact proof or uncertainty attached by the GC ref decision.
+    #[serde(skip)]
+    pub removal: Option<RemovalRecord>,
 }
 
 impl ArtefactOutcome {
@@ -53,6 +57,7 @@ impl ArtefactOutcome {
             outcome,
             reason: None,
             head: None,
+            removal: None,
         }
     }
 
@@ -68,6 +73,11 @@ impl ArtefactOutcome {
 
     pub fn with_remote(mut self, remote: impl Into<String>) -> Self {
         self.remote = Some(remote.into());
+        self
+    }
+
+    pub fn with_removal(mut self, removal: RemovalRecord) -> Self {
+        self.removal = Some(removal);
         self
     }
 

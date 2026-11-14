@@ -2359,9 +2359,11 @@ mod cargo_setup_tests {
         let nested = worktree.join("any/depth/rust/workspace");
         std::fs::create_dir_all(nested.join(".cargo")).unwrap();
         std::fs::create_dir_all(worktree.join(".provenant")).unwrap();
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.verify.workspace = "any/depth/rust/workspace".into();
         std::fs::write(
-            worktree.join(".provenant/verify.json"),
-            r#"{"workspace":"any/depth/rust/workspace"}"#,
+            worktree.join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&ports).unwrap(),
         )
         .unwrap();
         std::fs::write(nested.join("Cargo.toml"), "[workspace]\n").unwrap();

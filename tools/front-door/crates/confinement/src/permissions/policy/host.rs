@@ -532,13 +532,11 @@ impl MandatoryRoots {
                 continue;
             }
             controls.push((subtree(common), true));
-            controls.push((
-                subtree(
-                    &crate::worktrees::allocation_directory(common)
-                        .map_err(|_| inventory_error(common, "worktree allocation inventory"))?,
-                ),
-                false,
-            ));
+            for allocation in crate::worktrees::allocation_directories(common)
+                .map_err(|_| inventory_error(common, "worktree allocation inventory"))?
+            {
+                controls.push((subtree(&allocation), false));
+            }
             let project_state = roots
                 .state
                 .as_path()

@@ -9,15 +9,16 @@ on the package it changed), pushes, and leaves T0 to T3 to CI. Set
 `--set 'attempt.local_cargo="check"'` for a run, or `attempt.local_cargo` on a
 graph node, and the lane's `cargo` shim refuses anything heavier.
 
-`scripts/verify-tier` runs T0 (format, check and unit tests for touched crates);
-`--tier 1` adds mapped integration binaries, `--tier 2` the unpartitioned CI
-nextest suite with the same quarantine exclusions, and `--tier 3` repeats it with
-the advisory mutation script. It prints the selected crates, targets and paths,
-comparing committed and working-tree changes against `origin/main`. Base,
-workspace, commands, integration mappings, `package_paths` (non-Rust paths that
-affect a crate's unit tests), `test_threads` and runner hosts are set in
-`.provenant/verify.json`. Heavy tiers warn locally and continue, so run them on
-a host with spare capacity.
+`scripts/verify-tier` runs the built-in `0` tier (format, check and unit tests
+for touched crates), `1` adds mapped integration binaries, `2` runs the
+unpartitioned CI nextest suite with quarantine exclusions, and `3` repeats it
+with the advisory mutation script. It prints the selected crates, targets and
+paths, comparing committed and working-tree changes against `origin/main`.
+Base, workspace, commands, integration mappings, `package_paths` (non-Rust
+paths that affect a crate's unit tests), `test_threads` and runner hosts are set
+in the `verify` port in `.provenant/ports.json`. Tier names are free-form strings;
+each tier declares its commands, package/integration/all selection, and whether
+to warn under host load. Host-load warnings continue locally.
 
 See [CI](ci.md#pipeline) for pull request selection. A configured host can
 run `scripts/verify-tier --tier 2 --host ci` against a pushed branch; the

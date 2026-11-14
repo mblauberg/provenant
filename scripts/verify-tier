@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Select repository verification work from changed paths and tier data."""
 import argparse
+import copy
 import fnmatch
 import json
 import os
@@ -9,34 +10,31 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULTS = {
-    "base": "origin/main",
-    "workspace": ".",
-    "local_max_tier": 1,
-    "load_per_cpu": 1.0,
-    "tiers": {
-        "0": ["cargo fmt {packages} -- --check", "cargo check --locked {packages}", "scripts/verify-nextest --profile lane --locked {packages} --lib --bins"],
-        "1": ["scripts/verify-nextest --profile lane --locked {integration_args}"],
-        "2": ["scripts/verify-nextest --profile ci --workspace --locked"],
-        "3": ["scripts/verify-nextest --profile ci --workspace --locked --stress-count 20"],
-    },
-    "package_paths": [],
-    "integrations": [],
-    "remote": "origin",
-    "runners": {},
-}
+PORTS_ASSET = ROOT / "tools/front-door/crates/config/assets/ports.json"
+with PORTS_ASSET.open() as stream:
+    BUILTIN_PORTS = json.load(stream)
+DEFAULTS = BUILTIN_PORTS["verify"]
 
 
 def config(root):
-    data = dict(DEFAULTS)
-    data["tiers"] = dict(DEFAULTS["tiers"])
-    path = root / ".provenant" / "verify.json"
-    if path.exists():
-        with path.open() as stream:
-            override = json.load(stream)
-        data.update({k: v for k, v in override.items() if k != "tiers"})
-        data["tiers"].update(override.get("tiers", {}))
-    return data
+    path = root / ".provenant" / "ports.json"
+    if not path.exists():
+        return copy.deepcopy(DEFAULTS)
+    with path.open() as stream:
+        ports = json.load(stream)
+    names = set(BUILTIN_PORTS) - {"schema_version"}
+    if (not isinstance(ports, dict)
+            or type(ports.get("schema_version")) is not int
+            or ports["schema_version"] != BUILTIN_PORTS["schema_version"]
+            or {name for name in ports if name != "schema_version"} != names):
+        raise ValueError("invalid port table shape")
+    verify = ports["verify"]
+    if not isinstance(verify, dict):
+        raise ValueError("invalid verify port")
+    if verify.get("default_tier") not in verify.get("tiers", {}):
+        raise ValueError("verify default tier must name a declared tier")
+    verify["source"] = "project"
+    return verify
 
 
 def changed_paths(root, base):
@@ -70,10 +68,15 @@ def select(paths, packages, mappings, package_mappings=()):
 def main():
     import shlex
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tier", choices=["0", "1", "2", "3"], default="0")
+    parser.add_argument("--tier")
     parser.add_argument("--host", default="local")
     args = parser.parse_args()
     cfg = config(ROOT)
+    if not cfg["tiers"]:
+        parser.error("no verification tiers are configured")
+    args.tier = args.tier or cfg["default_tier"]
+    if args.tier not in cfg["tiers"]:
+        parser.error(f"no verification tier named {args.tier}")
     workspace = ROOT / cfg["workspace"]
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     if args.host != "local":
@@ -84,7 +87,7 @@ def main():
         if not any(line.split()[0] == commit for line in refs.splitlines() if line.split()):
             parser.error("commit is not the tip of a pushed branch")
         command = [part.replace("{commit}", commit).replace("{tier}", args.tier).replace("{remote}", cfg["remote"]) for part in runner]
-        print(f"tier T{args.tier} on {args.host}, commit {commit}: {shlex.join(command)}", flush=True)
+        print(f"tier {args.tier} on {args.host}, commit {commit}: {shlex.join(command)}", flush=True)
         result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
         if result.stderr:
             print(result.stderr, file=sys.stderr, end="")
@@ -101,30 +104,32 @@ def main():
         except (IndexError, KeyError, TypeError, ValueError) as error:
             print(f"invalid runner receipt: {error}", file=sys.stderr)
             return 1
-        print(f"result: host={args.host} tier=T{args.tier} commit={commit} exit_status={status}", flush=True)
+        print(f"result: host={args.host} tier={args.tier} commit={commit} exit_status={status}", flush=True)
         return status
-    if int(args.tier) > cfg["local_max_tier"] or (int(args.tier) >= 2 and os.getloadavg()[0] > cfg["load_per_cpu"] * (os.cpu_count() or 1)):
+    tier = cfg["tiers"][args.tier]
+    if tier["warn_for_host_load"] and os.getloadavg()[0] > cfg["load_per_cpu"] * (os.cpu_count() or 1):
         host = next(iter(cfg["runners"]), None)
         suggestion = f"; consider --host {host}" if host else ""
-        print(f"warning: T{args.tier} may load this host{suggestion}", file=sys.stderr)
+        print(f"warning: {args.tier} may load this host{suggestion}", file=sys.stderr)
+    templates = tier["commands"]
+    selection = tier["selection"]
     touched, integrations = [], []
-    if args.tier in ("0", "1"):
+    if selection in ("packages", "integrations"):
         metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"], cwd=workspace, text=True))
         packages = [{"name": p["name"], "manifest_path": str(Path(p["manifest_path"]).relative_to(ROOT))} for p in metadata["packages"] if p["id"] in metadata["workspace_members"]]
         paths = changed_paths(ROOT, cfg["base"])
         touched, integrations = select(
             paths, packages, cfg["integrations"], cfg["package_paths"]
         )
-    print(f"tier T{args.tier} on local, commit {commit}; touched crates: {', '.join(touched) or 'none'}", flush=True)
+    print(f"tier {args.tier} on local, commit {commit}; touched crates: {', '.join(touched) or 'none'}", flush=True)
     for package, binary, matches in integrations:
         print(f"integration {package}/{binary}: {', '.join(matches)}", flush=True)
-    if args.tier == "0" and not touched or args.tier == "1" and not integrations:
-        print(f"No matching tests selected. result: host=local tier=T{args.tier} commit={commit} exit_status=0")
+    if (selection == "packages" and not touched) or (selection == "integrations" and not integrations):
+        print(f"No matching tests selected. result: host=local tier={args.tier} commit={commit} exit_status=0")
         return 0
     packages_arg = " ".join(f"-p {shlex.quote(name)}" for name in touched)
-    templates = cfg["tiers"][args.tier]
     if not templates:
-        print(f"T{args.tier} has no configured commands", file=sys.stderr)
+        print(f"{args.tier} has no configured commands", file=sys.stderr)
         return 2
     env = os.environ.copy()
     threads = cfg.get("test_threads")
@@ -153,9 +158,9 @@ def main():
             print(f"+ {shlex.join(command)}", flush=True)
             status = subprocess.run(command, cwd=workspace, env=env).returncode
             if status:
-                print(f"result: host=local tier=T{args.tier} commit={commit} exit_status={status}", flush=True)
+                print(f"result: host=local tier={args.tier} commit={commit} exit_status={status}", flush=True)
                 return status
-    print(f"result: host=local tier=T{args.tier} commit={commit} exit_status=0", flush=True)
+    print(f"result: host=local tier={args.tier} commit={commit} exit_status=0", flush=True)
     return 0
 
 

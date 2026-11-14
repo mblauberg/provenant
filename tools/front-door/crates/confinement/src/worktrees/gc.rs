@@ -2,6 +2,9 @@
 use super::*;
 use provenant_os::fs::{FileKind, PayloadTree, entry_names, temporary_name};
 use std::collections::HashSet;
+use provenant_records::custody::{
+    RemovalOutcome, RemovalRecord, RemovalUncertainty, Subject, SubjectKind,
+};
 
 /// One budget covers every output candidate in a preview. Applied collection
 /// continues to use the full proof before mutation.
@@ -92,6 +95,9 @@ pub struct WorktreeGcReport {
     /// landed with an unchanged recorded tip, otherwise retained with its reason.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub refs: Vec<super::ArtefactOutcome>,
+    /// Records are lifted to the enclosing GC output alongside ref outcomes.
+    #[serde(skip)]
+    pub removals: Vec<RemovalRecord>,
 }
 
 #[derive(Debug, Serialize)]
@@ -99,6 +105,19 @@ pub struct OutputEntry {
     pub path: PathBuf,
     pub removed: bool,
     pub reason: String,
+}
+
+fn kept_landing_record(
+    project: provenant_core::ProjectId,
+    lane: &WorktreeInfo,
+    cause: RemovalUncertainty,
+) -> RemovalRecord {
+    RemovalRecord {
+        project,
+        subject: Subject::new(SubjectKind::Worktree, lane.path.to_string_lossy()),
+        tip: lane.head,
+        outcome: RemovalOutcome::Kept { cause },
+    }
 }
 
 /// Recheck each candidate under repository and writer custody. Failures keep
@@ -281,6 +300,7 @@ fn collect_impl(
                 &settings,
                 cancel,
                 &mut report.worktrees,
+                &mut report.removals,
                 &preview_walk,
             ) {
                 Ok(Some(info)) if policy.dry_run => {
@@ -404,9 +424,23 @@ fn collect_impl(
             reference: None,
             tip: upstream,
         };
-        match landed::landed_on(context, lane.head, &target, cancel) {
-            Ok(true) => {}
-            Ok(false) => {
+        match landed::landing_on(context, lane.head, &target, cancel) {
+            Ok(Landing::Landed(_)) => {}
+            Ok(Landing::Unproven(Unproven::MissingCommit { .. })) => {
+                report.removals.push(kept_landing_record(
+                    context.binding.project_id(),
+                    lane,
+                    RemovalUncertainty::MissingCommit,
+                ));
+                retain(&mut report.worktrees, &branch, RetainReason::NotMerged);
+                continue;
+            }
+            Ok(Landing::Unproven(_)) => {
+                report.removals.push(kept_landing_record(
+                    context.binding.project_id(),
+                    lane,
+                    RemovalUncertainty::UnprovenLanding,
+                ));
                 retain(&mut report.worktrees, &branch, RetainReason::NotMerged);
                 continue;
             }
@@ -1290,6 +1324,7 @@ fn collect_foreign(
     settings: &provenant_config::ProjectGcSettings,
     cancel: &CancelToken,
     outcome: &mut RemoveOutcome,
+    removals: &mut Vec<RemovalRecord>,
     preview_walk: &PreviewWalk,
 ) -> Result<Option<WorktreeInfo>, WorktreeError> {
     if !(policy.no_live_lanes)(&lane.path) {
@@ -1302,8 +1337,24 @@ fn collect_foreign(
         reference: None,
         tip: upstream,
     };
-    if !landed::landed_on(context, lane.head, &target, cancel)? {
-        return Ok(None);
+    match landed::landing_on(context, lane.head, &target, cancel)? {
+        Landing::Landed(_) => {}
+        Landing::Unproven(Unproven::MissingCommit { .. }) => {
+            removals.push(kept_landing_record(
+                context.binding.project_id(),
+                lane,
+                RemovalUncertainty::MissingCommit,
+            ));
+            return Ok(None);
+        }
+        Landing::Unproven(_) => {
+            removals.push(kept_landing_record(
+                context.binding.project_id(),
+                lane,
+                RemovalUncertainty::UnprovenLanding,
+            ));
+            return Ok(None);
+        }
     }
     let mut info = lane.clone();
     if policy.dry_run {

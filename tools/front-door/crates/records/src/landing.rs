@@ -296,7 +296,26 @@ pub struct RepositoryCommand {
     pub unknown_exit_code: i64,
     pub timeout_seconds: u64,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepositoryCommandOutcome {
+    Landed,
+    Refused,
+    Unknown,
+}
+
 impl RepositoryCommand {
+    /// Exit 0 records a landing; the declared unknown code requires evidence
+    /// re-checking, and every other nonzero code is a refusal.
+    pub fn outcome(&self, exit_code: i32) -> RepositoryCommandOutcome {
+        if exit_code == 0 {
+            RepositoryCommandOutcome::Landed
+        } else if i64::from(exit_code) == self.unknown_exit_code {
+            RepositoryCommandOutcome::Unknown
+        } else {
+            RepositoryCommandOutcome::Refused
+        }
+    }
+
     pub fn valid(&self) -> bool {
         !self.argv.is_empty()
             && !self.argv[0].is_empty()

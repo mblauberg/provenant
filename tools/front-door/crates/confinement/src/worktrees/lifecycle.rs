@@ -1,5 +1,6 @@
 //! Worktree creation, listing, removal and ref pruning.
 use super::*;
+use std::path::Component;
 
 /// Advance a free, registered linked worktree to a pinned descendant commit.
 /// Writer exclusion covers verification and mutation. Local edits, divergence
@@ -355,6 +356,42 @@ pub fn fetch_remote_branch_tip(
     }
 }
 
+fn open_or_create_layout_directory(
+    root: &Directory,
+    relative: &Path,
+    create: bool,
+    device: u64,
+) -> Result<Directory, WorktreeError> {
+    let mut current: Option<Directory> = None;
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(WorktreeError::InvalidRequest);
+        };
+        let parent = current.as_ref().unwrap_or(root);
+        let child = match parent.open_verified_directory(name) {
+            Ok(child) => child,
+            Err(error) if error.is_not_found() && create => {
+                match parent.mkdir(name, 0o700) {
+                    Ok(()) => parent.sync()?,
+                    Err(error) if error.is_exists() => {}
+                    Err(error) => return Err(error.into()),
+                }
+                parent.open_verified_directory(name)?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let identity = child.metadata()?;
+        if identity.uid != provenant_os::fs::effective_uid()
+            || identity.mode & 0o022 != 0
+            || identity.device != device
+        {
+            return Err(WorktreeError::UnknownWriter);
+        }
+        current = Some(child);
+    }
+    current.ok_or(WorktreeError::InvalidRequest)
+}
+
 fn create_with_default(
     context: &WorktreeContext<'_>,
     request: WorktreeCreate,
@@ -469,40 +506,22 @@ fn create_with_default(
     } else {
         default.as_ref().ok_or(WorktreeError::InvalidRequest)?.0
     };
-    let worktree_root = match context
-        .repo
-        .root_dir()
-        .open_verified_directory(OsStr::new(WORKTREE_ROOT))
-    {
-        Ok(root) => root,
-        Err(error) if error.is_not_found() => {
-            context
-                .repo
-                .root_dir()
-                .mkdir(OsStr::new(WORKTREE_ROOT), 0o700)?;
-            context.repo.root_dir().sync()?;
-            context
-                .repo
-                .root_dir()
-                .open_verified_directory(OsStr::new(WORKTREE_ROOT))?
-        }
-        Err(error) => return Err(error.into()),
-    };
-    let root_identity = worktree_root.metadata()?;
-    if root_identity.uid != provenant_os::fs::effective_uid()
-        || root_identity.mode & 0o022 != 0
-        || root_identity.device != context.repo.root_identity().device
-    {
-        return Err(WorktreeError::UnknownWriter);
-    }
-    let path_name = request.branch.replace('/', "-");
-    if path_name.is_empty() || path_name.len() > 240 || path_name.as_bytes().contains(&0) {
-        return Err(WorktreeError::InvalidRequest);
-    }
-    let target = canonicalize(context.repo.root_path())?
-        .join(WORKTREE_ROOT)
-        .join(&path_name);
-    match worktree_root.metadata_at(OsStr::new(&path_name), false) {
+    let ports = provenant_config::PortTable::read_project(context.repo.root_path())
+        .map_err(WorktreeError::PortConfiguration)?;
+    let target_relative = ports
+        .managed_writer_path(&request.branch)
+        .map_err(WorktreeError::PortConfiguration)?;
+    let parent_relative = target_relative.parent().ok_or(WorktreeError::InvalidRequest)?;
+    let path_name = target_relative.file_name().ok_or(WorktreeError::InvalidRequest)?;
+    let worktree_parent = open_or_create_layout_directory(
+        context.repo.root_dir(),
+        parent_relative,
+        true,
+        context.repo.root_identity().device,
+    )?;
+    let parent_identity = worktree_parent.metadata()?;
+    let target = canonicalize(context.repo.root_path())?.join(&target_relative);
+    match worktree_parent.metadata_at(path_name, false) {
         Ok(_) => return Err(WorktreeError::InvalidRequest),
         Err(error) if error.is_not_found() => {}
         Err(_) => return Err(WorktreeError::UnknownWriter),
@@ -513,11 +532,13 @@ fn create_with_default(
         }
     }
     let _writer = cache_writer_guard(context.project_state, &target).map_err(custody_refusal)?;
-    let named_root = context
-        .repo
-        .root_dir()
-        .metadata_at(OsStr::new(WORKTREE_ROOT), false)?;
-    if !root_identity.same_identity(&named_root) {
+    let named_parent = open_or_create_layout_directory(
+        context.repo.root_dir(),
+        parent_relative,
+        false,
+        context.repo.root_identity().device,
+    )?;
+    if !parent_identity.same_identity(&named_parent.metadata()?) {
         return Err(WorktreeError::UnknownWriter);
     }
     let primary_head = primary_head(context, facts, cancel)?;
@@ -1199,7 +1220,7 @@ pub(super) fn pin_integration(
 }
 
 /// The worktree a name refers to: its branch, or its directory name under
-/// `.worktrees/`. Two different worktrees matching one name are ambiguous.
+/// the configured worktree layout. Two different worktrees matching one name are ambiguous.
 pub(super) fn named_worktree<'a>(
     entries: &'a [GitWorktree],
     name: &str,

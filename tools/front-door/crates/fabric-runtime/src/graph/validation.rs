@@ -921,15 +921,8 @@ fn attempt_error(node: &GraphNode, spec: &AttemptSpec) -> Option<&'static str> {
         if node.source.is_some() || node.continues.is_some() {
             return Some("new worktree cannot override a source binding");
         }
-        let Ok(path) = provenant_confinement::worktrees::managed_writer_relative_path(&new.branch)
-        else {
-            return Some("invalid new worktree binding");
-        };
-        let Some(path) = path.to_str() else {
-            return Some("invalid new worktree binding");
-        };
-        if node.worktree.as_deref() != Some(path)
-            || path.len() > 251
+        if provenant_confinement::repo::GitRefName::branch(&new.branch).is_err()
+            || node.worktree.as_deref().is_none_or(|path| path.len() > 251)
             || provenant_confinement::repo::GitRevision::new(&new.base).is_err()
         {
             return Some("invalid new worktree binding");
