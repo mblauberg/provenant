@@ -979,6 +979,10 @@ fn prelaunch_login_failures_keep_auth_when_availability_is_absent()
         AccountObservationError::Other(_)
     ));
     assert!(matches!(
+        account_observation_error(&entries[0], &ProviderError::RefreshDeferred),
+        AccountObservationError::Other(_)
+    ));
+    assert!(matches!(
         account_observation_error(&entries[0], &ProviderError::CredentialUnavailable),
         AccountObservationError::AuthRequired(_)
     ));

@@ -1674,6 +1674,7 @@ pub(crate) fn execute(
             .filter_map(|r| r.quota_source)
             .find(|s| s.adapter_id() == account.adapter);
         let mut login_expiry = None;
+        let mut auth_state = None;
         let outcome = match source {
             Some(source) => {
                 let probe_deadline = schedule::probe_deadline(plan.deadline_unix_seconds, at)?;
@@ -1688,6 +1689,16 @@ pub(crate) fn execute(
                     .and_then(|probe| {
                         let capture = effects.capture(&probe, current.as_ref());
                         login_expiry = effects.login_expiry_unix_seconds();
+                        let access_token_expiry = effects.access_token_expiry_unix_seconds();
+                        let signed_in = effects.signed_in();
+                        if access_token_expiry.is_some() || signed_in.is_some() {
+                            auth_state = Some(AuthState {
+                                access_token_expiry_unix_seconds: access_token_expiry,
+                                signed_in,
+                                refresh_pending: effects.refresh_pending(),
+                                observed_unix_seconds: Some(at),
+                            });
+                        }
                         let capture = capture?;
                         source
                             .decode(&probe, &capture)
@@ -1696,10 +1707,12 @@ pub(crate) fn execute(
             }
             None => Err(ProbeFailure::Disabled),
         };
-        let readiness_reason = outcome
-            .as_ref()
-            .err()
-            .map(|failure| effects.readiness_reason(*failure));
+        let readiness_reason = match outcome.as_ref() {
+            // Auth status was verified; deferral must not publish an
+            // unavailable account and prevent launch from doing the refresh.
+            Err(ProbeFailure::RefreshDeferred) | Ok(_) => None,
+            Err(failure) => Some(effects.readiness_reason(*failure)),
+        };
         let finished = clock
             .wall_now()
             .map_err(|_| EdgeError::Time)?
@@ -1714,13 +1727,26 @@ pub(crate) fn execute(
         {
             match schedule::complete(reserved, &token, finished, outcome, None) {
                 Ok(mut complete) => {
+                    if let Some(replacement) = complete.replacement.as_mut() {
+                        if auth_state
+                            .as_ref()
+                            .is_some_and(|auth| auth.signed_in == Some(true))
+                            && !replacement
+                                .last_error
+                                .is_some_and(ProbeFailure::needs_login)
+                        {
+                            replacement.auth_verified_unix_seconds = Some(at);
+                        }
+                        // An unobserved login cannot inherit an older signed-in
+                        // assertion after a failed or missing probe.
+                        replacement.auth_state = auth_state;
+                    }
                     // A later failure cannot disprove a previously verified
                     // mismatch: publish the same sticky reason as the account
                     // record until a successful probe establishes recovery.
-                    let reason = if readiness_reason.is_some()
-                        && complete.replacement.as_ref().is_some_and(|record| {
-                            record.last_error == Some(ProbeFailure::AccountMismatch)
-                        }) {
+                    let reason = if complete.replacement.as_ref().is_some_and(|record| {
+                        record.last_error == Some(ProbeFailure::AccountMismatch)
+                    }) {
                         Some(ReadinessReason::AccountMismatch)
                     } else {
                         readiness_reason
@@ -2657,6 +2683,7 @@ mod tests {
                     },
                     readiness: None,
                     login_expiry: None,
+                    auth_state: None,
                     snapshot: None,
                     status: QuotaStatus::AuthRequired,
                     resets_at: None,
@@ -2701,6 +2728,7 @@ mod tests {
             },
             readiness: None,
             login_expiry: None,
+            auth_state: None,
             snapshot: None,
             status: QuotaStatus::KeychainUnavailable,
             resets_at: None,
@@ -2750,6 +2778,7 @@ mod tests {
                 },
                 readiness: None,
                 login_expiry: None,
+                    auth_state: None,
                 snapshot: None,
                 status: QuotaStatus::KeychainUnavailable,
                 resets_at: None,
@@ -2790,6 +2819,7 @@ mod tests {
             },
             readiness: None,
             login_expiry: None,
+            auth_state: None,
             snapshot: None,
             status,
             resets_at: None,
@@ -2870,6 +2900,7 @@ mod tests {
             },
             readiness: None,
             login_expiry: None,
+            auth_state: None,
             snapshot: None,
             status: QuotaStatus::Exhausted,
             resets_at: resets_at.map(str::to_owned),
@@ -3074,6 +3105,7 @@ mod tests {
             },
             readiness: None,
             login_expiry: None,
+            auth_state: None,
             snapshot,
             status,
             resets_at: None,
@@ -3975,6 +4007,7 @@ mod tests {
         }
         for (failure, malformed, expected) in [
             (None, false, None),
+            (Some(ProbeFailure::RefreshDeferred), false, None),
             (None, true, Some(ReadinessReason::CommandFailure)),
             (
                 Some(ProbeFailure::MissingCli),
@@ -4036,6 +4069,10 @@ mod tests {
                     failure
                 }
             );
+            if failure == Some(ProbeFailure::RefreshDeferred) {
+                assert_eq!(report.accounts[0].status, QuotaStatus::RefreshPending);
+                assert!(report.accounts[0].repair.is_none());
+            }
             let login = report.accounts[0].login_expiry.as_ref().unwrap();
             assert_eq!(login.expires_unix_seconds, expiry);
             assert_eq!(

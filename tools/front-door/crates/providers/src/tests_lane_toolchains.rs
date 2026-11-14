@@ -1188,16 +1188,30 @@ fn agy_probe_refuses_a_keychain_that_changes_between_selection_and_execution()
     assert!(refused(run(&selected.guard(&probes))));
     assert!(probes.homes.lock().unwrap().is_empty());
 
-    // Replaced by another file before the spawn: same path, new identity.
+    // An atomic save replaces the inode at the same safe account path. It
+    // remains the isolated keychain and the probe may proceed.
     reset()?;
     let selected = agy::ProbeHome::select(&isolated, &real_home)?;
-    // Renamed over the old file, so both inodes exist at once and cannot be
-    // the same one.
     let sibling = keychain.with_extension("new");
     std::fs::write(&sibling, "other")?;
     std::fs::rename(&sibling, &keychain)?;
-    assert!(refused(run(&selected.guard(&probes))));
-    assert!(probes.homes.lock().unwrap().is_empty());
+    assert!(run(&selected.guard(&probes)).is_ok());
+    assert_eq!(probes.homes.lock().unwrap().len(), 1);
+
+    // The same safe atomic replacement during the probe also passes the
+    // post-probe structural check.
+    reset()?;
+    let selected = agy::ProbeHome::select(&isolated, &real_home)?;
+    let (path, sibling) = (keychain.clone(), keychain.with_extension("during-probe"));
+    let racing = ChangesKeychain {
+        inner: &probes,
+        change: Box::new(move || {
+            std::fs::write(&sibling, "other").unwrap();
+            std::fs::rename(&sibling, &path).unwrap();
+        }),
+    };
+    assert!(run(&selected.guard(&racing)).is_ok());
+    assert_eq!(probes.homes.lock().unwrap().len(), 2);
 
     // Gone, or swapped for a symlink, while the probe runs: the result is refused.
     for swap_in_link in [false, true] {
@@ -1217,7 +1231,7 @@ fn agy_probe_refuses_a_keychain_that_changes_between_selection_and_execution()
         assert!(refused(run(&selected.guard(&racing))));
     }
     // The probe did run in those two cases; only its result was refused.
-    assert_eq!(probes.homes.lock().unwrap().len(), 2);
+    assert_eq!(probes.homes.lock().unwrap().len(), 4);
 
     // An unchanged keychain passes, and the user's own home is never guarded.
     reset()?;

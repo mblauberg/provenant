@@ -80,6 +80,17 @@ publication leaves readiness unknown and never erases held refusals.
   `::full_refusal_file_accepts_probe_failure_and_restores_refusals`
 - Owner: `crates/quota/src/admission.rs`, `crates/quota/src/readiness.rs`
 
+## Login and access-token status
+
+`refresh_pending` records a signed-in account whose access token needs renewal;
+it stays eligible for routing so launch can ask the provider CLI to refresh.
+`needs-login` / `AUTH_REQUIRED` requires a signed-out observation, rather than
+access-token expiry. Access-token expiry and sign-in end are distinct facts.
+Claude's sign-in end is `loginExpiresAt` from `auth status --json`, with a default
+ten-day warning; it is informational and never alone vetoes a route. Reprobing
+login uses each adapter's `login_reprobe` capability, including Claude's
+`AccountIdentity`, so a new signed-in observation clears a stale login failure.
+
 ## Depletion handoff
 
 For a graph stop, readiness observations older than one hour are unknown. A
@@ -92,8 +103,10 @@ custody; launched stops follow the graph stop rule.
 ## Revisioned, bounded refresh
 
 A quota refresh commits only against the revision it claimed, so stale
-completions are discarded; a tick never sleeps and config cannot raise probe
-limits.
+completions are discarded. Ordinary probes keep their tick deadline. A CLI
+credential rotation has a separate admission budget and, once started, runs to
+completion so its single-use refresh token can be persisted safely. A short
+budget returns a typed deferred result without starting the refresh.
 - Why: the menu bar ticks unattended and concurrently.
 - Test: `crates/quota/src/schedule.rs::competing_claims_and_stale_completions_cannot_overwrite`;
   `tests/quota.rs::configuration_cannot_raise_probe_limits_and_publication_failure_is_io`

@@ -832,6 +832,7 @@ mod tests {
                 reset_unix_seconds: None,
                 evidence_ref: Some("fixture".into()),
             }),
+            auth_state: None,
             login_expiry: Some(provenant_quota::LoginExpiryView {
                 state: provenant_quota::LoginExpiryState::Expired,
                 expires_unix_seconds: Some(90),

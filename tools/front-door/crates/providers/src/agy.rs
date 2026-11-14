@@ -205,7 +205,7 @@ fn isolated_keychain(
 }
 
 /// The `ExecError::Io` operation of a probe refused because its isolated
-/// keychain was no longer the one selected.
+/// keychain path was missing or unsafe.
 pub const KEYCHAIN_OPERATION: &str = "isolated keychain";
 
 /// The `HOME` an agy identity probe runs under, with the isolated keychain that
@@ -214,18 +214,19 @@ pub const KEYCHAIN_OPERATION: &str = "isolated keychain";
 /// The probe itself is unconfined, and `HOME` is all that makes the agent use
 /// the account's keychain: if that file vanished, macOS could fall through to
 /// the shared login keychain and the probe would record the wrong account.
-/// [`ProbeHome::guard`] therefore re-checks the keychain (same device and
-/// inode, still a regular file inside the account directory) immediately
-/// before spawning and again once the probe returns, and refuses the result if
-/// either check fails.
+/// [`ProbeHome::guard`] therefore verifies immediately before spawning and
+/// again after the probe that the path still resolves to a regular, single-link
+/// file inside this account directory and is not the real home's login
+/// keychain. It deliberately accepts an inode change at that safe path because
+/// macOS may atomically replace a keychain while saving it.
 ///
 /// Residual race: the agent opens the keychain at some point between the two
-/// checks, so any temporary replacement, absence or symlink swap during the
-/// probe that is undone, with the original inode restored, before the second
-/// check is not observable. The probe can then have read another keychain
-/// without the result being refused. Closing it needs a seatbelt profile
-/// denying the real home's `Library/Keychains` to the probe, which cannot be
-/// verified against a real agy without touching a real keychain.
+/// checks, so any temporary replacement, absence or unsafe link swap during
+/// the probe that is undone before the second check is not observable. The
+/// probe can then have read another keychain without the result being refused.
+/// Closing it needs a seatbelt profile denying the real home's
+/// `Library/Keychains` to the probe, which cannot be verified against a real
+/// agy without touching a real keychain.
 #[derive(Debug)]
 pub struct ProbeHome {
     home: std::path::PathBuf,
@@ -236,7 +237,6 @@ pub struct ProbeHome {
 struct Held {
     directory: std::path::PathBuf,
     home: std::path::PathBuf,
-    id: (u64, u64),
 }
 
 fn identity(metadata: &std::fs::Metadata) -> (u64, u64) {
@@ -257,13 +257,12 @@ impl ProbeHome {
                 held: None,
             });
         }
-        let (_, metadata) = isolated_keychain(directory, home)?;
+        isolated_keychain(directory, home)?;
         Ok(Self {
             home: directory.to_owned(),
             held: Some(Held {
                 directory: directory.to_owned(),
                 home: home.to_owned(),
-                id: identity(&metadata),
             }),
         })
     }
@@ -272,19 +271,15 @@ impl ProbeHome {
         &self.home
     }
 
-    /// Fails unless the isolated keychain is still the selected file.
+    /// Fails unless the isolated path still names a safe account keychain.
+    /// Atomic replacement is allowed; the path and file properties carry the
+    /// account boundary, while inode identity is not stable across macOS saves.
     pub fn verify(&self) -> Result<(), crate::ProviderError> {
         let Some(held) = &self.held else {
             return Ok(());
         };
-        let (keychain, metadata) = isolated_keychain(&held.directory, &held.home)?;
-        if identity(&metadata) == held.id {
-            Ok(())
-        } else {
-            Err(crate::ProviderError::IsolatedKeychainUnavailable(
-                keychain.display().to_string(),
-            ))
-        }
+        isolated_keychain(&held.directory, &held.home)?;
+        Ok(())
     }
 
     /// Runs probes through `executor` under this home's keychain check.
@@ -299,8 +294,9 @@ impl ProbeHome {
     }
 }
 
-/// An executor that checks the keychain before spawning and after the probe
-/// returns, failing with [`KEYCHAIN_OPERATION`] when it changed.
+/// An executor that checks the keychain path and safety properties before
+/// spawning and after the probe returns, failing with [`KEYCHAIN_OPERATION`]
+/// when the isolated path is missing or unsafe. Safe inode replacement passes.
 pub struct GuardedExecutor<'a> {
     executor: &'a dyn provenant_os::exec::Executor,
     home: &'a ProbeHome,

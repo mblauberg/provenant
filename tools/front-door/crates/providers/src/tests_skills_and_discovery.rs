@@ -4,7 +4,7 @@ fn identity_probes_preserve_auth_failures_only_from_intact_captures() {
     use provenant_os::exec::{
         CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
     };
-    struct SignedOut<'a>(&'a [u8], bool, bool, bool);
+    struct SignedOut<'a>(&'a [u8], bool, bool, bool, bool);
     impl Executor for SignedOut<'_> {
         fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
             assert!(matches!(
@@ -13,10 +13,14 @@ fn identity_probes_preserve_auth_failures_only_from_intact_captures() {
             ));
             Ok(ExecOutcome {
                 termination: Termination::Exit(1),
-                stdout: Default::default(),
+                stdout: CapturedStream {
+                    bytes: if self.4 { self.0.to_vec() } else { vec![] },
+                    truncated: self.1 && self.4,
+                    ..Default::default()
+                },
                 stderr: CapturedStream {
-                    bytes: self.0.to_vec(),
-                    truncated: self.1,
+                    bytes: if self.4 { vec![] } else { self.0.to_vec() },
+                    truncated: self.1 && !self.4,
                     ..Default::default()
                 },
                 timed_out: self.2,
@@ -28,12 +32,14 @@ fn identity_probes_preserve_auth_failures_only_from_intact_captures() {
         }
     }
     let scratch = tempfile::tempdir().unwrap();
-    for (adapter, capture) in [
+    for (adapter, capture, structured) in [
         (
             "agy",
             include_bytes!("../../../tests/fixtures/providers/agy/auth-required.stderr").as_slice(),
+            false,
         ),
-        ("claude", b"Not logged in".as_slice()),
+        ("claude", b"Not logged in".as_slice(), false),
+        ("claude", br#"{"loggedIn":false}"#.as_slice(), true),
     ] {
         for (truncated, timed_out, cancelled) in [
             (false, false, false),
@@ -42,7 +48,7 @@ fn identity_probes_preserve_auth_failures_only_from_intact_captures() {
             (false, false, true),
         ] {
             let result = accounts::detect(
-                &SignedOut(capture, truncated, timed_out, cancelled),
+                &SignedOut(capture, truncated, timed_out, cancelled, structured),
                 adapter,
                 Path::new("/fixture/agy"),
                 scratch.path(),
@@ -50,8 +56,10 @@ fn identity_probes_preserve_auth_failures_only_from_intact_captures() {
                 scratch.path(),
                 scratch.path(),
             );
-            if truncated || timed_out || cancelled {
+            if truncated || timed_out || cancelled || (adapter == "claude" && !structured) {
                 assert!(matches!(result, Err(ProviderError::UnknownIdentity)));
+            } else if adapter == "claude" {
+                assert!(matches!(result, Err(ProviderError::LoginRequired)));
             } else {
                 assert!(matches!(result, Err(ProviderError::CredentialUnavailable)));
             }

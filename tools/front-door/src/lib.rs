@@ -404,8 +404,18 @@ fn probe_registered_account(
     {
         return;
     }
-    let result = provenant_providers::quota_live::LiveQuota::new(edge.roots, edge.home, data)
+    let result = provenant_config::read_with_domains(edge.roots, &provenant_cli::domains::SECTIONS)
+        .map(|config| config.domains.quota)
         .map_err(|error| error.to_string())
+        .and_then(|settings| {
+            provenant_providers::quota_live::LiveQuota::new(edge.roots, edge.home, data)
+                .map(|effects| {
+                    effects
+                        .with_refresh_minimum(settings.refresh_min_budget_seconds)
+                        .with_refresh_budget(settings.refresh_budget_seconds)
+                })
+                .map_err(|error| error.to_string())
+        })
         .and_then(|effects| {
             provenant_cli::quota::probe_registered(
                 edge.roots,
@@ -669,12 +679,16 @@ pub(crate) fn registered_claude(
 fn live_quota(
     resolved: &roots::Resolved,
 ) -> Result<provenant_providers::quota_live::LiveQuota, Box<dyn std::error::Error>> {
-    let accounts = account_settings(&resolved.roots)?;
+    let settings =
+        provenant_config::read_with_domains(&resolved.roots, &provenant_cli::domains::SECTIONS)?
+            .domains;
     Ok(provenant_providers::quota_live::LiveQuota::new(
         &resolved.roots,
         &resolved.home,
-        &accounts,
-    )?)
+        &settings.accounts,
+    )?
+    .with_refresh_minimum(settings.quota.refresh_min_budget_seconds)
+    .with_refresh_budget(settings.quota.refresh_budget_seconds))
 }
 /// The LaunchAgent's long-running entrypoint, `fabric peer-agent`.
 fn peer_agent(globals: &provenant_cli::Globals) -> u8 {
