@@ -124,9 +124,9 @@ fn custody_refusal(
             custody::CustodyError::ReservationRetained(error),
         ) => HandOff::Protected(format!("custody reservation: {error}")),
         crate::writer::WriterCustodyError::Admission(custody::CustodyError::ImportRetained {
-            attempt,
+            fence,
         }) => HandOff::RetainedImport {
-            attempt,
+            fence,
             worktree: writer_path.unwrap_or_default(),
         },
         crate::writer::WriterCustodyError::Admission(custody::CustodyError::Admission(error)) => {
@@ -817,14 +817,20 @@ mod tests {
             }
         ));
         let retained = RunError::RetainedWriterImport {
-            attempt: provenant_core::AttemptId::from_bytes([4; 16]),
-            key: provenant_records::WorkKey::new(
-                provenant_core::ProjectId::from_bytes([5; 16]),
-                "repair",
-                "writer",
-                3,
-            )
-            .unwrap(),
+            fence: custody::PendingImport {
+                scope: custody::Scope {
+                    attempt: provenant_core::AttemptId::from_bytes([4; 16]),
+                    generation: 1,
+                },
+                fence: "/tmp/custody/reservation.json".into(),
+                lane: provenant_records::WorkKey::new(
+                    provenant_core::ProjectId::from_bytes([1; 16]),
+                    "build",
+                    "writer",
+                    1,
+                )
+                .expect("key"),
+            },
             worktree: "/tmp/writer".into(),
         };
         assert!(matches!(

@@ -526,6 +526,7 @@ fn settlement_checks_exact_attempt_and_both_digests_before_scratch() -> TestResu
         &writer.reservation,
         PublishMode::Replace,
     )?)?;
+    let reservation_bytes = serde_json::to_vec(&writer.reservation)?;
     let recovery = writer.into_recovery()?;
     assert!(
         recovery
@@ -597,7 +598,134 @@ fn settlement_checks_exact_attempt_and_both_digests_before_scratch() -> TestResu
             .join("settlement.json")
             .exists()
     );
-    drop(acquire(root.path())?);
+    // Simulate a crash after durable settlement but before reservation unlink.
+    let evidence_path = root.path().join(scope().attempt.to_string());
+    let evidence = Directory::open_anchor(&evidence_path)?;
+    std::fs::write(evidence_path.join("reservation.json"), &reservation_bytes)?;
+    let marker = ImportFence {
+        schema_version: 1,
+        scope: scope(),
+        lane: provenant_records::WorkKey::new(
+            provenant_core::ProjectId::from_bytes([1; 16]),
+            "retained",
+            "writer",
+            1,
+        )?,
+        run_attempt: attempt.path().to_path_buf(),
+    };
+    let marker_bytes = serde_json::to_vec(&marker)?;
+    std::fs::write(evidence_path.join("import-retained.json"), &marker_bytes)?;
+    let journal_path = evidence_path.join("settlement.json");
+    let journal = std::fs::read(&journal_path)?;
+    let release_path = attempt.path().join("release.json");
+    let release_bytes = std::fs::read(&release_path)?;
+    let wrong_attempt = Scope {
+        attempt: AttemptId::from_bytes([9; 16]),
+        ..scope()
+    };
+    let wrong_generation = Scope {
+        generation: scope().generation + 1,
+        ..scope()
+    };
+    for bytes in [
+        None,
+        Some(b"{".to_vec()),
+        Some(serde_json::to_vec(&SettlementJournal {
+            schema_version: 1,
+            scope: wrong_attempt,
+        })?),
+        Some(serde_json::to_vec(&SettlementJournal {
+            schema_version: 1,
+            scope: wrong_generation,
+        })?),
+    ] {
+        match bytes {
+            Some(bytes) => std::fs::write(&journal_path, bytes)?,
+            None => std::fs::remove_file(&journal_path)?,
+        }
+        assert!(matches!(
+            retained_import_decision(&evidence, scope())?,
+            Some(CustodyDecision::Pending(_))
+        ));
+        assert!(acquire(root.path()).is_err());
+        assert_eq!(
+            std::fs::read(evidence_path.join("reservation.json"))?,
+            reservation_bytes
+        );
+    }
+    std::fs::write(&journal_path, &journal)?;
+    for path in [
+        &release_path,
+        &attempt.path().join("terminal-commit.json"),
+        &attempt.path().join("quarantine/manifest.json"),
+    ] {
+        let bytes = std::fs::read(path)?;
+        std::fs::remove_file(path)?;
+        assert!(matches!(
+            retained_import_decision(&evidence, scope())?,
+            Some(CustodyDecision::Pending(_))
+        ));
+        std::fs::write(path, b"{")?;
+        assert!(matches!(
+            retained_import_decision(&evidence, scope())?,
+            Some(CustodyDecision::Pending(_))
+        ));
+        std::fs::write(path, bytes)?;
+    }
+    for wrong in [wrong_attempt, wrong_generation] {
+        let mismatched = ImportFence {
+            scope: wrong,
+            ..marker.clone()
+        };
+        std::fs::write(
+            evidence_path.join("import-retained.json"),
+            serde_json::to_vec(&mismatched)?,
+        )?;
+        assert!(retained_import_decision(&evidence, scope()).is_err());
+        assert!(acquire(root.path()).is_err());
+    }
+    let other_run = ImportFence {
+        run_attempt: unknown.path().to_path_buf(),
+        ..marker.clone()
+    };
+    std::fs::write(
+        evidence_path.join("import-retained.json"),
+        serde_json::to_vec(&other_run)?,
+    )?;
+    assert!(matches!(
+        retained_import_decision(&evidence, scope())?,
+        Some(CustodyDecision::Pending(_))
+    ));
+    std::fs::write(evidence_path.join("import-retained.json"), &marker_bytes)?;
+    assert_eq!(
+        retained_import_decision(&evidence, scope())?,
+        Some(CustodyDecision::Settled(scope()))
+    );
+    let slot = Directory::open_anchor(root.path())?;
+    assert!(pending_import(&slot)?.is_none());
+    // Observation preserves all evidence. Admission alone completes removal.
+    assert_eq!(
+        std::fs::read(evidence_path.join("reservation.json"))?,
+        reservation_bytes
+    );
+    let clock = SystemClock::new();
+    drop(crate::fixture::acquire_writer(
+        slot,
+        wrong_attempt,
+        WaitBudget::nonblocking(clock.mono_now()),
+        &CancelToken::new(),
+        &clock,
+    )?);
+    assert!(!evidence_path.join("reservation.json").exists());
+    assert_eq!(
+        std::fs::read(evidence_path.join("import-retained.json"))?,
+        marker_bytes
+    );
+    assert_eq!(std::fs::read(release_path)?, release_bytes);
+    assert_eq!(
+        std::fs::read(scratch_dir.path().join("transcript"))?,
+        b"retain"
+    );
     Ok(())
 }
 

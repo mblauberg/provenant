@@ -751,7 +751,7 @@ enum HandOff {
     /// No guardian was contacted, but custody remains protected.
     Protected(String),
     RetainedImport {
-        attempt: AttemptId,
+        fence: provenant_supervisor::custody::PendingImport,
         worktree: std::path::PathBuf,
     },
     /// The guardian may have received the launch.
@@ -796,7 +796,7 @@ pub enum RefusalKind {
     HandoffBoundary(provenant_records::diagnostic::BoundaryClass),
     HandoffResource(provenant_records::diagnostic::ResourceFact),
     RetainedImport {
-        attempt: AttemptId,
+        fence: provenant_supervisor::custody::PendingImport,
         worktree: std::path::PathBuf,
         key: provenant_records::WorkKey,
     },
@@ -1402,24 +1402,14 @@ impl RunStore {
                                 format!("launch preparation failed: {message}"),
                                 RefusalKind::HandoffResource(fact),
                             ),
-                            HandOff::RetainedImport { attempt, worktree } => {
-                                match self.writer_owner_key(attempt, call) {
-                                    Ok(key) => (
-                                        RunError::RetainedWriterImport {
-                                            attempt,
-                                            key: key.clone(),
-                                            worktree: worktree.clone(),
-                                        }.to_string(),
-                                        RefusalKind::RetainedImport { attempt, key, worktree },
-                                    ),
-                                    // Missing owner evidence must not strand this newly
-                                    // claimed attempt in Starting or invent a work key.
-                                    Err(error) => (
-                                        format!("writer import retained for worktree {}, attempt {attempt}; work key unavailable: {error}", worktree.display()),
-                                        RefusalKind::HandoffBoundary(provenant_records::diagnostic::BoundaryClass::LaneGit),
-                                    ),
+                            HandOff::RetainedImport { fence, worktree } => (
+                                RunError::RetainedWriterImport {
+                                    fence: fence.clone(),
+                                    worktree: worktree.clone(),
                                 }
-                            }
+                                .to_string(),
+                                RefusalKind::RetainedImport { fence, worktree },
+                            ),
                             _ => unreachable!(),
                         };
                         // Cancellation decides the outcome, but an independent

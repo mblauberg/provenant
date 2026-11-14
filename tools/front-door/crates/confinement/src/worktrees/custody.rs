@@ -399,21 +399,10 @@ fn lock_worktree_impl(
             Err(_) => return Err(WorktreeError::UnknownWriter),
         };
         drop(observation);
-        match retained_import(&state) {
-            Ok(true) => {
-                return Err(WorktreeError::UnknownOccupancy {
-                    path: verified.path().to_path_buf(),
-                    detail: "unresolved retained import fence".into(),
-                });
-            }
-            Ok(false) => {}
-            Err(detail) => {
-                return Err(WorktreeError::UnknownOccupancy {
-                    path: verified.path().to_path_buf(),
-                    detail,
-                });
-            }
-        }
+        retained_import(&state).map_err(|detail| WorktreeError::UnknownOccupancy {
+            path: verified.path().to_path_buf(),
+            detail,
+        })?;
         Some(writer)
     };
     let canonical = canonicalize(verified.path())?;
@@ -626,15 +615,8 @@ pub(crate) fn disk_writer_state(project_state: &Directory, path: &Path) -> Occup
         Err(error) => return Occupancy::custody_unknown(path.to_path_buf(), error.to_string()),
     };
     // Retained imports remain fences even when no writer inode survived.
-    match retained_import(&directory) {
-        Ok(true) => {
-            return Occupancy::custody_unknown(
-                path.to_path_buf(),
-                "unresolved retained import fence",
-            );
-        }
-        Ok(false) => {}
-        Err(detail) => return Occupancy::custody_unknown(path.to_path_buf(), detail),
+    if let Err(detail) = retained_import(&directory) {
+        return Occupancy::custody_unknown(path.to_path_buf(), detail);
     }
     if directory
         .metadata_at(OsStr::new(WRITER_LOCK), false)
@@ -670,10 +652,8 @@ pub fn cache_writer_probe(
     // Still scan retained evidence in the ordinary raw helper.
     let gate = match directory.metadata_at(OsStr::new(WRITER_LOCK), false) {
         Err(error) if error.is_not_found() => {
-            return match retained_import(&directory).map_err(unknown)? {
-                true => Err(unknown("unresolved retained import fence".into())),
-                false => Ok(None),
-            };
+            retained_import(&directory).map_err(unknown)?;
+            return Ok(None);
         }
         Err(error) => return Err(unknown(error.to_string())),
         Ok(_) => provenant_supervisor::custody::writer_observation_guard(&directory)
@@ -704,50 +684,23 @@ fn cache_writer_probe_under_gate(
             )));
         }
     };
-    if retained_import(&directory).map_err(unknown)? {
-        return Err(unknown("unresolved retained import fence".into()));
-    }
+    retained_import(&directory).map_err(unknown)?;
     Ok(guard)
 }
 
-// An interrupted import retains both its reservation and marker after the
-// process releases writer.lock. A resolved import may leave the marker as
-// historical evidence, so only the pair fences the slot.
-fn retained_import(slot: &Directory) -> Result<bool, String> {
-    fn exists(dir: &Directory, name: &str) -> Result<bool, String> {
-        match dir.metadata_at(OsStr::new(name), false) {
-            Ok(_) => Ok(true),
-            Err(error) if error.is_not_found() => Ok(false),
-            Err(error) => Err(format!("retained fence could not be checked: {error}")),
-        }
+// Supervisor validates exact scoped settlement and run-owned release evidence.
+// Observation never removes reservations or private Git.
+fn retained_import(slot: &Directory) -> Result<(), String> {
+    match provenant_supervisor::custody::pending_import(slot) {
+        Ok(None) => Ok(()),
+        Ok(Some(fence)) => Err(format!(
+            "unresolved retained import fence: {}",
+            provenant_supervisor::custody::CustodyError::ImportRetained { fence }
+        )),
+        Err(error) => Err(format!(
+            "retained import fence could not be checked: {error}"
+        )),
     }
-    if exists(slot, "reservation.json")? && exists(slot, "import-retained.json")? {
-        return Ok(true);
-    }
-    for (index, name) in slot
-        .entries()
-        .map_err(|error| format!("retained fences could not be listed: {error}"))?
-        .enumerate()
-    {
-        if index >= 10_000 {
-            return Err("retained fence scan exceeded its entry limit".into());
-        }
-        let name =
-            name.map_err(|error| format!("retained fence entry could not be read: {error}"))?;
-        let metadata = slot
-            .metadata_at(&name, false)
-            .map_err(|error| format!("retained fence entry could not be checked: {error}"))?;
-        if metadata.kind != provenant_os::fs::FileKind::Directory {
-            continue;
-        }
-        let attempt = slot
-            .open_verified_directory(&name)
-            .map_err(|error| format!("retained fence directory could not be opened: {error}"))?;
-        if exists(&attempt, "reservation.json")? && exists(&attempt, "import-retained.json")? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 /// Hold writer exclusion for cache mutation. Membership comes from the
@@ -765,9 +718,7 @@ pub fn cache_writer_guard(project_state: &Directory, path: &Path) -> Result<Lock
             error => unknown(format!("writer lock could not be acquired: {error}")),
         })?;
     drop(observation);
-    if retained_import(&directory).map_err(unknown)? {
-        return Err(unknown("unresolved retained import fence".into()));
-    }
+    retained_import(&directory).map_err(unknown)?;
     Ok(guard)
 }
 

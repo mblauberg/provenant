@@ -21,6 +21,41 @@ pub struct Scope {
     pub attempt: AttemptId,
     pub generation: u64,
 }
+
+/// Run seals this beside the reservation when private Git must be retained.
+/// The run directory is verified against the reservation's device and inode.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ImportFence {
+    pub schema_version: u64,
+    pub scope: Scope,
+    pub lane: provenant_records::WorkKey,
+    pub run_attempt: PathBuf,
+}
+
+/// A recovery target, carried intact from custody admission to the CLI.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingImport {
+    pub scope: Scope,
+    pub fence: PathBuf,
+    pub lane: provenant_records::WorkKey,
+}
+impl PendingImport {
+    pub fn reconcile(&self) -> String {
+        format!("provenant reconcile {}", self.lane)
+    }
+    pub fn abandon(&self) -> String {
+        format!(
+            "provenant reconcile --abandon {} --reason 'recover retained work manually'",
+            self.lane
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CustodyDecision {
+    Pending(PendingImport),
+    Settled(Scope),
+}
 #[derive(Debug, Error)]
 pub enum CustodyError {
     #[error("worktree writer lock busy")]
@@ -29,8 +64,8 @@ pub enum CustodyError {
     ObservationGate(String),
     #[error("writer reservation requires recovery")]
     Fenced,
-    #[error("writer import retained for attempt {attempt}")]
-    ImportRetained { attempt: AttemptId },
+    #[error("writer import retained for lane {} at {}; run `{}` or `{}`", fence.lane, fence.fence.display(), fence.reconcile(), fence.abandon())]
+    ImportRetained { fence: PendingImport },
     #[error("custody identity is unknown")]
     UnknownIdentity,
     #[error("record is invalid or belongs to another generation")]
@@ -504,7 +539,7 @@ pub(crate) fn acquire_writer_with_observer(
             let same_custody = previous.binding.same_custody(&binding.0);
             if previous.schema_version != 1
                 || settled.schema_version != 1
-                || settled.scope.generation < previous.scope.generation
+                || settled.scope != previous.scope
                 || (scope.generation > 1
                     && (scope.attempt != settled.scope.attempt || !same_custody))
             {
@@ -578,6 +613,90 @@ pub fn attempt_evidence(
 ) -> provenant_os::fs::Result<Directory> {
     directory.open_verified_directory(OsStr::new(&scope.attempt.to_string()))
 }
+
+/// Classify a retained import without changing its evidence. Only a matching
+/// settlement journal AND Run's inode-bound release attestations retire a
+/// reservation left behind by an interrupted removal. Uncertain proof retains
+/// custody; a historical marker without a reservation grants no custody.
+pub fn retained_import_decision(
+    evidence: &Directory,
+    expected: Scope,
+) -> Result<Option<CustodyDecision>> {
+    let reservation: Reservation = match read_record(evidence, "reservation.json", RECORD_LIMIT) {
+        Ok(record) => record,
+        Err(CustodyError::Filesystem(error)) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    validate_anchor(evidence, &reservation)?;
+    if reservation.scope != expected
+        || evidence.current_path()?.file_name() != Some(OsStr::new(&expected.attempt.to_string()))
+    {
+        return Err(CustodyError::InvalidRecord);
+    }
+    let marker: ImportFence = match read_record(evidence, "import-retained.json", RECORD_LIMIT) {
+        Ok(record) => record,
+        Err(CustodyError::Filesystem(error)) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if marker.schema_version != 1 || marker.scope != expected {
+        return Err(CustodyError::InvalidRecord);
+    }
+    let pending = CustodyDecision::Pending(PendingImport {
+        scope: expected,
+        fence: evidence.current_path()?.join("reservation.json"),
+        lane: marker.lane,
+    });
+    let settled = (|| -> Result<()> {
+        let journal: SettlementJournal = read_record(evidence, "settlement.json", RECORD_LIMIT)?;
+        if journal.schema_version != 1 || journal.scope != expected {
+            return Err(CustodyError::InvalidRecord);
+        }
+        let attempt = Directory::open_anchor(&marker.run_attempt)?;
+        let metadata = attempt.metadata()?;
+        if reservation.attempt_device != Some(metadata.device)
+            || reservation.attempt_inode != Some(metadata.inode)
+        {
+            return Err(CustodyError::InvalidRecord);
+        }
+        let quarantine = attempt.open_verified_directory(OsStr::new("quarantine"))?;
+        verify_release(expected, &attempt, &attempt, &quarantine)
+    })();
+    Ok(Some(if settled.is_ok() {
+        CustodyDecision::Settled(expected)
+    } else {
+        pending
+    }))
+}
+
+/// Supervisor owns the format-2 slot scan. Root-slot records are not attempt
+/// evidence. Callers retain writer exclusion when using this for mutation.
+pub fn pending_import(slot: &Directory) -> Result<Option<PendingImport>> {
+    for (index, name) in slot.entries()?.enumerate() {
+        if index >= 10_000 {
+            return Err(CustodyError::InvalidRecord);
+        }
+        let name = name?;
+        let Some(attempt) = name.to_str().and_then(|name| AttemptId::parse(name).ok()) else {
+            continue;
+        };
+        let evidence = slot.open_verified_directory(&name)?;
+        let reservation: Reservation =
+            match read_record(&evidence, "reservation.json", RECORD_LIMIT) {
+                Ok(record) => record,
+                Err(CustodyError::Filesystem(error)) if error.is_not_found() => continue,
+                Err(error) => return Err(error),
+            };
+        if reservation.scope.attempt != attempt {
+            return Err(CustodyError::InvalidRecord);
+        }
+        if let Some(CustodyDecision::Pending(fence)) =
+            retained_import_decision(&evidence, reservation.scope)?
+        {
+            return Ok(Some(fence));
+        }
+    }
+    Ok(None)
+}
 /// Unresolved attempt launches exclude new attempts until recovery.
 fn ensure_no_exclusive_reservation(directory: &Directory) -> Result<()> {
     for (index, name) in directory.entries()?.enumerate() {
@@ -604,6 +723,20 @@ fn ensure_no_exclusive_reservation(directory: &Directory) -> Result<()> {
         validate_anchor(&child, &reservation).map_err(|_| CustodyError::Fenced)?;
         if name != OsStr::new(&reservation.scope.attempt.to_string()) {
             return Err(CustodyError::Fenced);
+        }
+        match retained_import_decision(&child, reservation.scope)
+            .map_err(|_| CustodyError::Fenced)?
+        {
+            Some(CustodyDecision::Pending(fence)) => {
+                return Err(CustodyError::ImportRetained { fence });
+            }
+            Some(CustodyDecision::Settled(scope)) => {
+                // The writer lease is held. Finish only the verified interrupted
+                // removal; retain private Git, markers and the run's evidence.
+                clear_reservation(&child, scope)?;
+                continue;
+            }
+            None => {}
         }
         // Providers no longer inherit writer.lock. After guardian loss the
         // durable unresolved launch must exclude every new attempt, not just
@@ -2209,7 +2342,7 @@ pub(crate) fn verify_release(
     quarantine: &Directory,
 ) -> Result<()> {
     let release: ReleaseReceipt = read_record(receipt, "release.json", RECORD_LIMIT)?;
-    if release.scope != scope {
+    if release.schema_version != 1 || release.scope != scope {
         return Err(CustodyError::InvalidRecord);
     }
     for (directory, name, digest, expected_terminal) in [

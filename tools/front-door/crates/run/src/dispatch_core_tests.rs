@@ -161,6 +161,104 @@ fn terminal_dependency_waits_for_custody_release() -> TestResult {
     assert!(!store.custody_released(&record, &call)?);
     Ok(())
 }
+// Medium: filesystem/SQLite boundary, no provider process or timer.
+#[test]
+fn work_key_restart_uses_the_retained_attempts_settlement() -> TestResult {
+    use provenant_supervisor::custody::{self, ImportFence, Scope};
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut input = input();
+    let worktree = temp.path().join("lane");
+    input.request.task.writer = Some(WriterRequest {
+        extra: crate::tests::writer_extra(),
+        project: temp.path().to_path_buf(),
+        worktree: worktree.clone(),
+    });
+    store.create(&input, &call)?;
+    store.start(
+        input.attempt_id,
+        &Ready,
+        &|_, _| Err(RunError::Validation("preflight")),
+        &call,
+    )?;
+    let key = store.record(input.attempt_id, &call)?.key;
+    let record = store.attempt_by_key(&key, &call)?;
+    assert_eq!(record.attempt_id, input.attempt_id);
+    let scope = RunStore::scope(&record);
+    let run = store.attempt_dir(record.attempt_id, false)?;
+    let slot_path = store
+        .writer_registry
+        .join("worktrees")
+        .join(record.project_id.to_string())
+        .join(provenant_confinement::worktrees::state_dir_name(&worktree));
+    std::fs::create_dir_all(&slot_path)?;
+    let slot = provenant_os::fs::Directory::open_anchor(&slot_path)?;
+    let lease = provenant_supervisor::fixture::acquire_writer(
+        slot.try_clone()?,
+        scope,
+        call.lock_budget(),
+        call.cancel,
+        call.clock,
+    )?;
+    let evidence_path = slot_path.join(scope.attempt.to_string());
+    let reservation_path = evidence_path.join("reservation.json");
+    let mut reservation: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&reservation_path)?)?;
+    let metadata = run.metadata()?;
+    reservation["launch_state"] = serde_json::json!("never_spawned");
+    reservation["attempt_device"] = serde_json::json!(metadata.device);
+    reservation["attempt_inode"] = serde_json::json!(metadata.inode);
+    reservation["unresolved_cleanup"] = serde_json::json!(false);
+    reservation["census_incomplete"] = serde_json::json!(false);
+    std::fs::write(&reservation_path, serde_json::to_vec(&reservation)?)?;
+    std::fs::write(
+        evidence_path.join("import-retained.json"),
+        crate::db::bytes(&ImportFence {
+            schema_version: 1,
+            scope,
+            lane: key,
+            run_attempt: run.current_path()?,
+        })?,
+    )?;
+    drop(lease);
+    assert!(!store.custody_released(&record, &call)?);
+    let quarantine_path = run.current_path()?.join("quarantine");
+    std::fs::create_dir_all(&quarantine_path)?;
+    std::fs::write(
+        quarantine_path.join("manifest.json"),
+        crate::db::bytes(&serde_json::json!({
+            "schema_version":1, "scope":scope, "kind":"quarantine_manifest"
+        }))?,
+    )?;
+    custody::publish_release(&run, scope)?;
+    for journal_scope in [
+        Scope {
+            generation: scope.generation + 1,
+            ..scope
+        },
+        scope,
+    ] {
+        std::fs::write(
+            evidence_path.join("settlement.json"),
+            crate::db::bytes(&serde_json::json!({
+                "schema_version":1, "scope":journal_scope
+            }))?,
+        )?;
+        assert_eq!(
+            store.custody_released(&record, &call)?,
+            journal_scope == scope
+        );
+    }
+    assert!(
+        reservation_path.exists(),
+        "restart eligibility must not mutate retained custody"
+    );
+    assert!(quarantine_path.join("manifest.json").exists());
+    Ok(())
+}
+
 #[test]
 fn unreadable_reservation_in_the_writers_directory_holds_custody() -> TestResult {
     let temp = tempfile::tempdir()?;

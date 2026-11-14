@@ -394,14 +394,12 @@ fn missing_observer_gate_refuses_and_retained_lock_preserves_custody_evidence()
     let retained = writer_directory(context.project_state, &retained_path)?;
     drop(retained.try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?);
     fs::remove_file(retained.current_path()?.join(WRITER_LOCK))?;
-    fs::write(
-        retained.current_path()?.join("reservation.json"),
-        "retained",
-    )?;
-    fs::write(
-        retained.current_path()?.join("import-retained.json"),
-        "retained",
-    )?;
+    let attempt = retained
+        .current_path()?
+        .join(AttemptId::from_bytes([53; 16]).to_string());
+    fs::create_dir(&attempt)?;
+    fs::write(attempt.join("reservation.json"), "retained")?;
+    fs::write(attempt.join("import-retained.json"), "retained")?;
     assert!(
         matches!(disk_writer_state(context.project_state, &retained_path), Occupancy::Unknown { evidence, .. }
         if evidence.contains("retained import fence"))

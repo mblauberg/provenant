@@ -561,13 +561,28 @@ or manual host recovery to obtain success or delivery eligibility. Older sealed
 `unsettled` decisions remain immutable and project as failed through the final
 import receipt.
 
-Unresolved imports also seal a scoped `import-retained.json` marker beside the
-custody reservation. Run checks predecessor markers after acquiring the normal
-writer lease, while holding `writer.lock`, and withdraws a new unlaunched lease
-on refusal. This protects shared registries across different run-state roots
-after the original recovery process exits. Predecessors without an import marker
-keep their existing admission semantics. Reservation release retires the marker's
-active fence; its evidence may remain beside the retired reservation.
+Unresolved imports seal `import-retained.json` beside the custody reservation,
+binding its exact attempt and generation to its WorkKey and run-owned evidence
+directory. Supervisor owns the typed `Pending | Settled` decision consumed by
+writer admission, confinement observation and the custody-release check after
+restart resolves a WorkKey to its retained attempt. A matching settlement journal
+retires an interrupted reservation removal only when the run directory still
+matches the reservation's device and inode and its scoped release attestations
+verify both the terminal and quarantine digests. Missing, malformed or mismatched
+proof remains fenced. Observation preserves the evidence; admission completes
+verified removal while holding `writer.lock`. Private Git and retained work survive.
+
+The refusal carries the fence path, scoped lane and recovery targets as typed
+fields through launch to the CLI. It names `provenant reconcile NAME/NODE#N` and
+`provenant reconcile --abandon NAME/NODE#N --reason 'recover retained work manually'`.
+This protects shared registries across different run-state roots after the
+original recovery process exits. Predecessors without an import marker keep
+their existing admission semantics. A historical marker without a reservation
+grants no custody. Only format-2 attempt directories are interpreted; root-slot
+records are not adopted or migrated.
+- Tests: `crates/supervisor/src/custody_tests.rs::settlement_checks_exact_attempt_and_both_digests_before_scratch`;
+  `crates/run/src/dispatch_core_tests.rs::work_key_restart_uses_the_retained_attempts_settlement`;
+  `crates/cli/src/run/tests/writer_disk.rs::retained_import_refusal_carries_custody_and_recovery_targets`
 
 If launch preparation fails after acquiring custody, it withdraws the
 unlaunched reservation before reporting a local refusal. A failed withdrawal

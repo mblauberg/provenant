@@ -55,20 +55,26 @@ fn disk_policy_refusal_uses_resource_projection() {
 }
 
 #[test]
-fn retained_import_refusal_names_worktree_attempt_and_recovery() {
+fn retained_import_refusal_carries_custody_and_recovery_targets() {
     let attempt = AttemptId::from_bytes([4; 16]);
-    let key = provenant_records::WorkKey::new(
-        provenant_core::ProjectId::from_bytes([5; 16]),
-        "repair",
-        "writer",
-        3,
-    )
-    .unwrap();
+    let fence = provenant_supervisor::custody::PendingImport {
+        scope: provenant_supervisor::custody::Scope {
+            attempt,
+            generation: 3,
+        },
+        fence: "/tmp/custody/reservation.json".into(),
+        lane: provenant_records::WorkKey::new(
+            provenant_core::ProjectId::from_bytes([1; 16]),
+            "retained",
+            "writer",
+            2,
+        )
+        .expect("key"),
+    };
     let failure = check_launch_policy(&[run::Started::Refused {
         attempt: AttemptId::from_bytes([1; 16]),
         kind: run::RefusalKind::RetainedImport {
-            attempt,
-            key: key.clone(),
+            fence: fence.clone(),
             worktree: "/tmp/writer".into(),
         },
         reason: "retained".into(),
@@ -79,12 +85,26 @@ fn retained_import_refusal_names_worktree_attempt_and_recovery() {
     assert!(failure.message.contains(&attempt.to_string()));
     assert!(failure.message.contains(&key.to_string()));
     let diagnostic = failure.projection.expect("diagnostic");
-    // The repair command targets the retained writer's resolvable identity.
+    let custody = diagnostic
+        .extra
+        .get("custody")
+        .expect("typed custody fields");
+    assert_eq!(
+        custody["scope"],
+        serde_json::to_value(fence.scope).expect("scope")
+    );
+    assert_eq!(custody["fence"], fence.fence.to_string_lossy().as_ref());
+    assert_eq!(
+        custody["lane"],
+        serde_json::to_value(&fence.lane).expect("lane")
+    );
+    assert_eq!(custody["reconcile"], fence.reconcile());
+    assert_eq!(custody["abandon"], fence.abandon());
     assert!(
         diagnostic
             .next
             .iter()
-            .any(|next| { next.contains(&format!("reconcile --abandon {key}")) })
+            .any(|next| { next.contains(&fence.reconcile()) && next.contains(&fence.abandon()) })
     );
 }
 
