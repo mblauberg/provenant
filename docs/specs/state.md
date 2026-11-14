@@ -119,10 +119,10 @@ contributions and `admission.sqlite3` (leases reference dropped runs), including
 SQLite companions. Owned macOS `pv-*` links to those attempts' tmp directories
 are unlinked. All removals use a held state-root directory capability, restore
 owner access to read-only directories and treat absent entries as removed.
-Symlinked `fabric` refuses. Dropped symlinks are unlinked without following them,
-except lock-named symlinks: the current OS capability cannot unlink those, so
-preflight refuses them before any archive move or deletion. They require
-explicit removal before reset.
+Symlinked `fabric` refuses. Every dropped symlink, lock-named ones included, is
+unlinked without following it: the unlink is identity-checked against the entry
+observed before removal, refuses a replaced entry and never touches the link's
+target.
 
 Before removing any dropped tree, provider archives from its actual
 `attempts/<id>/provider-history` layout (including run-keyed and child stores)
@@ -132,7 +132,9 @@ archive collisions refuse without overwriting either archive. Usage and quota
 ledgers, these provider archives, session checkpoints, chair logs, worktrees
 and branches stay.
 - Why: deleting state is irreversible and a lane may be running.
-- Test: `tests/install.rs::format_one_state_is_reset_only_on_acknowledgement`
+- Test: `tests/install.rs::format_one_state_is_reset_only_on_acknowledgement`;
+  `tests/install.rs::reset_unlinks_lock_named_symlinks_without_touching_their_targets`;
+  `crates/os/src/fs/tests.rs::symlink_unlink_checks_identity_and_preserves_targets_even_for_lock_names`
 - Owner: `src/state_reset.rs`, `src/install.rs`, `install.sh`
 
 ## Release identity

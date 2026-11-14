@@ -1635,7 +1635,11 @@ settlement: a typed `cause` and the writer's `handoff`, decoded once by
 A finished attempt seals no stop. A cause is one fact. Facts about the
 worktree, such as whether it holds a new commit, sit beside the stop, so a
 writer that stopped early with no commit is a `stopped_early` stop, not a
-separate cause.
+separate cause. Settlement takes the cause from a recorded terminal cause,
+then from a host outcome the writer cannot know (lost or unsettled custody,
+cancellation, a deadline, a depleted route), then from the handoff. An
+`uncommitted` outcome is a worktree fact, so a declared stop that left edits
+keeps its declared cause.
 
 A `stopped_early` or `blocked` stop needs the handoff that declared it, and a
 `done` handoff declares no stop. `blocked` is a stop cause, not a plain
@@ -1675,7 +1679,8 @@ rather than the head commit (#3132). A graph `Pause` records a typed cause
   `crates/records/src/limit.rs::tests::the_nearest_source_wins_and_a_ceiling_cannot_be_raised`;
   `crates/run/src/limits.rs::tests::each_limit_reports_the_winning_source`;
   `crates/run/src/limits.rs::tests::the_preamble_and_the_capture_plan_read_the_same_numbers`;
-  `crates/records/src/format2_tests.rs::a_declared_stop_needs_the_handoff_that_declared_it`
+  `crates/records/src/format2_tests.rs::a_declared_stop_needs_the_handoff_that_declared_it`;
+  `crates/records/src/format2_tests.rs::a_declared_stop_survives_uncommitted_edits_but_not_uncertain_custody`
 - Owner: `crates/records/src/stop.rs`, `crates/records/src/work_key.rs`,
   `crates/records/src/limit.rs`, `crates/run/src/limits.rs`, `crates/records/src/finding_decision.rs`,
   `crates/records/src/pause.rs`
