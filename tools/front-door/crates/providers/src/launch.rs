@@ -761,6 +761,28 @@ pub(crate) fn prepare_tool_requirements(input: &PrepareInput<'_>, spec: &mut Lau
     spec.complete_tool_requirements(input.confined, input.home, input.cwd);
 }
 
+/// Every adapter finishes here, after provider-specific environment changes.
+/// Identity, temporary files and Cargo configuration are lane bindings even
+/// when the host environment is sparse or sandboxing is disabled.
+pub(crate) fn finalise_provider_env(input: &PrepareInput<'_>, spec: &mut LaunchSpec) {
+    let scratch = &input.confined.permissions().scratch.path;
+    spec.env
+        .retain(|(key, _)| !matches!(key.to_str(), Some("HOME" | "TMPDIR" | "TMPPREFIX")));
+    spec.env.extend([
+        ("HOME".into(), input.home.into()),
+        ("TMPDIR".into(), scratch.into()),
+        ("TMPPREFIX".into(), scratch.join("zsh").into()),
+    ]);
+    let access = match input.confined.permissions().mode {
+        provenant_confinement::permissions::AccessMode::ReadOnly => Access::ReadOnly,
+        provenant_confinement::permissions::AccessMode::WorktreeWrite(_) => Access::WorktreeWrite,
+    };
+    let cache = lane_cache(input);
+    spec.setup
+        .push(SetupStep::CreateDir(cache.join("cargo-home")));
+    cargo_environment(input.home, cache, access, !input.sandboxed(), &mut spec.env);
+}
+
 impl LaunchSpec {
     pub(crate) fn native_environment(&self) -> bool {
         self.env.iter().any(|(name, value)| {

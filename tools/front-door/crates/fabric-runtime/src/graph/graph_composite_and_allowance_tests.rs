@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn advisory_composite_failure_preserves_cause_and_launches_dependant() {
+fn advisory_composite_settlement_preserves_cause_and_launches_dependant() {
     for outcome in [AttemptOutcome::ReviewRequired, AttemptOutcome::TaskFailed] {
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version":1, "graph_id":"advisory", "nodes":[
@@ -33,7 +33,11 @@ fn advisory_composite_failure_preserves_cause_and_launches_dependant() {
                 .state,
             NodeState::Succeeded
         );
-        assert!(owner.prompts.last().unwrap().contains("scout: unavailable"));
+        if outcome == AttemptOutcome::TaskFailed {
+            assert!(owner.prompts.last().unwrap().contains("scout: unavailable"));
+        } else {
+            assert_eq!(scout.state, NodeState::Succeeded);
+        }
     }
 }
 

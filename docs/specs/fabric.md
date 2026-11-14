@@ -205,6 +205,10 @@ answer still needs the held authority, whether it arrives by chat or the CLI.
 A decide node's chosen option, or its default at the deadline, becomes its
 verdict; the link is dropped in the same save as the verdict. A cancelled graph
 closes the requests it still owns.
+Decide asks have a five-minute default timeout, overridable with
+`timeout_seconds`. Without a declared default they take the first option;
+expiry records a warning. A scope or one-way-door approval gate instead
+settles with verdict `timed_out`: silence never grants new authority.
 - Why: the owner and the chair read one list, and two copies of a question could
   disagree.
 - Test: `crates/fabric-runtime/src/graph/ask_tests.rs::decide_answer_becomes_the_verdict_and_routes_the_chosen_edge`;
@@ -231,8 +235,14 @@ wherever it sits; a rejection names what was seen. Invalid evidence fails a
 consuming gate; a matched `required_verdict` cannot override it. Selected
 outputs reach dependants as delimited untrusted data that must fit the prompt
 budget, or the node fails before launch.
+Findings size alone never fails settlement. The full findings remain in the
+immutable attempt result; an oversized block also uses the existing
+content-addressed graph text store. The checkpoint keeps a bounded summary
+and artifact reference, and readers and dependent nodes rehydrate the full
+findings without losing the verdict.
 - Why: dependants use bounded evidence without copying transcripts.
 - Test: `crates/fabric-runtime/src/graph/graph_inputs_and_outputs_tests.rs::outputs_feed_direct_dependants_and_survive_replay`;
+  `crates/fabric-runtime/src/graph/graph_review_contract_tests.rs::seven_long_blocking_findings_remain_retrievable_with_the_verdict`;
   `crates/fabric-runtime/src/graph/graph_delivery_and_routes_tests.rs::matched_required_contract_cannot_override_ambiguous_verdict_evidence`
 
 ### Checkpoint before launch

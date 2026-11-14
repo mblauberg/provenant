@@ -463,7 +463,7 @@ fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
 
     /// A long review ending in one verdict, a blank line and a pretty-printed
     /// handoff block is one verdict. Size alone (past the run store's head
-    /// window) costs the findings, never the verdict.
+    /// window) costs neither complete findings nor the verdict.
     #[test]
     fn a_long_review_with_a_spaced_handoff_keeps_its_single_verdict() {
         let overlong = format!("Traced {} to its call sites.", "a/b/c ".repeat(400));
@@ -1156,4 +1156,82 @@ fn maximal_panel_verify_and_synthesis_prompts_fit_default_limits() {
     }
     assert_eq!(verifiers, 2);
     assert_eq!(synthesis, 1);
+}
+
+/// Medium: size affects only the checkpoint summary. The full artifact,
+/// verdict and every blocking finding survive storage, replay and retrieval.
+#[test]
+fn seven_long_blocking_findings_remain_retrievable_with_the_verdict() {
+    let entries: Vec<_> = (0..7)
+        .map(|index| {
+            let mut entry = finding();
+            entry["id"] = json!(format!("F{index}"));
+            entry["summary"] = json!(format!(
+                "Finding {index}: {}",
+                "full evidence ".repeat(1800)
+            ));
+            entry["triage"]["reason"] = json!("Verified the failing path. ".repeat(100));
+            entry["evidence"] = json!("Trace the reachable failing path. ".repeat(400));
+            entry
+        })
+        .collect();
+    let response = answer(json!(entries), "VERDICT: FAIL");
+    let mut capture = crate::result_capture::ResultCapture::new(None);
+    for chunk in response.as_bytes().chunks(37) {
+        capture.push(chunk);
+    }
+    let captured = capture.finish();
+    assert!(!captured.source_truncated);
+    let mut observation = terminal_with_result(AttemptOutcome::Succeeded, &response);
+    if let AttemptObservation::Terminal {
+        result,
+        result_path,
+        ..
+    } = &mut observation
+    {
+        *result = Some(Box::new(captured));
+        *result_path = Some("attempts/review/result.md".into());
+    }
+    let document = graph(vec![review("review.tests", "review")]);
+    let mut owner = FakeOwner {
+        observations: [observation].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let progress = &run.checkpoint.nodes[0];
+    assert_eq!(progress.state, NodeState::Succeeded);
+    let outputs = progress.outputs.as_ref().unwrap();
+    assert_eq!(outputs.verdict.as_deref(), Some("VERDICT: FAIL"));
+    assert!(canonical_len(&outputs.findings) <= FINDINGS_BYTES);
+    assert_eq!(outputs.findings_available, Some(true));
+    assert_eq!(
+        outputs.result.as_ref().unwrap().path.as_deref(),
+        Some("attempts/review/result.md")
+    );
+    let temp = crate::test_support::tempdir().unwrap();
+    let directory = Directory::open_anchor(temp.path()).unwrap();
+    let mut stored = json!({"checkpoint":run.checkpoint});
+    prompt_store::externalise(&directory, &document.graph_id, &mut stored).unwrap();
+    assert!(stored["checkpoint"]["nodes"][0]["outputs"]["_artifact_findings"].is_null());
+    let bytes = serde_json::to_vec(&stored).unwrap();
+    assert!(bytes.len() < response.len());
+    let hydrated = prompt_store::rehydrate(&directory, &document.graph_id, &bytes).unwrap();
+    let hydrated: Value = serde_json::from_slice(&hydrated).unwrap();
+    let mut checkpoint: GraphCheckpoint =
+        serde_json::from_value(hydrated["checkpoint"].clone()).unwrap();
+    materialise_checkpoint_findings(&document, &mut checkpoint).unwrap();
+    let findings = &checkpoint.nodes[0].outputs.as_ref().unwrap().findings;
+    assert_eq!(findings.len(), entries.len());
+    for (finding, entry) in findings.iter().zip(entries) {
+        assert_eq!(finding.summary, entry["summary"].as_str().unwrap());
+        assert_eq!(finding.extra["evidence"], entry["evidence"]);
+        assert!(repair::blocking(finding));
+    }
+    assert_eq!(
+        advance(&document, &mut owner, &mut journal)
+            .unwrap()
+            .checkpoint,
+        run.checkpoint
+    );
 }

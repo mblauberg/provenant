@@ -13,6 +13,7 @@ struct Owner {
     prompts: Vec<String>,
     worktrees: Vec<Option<String>>,
     facts: Option<DepletionFacts>,
+    spawn_custody_released: Option<bool>,
 }
 
 impl AttemptOwner for Owner {
@@ -20,6 +21,20 @@ impl AttemptOwner for Owner {
 
     fn actor(&self) -> String {
         "chair".into()
+    }
+
+    fn preparation_fallback_evidence(
+        &mut self,
+        _key: &AttemptKey,
+        _reference: &str,
+    ) -> Result<Option<PreparationFallbackEvidence>, Self::Error> {
+        Ok(self
+            .spawn_custody_released
+            .map(|custody_released| PreparationFallbackEvidence {
+                failure: provenant_records::run::PreparationFailure::AdapterUnavailable,
+                handoff: provenant_routing::FallbackHandoff::Local,
+                custody_released,
+            }))
     }
 
     fn depletion_facts(
@@ -145,6 +160,155 @@ fn terminal(
 
 fn done(reference: &str) -> AttemptObservation {
     terminal(reference, AttemptOutcome::Succeeded, None, None)
+}
+
+/// Small: final handoff status, committed work and the host's no-work evidence
+/// jointly decide completion; a blocked writer preserves its stated cause.
+#[test]
+fn writer_handoff_classes_settle_without_mistaking_done_for_a_stop() {
+    for status in [Some("done"), Some("blocked"), Some("stopped_early"), None] {
+        let document = document("worktree_write", json!({"stopped_early":"chair"}));
+        let text = status.map(|status| format!("```handoff\n{}\n```", json!({
+            "schema_version":2, "status":status, "note":"Owner must supply the missing capability",
+            "remaining":if status == "done" { vec![] } else { vec!["Finish the brief"] },
+            "decisions":[], "verify":[]
+        })));
+        let mut observation = terminal(
+            "a/1",
+            if status.is_some() {
+                AttemptOutcome::Succeeded
+            } else {
+                AttemptOutcome::StoppedNoWork
+            },
+            None,
+            text.as_deref(),
+        );
+        if let AttemptObservation::Terminal { commit, .. } = &mut observation {
+            *commit = status.map(|_| "a".repeat(40));
+        }
+        let mut owner = Owner {
+            observations: [observation].into(),
+            ..Default::default()
+        };
+        let run = advance(&document, &mut owner, &mut journal(&document)).unwrap();
+        let progress = &run.checkpoint.nodes[0];
+        if status == Some("done") {
+            assert_eq!(progress.state, NodeState::Succeeded);
+            assert_eq!(
+                progress.attempts[0].outcome,
+                Some(AttemptOutcome::Succeeded)
+            );
+            assert!(run.checkpoint.pause.is_none());
+        } else {
+            assert_eq!(
+                progress.attempts[0].outcome,
+                Some(if status.is_some() {
+                    AttemptOutcome::DeclaredStop
+                } else {
+                    AttemptOutcome::StoppedNoWork
+                })
+            );
+            assert!(run.checkpoint.pause.is_some());
+            if status == Some("blocked") {
+                assert!(progress.blocked);
+                assert_eq!(progress.attempts[0].stop, Some(StopCause::Blocked));
+                assert!(
+                    progress
+                        .advance_error
+                        .as_deref()
+                        .unwrap()
+                        .contains("missing capability")
+                );
+            }
+        }
+        assert_eq!(owner.routes.len(), 1);
+    }
+}
+
+/// Small: a settled review-required lane remains visible as such while its
+/// dependent starts, without an acknowledgement or a synthetic retry.
+#[test]
+fn settled_review_required_proceeds_without_acknowledgement() {
+    let mut document = document("read_only", serde_json::Value::Null);
+    let mut dependent = document.nodes[0].clone();
+    dependent.id = "dependent".into();
+    dependent.depends_on = vec!["work".into()];
+    document.nodes.push(dependent);
+    let mut owner = Owner {
+        observations: [
+            terminal("a/1", AttemptOutcome::ReviewRequired, None, None),
+            done("b/1"),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = journal(&document);
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .all(|node| node.state == NodeState::Succeeded)
+    );
+    assert_eq!(
+        run.checkpoint.nodes[0].attempts[0].outcome,
+        Some(AttemptOutcome::ReviewRequired)
+    );
+    assert_eq!(
+        advance(&document, &mut owner, &mut journal)
+            .unwrap()
+            .checkpoint,
+        run.checkpoint
+    );
+}
+
+/// Small: a provider that never started can consume another route only after
+/// the owner proves custody release; its typed cause is never task failure.
+#[test]
+fn never_spawned_attempt_retries_elsewhere_only_with_released_custody() {
+    for released in [false, true] {
+        let document = document("worktree_write", serde_json::Value::Null);
+        let mut failed = terminal(
+            "a/1",
+            AttemptOutcome::PreparationRefused(provenant_records::run::TerminalCause::SpawnFailure),
+            Some(StopCause::SpawnFailure),
+            None,
+        );
+        if let AttemptObservation::Terminal { launched, .. } = &mut failed {
+            *launched = false;
+        }
+        let mut owner = Owner {
+            observations: [failed, done("b/1")].into(),
+            spawn_custody_released: Some(released),
+            ..Default::default()
+        };
+        let run = advance(&document, &mut owner, &mut journal(&document)).unwrap();
+        assert_eq!(
+            adapters(&owner),
+            if released {
+                vec!["first", "second"]
+            } else {
+                vec!["first"]
+            }
+        );
+        let progress = &run.checkpoint.nodes[0];
+        assert_eq!(
+            progress.state,
+            if released {
+                NodeState::Succeeded
+            } else {
+                NodeState::Failed
+            }
+        );
+        assert_eq!(progress.attempts[0].stop, Some(StopCause::SpawnFailure));
+        assert!(
+            !progress
+                .attempts
+                .iter()
+                .any(|attempt| attempt.outcome == Some(AttemptOutcome::TaskFailed))
+        );
+    }
 }
 
 fn adapters(owner: &Owner) -> Vec<&str> {

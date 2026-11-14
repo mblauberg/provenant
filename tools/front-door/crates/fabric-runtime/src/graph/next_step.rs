@@ -415,8 +415,12 @@ fn decide(
         NextStep::Chair => {
             return pause(if cause == StopCause::Blocked {
                 format!(
-                    "writer {} needs an owner decision, capability or external change; inspect its handoff",
-                    node.id
+                    "writer {} needs an owner decision, capability or external change: {}",
+                    node.id,
+                    progress
+                        .advance_error
+                        .as_deref()
+                        .unwrap_or("inspect its handoff")
                 )
             } else {
                 format!("node {} stopped ({cause}); return to the chair", node.id)
@@ -739,6 +743,9 @@ pub(super) fn settlement_fallback_decision(
     let cause = match outcome {
         AttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
         AttemptOutcome::UsageLimited => Some(StopCause::UsageLimited),
+        AttemptOutcome::PreparationRefused(provenant_records::run::TerminalCause::SpawnFailure) => {
+            Some(StopCause::SpawnFailure)
+        }
         AttemptOutcome::AdapterUnavailable | AttemptOutcome::PreparationRefused(_) => {
             Some(StopCause::AdapterUnavailable)
         }

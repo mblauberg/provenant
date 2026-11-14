@@ -7,6 +7,10 @@ pub(super) const FAMILY_BYTES: usize = 64;
 pub(super) const MAX_FINDINGS: usize = 32;
 /// Checkpoint extension holding the original bounded synthesis block.
 const COMPACT_FINDINGS: &str = "_compact_disposition_findings";
+// Existing content-addressed checkpoint text storage externalises this block;
+// it is rehydrated only for validation and consumers, alongside the original
+// immutable attempt result. The checkpoint's findings list stays a summary.
+const ARTIFACT_FINDINGS: &str = "_artifact_findings";
 
 /// Soft per-node budget for inherited disposition descriptions.
 const DISPOSITION_TEXT_TARGET: usize = 64 * 1024;
@@ -367,9 +371,6 @@ fn parse_findings(
             .collect(),
         _ => return Err("field findings: expected array or object".into()),
     };
-    if entries.len() > MAX_FINDINGS {
-        return Err(format!("field findings: exceeds {MAX_FINDINGS} entries"));
-    }
     let mut findings = Vec::new();
     let mut skipped = Vec::new();
     for (index, (key, entry)) in entries.into_iter().enumerate() {
@@ -507,22 +508,6 @@ fn parse_findings(
             ));
             entry.insert("severity".into(), "blocking".into());
         }
-        let mut explicit_extensions = entry.clone();
-        for field in [
-            "id",
-            "severity",
-            "file",
-            "line",
-            "summary",
-            "status",
-            "disposition",
-            "reason",
-        ] {
-            explicit_extensions.remove(field);
-        }
-        if canonical_len(&explicit_extensions) > FINDINGS_BYTES {
-            return Err(fail("findings", "additional fields exceed byte cap"));
-        }
         // Expand one disposition to all copies, inheriting each separately.
         let copies: Vec<_> = source.map_or_else(
             || vec![None],
@@ -597,12 +582,8 @@ fn parse_findings(
             ] {
                 let optional = matches!(field, "disposition" | "reason");
                 match entry.get(field) {
-                    Some(serde_json::Value::String(value)) if value.len() <= OUTPUT_FIELD_BYTES => {
-                    }
+                    Some(serde_json::Value::String(_)) => {}
                     None | Some(serde_json::Value::Null) if optional => {}
-                    Some(serde_json::Value::String(_)) => {
-                        return Err(fail(field, "exceeds byte cap"));
-                    }
                     _ => return Err(fail(field, "expected string")),
                 }
             }
@@ -612,33 +593,12 @@ fn parse_findings(
             {
                 return Err(fail("line", "expected non-negative integer or null"));
             }
-            let mut extensions = entry.clone();
-            for field in [
-                "id",
-                "severity",
-                "file",
-                "line",
-                "summary",
-                "status",
-                "disposition",
-                "reason",
-            ] {
-                extensions.remove(field);
-            }
-            if canonical_len(&extensions) > FINDINGS_BYTES {
-                return Err(fail("findings", "additional fields exceed byte cap"));
-            }
             findings.push(
                 serde_json::from_value::<Finding>(entry.into())
                     .map_err(|_| fail("findings", "invalid entry"))?,
             );
         }
     }
-    let cap = if upstream.is_empty() {
-        FINDINGS_BYTES
-    } else {
-        DISPOSITION_FINDINGS_BYTES
-    };
     let mut size = canonical_len(&findings);
     let mut trimmed = 0;
     if !upstream.is_empty() && size > DISPOSITION_TEXT_TARGET {
@@ -673,9 +633,6 @@ fn parse_findings(
             }
         }
     }
-    if upstream.is_empty() && size > cap {
-        return Err("field findings: exceeds canonical byte cap".into());
-    }
     if findings.is_empty()
         && let Some(warning) = skipped
             .iter()
@@ -688,6 +645,15 @@ fn parse_findings(
 
 /// Read only a complete findings block from the captured head or tail.
 fn findings_block(capture: &crate::result_capture::CapturedResult) -> Result<&str, &'static str> {
+    if let Some(block) = &capture.findings {
+        return Ok(block);
+    }
+    // A clipped display window cannot override the complete stream's absence
+    // of a finished block, for example after a later unterminated findings
+    // fence. Only an uncut window may supply a block without stream evidence.
+    if capture.tail_truncated {
+        return Err("field findings: no complete block in the full result");
+    }
     let head = if capture.truncated {
         capture
             .excerpt
@@ -724,6 +690,27 @@ pub(super) fn compact_findings(
     capture: Option<&crate::result_capture::CapturedResult>,
     upstream: &[Finding],
 ) {
+    let cap = if upstream.is_empty() {
+        FINDINGS_BYTES
+    } else {
+        DISPOSITION_FINDINGS_BYTES - 512
+    };
+    let oversized_block = capture
+        .and_then(|capture| findings_block(capture).ok())
+        .is_some_and(|block| block.len() > 16 * 1024);
+    if (upstream.is_empty()
+        && (outputs.findings.len() > MAX_FINDINGS || canonical_len(&outputs.findings) > cap))
+        || (oversized_block && canonical_len(&outputs.findings) > cap)
+    {
+        let count = outputs.findings.len();
+        if let Some(block) = capture.and_then(|capture| findings_block(capture).ok()) {
+            outputs.extra.insert(ARTIFACT_FINDINGS.into(), block.into());
+        }
+        summarise_findings(&mut outputs.findings, cap);
+        outputs.warnings.truncate(MAX_WARNINGS.saturating_sub(1));
+        outputs.warnings.push(bounded(&format!("findings summarised: {count} entries; full findings retained in the result artifact"), WARNING_BYTES));
+        return;
+    }
     if upstream.is_empty() || canonical_len(&outputs.findings) <= DISPOSITION_FINDINGS_BYTES - 512 {
         return;
     }
@@ -738,6 +725,39 @@ pub(super) fn compact_findings(
             ),
             WARNING_BYTES,
         ));
+    }
+}
+
+/// A display projection only: consumers resolve full findings from artifacts.
+fn summarise_findings(findings: &mut Vec<Finding>, cap: usize) {
+    findings.sort_by_key(|finding| !repair::blocking(finding));
+    findings.truncate(MAX_FINDINGS);
+    for finding in findings.iter_mut() {
+        finding.id = bounded(&finding.id, 128);
+        finding.file = bounded(&finding.file, 128);
+        finding.summary = bounded(&finding.summary, 128);
+        finding.status = bounded(&finding.status, 32);
+        finding.reason = finding.reason.as_deref().map(|text| bounded(text, 128));
+        finding.disposition = finding.disposition.as_deref().map(|text| bounded(text, 32));
+        for value in finding.extra.values_mut() {
+            if let Some(text) = value.as_str() {
+                *value = bounded(text, 128).into();
+            }
+        }
+        finding.extra.retain(|_, value| canonical_len(value) <= 512);
+    }
+    while canonical_len(findings) > cap {
+        if findings.iter().any(|finding| {
+            !finding.extra.is_empty() || !finding.summary.is_empty() || finding.reason.is_some()
+        }) {
+            for finding in findings.iter_mut() {
+                finding.extra.clear();
+                finding.summary.clear();
+                finding.reason = None;
+            }
+        } else {
+            findings.pop();
+        }
     }
 }
 
@@ -764,6 +784,15 @@ pub(super) fn valid_compacted_findings(
     let Some(outputs) = checkpoint.nodes[index].outputs.as_ref() else {
         return true;
     };
+    if let Some(value) = outputs.extra.get(ARTIFACT_FINDINGS) {
+        let upstream: Vec<_> = selected_findings(&plan.nodes[index], plan, checkpoint, positions)
+            .into_iter()
+            .map(|(source, finding)| upstream_finding(&plan.nodes[index], &source, finding))
+            .collect();
+        return value
+            .as_str()
+            .is_some_and(|block| parse_findings(block, &upstream).is_ok());
+    }
     let Some(value) = outputs.extra.get(COMPACT_FINDINGS) else {
         return true;
     };
@@ -798,6 +827,37 @@ pub(super) fn materialised_findings(
     let Some(outputs) = checkpoint.nodes[index].outputs.as_ref() else {
         return Vec::new();
     };
+    if let Some(block) = outputs
+        .extra
+        .get(ARTIFACT_FINDINGS)
+        .and_then(|value| value.as_str())
+    {
+        let node = &plan.nodes[index];
+        let upstream: Vec<_> = selected_findings(node, plan, checkpoint, positions)
+            .into_iter()
+            .map(|(source, finding)| upstream_finding(node, &source, finding))
+            .collect();
+        let mut findings = parse_findings(block, &upstream)
+            .map(|(findings, _, _)| findings)
+            .unwrap_or_default();
+        if let Some(lens) = node
+            .role
+            .as_deref()
+            .and_then(|role| role.strip_prefix("lens."))
+            .or_else(|| {
+                node.extra
+                    .get("review_lens")
+                    .and_then(serde_json::Value::as_str)
+            })
+        {
+            for finding in &mut findings {
+                if !upstream.iter().any(|source| source.id == finding.id) {
+                    finding.extra.insert("lens".into(), lens.into());
+                }
+            }
+        }
+        return findings;
+    }
     let Some(block) = outputs
         .extra
         .get(COMPACT_FINDINGS)
@@ -821,9 +881,10 @@ pub(super) fn materialise_checkpoint_findings(
     checkpoint: &mut GraphCheckpoint,
 ) -> Result<(), String> {
     if !checkpoint.nodes.iter().any(|node| {
-        node.outputs
-            .as_ref()
-            .is_some_and(|outputs| outputs.extra.contains_key(COMPACT_FINDINGS))
+        node.outputs.as_ref().is_some_and(|outputs| {
+            outputs.extra.contains_key(COMPACT_FINDINGS)
+                || outputs.extra.contains_key(ARTIFACT_FINDINGS)
+        })
     }) {
         return Ok(());
     }
@@ -1364,6 +1425,18 @@ pub(super) fn render_input(
                 }
             }
         }
+        if input.outputs.contains(&OutputKind::Findings)
+            && outputs.extra.contains_key(ARTIFACT_FINDINGS)
+        {
+            let section = format!(
+                "{} findings are summarised below; read the staged full result artifact for every finding and its complete evidence.\n",
+                input.node
+            );
+            if section.len() + INPUT_CLOSE.len() > cap.saturating_sub(prompt.len()) {
+                return (prompt, true);
+            }
+            prompt.push_str(&section);
+        }
         for kind in &input.outputs {
             if *kind == OutputKind::Findings && outputs.findings_available != Some(true) {
                 let section = format!("{} findings availability: unavailable\n", input.node);
@@ -1383,10 +1456,16 @@ pub(super) fn render_input(
                         plan.nodes[*index].composite.is_some() && !outputs.findings.is_empty()
                     });
                     let available = outputs.findings_available == Some(true) || partial;
-                    let findings = available.then(|| {
+                    let mut projection = available.then(|| {
                         selected.iter().filter(|(source, _)| source == &input.node)
-                            .map(|(_, finding)| finding).collect::<Vec<_>>()
+                            .map(|(_, finding)| finding.clone()).collect::<Vec<_>>()
                     });
+                    if outputs.extra.contains_key(ARTIFACT_FINDINGS)
+                        && let Some(findings) = &mut projection
+                    {
+                        summarise_findings(findings, FINDINGS_BYTES);
+                    }
+                    let findings = projection.as_ref().map(|findings| findings.iter().collect::<Vec<_>>());
                     if repair_writer(node) {
                         let mut groups: std::collections::BTreeMap<String, Vec<&Finding>> = Default::default();
                         for finding in findings.into_iter().flatten() {

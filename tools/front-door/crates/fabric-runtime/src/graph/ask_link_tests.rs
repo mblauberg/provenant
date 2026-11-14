@@ -41,6 +41,9 @@ impl InboxOwner {
 impl AttemptOwner for InboxOwner {
     type Error = std::convert::Infallible;
 
+    fn wall_now(&self) -> Option<provenant_core::WallTime> {
+        Some(provenant_core::WallTime::from_micros(0).unwrap())
+    }
     fn actor(&self) -> String {
         "chair".into()
     }

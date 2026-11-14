@@ -429,19 +429,27 @@ fn findings_and_verdict_at_the_end_of_a_large_result_are_parsed() {
         "id": "F1", "severity": "high", "file": "a.rs", "line": 1,
         "summary": "issue", "status": "open"
     });
-    for invalid in [
+    for large in [
         vec![finding.clone(); MAX_FINDINGS + 1],
         vec![serde_json::json!({
             "id": "F1", "severity": "high", "file": "a.rs", "line": 1,
             "summary": "x".repeat(OUTPUT_FIELD_BYTES + 1), "status": "open"
         })],
     ] {
-        let block = serde_json::json!({"schema_version": 1, "findings": invalid});
+        let block = serde_json::json!({"schema_version": 1, "findings": large});
         let text = format!("```findings\n{block}\n```");
-        let outputs = make_outputs(Some(&capture(&text)), None, None, None, None);
-        assert!(outputs.findings.is_empty());
-        assert_eq!(outputs.warnings.len(), 1);
-        assert!(outputs.warnings[0].starts_with(FINDINGS_INVALID));
+        let captured = capture(&text);
+        let mut outputs = make_outputs(Some(&captured), None, None, None, None);
+        assert_eq!(outputs.findings_available, Some(true));
+        compact_findings(&mut outputs, Some(&captured), &[]);
+        assert!(!outputs.findings.is_empty());
+        assert!(canonical_len(&outputs.findings) <= FINDINGS_BYTES);
+        assert!(
+            !outputs
+                .warnings
+                .iter()
+                .any(|warning| warning.starts_with(FINDINGS_INVALID))
+        );
     }
 }
 

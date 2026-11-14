@@ -1056,3 +1056,40 @@ fn successful_output_with_incidental_auth_stderr_stays_successful() {
         .unwrap();
     assert_eq!(decoded.outcome, run::Outcome::Succeeded);
 }
+
+/// Small: an unsupported OpenCode reference names the requested route in both
+/// status's reason and output, without copying the provider's arbitrary body.
+#[test]
+fn unsupported_opencode_reference_is_actionable_and_redacted_in_status_and_output() {
+    let route = run::RouteRecord {
+        provider: Some("opencode".into()),
+        model: Some("opencode/example/model".into()),
+        effort: Some("ultra".into()),
+        ..Default::default()
+    };
+    for message in [
+        "Invalid model reference",
+        "Unsupported variant",
+        "effort is not supported",
+    ] {
+        let error = serde_json::json!({"type":"error", "error":{"type":"unknown", "message":format!("{message}; password=fixture-secret"), "response":{"body":{"error":{"code":"invalid_reference", "message":"https://user:secret@example.invalid"}}}}});
+        let mut exit = clean_exit();
+        exit.termination = Some(provenant_os::exec::Termination::Exit(1));
+        let decoded = Registry::default()
+            .decode_captures(
+                &route,
+                error.to_string().as_bytes(),
+                b"",
+                &exit,
+                Path::new("/nonexistent"),
+                None,
+            )
+            .unwrap();
+        for text in [decoded.reason.as_deref().unwrap(), decoded.result.as_str()] {
+            assert!(text.contains(route.model.as_deref().unwrap()));
+            assert!(text.contains("variant=ultra"));
+            assert!(text.contains("choose a supported model and variant"));
+            assert!(!text.contains("fixture-secret") && !text.contains("user:secret"));
+        }
+    }
+}

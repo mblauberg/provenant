@@ -1752,7 +1752,10 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             NodeState::Succeeded => {
                 last.is_some_and(|attempt| {
                     attempt.state == AttemptState::Terminal
-                        && attempt.outcome == Some(AttemptOutcome::Succeeded)
+                        && matches!(
+                            attempt.outcome,
+                            Some(AttemptOutcome::Succeeded | AttemptOutcome::ReviewRequired)
+                        )
                 }) || fallback_settled(node, progress, document, checkpoint)
             }
             NodeState::Failed if progress.advance_error.is_some() => last.is_none_or(|attempt| {

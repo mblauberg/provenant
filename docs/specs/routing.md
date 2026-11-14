@@ -117,6 +117,10 @@ Providers never signal a process or publish completion. Structured errors
 outrank claimed success, provider prose asserts nothing, and malformed frames
 fail closed. A continuation binds the exact adapter, session, account, model and
 controls. A launch spec is built in memory and persists only redacted.
+Unsupported requested OpenCode effort is an actionable `unsupported_effort`
+error naming the model and supported controls. A provider-side invalid model
+or variant error names the requested model and variant in status and output,
+with a remedy, without copying arbitrary provider messages or bodies.
 - Why: a provider's text must not decide an outcome or switch identity, and the
   launch spec carries credentials.
 - Test: `crates/providers/src/tests_stream_outcomes.rs::terminal_answer_and_nonzero_exit_remain_separate_facts`;

@@ -36,7 +36,12 @@ fn text_paths(value: &Value, path: &str, found: &mut Vec<String>) {
                     !text.is_empty()
                         && (matches!(
                             key.as_str(),
-                            "prompt" | "brief" | "spec" | "fragment" | "excerpt"
+                            "prompt"
+                                | "brief"
+                                | "spec"
+                                | "fragment"
+                                | "excerpt"
+                                | "_artifact_findings"
                         ) || text.len() > 4096)
                 }) {
                     found.push(path);

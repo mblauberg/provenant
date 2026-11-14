@@ -1664,6 +1664,201 @@ mod stale_readiness_tests {
         ));
         assert!(same_selected_ready(&route, denied).is_none());
     }
+
+    #[test]
+    fn claude_lane_token_loss_reprobes_the_same_account_without_mutating_credentials()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::exec::{
+            CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
+        };
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct Fake {
+            account_directory: std::path::PathBuf,
+            signed_in: AtomicBool,
+        }
+        impl Executor for Fake {
+            fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                let output = if options.argv[1] == "auth" {
+                    assert_eq!(options.argv[2], "status");
+                    assert_eq!(options.argv[3], "--json");
+                    assert!(options.env.unwrap().iter().any(|(key, value)| {
+                        key == "CLAUDE_CONFIG_DIR" && value == self.account_directory.as_os_str()
+                    }));
+
+                    if self.signed_in.load(Ordering::Relaxed) {
+                        br#"{"loggedIn":true,"email":"account@example.test"}"#.as_slice()
+                    } else {
+                        br#"{"loggedIn":false}"#.as_slice()
+                    }
+                } else if options.argv[1] == "--version" {
+                    b"Claude 2.0\n".as_slice()
+                } else {
+                    panic!("unexpected account probe: {:?}", options.argv);
+                };
+                let stdout = CapturedStream {
+                    bytes: output.to_vec(),
+                    total_bytes: output.len() as u64,
+                    ..Default::default()
+                };
+                Ok(ExecOutcome {
+                    termination: Termination::Exit(0),
+                    stdout,
+                    stderr: CapturedStream::default(),
+                    timed_out: false,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                })
+            }
+        }
+
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let home = root.join("home");
+        let account_directory = home.join(".claude-work");
+        let state = root.join("state");
+        std::fs::create_dir_all(&account_directory)?;
+        std::fs::create_dir_all(&state)?;
+        let token_path = account_directory.join(provenant_providers::claude::LANE_TOKEN_FILE);
+        std::fs::write(&token_path, "registered-token-sentinel\n")?;
+        let token_before = std::fs::read(&token_path)?;
+        let key = provenant_providers::identity::fingerprint("account@example.test")
+            .ok_or("account fingerprint")?;
+        let entry: provenant_providers::accounts::Registration =
+            serde_json::from_value(serde_json::json!({
+                "adapter":"claude", "label":"work", "key":key.clone(),
+                "directory":account_directory
+            }))?;
+        let fake = Fake {
+            account_directory: entry.directory.clone(),
+            signed_in: AtomicBool::new(true),
+        };
+        let executor = provenant_providers::host::HostProbeExecutor::new(&fake, &state)?;
+        let probe = Probe {
+            roots: None,
+            executor: &executor,
+            home: &home,
+            user: std::ffi::OsStr::new("fixture"),
+            scratch: temp.path(),
+        };
+        let route: ResolvedRoute = serde_json::from_value(serde_json::json!({
+            "adapter":"claude", "model":"claude/example", "effort":null,
+            "catalogue_revision":"revision", "account_key":key.clone(), "host":"local",
+            "alternatives":[], "exclusions":[], "eligibility":"eligible",
+            "readiness":{"status":"unavailable","reason":"stale_availability"},
+            "confidentiality":{"evidence_ref":"evidence"}
+        }))?;
+        use provenant_run::Providers as _;
+        let prior_route = run::RouteRecord {
+            provider: Some("claude".into()),
+            model: Some("claude/example".into()),
+            account_key: Some(entry.key.clone()),
+            ..Default::default()
+        };
+        let mut exit = crate::run::tests::clean_exit();
+        exit.termination = Some(Termination::Exit(1));
+        let prior = crate::run::Registry::default().decode_captures(
+            &prior_route,
+            include_bytes!(
+                "../../../../../tests/fixtures/providers/claude/live-auth-required.jsonl"
+            ),
+            b"",
+            &exit,
+            temp.path(),
+            None,
+        )?;
+        assert_eq!(
+            prior.terminal_cause,
+            Some(run::TerminalCause::LaneTokenLost)
+        );
+        let stale = provenant_providers::AvailabilityRecord {
+            schema_version: 1,
+            adapter: "claude".into(),
+            executable: "/fixture/claude".into(),
+            version: "old".into(),
+            last_update: None,
+            fixture_ref: "installed/claude/version".into(),
+            catalogue_revision: "revision".into(),
+            account_key: Some(entry.key.clone()),
+            observed_models: vec![],
+            observed_unix_seconds: 10,
+            expires_unix_seconds: 20,
+        };
+
+        // This is the successor probe after the prior writer stopped with
+        // LaneTokenLost: a healthy account refreshes readiness on the same route.
+        let mut availability = vec![stale.clone()];
+        let selected = retry_stale_selected(
+            &mut availability,
+            &route,
+            30,
+            "revision",
+            || observe_account(&entry, Path::new("/fixture/claude"), &probe, "revision", 30),
+            |records| {
+                assert_eq!(records[0].account_key.as_deref(), Some(entry.key.as_str()));
+                let mut ready = route.clone();
+                ready.readiness = provenant_records::RouteReadiness::Ready {
+                    extra: Default::default(),
+                    availability_ref: records[0].fixture_ref.clone(),
+                    expires_unix_seconds: records[0].expires_unix_seconds,
+                };
+                Some(ready)
+            },
+        )?
+        .ok_or("healthy selected account was not reusable")?;
+        assert_eq!(selected.adapter, route.adapter);
+        assert_eq!(selected.account_key.as_deref(), Some(entry.key.as_str()));
+        assert_eq!(
+            availability[0].account_key.as_deref(),
+            Some(entry.key.as_str())
+        );
+
+        // If the account itself has since signed out, the next fresh observation
+        // becomes an account-login refusal rather than another lane-token stop.
+        assert_eq!(std::fs::read(&token_path)?, token_before);
+        fake.signed_in.store(false, Ordering::Relaxed);
+        let failed = observe_account(&entry, Path::new("/fixture/claude"), &probe, "revision", 31)
+            .expect_err("signed-out account must not be available");
+        let AccountObservationError::AuthRequired(detail) = failed else {
+            panic!("signed-out account lost its typed login outcome: {failed:?}");
+        };
+        let failures = std::collections::BTreeMap::from([(
+            (entry.adapter.clone(), entry.key.clone()),
+            detail.clone(),
+        )]);
+        let failed_route = unavailable_auth_detail(
+            &route,
+            Some(entry.key.as_str()),
+            std::slice::from_ref(&entry),
+            &failures,
+        )
+        .ok_or("selected account login failure was not retained")?;
+        let mut skipped = skip("claude/example", SkipKind::AuthRequired, failed_route);
+        skipped.set_cause(provenant_records::RouteExclusionReason::AuthRequired);
+        let refusal = PrepareError::Candidates {
+            message: detail,
+            plans: Vec::new(),
+            candidate_boundary: None,
+            candidate_resource: None,
+            skipped_routes: vec![skipped],
+            fallback_outcome: Some(provenant_records::run::PreparationFailure::AuthRequired),
+        }
+        .into_refusal();
+        assert!(refusal.auth_required());
+        assert_eq!(
+            refusal.terminal_cause,
+            provenant_records::run::TerminalCause::AccountLoginRequired
+        );
+        assert_eq!(
+            refusal.skipped_routes[0].cause,
+            Some(provenant_records::RouteExclusionReason::AuthRequired)
+        );
+
+        assert_eq!(std::fs::read(&token_path)?, token_before);
+        Ok(())
+    }
 }
 
 /// Name, by registered label only, each account an unpinned route passed over
@@ -3872,11 +4067,6 @@ fn launch_route_record(
         "named_route"
     };
     let mut record = RouteRecord::from_resolved(route, account_label, source);
-    if let Some(warning) = route.extra.get("effort_warning") {
-        record
-            .extra
-            .insert("effort_warning".into(), warning.clone());
-    }
     if let provenant_records::RouteReadiness::Ready { extra, .. } = &route.readiness
         && let Some(state) = extra.get("availability_warning").and_then(|v| v.as_str())
     {

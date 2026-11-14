@@ -465,12 +465,19 @@ pub(super) fn apply_attempt_observation(
                     && disposition_error.is_none();
                 // A writer that reports success with an unfinished handoff
                 // declared a stop; the one next-step decision answers it.
-                let outcome = if outcome == AttemptOutcome::Succeeded
-                    && launched
+                let handoff = result
+                    .as_ref()
+                    .and_then(|capture| capture.handoff.as_ref().ok())
+                    .and_then(Option::as_ref);
+                let outcome = if matches!(
+                    outcome,
+                    AttemptOutcome::Succeeded
+                        | AttemptOutcome::ReviewRequired
+                        | AttemptOutcome::DeclaredStop
+                        | AttemptOutcome::StoppedNoWork
+                ) && launched
                     && node.access == AccessMode::WorktreeWrite
-                    && result
-                        .as_ref()
-                        .is_some_and(|capture| plans::handoff(capture).ok().flatten().is_some())
+                    && handoff.is_some_and(|handoff| handoff.unfinished())
                 {
                     AttemptOutcome::DeclaredStop
                 } else {
@@ -479,6 +486,7 @@ pub(super) fn apply_attempt_observation(
                 let outcome = if matches!(
                     outcome,
                     AttemptOutcome::Succeeded
+                        | AttemptOutcome::ReviewRequired
                         | AttemptOutcome::DeclaredStop
                         | AttemptOutcome::StoppedNoWork
                 ) && disposition_error.is_some()
@@ -499,12 +507,15 @@ pub(super) fn apply_attempt_observation(
                     // worktree, or return to the chair (see `next_step`).
                     progress.advance_error_code = Some("stopped_no_work".into());
                     progress.advance_error = Some(
-                        if outcome == AttemptOutcome::StoppedNoWork {
-                            "writer stopped with no work: no new commit"
+                        if let Some(handoff) = handoff.filter(|handoff| {
+                            handoff.status == provenant_records::handoff::HandoffStatus::Blocked
+                        }) {
+                            bounded(&handoff.note, MAX_ADVANCE_ERROR_BYTES)
+                        } else if outcome == AttemptOutcome::StoppedNoWork {
+                            "writer stopped with no work: no new commit".into()
                         } else {
-                            "writer stopped before finishing"
-                        }
-                        .into(),
+                            "writer stopped before finishing".into()
+                        },
                     );
                     outcome
                 } else if warned || outcome == AttemptOutcome::DeclaredStop {
@@ -542,6 +553,9 @@ pub(super) fn apply_attempt_observation(
                         matches!(&capture.handoff, Ok(Some(handoff))
                             if handoff.status == provenant_records::handoff::HandoffStatus::Blocked)
                     });
+                    if progress.blocked {
+                        attempt.stop = Some(provenant_records::StopCause::Blocked);
+                    }
                     progress.handoff = result
                         .as_ref()
                         .and_then(|capture| capture.handoff.as_ref().ok())
@@ -552,7 +566,7 @@ pub(super) fn apply_attempt_observation(
                 compact_findings(&mut outputs, result.as_deref(), &upstream_findings);
                 progress.outputs = Some(outputs);
                 match outcome {
-                    AttemptOutcome::Succeeded => {
+                    AttemptOutcome::Succeeded | AttemptOutcome::ReviewRequired => {
                         progress.state = NodeState::Succeeded;
                         if node.access == AccessMode::ReadOnly && template::review_node(node) {
                             let head_oid = match &review_range {
@@ -686,7 +700,6 @@ pub(super) fn apply_attempt_observation(
                     }
                     AttemptOutcome::TaskFailed
                     | AttemptOutcome::OtherFailure
-                    | AttemptOutcome::ReviewRequired
                     | AttemptOutcome::DeclaredStop
                     | AttemptOutcome::StoppedNoWork => {
                         progress.state = NodeState::Failed;
