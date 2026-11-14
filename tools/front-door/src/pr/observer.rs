@@ -17,7 +17,8 @@ use provenant_os::fs::{Directory, LockMode, PublishMode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
+    io::Write,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -30,6 +31,8 @@ const RETRY_LAST: Duration = Duration::from_secs(15);
 const RATE_FILE: &str = "rate-limit.json";
 const RATE_LOCK: &str = "rate-limit.lock";
 const CACHE_LIMIT: u64 = 16 * 1024 * 1024;
+const RECENT_CACHE_LIMIT: usize = 64;
+const RUN_HISTORY_LIMIT: usize = 512;
 
 /// One reported check run or the latest state of one status context.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -106,6 +109,115 @@ struct Cached {
     runs: Vec<Page>,
     statuses: Vec<Page>,
 }
+
+#[derive(Clone)]
+struct RunDuration {
+    name: String,
+    duration_ms: i64,
+    completed_at_ms: i64,
+}
+
+#[derive(Clone, Copy)]
+struct Cadence {
+    slow: Duration,
+    near_end: Duration,
+    conditional_requests: bool,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct WaitDomain {
+    wait: provenant_cli::wait::Settings,
+}
+static WAIT_SECTIONS: [provenant_config::DomainSection; 1] =
+    [provenant_cli::wait::SECTION];
+
+fn adaptive_freshness(
+    cached: &Cached,
+    history: &[RunDuration],
+    fast: Duration,
+    cadence: Cadence,
+    now_ms: i64,
+) -> Duration {
+    if fast.is_zero() {
+        return fast;
+    }
+    let pending = cached
+        .runs
+        .iter()
+        .filter_map(|page| page.body.get("check_runs")?.as_array())
+        .flat_map(|runs| runs.iter())
+        .filter(|run| matches!(run.get("status").and_then(Value::as_str),
+            Some("queued" | "in_progress" | "pending" | "waiting" | "requested")))
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        return fast;
+    }
+    let near_end = pending.iter().any(|run| {
+        let Some(name) = run.get("name").and_then(Value::as_str) else { return false; };
+        let Some(started) = time(run.get("started_at")).flatten() else { return false; };
+        let mut durations = history.iter().filter(|sample| sample.name == name)
+            .map(|sample| sample.duration_ms).collect::<Vec<_>>();
+        if durations.is_empty() { return false; }
+        durations.sort_unstable();
+        let expected_ms = durations[durations.len() / 2];
+        let elapsed_ms = now_ms.saturating_sub(started.as_millisecond()).max(0);
+        elapsed_ms.saturating_add(i64::try_from(cadence.near_end.as_millis()).unwrap_or(i64::MAX))
+            >= expected_ms
+    });
+    if near_end { fast } else { cadence.slow.max(fast) }
+}
+
+fn durations_from_cache(cached: &Cached) -> Vec<RunDuration> {
+    cached.runs.iter().filter_map(|page| page.body.get("check_runs")?.as_array())
+        .flat_map(|runs| runs.iter())
+        .filter(|run| run.get("status").and_then(Value::as_str) == Some("completed"))
+        .filter_map(|run| {
+            let started = time(run.get("started_at"))?.flatten()?.as_millisecond();
+            let completed = time(run.get("completed_at"))?.flatten()?.as_millisecond();
+            let duration_ms = completed.checked_sub(started).filter(|duration| *duration > 0)?;
+            Some(RunDuration { name: run.get("name")?.as_str()?.to_owned(), duration_ms, completed_at_ms: completed })
+        }).collect()
+}
+
+fn cached_run_history(dir: &Directory) -> Option<Vec<RunDuration>> {
+    let entries = dir.entries().ok()?;
+    let mut names = Vec::<(i128, OsString)>::new();
+    for entry in entries {
+        let name = entry.ok()?;
+        let Some(text) = name.to_str() else { continue; };
+        let Some(commit) = text.strip_suffix(".json") else { continue; };
+        if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) { continue; }
+        let metadata = dir.metadata_at(&name, false).ok()?;
+        if metadata.kind == provenant_os::fs::FileKind::Regular { names.push((metadata.modified_ns, name)); }
+    }
+    names.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    let mut history = Vec::new();
+    for (_, name) in names.into_iter().take(RECENT_CACHE_LIMIT) {
+        let bytes = dir.read_bounded(&name, CACHE_LIMIT).ok()?;
+        let cached: Cached = serde_json::from_slice(&bytes).ok()?;
+        history.extend(durations_from_cache(&cached));
+    }
+    history.sort_by_key(|sample| sample.completed_at_ms);
+    history.dedup_by(|left, right| left.name == right.name && left.duration_ms == right.duration_ms
+        && left.completed_at_ms == right.completed_at_ms);
+    if history.len() > RUN_HISTORY_LIMIT { history.drain(..history.len() - RUN_HISTORY_LIMIT); }
+    Some(history)
+}
+
+fn settings_roots(state: &Path, project: &Path) -> Result<provenant_core::Roots, ObserveError> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)
+        .ok_or_else(|| ObserveError::Unavailable("cannot resolve CI cadence configuration roots".into()))?;
+    let mut inputs = provenant_core::RootInputs::new(home, project.to_owned());
+    inputs.state_dir = Some(state.to_owned());
+    inputs.workspaces.push(project.to_owned());
+    inputs.resolve(&provenant_os::fs::SystemPathResolver)
+        .map_err(|_| ObserveError::Unavailable("cannot resolve CI cadence configuration roots".into()))
+}
+
+fn request_etag<'a>(cadence: Cadence, previous: Option<&'a Page>) -> Option<&'a str> {
+    if cadence.conditional_requests { previous.and_then(|page| page.etag.as_deref()) } else { None }
+}
 #[derive(Serialize, Deserialize)]
 struct RateLimit {
     reset: i64,
@@ -118,10 +230,8 @@ enum Fetch {
 }
 
 pub(crate) struct Observer<F, C> {
-    dir: Directory,
-    repository: String,
-    forge: F,
-    clock: C,
+    dir: Directory, repository: String, forge: F, clock: C,
+    cadence: Cadence, history: Vec<RunDuration>,
 }
 
 impl Observer<GhTransport, WallClock> {
@@ -134,11 +244,21 @@ impl Observer<GhTransport, WallClock> {
         repository: &str,
         budget: Duration,
     ) -> Result<Self, ObserveError> {
-        let transport = GhTransport {
-            project: project.to_owned(),
-            left: budget,
+        let transport = GhTransport { project: project.to_owned(), left: budget };
+        let settings = match settings_roots(state, project).and_then(|roots| {
+            let sections = provenant_config::DomainSections::<WaitDomain>::new(&WAIT_SECTIONS);
+            provenant_config::read_with_domains(&roots, &sections)
+                .map(|config| config.domains.wait)
+                .map_err(|error| ObserveError::Unavailable(format!("cannot read CI cadence configuration: {error}")))
+        }) {
+            Ok(settings) => settings,
+            Err(error) => {
+                let _ = writeln!(std::io::stderr().lock(),
+                    "warning: {error}; using compiled CI observation cadence");
+                provenant_cli::wait::Settings::default()
+            }
         };
-        Self::with(state, repository, transport, WallClock)
+        Self::with_settings(state, repository, transport, WallClock, settings)
     }
 }
 
@@ -149,6 +269,12 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         forge: F,
         clock: C,
     ) -> Result<Self, ObserveError> {
+        Self::with_settings(state, repository, forge, clock, provenant_cli::wait::Settings::default())
+    }
+
+    #[allow(clippy::disallowed_methods, reason = "optional cadence-history warning") ]
+    fn with_settings(state: &Path, repository: &str, forge: F, clock: C,
+        settings: provenant_cli::wait::Settings) -> Result<Self, ObserveError> {
         let repository = repository
             .strip_prefix("repos/")
             .unwrap_or(repository)
@@ -170,12 +296,18 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         let dir = open_state(state, &key).map_err(|error| {
             ObserveError::Unavailable(format!("cannot open CI observer state: {error}"))
         })?;
-        Ok(Self {
-            dir,
-            repository,
-            forge,
-            clock,
-        })
+        let history = match cached_run_history(&dir) {
+            Some(history) => history,
+            None => {
+                let _ = writeln!(std::io::stderr().lock(),
+                    "warning: recent CI duration cache unavailable; using slower observation cadence");
+                Vec::new()
+            }
+        };
+        let cadence = Cadence { slow: Duration::from_millis(settings.pr_slow_interval_ms),
+            near_end: Duration::from_millis(settings.pr_near_end_window_ms),
+            conditional_requests: settings.pr_conditional_requests };
+        Ok(Self { dir, repository, forge, clock, cadence, history })
     }
 
     /// Every check reported for `commit`. An answer any waiter on the host
@@ -232,15 +364,25 @@ impl<F: Forge, C: Clock> Observer<F, C> {
                 .read_bounded(OsStr::new(&name), CACHE_LIMIT)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+            let freshness = cached.as_ref().map_or(max_age, |cached|
+                adaptive_freshness(cached, &self.history, max_age, self.cadence, now.as_millisecond()));
             let fresh = cached.as_ref().is_some_and(|cached| {
                 let age = now.as_millisecond().saturating_sub(cached.fetched_at);
-                (0..i64::try_from(max_age.as_millis()).unwrap_or(i64::MAX)).contains(&age)
+                (0..i64::try_from(freshness.as_millis()).unwrap_or(i64::MAX)).contains(&age)
             });
             let cached = if fresh {
                 cached.unwrap_or_default()
             } else {
                 match self.fetch(commit, cached.unwrap_or_default()) {
                     Ok(mut fetched) => {
+                        self.history.extend(durations_from_cache(&fetched));
+                        self.history.sort_by_key(|sample| sample.completed_at_ms);
+                        self.history.dedup_by(|left, right| left.name == right.name
+                            && left.duration_ms == right.duration_ms
+                            && left.completed_at_ms == right.completed_at_ms);
+                        if self.history.len() > RUN_HISTORY_LIMIT {
+                            self.history.drain(..self.history.len() - RUN_HISTORY_LIMIT);
+                        }
                         fetched.fetched_at = now.as_millisecond();
                         let bytes = serde_json::to_vec(&fetched).map_err(|error| {
                             ObserveError::Unavailable(format!("cannot encode CI: {error}"))
@@ -373,7 +515,7 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         previous: Option<&Page>,
         prune: fn(Value) -> Value,
     ) -> Result<Page, Fetch> {
-        let etag = previous.and_then(|page| page.etag.as_deref());
+        let etag = request_etag(self.cadence, previous);
         let response = self
             .forge
             .get(path, etag)
@@ -1111,6 +1253,27 @@ mod tests {
                 .as_deref()
                 .is_some_and(|url| url.ends_with("/runs/1"))
         );
+    }
+
+    #[test]
+    fn pending_cache_cadence_speeds_up_near_the_recent_check_duration() {
+        let cached = Cached { runs: vec![Page { etag: None, body: json!({"check_runs":[{
+            "name":"build", "status":"in_progress", "started_at":"1970-01-01T00:00:00Z"
+        }]}) }], ..Cached::default() };
+        let history = [RunDuration { name: "build".into(), duration_ms: 300_000, completed_at_ms: 300_000 }];
+        let cadence = Cadence { slow: Duration::from_secs(15), near_end: Duration::from_secs(30), conditional_requests: true };
+        assert_eq!(adaptive_freshness(&cached, &history, Duration::from_secs(5), cadence, 100_000), Duration::from_secs(15));
+        assert_eq!(adaptive_freshness(&cached, &history, Duration::from_secs(5), cadence, 280_000), Duration::from_secs(5));
+        assert_eq!(adaptive_freshness(&cached, &[], Duration::from_secs(5), cadence, 280_000), Duration::from_secs(15));
+    }
+
+    #[test]
+    fn etag_requests_follow_the_sourced_conditional_setting() {
+        let previous = Page { etag: Some("validator".into()), body: Value::Null };
+        let mut cadence = Cadence { slow: Duration::from_secs(15), near_end: Duration::from_secs(30), conditional_requests: true };
+        assert_eq!(request_etag(cadence, Some(&previous)), Some("validator"));
+        cadence.conditional_requests = false;
+        assert_eq!(request_etag(cadence, Some(&previous)), None);
     }
 
     #[test]

@@ -35,6 +35,7 @@ continuation_copy_depth = 32
 source_view_seconds = 300
 source_view_entries = 100000
 source_view_bytes = 536870912
+resource_sample_interval_ms = 5000
 sandboxed_routes = []
 sandbox_cache_reads = []
 
@@ -113,6 +114,9 @@ pub struct RunConfig {
     /// Maximum total file bytes in one pinned source view.
     #[serde(default = "default_source_view_bytes")]
     pub source_view_bytes: u64,
+    /// Interval between advisory CPU and process-tree observations (default 5s).
+    #[serde(default = "default_resource_sample_interval_ms")]
+    pub resource_sample_interval_ms: u64,
     /// Route prefixes (`adapter/model`) whose lanes run sandboxed under default
     /// configuration. Empty by default; users can add routes (e.g. OpenCode Zen tier
     /// `opencode/opencode/`). An explicit `lanes.sandbox = "off"` / `--no-sandbox`
@@ -279,6 +283,9 @@ fn default_source_view_entries() -> u32 {
 fn default_source_view_bytes() -> u64 {
     512 << 20
 }
+fn default_resource_sample_interval_ms() -> u64 {
+    5_000
+}
 fn default_true() -> bool {
     true
 }
@@ -342,6 +349,7 @@ impl Default for RunConfig {
             source_view_seconds: default_source_view_seconds(),
             source_view_entries: default_source_view_entries(),
             source_view_bytes: default_source_view_bytes(),
+            resource_sample_interval_ms: default_resource_sample_interval_ms(),
             sandboxed_routes: default_sandboxed_routes(),
             sandbox_cache_reads: Vec::new(),
             projects: BTreeMap::new(),
@@ -809,6 +817,7 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("source_view_seconds", "int"),
     FieldMetadata::new("source_view_entries", "int"),
     FieldMetadata::new("source_view_bytes", "int"),
+    FieldMetadata::int("resource_sample_interval_ms", 1, 60000),
     FieldMetadata::new("push_conflict_markers", "bool"),
     FieldMetadata::new("admission_seconds", "integer"),
     FieldMetadata::new("writer_writes", "array"),

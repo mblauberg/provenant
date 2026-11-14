@@ -8,6 +8,9 @@ pub struct Settings {
     pub timeout_seconds: u64,
     pub local_interval_ms: u64,
     pub pr_interval_ms: u64,
+    pub pr_slow_interval_ms: u64,
+    pub pr_near_end_window_ms: u64,
+    pub pr_conditional_requests: bool,
     pub max_targets: u64,
     pub pr_read_timeout_seconds: u64,
 }
@@ -17,6 +20,9 @@ impl Default for Settings {
             timeout_seconds: 300,
             local_interval_ms: 500,
             pr_interval_ms: 5000,
+            pr_slow_interval_ms: 15000,
+            pr_near_end_window_ms: 30000,
+            pr_conditional_requests: true,
             max_targets: 64,
             pr_read_timeout_seconds: 60,
         }
@@ -35,6 +41,8 @@ impl DomainConfig for Settings {
             ("timeout_seconds", self.timeout_seconds, 1, 14400),
             ("local_interval_ms", self.local_interval_ms, 10, 60000),
             ("pr_interval_ms", self.pr_interval_ms, 10, 60000),
+            ("pr_slow_interval_ms", self.pr_slow_interval_ms, 10, 60000),
+            ("pr_near_end_window_ms", self.pr_near_end_window_ms, 0, 60000),
             ("max_targets", self.max_targets, 1, 1024),
             (
                 "pr_read_timeout_seconds",
@@ -56,7 +64,7 @@ impl DomainConfig for Settings {
 pub const SECTION: DomainSection = DomainSection::new::<Settings>(
     "wait",
     |_| {
-        "timeout_seconds = 300\nlocal_interval_ms = 500\npr_interval_ms = 5000\nmax_targets = 64\npr_read_timeout_seconds = 60\n"
+        "timeout_seconds = 300\nlocal_interval_ms = 500\npr_interval_ms = 5000\npr_slow_interval_ms = 15000\npr_near_end_window_ms = 30000\npr_conditional_requests = true\nmax_targets = 64\npr_read_timeout_seconds = 60\n"
     },
 )
 .with_boundary_checks()
@@ -64,6 +72,9 @@ pub const SECTION: DomainSection = DomainSection::new::<Settings>(
     FieldMetadata::int("timeout_seconds", 1, 14400),
     FieldMetadata::int("local_interval_ms", 10, 60000),
     FieldMetadata::int("pr_interval_ms", 10, 60000),
+    FieldMetadata::int("pr_slow_interval_ms", 10, 60000),
+    FieldMetadata::int("pr_near_end_window_ms", 0, 60000),
+    FieldMetadata::new("pr_conditional_requests", "bool"),
     FieldMetadata::int("max_targets", 1, 1024),
     FieldMetadata::int("pr_read_timeout_seconds", 1, 600),
 ]);

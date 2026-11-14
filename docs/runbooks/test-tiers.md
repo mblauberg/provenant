@@ -16,7 +16,7 @@ with the advisory mutation script. It prints the selected crates, targets and
 paths, comparing committed and working-tree changes against `origin/main`.
 Base, workspace, commands, integration mappings, `package_paths` (non-Rust
 paths that affect a crate's unit tests), `test_threads` and runner hosts are set
-in the `verify` port in `.provenant/ports.json`. Tier names are free-form strings;
+in the `verify` port in `config/ports.json` (also exposed through the optional `.provenant/ports.json` link). Tier names are free-form strings;
 each tier declares its commands, package/integration/all selection, and whether
 to warn under host load. Host-load warnings continue locally.
 

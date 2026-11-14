@@ -97,11 +97,6 @@ fn cancel_poll_interval(watched: bool) -> u64 {
     if watched { 1_000 } else { 100 }
 }
 
-// Provider CPU only feeds progress evidence published by the one-second
-// checkpoint, and silence is never a stop reason; sampling faster than the
-// checkpoint only repeated `proc_pidinfo`.
-const CPU_SAMPLE_INTERVAL_MS: u64 = 1_000;
-
 /// Clone failure must leave the driver's writer lease available for recovery.
 fn settlement_recovery(
     writer: &mut Option<provenant_os::fs::LockGuard>,
@@ -267,6 +262,8 @@ pub(crate) fn handoff(
 pub struct GuardianHooks<'a> {
     /// Host disk policy, sampled only while this attempt has a live provider.
     pub disk: Option<&'a dyn DiskPressure>,
+    /// Resource sampling cadence selected from `[domains.run]`; `None` uses the compiled default.
+    pub resource_sample_interval: Option<Duration>,
     pub children: Option<&'a dyn ChildRegistry>,
     /// Run's terminal transaction. Without one, custody stays fenced after
     /// exit until an explicit recovery verifies Run's release attestations.
@@ -876,6 +873,12 @@ impl Driver<'_> {
     ) -> Result<()> {
         let mut warnings = Vec::new();
         let mut omitted_warnings = 0_u64;
+        let resource_sample_interval = hooks
+            .resource_sample_interval
+            .unwrap_or(crate::process_tree::DEFAULT_SAMPLE_INTERVAL)
+            .max(Duration::from_millis(1));
+        let resource_sample_interval_ms = u64::try_from(resource_sample_interval.as_millis())
+            .unwrap_or(u64::MAX);
         // Keep the original inode and path even if the caller later removes
         // its state. A rename alone must not end a publication retry.
         let writer_evidence_identity = DirectoryIdentity::of(&self.writer_dir).ok();
@@ -987,6 +990,7 @@ impl Driver<'_> {
                     self.reservation.scope.attempt,
                     // Without a profile the lane has no sandbox mark to test.
                     self.profile_file.is_some(),
+                    resource_sample_interval,
                 )
             });
         if write_record(
@@ -1128,7 +1132,7 @@ impl Driver<'_> {
             last_stdout_bytes = stdout_bytes;
             last_stderr_bytes = stderr_bytes;
             let cpu_sample_due =
-                now.saturating_sub(last_cpu_observation_ms) >= CPU_SAMPLE_INTERVAL_MS;
+                now.saturating_sub(last_cpu_observation_ms) >= resource_sample_interval_ms;
             let cpu_progress = if cpu_sample_due {
                 last_cpu_observation_ms = now;
                 provider_cpu_micros = self.provider_cpu_micros();
@@ -1645,7 +1649,7 @@ impl Driver<'_> {
                     .unwrap_or(0)
             });
             let mut wait_ms = last_cpu_observation_ms
-                .saturating_add(CPU_SAMPLE_INTERVAL_MS)
+                .saturating_add(resource_sample_interval_ms)
                 .saturating_sub(wait_now);
             if let Some(last) = last_full_census_ms {
                 wait_ms = wait_ms.min(

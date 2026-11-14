@@ -187,7 +187,13 @@ force and refuses a mismatched branch.
 
 Gates decide without a model or attempt and save the decision before dependants
 run. CI gates query the exact pinned SHA; unavailable checks or policy fail
-explicitly.
+explicitly. The shared forge observer uses conditional validators by default,
+controlled by `domains.wait.pr_conditional_requests`. Its cached result age
+uses `pr_slow_interval_ms` while checks run and returns to `pr_interval_ms`
+within `pr_near_end_window_ms` of the median duration for that check name,
+learned from the latest 64 cached commit pages in the repository observer.
+These settings change request cadence only; they do not change a gate verdict.
+Their sources are shown by `provenant config show`.
 - Why: deterministic decisions need durable evidence without a launch.
 - Test: `crates/fabric-runtime/src/graph/graph_plan_and_gates_tests.rs::gate_verdict_fixture_is_attempt_less_and_replays`;
   `crates/fabric-runtime/src/graph/ci_tests.rs::ci_outcomes_are_recorded_and_fail_closed`

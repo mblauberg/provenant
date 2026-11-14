@@ -207,6 +207,11 @@ The process-tree interface reads a host-sampled snapshot of the lane's own
 descendants without process-listing authority. A missing, stale, incomplete or
 unsupported sample is unavailable, never a partial tree or zero memory.
 The sample is periodic observation, not an atomic census or a memory limit.
+`domains.run.resource_sample_interval_ms` controls CPU and process-tree sampling
+(1..=60000 ms, compiled default 5000 ms). Each private snapshot records a
+freshness allowance derived from that interval plus the bounded sample budget;
+the CLI output and public sample schema do not change. The setting source is
+available from `provenant config show`.
 - Why: a memory guard that reads lost observation as zero would approve a
   runaway build.
 - Test: `crates/confinement/src/permissions/tests/process_tree.rs::lane_process_tree_sample_is_private_under_production_profiles`;

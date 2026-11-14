@@ -869,8 +869,44 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
                 globals,
             );
         };
+        let (resource_sample_interval, resource_sample_interval_source) =
+            match roots::resolve(globals, Workspace::Project, Product::Optional) {
+                Ok(resolved) => match provenant_cli::config_reads::read_for(&resolved.roots, "internal") {
+                    Ok(config) => {
+                        let millis = config.domains.run.resource_sample_interval_ms;
+                        let source = config
+                            .origins
+                            .get("domains.run.resource_sample_interval_ms")
+                            .map(|origin| format!("{origin:?}"))
+                            .unwrap_or_else(|| "compiled default (origin unavailable)".into());
+                        if (1..=60_000).contains(&millis) {
+                            (Some(std::time::Duration::from_millis(millis)), source)
+                        } else {
+                            let _ = writeln!(io::stderr().lock(),
+                                "warning: domains.run.resource_sample_interval_ms is outside 1..=60000; using compiled 5000ms default");
+                            (None, "compiled default (invalid configured value)".into())
+                        }
+                    }
+                    Err(error) => {
+                        let _ = writeln!(io::stderr().lock(),
+                            "warning: domains.run resource sampling configuration unavailable; using compiled 5000ms default: {error}");
+                        (None, "compiled default (configuration unavailable)".into())
+                    }
+                },
+                Err(error) => {
+                    let _ = writeln!(io::stderr().lock(),
+                        "warning: resource sampling configuration roots unavailable; using compiled 5000ms default: {error}");
+                    (None, "compiled default (roots unavailable)".into())
+                }
+            };
+        let effective_interval = resource_sample_interval
+            .unwrap_or(provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL);
+        let _ = writeln!(io::stderr().lock(),
+            "resource sampling interval: {}ms (source: {})",
+            effective_interval.as_millis(), resource_sample_interval_source);
         let hooks = provenant_supervisor::GuardianHooks {
             disk: Some(&disk),
+            resource_sample_interval,
             holder: Some(&holder),
             stdout_decoder: Some(holder.stdout_decoder()),
             stderr_decoder: Some(holder.stderr_decoder()),
