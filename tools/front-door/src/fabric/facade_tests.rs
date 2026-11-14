@@ -712,7 +712,16 @@ pub(crate) mod peer_tests {
 
         /// A settled lane whose head is one commit past its base.
         pub(crate) fn resumed_with_lane_commit() -> Result<Self, Box<dyn std::error::Error>> {
-            Self::build("settlement-resume", None, "lane", true)
+            Self::build("settlement-resume", None, "lane", true, None)
+        }
+
+        pub(crate) fn resumed_with_integrated_lane_commit() -> Result<Self, Box<dyn std::error::Error>> {
+            let delivery = provenant_run::HostDeliveryContext::destination(
+                provenant_run::DeliveryMode::Integrate("origin/trunk".into()),
+                "resumed-lane",
+            )?
+            .ok_or("integration delivery")?;
+            Self::build("settlement-resume", None, "lane", true, Some(delivery))
         }
 
         fn resumed_as(operation: &str) -> Result<Self, Box<dyn std::error::Error>> {
@@ -720,13 +729,13 @@ pub(crate) mod peer_tests {
         }
 
         fn settled_fixture(operation: &str, graph_id: Option<&str>) -> Result<Self, Box<dyn std::error::Error>> {
-            Self::build(operation, graph_id, "lane", false)
+            Self::build(operation, graph_id, "lane", false, None)
         }
 
         /// A settled attempt admitted under `graph`'s `node`, attempt 1: the
         /// work key a graph binding this attempt to that node must carry.
         pub(crate) fn for_node(graph: &str, node: &str) -> Result<Self, Box<dyn std::error::Error>> {
-            Self::build(&format!("settled-{graph}"), Some(graph), node, false)
+            Self::build(&format!("settled-{graph}"), Some(graph), node, false, None)
         }
 
         /// Dispatch another attempt in this store under `graph`'s `node`,
@@ -781,7 +790,13 @@ pub(crate) mod peer_tests {
             Ok((self.store.record(run.attempt_id, call)?, head))
         }
 
-        fn build(operation: &str, graph_id: Option<&str>, node: &str, lane_commit: bool) -> Result<Self, Box<dyn std::error::Error>> {
+        fn build(
+            operation: &str,
+            graph_id: Option<&str>,
+            node: &str,
+            lane_commit: bool,
+            delivery: Option<provenant_run::WriterDeliveryRequest>,
+        ) -> Result<Self, Box<dyn std::error::Error>> {
             use provenant_confinement::worktrees::{
                 self, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
             };
@@ -865,7 +880,7 @@ pub(crate) mod peer_tests {
                         account: None,
                         timeout_seconds: 30,
                         delivery_id: None,
-                        deliver: None,
+                        deliver: delivery,
                         worktree: Some(info.path.clone()),
                         access: Default::default(),
                     },

@@ -1245,11 +1245,24 @@ pub(super) fn gc_collects_a_fast_forwarded_lane_its_settlement_missed() -> Resul
     }
     use crate::fabric::gc_cleanup::SPAWNED;
     for busy in [true, false] {
-        let fixture = crate::fabric::peer_tests::SettlementFixture::resumed_with_lane_commit()
-            .map_err(|error| format!("fast-forward fixture creation failed: {error}"))?;
+        let fixture =
+            crate::fabric::peer_tests::SettlementFixture::resumed_with_integrated_lane_commit()
+                .map_err(|error| format!("fast-forward fixture creation failed: {error}"))?;
         let rig = &fixture.rig;
         let lane = fixture.worktree.to_str().ok_or("lane path")?;
-        publish_upstream(rig, &git(rig, &["-C", lane, "rev-parse", "HEAD"])?)?;
+        let lane_head = git(rig, &["-C", lane, "rev-parse", "HEAD"])?;
+        publish_upstream(rig, &lane_head)?;
+        let attempt = fixture.settled.attempt_id.to_string();
+        let delivered = ok(rig, &["lane", "deliver", &attempt, "--json"])?;
+        assert_eq!(delivered["data"]["delivery"]["state"]["state"], "delivered");
+        assert_eq!(
+            delivered["data"]["delivery"]["integration"]["target"],
+            "refs/heads/trunk"
+        );
+        assert_eq!(
+            delivered["data"]["delivery"]["integration"]["integrated"],
+            lane_head
+        );
         if busy {
             SPAWNED.set(Ok(Vec::new()));
             crate::fabric::settle_owned_worktree(
