@@ -134,6 +134,21 @@ pub struct CancellationTarget<'a> {
 }
 
 impl FileJournal {
+    /// Watch the journal owner directory before reading a checkpoint. Events
+    /// are hints to reread typed state, never settlement evidence themselves.
+    pub fn watch_changes(
+        root: &StateRoot,
+        project: ProjectId,
+    ) -> Result<provenant_os::sys::file_events::FileEvents, JournalError> {
+        Ok(graph_directory(root, project)?
+            .watch_changes()
+            .map_err(|source| FsError::Io {
+                operation: "watch graph settlement",
+                path: root.as_path().to_owned(),
+                source,
+            })?)
+    }
+
     /// Persist cancellation without waiting for the graph's journal lock.
     pub fn request_cancellation(
         root: &StateRoot,

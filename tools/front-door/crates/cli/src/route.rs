@@ -29,6 +29,29 @@ pub use resolution::{depletion_facts, resolve_review_family};
 use serde::Serialize;
 use std::{collections::BTreeSet, io, str::FromStr};
 
+/// The same effective catalogue and derived account set used by routing.
+/// This read never probes a provider or filters on quota/readiness.
+pub fn provider_check_routes(
+    roots: &Roots,
+) -> Result<
+    (
+        Box<provenant_routing::RouteList>,
+        provenant_providers::accounts::Settings,
+    ),
+    String,
+> {
+    config::list_data_and_accounts(
+        roots,
+        &RouteListRequest {
+            valid: false,
+            adapter: None,
+            pool: None,
+        },
+    )
+    .map(|(routes, accounts)| (routes, accounts.with_derived_accounts()))
+    .map_err(|error| error.to_string())
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Route {
     /// Show the catalogue, pools, configured weights and pacing policy.

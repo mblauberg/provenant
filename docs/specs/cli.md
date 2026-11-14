@@ -816,6 +816,42 @@ a bounded stderr cause on refusal.
 
 ### Checks report, never repair
 
+`check providers [--live] [--route ADAPTER/ACCOUNT/MODEL]... [--set NAME=VALUE]...`
+uses routing's effective catalogue and account registry, including derived
+accounts. MODEL may contain slashes; ACCOUNT is its configured label. Without
+`--live`, it launches nothing and reports harness discovery, recorded sign-in
+state/source, quota coverage (`known`, `partial`, `unknown`)/source and allowance
+pools. Unknown and partial quota are diagnostic, never selection filters or
+readiness failures. Repeated exact `--route` values narrow the inventory; an
+unknown route is malformed input. With no filters, every configured pair is
+selected independently of quota, routing weights and readiness.
+
+`--live` spends quota on one ordinary read-only lane per selected pair, with a
+fixed one-word, no-tools prompt, the lowest recorded effort (preferring `low`),
+and no continuation or fallback. Normal run preparation, confinement,
+environment finalisation, runtime timeout, settlement and retention apply.
+Readers subscribe to native journal change events, then read typed settlement
+state; they do not sample transition states on a timer. `timeout_seconds`
+(default 60; 1..14400) sets provider runtime and launch wait allowance;
+`concurrency` (default 2; 1..16) caps simultaneous routes. `--set NAME=VALUE`
+overrides these compiled defaults. The report includes both effective values
+and their sources (`default`, `set`). A settlement observation budget includes
+the configured graph launch allowance; its expiry reports
+`settlement_failed`/`settlement_wait_expired` and leaves the ordinary runtime
+owner responsible for cleanup.
+
+Each selected route prints one `ROUTE pass|fail CAUSE attempt=ID` row, followed
+by its readiness facts. CAUSE comes from the typed stop or settlement outcome;
+deadline stops render as `timed_out`. A refusal before admission has no attempt
+ID; the row retains its graph handle and error code when available. `--json`
+returns the same typed rows under `data.rows`, with settings under
+`data.settings`. Exit 0 means all selected routes passed, 1 means any failed.
+Readiness alone passes when the harness exists and no recorded sign-out is
+known; an unknown login is explicitly labelled, never claimed signed in.
+
+- Test: `tests/graph_provider.rs::provider_checks_preserve_routes_and_settlement_causes`
+- Owner: `src/check_providers.rs`, `crates/cli/src/check/mod.rs`
+
 `check` exits 1 on findings, 2 on malformed input and 3 on unreadable
 evidence. `check release` validates Git with redirects, replacements,
 fsmonitor, textconv and lazy fetch off; a missing object never yields a clean

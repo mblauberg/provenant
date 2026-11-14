@@ -22,6 +22,8 @@ mod dates;
 mod release;
 #[derive(Debug, Subcommand)]
 pub enum Check {
+    /// Check every configured provider route without launching a lane
+    Providers(Providers),
     /// Check configuration files
     Config(Page),
     /// Check the installed release
@@ -54,6 +56,20 @@ pub enum Check {
         #[command(flatten)]
         page: Page,
     },
+}
+
+/// Provider smoke checks use ordinary read-only lanes and consume provider quota.
+#[derive(Debug, clap::Args)]
+pub struct Providers {
+    /// Launch one tiny read-only lane per route; consumes quota like any lane
+    #[arg(long)]
+    pub live: bool,
+    /// Exact ADAPTER/ACCOUNT/MODEL (MODEL may contain slashes); repeatable
+    #[arg(long = "route", value_name = "ROUTE")]
+    pub routes: Vec<String>,
+    /// Override timeout_seconds (default 60) or concurrency (default 2); repeatable
+    #[arg(long = "set", value_name = "NAME=VALUE")]
+    pub set: Vec<String>,
 }
 
 #[derive(Debug, Error)]
