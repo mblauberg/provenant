@@ -611,8 +611,12 @@ pub(crate) fn base_env(
 ) -> Vec<(OsString, OsString)> {
     if !input.sandboxed() {
         let mut env: Vec<_> = std::env::vars_os()
-            .filter(|(name, _)| name != provenant_confinement::run_config::SANDBOX_ENV)
+            .filter(|(name, _)| {
+                name != provenant_confinement::run_config::SANDBOX_ENV && name != "HOME"
+            })
             .collect();
+        // Establish the host's selected home before an adapter may isolate it.
+        env.push(("HOME".into(), input.home.into()));
         env.push((
             provenant_confinement::run_config::SANDBOX_ENV.into(),
             "off".into(),

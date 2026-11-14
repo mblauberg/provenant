@@ -1558,6 +1558,9 @@ fn every_adapter_finalises_missing_lane_environment() -> Result<(), ProviderErro
                 .find(|(key, _)| key == "HOME")
                 .map(|(_, value)| value.clone())
                 .expect("adapter HOME");
+            if native {
+                assert_eq!(selected_home, std::ffi::OsString::from("/fixture/home"));
+            }
             let assert_bindings = |spec: &LaunchSpec| {
                 for (key, expected) in [
                     ("HOME", Path::new(&selected_home).to_path_buf()),
