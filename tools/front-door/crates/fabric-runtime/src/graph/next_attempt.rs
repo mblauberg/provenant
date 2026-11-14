@@ -1088,8 +1088,8 @@ mod tests {
         let json = serde_json::json!({
             "account": "acct-1",
             "build_heavy": true,
-            "capability": ["postgres"],
-            "write_root": ["/tmp/write"]
+            "capabilities": ["postgres"],
+            "write_roots": ["/tmp/write"]
         });
         let spec: AttemptSpec = serde_json::from_value(json).unwrap();
         assert_eq!(spec.account.as_deref(), Some("acct-1"));

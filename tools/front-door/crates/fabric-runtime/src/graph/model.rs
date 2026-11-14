@@ -234,13 +234,13 @@ pub struct AttemptSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
     /// Explicit capabilities granted to this attempt.
-    #[serde(default, alias = "capability", skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
     /// Use build-heavy scheduling priority.
-    #[serde(default, alias = "build_weight", skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub build_heavy: bool,
     /// Explicit write roots outside the worktree.
-    #[serde(default, alias = "write_root", skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub write_roots: Vec<String>,
     /// Cargo commands this node's lane may run locally: `all`, `check` or
     /// `none`. Sets the `lanes.local_cargo` knob for this node alone; omitted
@@ -488,7 +488,7 @@ pub struct GraphNode {
     /// Wall-clock limit for this node's lane, in seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_seconds: Option<u64>,
-    #[serde(default, alias = "goal", alias = "brief")]
+    #[serde(default, alias = "brief")]
     pub prompt: String,
     #[serde(default)]
     pub depends_on: Vec<String>,
@@ -967,9 +967,8 @@ pub struct NodeOutputs {
     pub result: Option<ResultOutput>,
     pub verdict: Option<String>,
     pub findings: Vec<Finding>,
-    /// Whether the full findings selection was observed and parsed. Missing
-    /// evidence in older checkpoints remains unknown on replay.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Whether the full findings selection was observed and parsed.
+    #[serde(deserialize_with = "Option::deserialize")]
     pub findings_available: Option<bool>,
     pub branch: Option<String>,
     pub commit: Option<String>,

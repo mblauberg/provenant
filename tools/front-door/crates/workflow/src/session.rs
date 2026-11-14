@@ -1085,7 +1085,7 @@ mod tests {
     }
 
     #[test]
-    fn rebind_keeps_eight_changes_and_upgrades_single_hop_records() {
+    fn rebind_keeps_eight_changes() {
         use provenant_core::{ActorId, HostId};
         let (_temp, root, project) = setup();
         let host = HostId::from_bytes([3; 16]);
@@ -1112,17 +1112,6 @@ mod tests {
                 .rebound_from,
             record.rebound_from
         );
-        // Old single-hop JSON remains readable and is retained on migration.
-        let mut legacy = serde_json::to_value(&record).unwrap();
-        legacy["rebound_from"] = serde_json::to_value(&record.rebound_from[7]).unwrap();
-        let discovery = path(&root, project, "chair").join("discovery.json");
-        std::fs::write(&discovery, serde_json::to_vec(&legacy).unwrap()).unwrap();
-        saved(&selected(11), "notes");
-        let record = selected(11).discovery().unwrap().unwrap().record;
-        assert_eq!(record.rebound_from.len(), 2);
-        assert_eq!(record.rebound_from[0].actor, ActorId::from_bytes([9; 16]));
-        assert_eq!(record.rebound_from[1].actor, ActorId::from_bytes([10; 16]));
-        assert!(std::fs::metadata(discovery).unwrap().len() <= 4096);
     }
 
     #[test]

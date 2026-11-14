@@ -14,7 +14,7 @@ fn past_deadline_account_stands_by_for_an_available_account()
     let reset = local(31)? + 86_400;
     let catalogue = Catalogue::bundled()?;
     let config: RoutingConfig = serde_json::from_value(
-        serde_json::json!({"pacing":{"accounts":{"michael":{"policy":"pace","windows":["seven_day"],"deadline":{"reset_of":"anese"}},"anese":{"policy":"pace","windows":["seven_day"],"deadline":{"reset_of":"michael"}}}}}),
+        serde_json::json!({"pacing":{"accounts":{"claude/michael":{"policy":"pace","windows":["seven_day"],"deadline":{"reset_of":"claude/anese"}},"claude/anese":{"policy":"pace","windows":["seven_day"],"deadline":{"reset_of":"claude/michael"}}}}}),
     )?;
     let mut michael = availability();
     michael.adapter = "claude".into();
@@ -177,7 +177,7 @@ fn pace_reserves_account_headroom_across_windows() -> Result<(), Box<dyn std::er
             20,
         ),
         (
-            serde_json::json!({"pacing": {"accounts": {"opaque-account": {"policy": "pace", "reserve": {"five_hour": 25}}}}}),
+            serde_json::json!({"pacing": {"accounts": {"codex/opaque-account": {"policy": "pace", "reserve": {"five_hour": 25}}}}}),
             provenant_records::diagnostic::PacingReserveSetting::Account,
             provenant_records::diagnostic::PacingSettingSource::Configuration,
             25,
@@ -722,8 +722,8 @@ fn reset_reference_uses_fresh_reset_and_reports_unknown_or_stale_fallback()
     let model = "claude/claude-haiku-5-5";
     let config = || {
         serde_json::from_value::<RoutingConfig>(serde_json::json!({
-            "pacing":{"accounts":{"michael":{"policy":"pace", "windows":["seven_day"],
-                "deadline":{"reset_of":"anese"}}}}
+            "pacing":{"accounts":{"claude/michael":{"policy":"pace", "windows":["seven_day"],
+                "deadline":{"reset_of":"claude/anese"}}}}
         }))
     };
     let own = QuotaWindow {

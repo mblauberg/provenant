@@ -8,7 +8,7 @@ fn capacity_cooldowns_apply_only_to_draws_and_expire() -> Result<(), Box<dyn std
             {"model":"codex/gpt-6-luna", "weight":1, "efforts":["high"]},
             {"model":"codex/gpt-6.1-sol", "weight":1, "efforts":["high"]}
         ]},
-        "pacing": {"accounts": {"opaque-account": {"policy":"pace"}}}
+        "pacing": {"accounts": {"codex/opaque-account": {"policy":"pace"}}}
     }))?;
     let registry = [provenant_providers::Registration {
         quota_source: None,
@@ -190,7 +190,7 @@ fn agy_models_are_paced_and_reserved_by_their_own_quota_pool_only()
         ("agy/gemini-3.8-flash", 10_000, 0, 10_000, "exhausted"),
     ] {
         let config: RoutingConfig = serde_json::from_value(serde_json::json!({
-            "pacing":{"accounts":{"agy-host":{"policy":"pace", "windows":["seven_day"]}}},
+            "pacing":{"accounts":{"agy/agy-host":{"policy":"pace", "windows":["seven_day"]}}},
             "pacing_reserve":{"agy":{"seven_day_percent":5}}
         }))?;
         let result = profile_preview(
@@ -278,7 +278,7 @@ fn agy_exhaustion_follows_the_models_serving_windows() -> Result<(), Box<dyn std
     };
     let ready = |model: &str, status, windows| -> Result<bool, Box<dyn std::error::Error>> {
         let config: RoutingConfig = serde_json::from_value(
-            serde_json::json!({"pacing":{"accounts":{"agy-host":{"policy":"max"}}}}),
+            serde_json::json!({"pacing":{"accounts":{"agy/agy-host":{"policy":"max"}}}}),
         )?;
         agy_profile_ready(
             profile_preview_with_status(config, model, "agy-host", windows, vec![], status),
@@ -336,7 +336,7 @@ fn agy_shared_claude_pool_exhaustion_skips_only_the_claude_models()
     ];
     let ready = |model: &str| -> Result<bool, Box<dyn std::error::Error>> {
         let config: RoutingConfig = serde_json::from_value(
-            serde_json::json!({"pacing":{"accounts":{"agy-host":{"policy":"max"}}}}),
+            serde_json::json!({"pacing":{"accounts":{"agy/agy-host":{"policy":"max"}}}}),
         )?;
         agy_profile_ready(
             profile_preview_with_status(

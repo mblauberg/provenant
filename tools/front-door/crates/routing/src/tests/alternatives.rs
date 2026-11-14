@@ -736,7 +736,7 @@ fn account_spend_and_expiring_override_ignore_reserve() -> Result<(), Box<dyn st
         ),
     ] {
         let config: RoutingConfig = serde_json::from_value(
-            serde_json::json!({"pacing": {"accounts": {"opaque-account": {"policy":profile}}}, "pacing_overrides":overrides}),
+            serde_json::json!({"pacing": {"accounts": {"codex/opaque-account": {"policy":profile}}}, "pacing_overrides":overrides}),
         )?;
         let mut ctx = context(&catalogue, &config, now()?);
         ctx.registry = &registry;
@@ -759,7 +759,7 @@ fn rolling_window_limits_go_despite_monthly_headroom() -> Result<(), Box<dyn std
     let catalogue = Catalogue::bundled()?;
     let config: RoutingConfig = serde_json::from_value(serde_json::json!({
         "pools": {"trial": [{"model":"opencode/opencode-go/glm-5.3-flash", "weight":1, "efforts":[]}]},
-        "pacing": {"accounts": {"go": {"policy":"pace", "windows":["rolling", "seven_day", "monthly"], "reserve":{"rolling":0}}}}
+        "pacing": {"accounts": {"opencode/go": {"policy":"pace", "windows":["rolling", "seven_day", "monthly"], "reserve":{"rolling":0}}}}
     }))?;
     let model = "opencode/opencode-go/glm-5.3-flash";
     let mut record = availability();

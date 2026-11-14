@@ -149,8 +149,8 @@
       "outputs": {
         "schema_version": 2,
         "result": {
-          "digest": "sha256:05cd64f15df64e963edcf0a796a8423deb75489ed6c917b8aa23a5fce762b0c0",
-          "excerpt": "```fragment\n{\"nodes\":[{\"acceptance_checks\":[\"Verify the slice\"],\"access\":\"read_only\",\"goal\":\"Do a slice\",\"id\":\"nested\",\"kind\":\"task\",\"plan\":{\"kinds\":[\"task\"],\"max_nodes\":1},\"write_scope\":[\"src\"]}],\"schema_version\":1}\n```",
+          "digest": "sha256:763db5290ab7f746ce708a9ff77f0a516f7f40bb506855a3ae1ef955161a96f3",
+          "excerpt": "```fragment\n{\"nodes\":[{\"acceptance_checks\":[\"Verify the slice\"],\"access\":\"read_only\",\"id\":\"nested\",\"kind\":\"task\",\"plan\":{\"kinds\":[\"task\"],\"max_nodes\":1},\"prompt\":\"Do a slice\",\"write_scope\":[\"src\"]}],\"schema_version\":1}\n```",
           "truncated": false,
           "path": null
         },
@@ -190,8 +190,8 @@
       "outputs": {
         "schema_version": 2,
         "result": {
-          "digest": "sha256:73940d06c095eb2991bb4f31c1398f647ed1c244813cae7b5e37ce6f2712ced8",
-          "excerpt": "```fragment\n{\"nodes\":[{\"acceptance_checks\":[\"Verify the slice\"],\"access\":\"read_only\",\"goal\":\"Do a slice\",\"id\":\"inner\",\"write_scope\":[\"src\"]}],\"schema_version\":1}\n```",
+          "digest": "sha256:900bc248d970f5d3c820a7336239cd7b6f8d4fa4cb3b58679dabc09f28abac36",
+          "excerpt": "```fragment\n{\"nodes\":[{\"acceptance_checks\":[\"Verify the slice\"],\"access\":\"read_only\",\"id\":\"inner\",\"prompt\":\"Do a slice\",\"write_scope\":[\"src\"]}],\"schema_version\":1}\n```",
           "truncated": false,
           "path": null
         },

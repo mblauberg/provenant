@@ -498,7 +498,6 @@ fn outputs(
     plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
-    legacy: bool,
 ) -> Result<(NodeOutputs, Option<NodeDecisionCause>), String> {
     let mut selected = NodeOutputs {
         extra: Default::default(),
@@ -521,7 +520,7 @@ fn outputs(
     let mut family_notices = Vec::new();
     let mut truncation_warning_indices = Vec::new();
     let partial = spec.min_successful.is_some() || spec.reduce_verdict;
-    let unavailable = unavailable_with_wording(spec, checkpoint, positions, legacy);
+    let unavailable = unavailable(spec, checkpoint, positions);
     let finding_exports: Vec<_> = spec
         .exports
         .iter()
@@ -786,11 +785,7 @@ fn outputs(
             headers.push(family_notices.join("\n"));
         }
         if !unavailable.is_empty() {
-            headers.push(format!(
-                "Unavailable {}:\n{}",
-                if legacy { "lenses" } else { "members" },
-                unavailable.join("\n")
-            ));
+            headers.push(format!("Unavailable members:\n{}", unavailable.join("\n")));
         }
         let full_header = headers.join("\n");
         let header = bounded(&full_header, header_limit);
@@ -922,11 +917,10 @@ fn exporting_members(spec: &CompositeSpec, positions: &BTreeMap<String, usize>) 
 }
 
 /// Failed exporting members as `id: reason`.
-fn unavailable_with_wording(
+fn unavailable(
     spec: &CompositeSpec,
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
-    legacy: bool,
 ) -> Vec<String> {
     if spec.min_successful.is_none() && !spec.reduce_verdict {
         return Vec::new();
@@ -943,7 +937,6 @@ fn unavailable_with_wording(
             let reason = progress.advance_error.as_deref().unwrap_or_else(|| {
                 match progress.attempts.last().and_then(|a| a.outcome.as_ref()) {
                     Some(AttemptOutcome::AdapterUnavailable) => "adapter unavailable",
-                    _ if legacy => "lens failed",
                     _ => "member failed",
                 }
             });
@@ -958,15 +951,6 @@ fn coverage_shortfall(
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
 ) -> Option<String> {
-    coverage_shortfall_with_wording(spec, checkpoint, positions, false)
-}
-
-fn coverage_shortfall_with_wording(
-    spec: &CompositeSpec,
-    checkpoint: &GraphCheckpoint,
-    positions: &BTreeMap<String, usize>,
-    legacy: bool,
-) -> Option<String> {
     let members = exporting_members(spec, positions);
     let minimum = if spec.reduce_verdict {
         spec.min_successful.unwrap_or(members.len()).max(1)
@@ -979,10 +963,9 @@ fn coverage_shortfall_with_wording(
         .count();
     (succeeded < minimum).then(|| {
         format!(
-            "coverage_below_minimum: {succeeded} of {} {} succeeded, minimum {minimum}; unavailable: {}",
+            "coverage_below_minimum: {succeeded} of {} members succeeded, minimum {minimum}; unavailable: {}",
             members.len(),
-            if legacy { "lenses" } else { "members" },
-            unavailable_with_wording(spec, checkpoint, positions, legacy).join("; ")
+            unavailable(spec, checkpoint, positions).join("; ")
         )
     })
 }
@@ -1011,7 +994,7 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
     if state == NodeState::Succeeded
         || (shortfall.is_some() && review::composite_review(spec, plan, positions))
     {
-        match outputs(spec, plan, checkpoint, positions, false) {
+        match outputs(spec, plan, checkpoint, positions) {
             Ok(mut value) => {
                 if state == NodeState::Failed {
                     review::mark_partial(&mut value.0);
@@ -1138,30 +1121,13 @@ pub(super) fn validate_progress(
     let failed_for_coverage = progress.state == NodeState::Failed
         && state == NodeState::Succeeded
         && progress.advance_error_code.as_deref() == Some("coverage_below_minimum")
-        && (progress.advance_error == shortfall
-            || node
-                .composite
-                .as_ref()
-                .and_then(|spec| {
-                    coverage_shortfall_with_wording(spec, checkpoint, positions, true)
-                        .map(|reason| bounded(&reason, MAX_ADVANCE_ERROR_BYTES))
-                })
-                .is_some_and(|legacy| progress.advance_error.as_ref() == Some(&legacy)));
+        && progress.advance_error == shortfall;
     let mut export = node
         .composite
         .as_ref()
-        .map(|spec| outputs(spec, plan, checkpoint, positions, false));
+        .map(|spec| outputs(spec, plan, checkpoint, positions));
     if failed_for_coverage && let Some(Ok((output, _))) = &mut export {
         review::mark_partial(output);
-    }
-    if progress
-        .outputs
-        .as_ref()
-        .is_some_and(|outputs| outputs.findings_available.is_none())
-        && let Some(Ok(expected)) = &mut export
-    {
-        // An older checkpoint retains unknown availability on replay.
-        expected.0.findings_available = None;
     }
     let failed_for_export = progress.state == NodeState::Failed
         && state == NodeState::Succeeded
@@ -1195,13 +1161,6 @@ pub(super) fn validate_progress(
                     export.and_then(Result::ok).is_some_and(|(output, cause)| {
                         progress.outputs.as_ref() == Some(&output)
                             && progress.truncation_cause == cause
-                    }) || node.composite.as_ref().is_some_and(|spec| {
-                        outputs(spec, plan, checkpoint, positions, true)
-                            .ok()
-                            .is_some_and(|(output, cause)| {
-                                progress.outputs.as_ref() == Some(&output)
-                                    && progress.truncation_cause == cause
-                            })
                     })
                 }
             }

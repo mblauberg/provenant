@@ -126,12 +126,9 @@ fn optional_findings_distinguish_missing_invalid_and_valid_empty() {
             .as_ref()
             .unwrap();
         assert_eq!(output.findings_available, Some(available));
-        let mut stored = serde_json::to_value(output).unwrap();
+        let stored = serde_json::to_value(output).unwrap();
         let decoded: NodeOutputs = serde_json::from_value(stored.clone()).unwrap();
         assert_eq!(decoded.findings_available, Some(available));
-        stored.as_object_mut().unwrap().remove("findings_available");
-        let older: NodeOutputs = serde_json::from_value(stored).unwrap();
-        assert_eq!(older.findings_available, None);
         let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
         let replayed = replay
             .checkpoint

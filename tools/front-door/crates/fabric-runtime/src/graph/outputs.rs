@@ -785,7 +785,7 @@ pub(super) fn valid_compacted_findings(
 }
 
 /// Expand a compacted synthesis projection using the same selected inputs as
-/// settlement. Legacy checkpoints have no block and use their stored list.
+/// settlement. Uncompacted outputs retain their stored list.
 pub(super) fn materialised_findings(
     index: usize,
     plan: &PlannedGraph,

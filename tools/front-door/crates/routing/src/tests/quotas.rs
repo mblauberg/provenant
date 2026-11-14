@@ -19,8 +19,8 @@ fn reset_reference_standby_and_continue_after_observed_deadline()
     }];
     for (after, factor) in [("standby", 0), ("continue", 5_000)] {
         let config: RoutingConfig = serde_json::from_value(serde_json::json!({
-            "pacing":{"accounts":{"michael":{"policy":"pace", "windows":["seven_day"],
-                "deadline":{"reset_of":"anese", "window":"seven_day"}, "after_deadline":after}}}
+            "pacing":{"accounts":{"claude/michael":{"policy":"pace", "windows":["seven_day"],
+                "deadline":{"reset_of":"claude/anese", "window":"seven_day"}, "after_deadline":after}}}
         }))?;
         let route = profile_preview(
             config,
@@ -90,7 +90,8 @@ fn selected_windows_cover_pro_cursor_agy_and_free_profiles()
         let config: RoutingConfig = if account == "zen" {
             serde_json::from_value(serde_json::json!({"pacing":{"free":{"opencode":profile}}}))?
         } else {
-            serde_json::from_value(serde_json::json!({"pacing":{"accounts":{account:profile}}}))?
+            let key = format!("{}/{account}", model.split('/').next().unwrap_or_default());
+            serde_json::from_value(serde_json::json!({"pacing":{"accounts":{key:profile}}}))?
         };
         let route = profile_preview(config, model, account, windows, vec![])?;
         assert!(
@@ -132,7 +133,7 @@ fn fixed_deadlines_use_host_local_weekly_monthly_and_absolute_times()
         ),
     ] {
         let config: RoutingConfig = serde_json::from_value(serde_json::json!({
-            "pacing":{"accounts":{"michael":{"policy":"pace", "windows":[selector],
+            "pacing":{"accounts":{"claude/michael":{"policy":"pace", "windows":[selector],
                 "deadline":deadline}}}
         }))?;
         let route = profile_preview(
@@ -172,8 +173,8 @@ fn refreshed_peer_reset_preserves_handover_in_the_current_account_cycle()
     use provenant_quota::{QuotaStatus, QuotaWindow};
     let model = "claude/claude-haiku-5-5";
     let config: RoutingConfig = serde_json::from_value(serde_json::json!({
-        "pacing":{"accounts":{"michael":{"policy":"pace", "windows":["seven_day"],
-            "deadline":{"reset_of":"anese"}}}}
+        "pacing":{"accounts":{"claude/michael":{"policy":"pace", "windows":["seven_day"],
+            "deadline":{"reset_of":"claude/anese"}}}}
     }))?;
     // Michael's cycle spans [-302300, 302500]. Anese's newly observed next
     // reset is 432100, so the handover in Michael's cycle was at -172700.
@@ -226,20 +227,20 @@ fn account_profile_and_overrides_govern_free_models() -> Result<(), Box<dyn std:
     };
     // An account set to off cannot serve a free model, whatever the free profile says.
     assert!(blocked(serde_json::json!({"pacing":{
-        "accounts":{"zen":{"policy":"off"}}, "free":{"opencode":{"policy":"max"}}}}))?);
+        "accounts":{"opencode/zen":{"policy":"off"}}, "free":{"opencode":{"policy":"max"}}}}))?);
     // Without an account profile, the free profile is the provider default.
     assert!(blocked(
         serde_json::json!({"pacing":{"free":{"opencode":{"policy":"off"}}}})
     )?);
     assert!(!blocked(serde_json::json!({"pacing":{
-        "accounts":{"zen":{"policy":"max"}}, "free":{"opencode":{"policy":"off"}}}}))?);
+        "accounts":{"opencode/zen":{"policy":"max"}}, "free":{"opencode":{"policy":"off"}}}}))?);
     // An active override outranks the account profile; an expired one does not.
     let override_row = |expires: i64| serde_json::json!([{"account":"zen", "policy":"spend", "schedule":{"expires":provenant_core::WallTime::from_unix_seconds(expires).map(|at| at.to_string()).ok()}}]);
     assert!(!blocked(serde_json::json!({
-        "pacing":{"accounts":{"zen":{"policy":"off"}}}, "pacing_overrides": override_row(1_000_000)
+        "pacing":{"accounts":{"opencode/zen":{"policy":"off"}}}, "pacing_overrides": override_row(1_000_000)
     }))?);
     assert!(blocked(serde_json::json!({
-        "pacing":{"accounts":{"zen":{"policy":"off"}}}, "pacing_overrides": override_row(1)
+        "pacing":{"accounts":{"opencode/zen":{"policy":"off"}}}, "pacing_overrides": override_row(1)
     }))?);
     Ok(())
 }
@@ -249,8 +250,8 @@ fn newer_unknown_reference_supersedes_older_reset() -> Result<(), Box<dyn std::e
     use provenant_quota::{QuotaStatus, QuotaWindow};
     let model = "claude/claude-haiku-5-5";
     let config: RoutingConfig = serde_json::from_value(serde_json::json!({
-        "pacing":{"accounts":{"michael":{"policy":"pace", "windows":["seven_day"],
-            "deadline":{"reset_of":"anese"}}}}
+        "pacing":{"accounts":{"claude/michael":{"policy":"pace", "windows":["seven_day"],
+            "deadline":{"reset_of":"claude/anese"}}}}
     }))?;
     let own = QuotaWindow {
         pool: "seven_day".into(),
@@ -288,7 +289,7 @@ fn monthly_day_31_clamps_to_a_shorter_months_last_day() -> Result<(), Box<dyn st
             .map(|z| z.timestamp().as_second())
     };
     let config: RoutingConfig = serde_json::from_value(serde_json::json!({
-        "pacing":{"accounts":{"michael":{"policy":"pace", "windows":["monthly"],
+        "pacing":{"accounts":{"claude/michael":{"policy":"pace", "windows":["monthly"],
             "deadline":"day 31"}}}
     }))?;
     let route = profile_preview(
@@ -320,7 +321,7 @@ fn daily_selector_is_neutral_until_a_daily_window_is_observable()
     let model = "claude/claude-haiku-5-5";
     let config = || {
         serde_json::from_value::<RoutingConfig>(serde_json::json!({
-            "pacing":{"accounts":{"michael":{"policy":"pace", "windows":["daily"]}}}
+            "pacing":{"accounts":{"claude/michael":{"policy":"pace", "windows":["daily"]}}}
         }))
     };
     let weekly = QuotaWindow {
@@ -401,7 +402,7 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
         ..RoutingConfig::default()
     };
     config.pacing.accounts.insert(
-        "go".into(),
+        "opencode/go".into(),
         PacingProfile {
             policy: Some(PacingPolicy::Pace),
             windows: Some(vec![PacingWindow::Rolling, PacingWindow::Monthly]),
@@ -700,7 +701,7 @@ fn opencode_zen_pool_does_not_inherit_go_pacing_quota() -> Result<(), Box<dyn st
         .providers
         .insert("opencode".into(), PacingPolicy::Pace);
     config.pacing.accounts.insert(
-        "go".into(),
+        "opencode/go".into(),
         PacingProfile {
             policy: Some(PacingPolicy::Off),
             windows: Some(vec![PacingWindow::Rolling]),
@@ -794,7 +795,7 @@ fn account_level_exhausted_record_stands_by_when_the_model_windows_are_unprobed(
         resets_unix_seconds: Some(604_900),
     }];
     let config: RoutingConfig = serde_json::from_value(serde_json::json!({
-        "pacing":{"accounts":{"michael":{"policy":"pace", "windows":["seven_day"]}}}
+        "pacing":{"accounts":{"claude/michael":{"policy":"pace", "windows":["seven_day"]}}}
     }))?;
     let route = profile_preview(
         config,
