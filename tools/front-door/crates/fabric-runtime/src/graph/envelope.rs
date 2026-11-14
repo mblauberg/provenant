@@ -321,7 +321,7 @@ fn node_bound(
                 extra: Default::default(),
                 verdict_error: Some(String::new()),
                 schema_version: 2,
-        decide_outcome: None,
+                decide_outcome: None,
                 result: Some(ResultOutput {
                     extra: Default::default(),
                     digest: String::new(),

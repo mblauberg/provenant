@@ -293,7 +293,11 @@ mod tests {
         let mut ports = provenant_config::PortTable::builtin();
         ports.worktree_layout.roots = vec![PathBuf::from(".claude/worktrees")];
         ports.worktree_layout.default = PathBuf::from(".claude/worktrees/<branch>");
-        std::fs::write(config.join("ports.json"), serde_json::to_vec(&ports).unwrap()).unwrap();
+        std::fs::write(
+            config.join("ports.json"),
+            serde_json::to_vec(&ports).unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             collect_path(temp.path(), Path::new("/repo"), None, "cloud/abc").unwrap(),
             Path::new("/repo/.claude/worktrees/cloud-abc")

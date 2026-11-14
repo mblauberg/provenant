@@ -8,8 +8,8 @@ use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use support::{
-    Result, TestRig, code, install_fake_claude_auth, register_account,
-    set_claude_config_dir, write_fake_claude_identity,
+    Result, TestRig, code, install_fake_claude_auth, register_account, set_claude_config_dir,
+    write_fake_claude_identity,
 };
 
 fn message(id: &str, output: u64) -> String {
@@ -25,10 +25,7 @@ fn message(id: &str, output: u64) -> String {
     )
 }
 
-fn start_chair_session(
-    rig: &TestRig,
-    session: &str,
-) -> Result<provenant_os::exec::ExecOutcome> {
+fn start_chair_session(rig: &TestRig, session: &str) -> Result<provenant_os::exec::ExecOutcome> {
     let input = serde_json::to_vec(&json!({
         "hook_event_name":"SessionStart", "session_id":session, "cwd":rig.project,
         "transcript_path":rig.root.join("transcript.jsonl"), "source":"startup"

@@ -9,8 +9,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use support::{
-    Result, TestRig, code, install_fake_claude_auth, register_account,
-    set_claude_config_dir, write_fake_claude_identity,
+    Result, TestRig, code, install_fake_claude_auth, register_account, set_claude_config_dir,
+    write_fake_claude_identity,
 };
 
 fn configured() -> Result<TestRig> {
@@ -246,7 +246,10 @@ fn chair_start_records_verified_identity_without_a_pending_handoff() -> Result {
     assert_eq!(event["unit"], "claude");
     assert_eq!(event["account_identity"]["identity"]["state"], "known");
     assert_eq!(event["account_identity"]["identity"]["provider"], "claude");
-    assert_eq!(event["account_identity"]["identity"]["account_key"], identity_key);
+    assert_eq!(
+        event["account_identity"]["identity"]["account_key"],
+        identity_key
+    );
     assert_eq!(event["account_identity"]["epoch"]["state"], "unknown");
     assert_eq!(event["account_identity"]["evidence_source"], "provider");
     assert!(event.get("account").is_none());

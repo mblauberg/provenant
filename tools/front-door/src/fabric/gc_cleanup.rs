@@ -109,10 +109,7 @@ fn landed_evidence(
 ) -> provenant_records::custody::LandedEvidence {
     provenant_records::custody::LandedEvidence {
         predicate: provenant_records::custody::LandingPredicate::Landed,
-        source: provenant_records::custody::LandingSource::IntegrationTarget {
-            reference,
-            commit,
-        },
+        source: provenant_records::custody::LandingSource::IntegrationTarget { reference, commit },
     }
 }
 
@@ -130,8 +127,13 @@ fn valid_removal_evidence(evidence: &provenant_records::custody::LandedEvidence)
     use provenant_records::custody::{LandingPredicate, LandingSource};
     matches!(
         (&evidence.predicate, &evidence.source),
-        (LandingPredicate::Landed, LandingSource::IntegrationTarget { .. })
-            | (LandingPredicate::Subsumed, LandingSource::RetainedRef { .. })
+        (
+            LandingPredicate::Landed,
+            LandingSource::IntegrationTarget { .. }
+        ) | (
+            LandingPredicate::Subsumed,
+            LandingSource::RetainedRef { .. }
+        )
     )
 }
 
@@ -164,9 +166,9 @@ fn delivered_removal_evidence(
         {
             return false;
         }
-        let Ok(Some(destination)) = provenant_run::HostDeliveryContext::destination(
-            request.mode.clone(), &request.branch,
-        ) else {
+        let Ok(Some(destination)) =
+            provenant_run::HostDeliveryContext::destination(request.mode.clone(), &request.branch)
+        else {
             return false;
         };
         let remote = destination.remote;
@@ -305,7 +307,8 @@ fn recovered_removal_records(
             SubjectKind::Branch
                 if branch == Some(candidate.subject.id.as_str())
                     && worktree_tip == Some(candidate.tip)
-                    && worktree_intent.is_some_and(|intent| intent.evidence == candidate.evidence) =>
+                    && worktree_intent
+                        .is_some_and(|intent| intent.evidence == candidate.evidence) =>
             {
                 let reference = provenant_confinement::repo::GitRefName::new(&candidate.subject.id)
                     .map_err(|_| "pruning intent contains an invalid branch subject")?;
@@ -429,7 +432,9 @@ pub(crate) fn collect_unsettled(
             roots,
             workers,
             None,
-            Collection::Sweep { upstream: upstream.clone() },
+            Collection::Sweep {
+                upstream: upstream.clone(),
+            },
             Some(&mut collection.removals),
         );
         if let Err(error) = collected {
@@ -607,7 +612,8 @@ fn collect_owned_worktree_with(
     let retention_reason =
         settlement_retention_reason(&record.state, task.deliver.is_some(), delivery);
     let mut pruning_intent = replayed.clone();
-    let removal_evidence = std::cell::RefCell::new(None::<provenant_records::custody::LandedEvidence>);
+    let removal_evidence =
+        std::cell::RefCell::new(None::<provenant_records::custody::LandedEvidence>);
     let collection_error = std::cell::RefCell::new(None::<String>);
     let final_reason = std::cell::Cell::new(retention_reason);
     let result = (|| -> Result<_, Box<dyn std::error::Error>> {
@@ -633,7 +639,9 @@ fn collect_owned_worktree_with(
                         )?;
                         let candidates: Vec<RemovalIntent> = serde_json::from_value(evidence)?;
                         if replayed_receipt["schema_version"] != 2 {
-                            return Err("pruning receipt has an unsupported removal-evidence schema".into());
+                            return Err(
+                                "pruning receipt has an unsupported removal-evidence schema".into(),
+                            );
                         }
                         let confirmed = recovered_removal_records(
                             context,
@@ -646,7 +654,9 @@ fn collect_owned_worktree_with(
                         if !confirmed.iter().any(|record| {
                             record.subject.kind == provenant_records::custody::SubjectKind::Worktree
                         }) {
-                            return Err("pruned worktree has no matching recorded removal evidence".into());
+                            return Err(
+                                "pruned worktree has no matching recorded removal evidence".into(),
+                            );
                         }
                         if let Some(records) = removal_records.as_deref_mut() {
                             records.extend(confirmed.iter().cloned());
@@ -804,20 +814,32 @@ fn collect_owned_worktree_with(
                     (None, Some((reference, fetched))) => (reference.clone(), *fetched),
                     (None, None) => {
                         if let Some(records) = removal_records.as_deref_mut() {
-                            records.push(kept_unproven_worktree(settled.project_id, &writer.worktree, head));
+                            records.push(kept_unproven_worktree(
+                                settled.project_id,
+                                &writer.worktree,
+                                head,
+                            ));
                         }
                         return Err("no exact ref is available for removal evidence".into());
                     }
                 };
                 let evidence = if has_delivered_ref {
-                    delivered_removal_evidence(delivery_request, delivery, &proof_reference, head, pinned)
+                    delivered_removal_evidence(
+                        delivery_request,
+                        delivery,
+                        &proof_reference,
+                        head,
+                        pinned,
+                    )
                 } else {
                     landed_evidence(proof_reference.clone(), pinned)
                 };
                 *removal_evidence.borrow_mut() = Some(evidence.clone());
                 let target = worktrees::LandingTarget {
-                    reference: Some(provenant_confinement::repo::GitRefName::new(&proof_reference)
-                        .map_err(|_| worktrees::WorktreeError::InvalidRequest)?),
+                    reference: Some(
+                        provenant_confinement::repo::GitRefName::new(&proof_reference)
+                            .map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
+                    ),
                     tip: pinned,
                 };
                 if delivery.is_none()
@@ -831,7 +853,12 @@ fn collect_owned_worktree_with(
                     // Retained lane refs prove subsumption, but only an exact
                     // integration target permits deleting the local branch.
                     upstream: delivery_request
-                        .filter(|request| matches!(request.mode, provenant_records::run::DeliveryMode::Integrate(_)))
+                        .filter(|request| {
+                            matches!(
+                                request.mode,
+                                provenant_records::run::DeliveryMode::Integrate(_)
+                            )
+                        })
                         .filter(|_| is_integration_evidence(&evidence))
                         .map(|_| pinned),
                     ..output_policy
@@ -840,28 +867,29 @@ fn collect_owned_worktree_with(
                     "schema_version":2, "state":"pruning", "worktree":writer.worktree,
                     "branch":format!("refs/heads/{}", owner.branch)
                 });
-                    let mut candidates = vec![removal_intent(
+                let mut candidates = vec![removal_intent(
+                    settled.project_id,
+                    provenant_records::custody::SubjectKind::Worktree,
+                    writer.worktree.to_string_lossy(),
+                    head,
+                    &evidence,
+                )];
+                let branch = provenant_confinement::repo::GitRefName::branch(&owner.branch)
+                    .map_err(|_| worktrees::WorktreeError::InvalidRequest)?;
+                if policy.upstream.is_some()
+                    && worktrees::created_branch(context, &branch, owner.reference.as_ref())?
+                        .is_some()
+                    && worktrees::ref_tip(context, &branch, cancel)? == Some(head)
+                {
+                    candidates.push(removal_intent(
                         settled.project_id,
-                        provenant_records::custody::SubjectKind::Worktree,
-                        writer.worktree.to_string_lossy(),
+                        provenant_records::custody::SubjectKind::Branch,
+                        branch.as_str(),
                         head,
                         &evidence,
-                    )];
-                    let branch = provenant_confinement::repo::GitRefName::branch(&owner.branch)
-                        .map_err(|_| worktrees::WorktreeError::InvalidRequest)?;
-                    if policy.upstream.is_some()
-                        && worktrees::created_branch(context, &branch, owner.reference.as_ref())?.is_some()
-                        && worktrees::ref_tip(context, &branch, cancel)? == Some(head)
-                    {
-                        candidates.push(removal_intent(
-                            settled.project_id,
-                            provenant_records::custody::SubjectKind::Branch,
-                            branch.as_str(),
-                            head,
-                            &evidence,
-                        ));
-                    }
-                    intent["removal_intents"] = serde_json::to_value(&candidates)?;
+                    ));
+                }
+                intent["removal_intents"] = serde_json::to_value(&candidates)?;
                 if let Some(warning) = tracking_ref_warning.as_ref() {
                     intent["tracking_ref_warning"] = serde_json::json!(warning);
                 }
@@ -948,8 +976,7 @@ fn collect_owned_worktree_with(
     {
         receipt["branch"] = branch.clone();
     }
-    if receipt["state"] == "pruned" && !receipt["removal_records"].is_array()
-    {
+    if receipt["state"] == "pruned" && !receipt["removal_records"].is_array() {
         return Err("pruned GC receipt is missing required removal evidence".into());
     }
     // Retry remote removal even when an earlier worker already pruned the tree.
@@ -1046,7 +1073,6 @@ fn collect_owned_worktree_with(
     Ok(())
 }
 
-
 #[cfg(test)]
 mod removal_tests {
     use super::*;
@@ -1059,16 +1085,18 @@ mod removal_tests {
         let path = Path::new("/repo/.worktrees/topic");
         let evidence = landed_evidence("refs/remotes/origin/main".into(), target);
         let mut result = provenant_confinement::worktrees::RemoveOutcome::default();
-        result.removed.push(provenant_confinement::worktrees::WorktreeInfo {
-            warnings: Vec::new(),
-            path: path.to_path_buf(),
-            branch: Some("refs/heads/topic".into()),
-            head: tip,
-            dirty: provenant_confinement::worktrees::WorktreeCondition::Clean,
-            occupancy: provenant_confinement::worktrees::Occupancy::Available,
-            owner: Ok(None),
-            primary: false,
-        });
+        result
+            .removed
+            .push(provenant_confinement::worktrees::WorktreeInfo {
+                warnings: Vec::new(),
+                path: path.to_path_buf(),
+                branch: Some("refs/heads/topic".into()),
+                head: tip,
+                dirty: provenant_confinement::worktrees::WorktreeCondition::Clean,
+                occupancy: provenant_confinement::worktrees::Occupancy::Available,
+                owner: Ok(None),
+                primary: false,
+            });
         result.pruned_refs.push("topic".into());
 
         let records = removal_records_for_result(project, &result, &evidence);
@@ -1131,8 +1159,8 @@ mod removal_tests {
             open_pr,
             fast_forward_only: false,
         };
-        let make_receipt = |remote: &str, branch: &str, integration| {
-            provenant_run::WriterDeliveryReceipt {
+        let make_receipt =
+            |remote: &str, branch: &str, integration| provenant_run::WriterDeliveryReceipt {
                 extra: Default::default(),
                 schema_version: 1,
                 remote: remote.into(),
@@ -1144,8 +1172,7 @@ mod removal_tests {
                     pull_request: None,
                 },
                 integration,
-            }
-        };
+            };
         let lane_integration = Some(WriterIntegration {
             extra: Default::default(),
             remote: "origin".into(),

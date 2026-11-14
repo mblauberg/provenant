@@ -29,9 +29,13 @@ pub enum RetentionEligibility {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ByteObservation {
-    Measured { bytes: u64 },
+    Measured {
+        bytes: u64,
+    },
     /// Observed bytes cover only part of the class or are best-effort.
-    Partial { bytes: u64 },
+    Partial {
+        bytes: u64,
+    },
     Unknown,
 }
 
@@ -55,8 +59,7 @@ pub struct RetentionClass {
 
 const GC: &[RetentionTrigger] = &[RetentionTrigger::Gc];
 const FULL_GC: &[RetentionTrigger] = &[RetentionTrigger::FullGc];
-const GC_SETTLEMENT: &[RetentionTrigger] =
-    &[RetentionTrigger::Gc, RetentionTrigger::Settlement];
+const GC_SETTLEMENT: &[RetentionTrigger] = &[RetentionTrigger::Gc, RetentionTrigger::Settlement];
 const INSTALL: &[RetentionTrigger] = &[RetentionTrigger::Install];
 const APPEND: &[RetentionTrigger] = &[RetentionTrigger::Append];
 const NEVER: &[RetentionTrigger] = &[RetentionTrigger::Never];
@@ -203,7 +206,8 @@ pub fn retention_schedule(
 ) -> impl Iterator<Item = &'static RetentionClass> {
     RETENTION_CLASSES.iter().filter(move |class| {
         class.triggers.contains(&trigger)
-            || (trigger == RetentionTrigger::FullGc && class.triggers.contains(&RetentionTrigger::Gc))
+            || (trigger == RetentionTrigger::FullGc
+                && class.triggers.contains(&RetentionTrigger::Gc))
     })
 }
 
@@ -723,13 +727,23 @@ mod tests {
             let decoded: RetentionBytes = serde_json::from_slice(&encoded).unwrap();
             assert_eq!(decoded, bytes);
         }
-        for kind in [RetentionKind::GitWorktrees, RetentionKind::ObservationLedgers] {
+        for kind in [
+            RetentionKind::GitWorktrees,
+            RetentionKind::ObservationLedgers,
+        ] {
             assert!(!retention_schedule(RetentionTrigger::FullGc).any(|entry| entry.class == kind));
         }
         for class in retention_schedule(RetentionTrigger::Gc) {
-            assert!(retention_schedule(RetentionTrigger::FullGc).any(|entry| entry.class == class.class));
+            assert!(
+                retention_schedule(RetentionTrigger::FullGc)
+                    .any(|entry| entry.class == class.class)
+            );
         }
-        for observation in [ByteObservation::Measured { bytes: 17 }, ByteObservation::Partial { bytes: 19 }, ByteObservation::Unknown] {
+        for observation in [
+            ByteObservation::Measured { bytes: 17 },
+            ByteObservation::Partial { bytes: 19 },
+            ByteObservation::Unknown,
+        ] {
             let encoded = serde_json::to_vec(&observation).unwrap();
             let decoded: ByteObservation = serde_json::from_slice(&encoded).unwrap();
             assert_eq!(decoded, observation);

@@ -90,7 +90,9 @@ fn chair_observations_survive_rotation_and_respect_window_bounds() -> Result {
                 provider: "claude".into(),
                 account_key: "account-work".into(),
             },
-            epoch: IdentityEpoch::Known { id: "epoch-1".into() },
+            epoch: IdentityEpoch::Known {
+                id: "epoch-1".into(),
+            },
             evidence_source: IdentityEvidenceSource::Provider,
         },
         "session",
@@ -113,7 +115,10 @@ fn chair_observations_survive_rotation_and_respect_window_bounds() -> Result {
     let until = "2026-10-27T00:00:00Z".parse()?;
     let chairs = chair_sessions(&roots, since, until)?;
     assert_eq!(chairs.len(), 2);
-    assert_eq!(chairs[0].account_identity.account_key(), "claude/account-work");
+    assert_eq!(
+        chairs[0].account_identity.account_key(),
+        "claude/account-work"
+    );
     assert_eq!(chairs[0].config.as_deref(), Some(".claude-work"));
     assert_eq!(chairs[1].account_identity, AccountIdentity::unknown());
     assert_eq!(chairs[1].config, None);

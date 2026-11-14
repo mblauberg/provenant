@@ -22,7 +22,9 @@ pub struct Manifest {
 /// as the verification tiers. Read only data here: lane preparation must never
 /// invoke Cargo (or a writer-controlled compiler) outside confinement.
 pub fn cargo_build_directory(project: &Path) -> io::Result<Option<PathBuf>> {
-    let workspace = provenant_config::PortTable::read_project(project)?.verify.workspace;
+    let workspace = provenant_config::PortTable::read_project(project)?
+        .verify
+        .workspace;
     if workspace.is_absolute()
         || workspace.components().any(|component| {
             !matches!(

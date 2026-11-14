@@ -35,7 +35,9 @@ impl UsageError {
     }
 }
 
-pub use provenant_records::{AccountIdentity, Identity, IdentityEpoch, IdentityEvidenceSource, UnknownIdentityReason};
+pub use provenant_records::{
+    AccountIdentity, Identity, IdentityEpoch, IdentityEvidenceSource, UnknownIdentityReason,
+};
 
 #[derive(Serialize, Deserialize)]
 struct Event {

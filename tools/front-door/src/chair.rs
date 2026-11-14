@@ -948,7 +948,10 @@ fn session_identity(context: &Context) -> provenant_telemetry::usage::AccountIde
             context.roots.state.as_path(),
         )
         .ok()?;
-        Some(AccountIdentity::provider_observation("claude", &account_key))
+        Some(AccountIdentity::provider_observation(
+            "claude",
+            &account_key,
+        ))
     })();
     identity.unwrap_or_else(AccountIdentity::unknown)
 }

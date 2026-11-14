@@ -1,10 +1,10 @@
 //! The GC worktree selection, shared by merged removal and declared output.
 use super::*;
 use provenant_os::fs::{FileKind, PayloadTree, entry_names, temporary_name};
-use std::collections::HashSet;
 use provenant_records::custody::{
     RemovalOutcome, RemovalRecord, RemovalUncertainty, Subject, SubjectKind,
 };
+use std::collections::HashSet;
 
 /// One budget covers every output candidate in a preview. Applied collection
 /// continues to use the full proof before mutation.
@@ -205,9 +205,7 @@ fn collect_impl(
         // a complete free census and writer exclusion before considering it.
         // This is independent of the policy for removing foreign worktrees.
         let unknown_output = matches!(&lane.occupancy, Occupancy::Unknown { .. })
-            || (!is_managed(&lane.path)
-                && lane.is_unowned()
-                && lane.occupancy.is_available());
+            || (!is_managed(&lane.path) && lane.is_unowned() && lane.occupancy.is_available());
         if unknown_output && policy.regenerable.is_empty() {
             if policy.dry_run {
                 report.idle_output.push(OutputEntry {
@@ -943,7 +941,11 @@ fn walk_output(
             continue;
         }
         let path = relative.join(&name);
-        if layout_roots.iter().any(|root| path.as_path() == root.as_path()) || protected.covers(&path) {
+        if layout_roots
+            .iter()
+            .any(|root| path.as_path() == root.as_path())
+            || protected.covers(&path)
+        {
             continue;
         }
         let mut prune = || -> Result<bool, FsError> {

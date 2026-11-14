@@ -64,8 +64,8 @@ use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io;
 use std::ffi::{OsStr, OsString};
+use std::io;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -956,11 +956,8 @@ mod worktree_layout_tests {
             Some("other".to_owned()),
         );
         assert_eq!(
-            managed_writer_branch(
-                project.path(),
-                Path::new(".claude/worktrees/feature-topic"),
-            )
-            .unwrap(),
+            managed_writer_branch(project.path(), Path::new(".claude/worktrees/feature-topic"),)
+                .unwrap(),
             Some("feature-topic".to_owned()),
         );
     }
@@ -971,10 +968,8 @@ mod worktree_layout_tests {
         std::fs::create_dir(project.path().join(".git")).unwrap();
         std::fs::create_dir(project.path().join(".provenant")).unwrap();
         let mut ports = provenant_config::PortTable::builtin();
-        ports.worktree_layout.roots = vec![
-            PathBuf::from("trees"),
-            PathBuf::from(".claude/worktrees"),
-        ];
+        ports.worktree_layout.roots =
+            vec![PathBuf::from("trees"), PathBuf::from(".claude/worktrees")];
         ports.worktree_layout.default = PathBuf::from("trees/topic-<branch>/checkout");
         std::fs::write(
             project.path().join(provenant_config::PORTS_CONFIG),

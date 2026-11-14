@@ -817,7 +817,11 @@ impl DomainConfig for FabricConfig {
                 self.graph.decide_timeout_seconds,
                 MAX_DECIDE_TIMEOUT_SECONDS,
             ),
-            ("launch_wait_seconds", self.graph.launch_wait_seconds, 14_400),
+            (
+                "launch_wait_seconds",
+                self.graph.launch_wait_seconds,
+                14_400,
+            ),
             (
                 "writer_provision_seconds",
                 self.graph.writer_provision_seconds,
@@ -890,7 +894,11 @@ fn defaults(_profile: Profile) -> &'static str {
 /// boundary: recovery could raise a cap, lift a budget or swap a binary. Labels,
 /// peers' addresses and lane tuning recover to defaults.
 pub const FIELD_METADATA: &[FieldMetadata] = &[
-    FieldMetadata::int("graph.decide_timeout_seconds", 1, MAX_DECIDE_TIMEOUT_SECONDS as i64),
+    FieldMetadata::int(
+        "graph.decide_timeout_seconds",
+        1,
+        MAX_DECIDE_TIMEOUT_SECONDS as i64,
+    ),
     FieldMetadata::int("graph.launch_wait_seconds", 1, 14_400),
     FieldMetadata::int("graph.writer_provision_seconds", 1, 14_400),
     FieldMetadata::enumeration(
@@ -966,11 +974,18 @@ mod tests {
         let mut config = config();
         for seconds in [0, MAX_DECIDE_TIMEOUT_SECONDS + 1] {
             config.graph.decide_timeout_seconds = seconds;
-            assert!(config.validate().iter().any(|error| {
-                error.field == "graph.decide_timeout_seconds"
-            }));
+            assert!(
+                config
+                    .validate()
+                    .iter()
+                    .any(|error| { error.field == "graph.decide_timeout_seconds" })
+            );
         }
-        for seconds in [1, MAX_DECIDE_TIMEOUT_SECONDS, DEFAULT_DECIDE_TIMEOUT_SECONDS] {
+        for seconds in [
+            1,
+            MAX_DECIDE_TIMEOUT_SECONDS,
+            DEFAULT_DECIDE_TIMEOUT_SECONDS,
+        ] {
             config.graph.decide_timeout_seconds = seconds;
             assert!(config.validate().is_empty());
         }

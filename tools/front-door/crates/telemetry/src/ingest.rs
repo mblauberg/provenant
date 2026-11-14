@@ -7,11 +7,11 @@
 //! and identifiers only: never a prompt, a reply or a path. Ingest rewrites
 //! only the segments it touches and readers stream the days they ask for, so
 //! no operation meets a whole-store size.
-use crate::{claude::Raw, segments};
-use provenant_records::AccountIdentity;
 use crate::usage::{Identity, UnknownIdentityReason};
+use crate::{claude::Raw, segments};
 use provenant_core::Roots;
 use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
+use provenant_records::AccountIdentity;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -372,7 +372,7 @@ fn locate(
                     if fresh(&meta) {
                         out.push(Transcript {
                             path: file.path(),
-                                    session: name.into(),
+                            session: name.into(),
                             source: Source::Subagent,
                             agent_id,
                             native_config: Some(config_key.clone()),
@@ -843,9 +843,7 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
     }
     for segment in days.values_mut() {
         for row in segment.rows.values_mut() {
-            if row.source == Source::Lane
-                && request.chair_sessions.contains_key(&row.session)
-            {
+            if row.source == Source::Lane && request.chair_sessions.contains_key(&row.session) {
                 row.source = Source::Chair;
                 segment.changed = true;
             }
@@ -1121,12 +1119,13 @@ fn read_identity_overrides(
             return Err(IngestError::IdentityOverrideStore);
         }
         let mut bytes = Vec::new();
-        file.take(IDENTITY_OVERRIDE_CAP + 1).read_to_end(&mut bytes)?;
+        file.take(IDENTITY_OVERRIDE_CAP + 1)
+            .read_to_end(&mut bytes)?;
         if bytes.len() as u64 > IDENTITY_OVERRIDE_CAP {
             return Err(IngestError::IdentityOverrideStore);
         }
-        let record: SessionIdentityOverride = serde_json::from_slice(&bytes)
-            .map_err(|_| IngestError::IdentityOverrideStore)?;
+        let record: SessionIdentityOverride =
+            serde_json::from_slice(&bytes).map_err(|_| IngestError::IdentityOverrideStore)?;
         if record.schema_version != IDENTITY_OVERRIDE_SCHEMA_VERSION
             || record.provider != PROVIDER
             || !valid_session(&record.session)
@@ -1284,7 +1283,10 @@ pub fn read_rows(roots: &Roots, filter: &RowFilter) -> Result<Vec<Row>, IngestEr
                 row.identity = identity.clone();
             }
             if row.schema_version != ROW_SCHEMA_VERSION
-                || filter.account.as_ref().is_some_and(|a| a != &row.identity.account_key())
+                || filter
+                    .account
+                    .as_ref()
+                    .is_some_and(|a| a != &row.identity.account_key())
                 || filter.model.as_ref().is_some_and(|m| *m != row.model)
             {
                 return;

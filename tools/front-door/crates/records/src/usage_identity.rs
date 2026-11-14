@@ -13,8 +13,13 @@ pub struct AccountIdentity {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Identity {
-    Known { provider: String, account_key: String },
-    Unknown { reason: UnknownIdentityReason },
+    Known {
+        provider: String,
+        account_key: String,
+    },
+    Unknown {
+        reason: UnknownIdentityReason,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -96,7 +101,10 @@ impl AccountIdentity {
     /// Stable grouping key; unknown identities remain in the visible gap group.
     pub fn account_key(&self) -> String {
         match &self.identity {
-            Identity::Known { provider, account_key } => format!("{provider}/{account_key}"),
+            Identity::Known {
+                provider,
+                account_key,
+            } => format!("{provider}/{account_key}"),
             Identity::Unknown { .. } => "unattributed".into(),
         }
     }

@@ -1020,7 +1020,8 @@ pub enum DecideOutcome {
 impl DecideOutcome {
     pub fn option(&self) -> Option<&str> {
         match self {
-            Self::Answered { option, .. } | Self::AnsweredByDefault { option }
+            Self::Answered { option, .. }
+            | Self::AnsweredByDefault { option }
             | Self::AnsweredByPolicy { option, .. } => Some(option),
             Self::Unanswered => None,
         }

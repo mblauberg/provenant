@@ -511,8 +511,12 @@ fn create_with_default(
     let target_relative = ports
         .managed_writer_path(&request.branch)
         .map_err(WorktreeError::PortConfiguration)?;
-    let parent_relative = target_relative.parent().ok_or(WorktreeError::InvalidRequest)?;
-    let path_name = target_relative.file_name().ok_or(WorktreeError::InvalidRequest)?;
+    let parent_relative = target_relative
+        .parent()
+        .ok_or(WorktreeError::InvalidRequest)?;
+    let path_name = target_relative
+        .file_name()
+        .ok_or(WorktreeError::InvalidRequest)?;
     let worktree_parent = open_or_create_layout_directory(
         context.repo.root_dir(),
         parent_relative,

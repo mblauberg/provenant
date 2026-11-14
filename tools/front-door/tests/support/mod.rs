@@ -1,6 +1,8 @@
 //! Isolated process fixtures; no ambient config, credentials, or product state.
 #![allow(dead_code)]
 use provenant_os::exec::{ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     ffi::{OsStr, OsString},
     fs,
@@ -8,8 +10,6 @@ use std::{
     sync::Mutex,
     time::Duration,
 };
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 
 pub type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -43,7 +43,11 @@ pub fn install_fake_claude_auth(rig: &mut TestRig) -> Result {
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))?;
         Ok(())
     })?;
-    set_rig_env(rig, "PATH", format!("{}:/usr/bin:/bin", bin.display()).into());
+    set_rig_env(
+        rig,
+        "PATH",
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    );
     set_rig_env(rig, "USER", "fixture-user".into());
     Ok(())
 }
@@ -57,7 +61,8 @@ pub fn set_claude_config_dir(rig: &mut TestRig, directory: &Path) {
 pub fn write_fake_claude_identity(directory: &Path, email: &str) -> Result<String> {
     fs::create_dir_all(directory)?;
     fs::write(directory.join(".fixture-email"), email)?;
-    provenant_providers::identity::fingerprint(email).ok_or_else(|| "invalid fixture identity".into())
+    provenant_providers::identity::fingerprint(email)
+        .ok_or_else(|| "invalid fixture identity".into())
 }
 
 fn set_rig_env(rig: &mut TestRig, name: &str, value: OsString) {

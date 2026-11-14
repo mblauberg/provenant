@@ -810,10 +810,7 @@ pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
         };
         let progress = &mut checkpoint.nodes[index];
         progress.state = state;
-        progress.outputs = Some(decision_outputs(
-            &link.ask_id,
-            DecideOutcome::Unanswered,
-        ));
+        progress.outputs = Some(decision_outputs(&link.ask_id, DecideOutcome::Unanswered));
         checkpoint.asks.remove(position);
         refresh_wake(checkpoint);
         return journal.save(checkpoint).map_err(GraphError::Journal);
@@ -844,10 +841,13 @@ pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
             },
             AnswerSource::Answered => DecideOutcome::Answered {
                 option: chosen.clone(),
-                actor: answer.actor.clone().ok_or_else(|| GraphError::BadCheckpoint {
-                    node: node.id.clone(),
-                    invariant: "an owner decide answer must retain its actor",
-                })?,
+                actor: answer
+                    .actor
+                    .clone()
+                    .ok_or_else(|| GraphError::BadCheckpoint {
+                        node: node.id.clone(),
+                        invariant: "an owner decide answer must retain its actor",
+                    })?,
             },
         };
         progress.outputs = Some(decision_outputs(&ask_id, outcome));
@@ -924,9 +924,9 @@ fn decision_outputs(ask_id: &str, outcome: DecideOutcome) -> NodeOutputs {
             DecideOutcome::AnsweredByDefault { option } => vec![format!(
                 "decide timeout: applied declared default {option}; no answer arrived before the deadline"
             )],
-            DecideOutcome::Unanswered => vec![
-                "decide timeout: no answer or declared default; recorded unanswered".into(),
-            ],
+            DecideOutcome::Unanswered => {
+                vec!["decide timeout: no answer or declared default; recorded unanswered".into()]
+            }
         },
         plan: None,
         remaining: None,
@@ -1201,7 +1201,7 @@ pub(super) fn validate(checkpoint: &GraphCheckpoint, plan: &PlannedGraph) -> Res
                 }
                 (AskKind::Pause, None) => {
                     ask.timeout.is_none() && plan.decision_session.as_deref() == session
-                },
+                }
                 (AskKind::Land, Some(node)) => {
                     ask.timeout.is_none()
                         && land::parse(&ask.ask_id, &node.id).is_some()
@@ -1234,9 +1234,7 @@ pub(super) fn validate_progress(
         && (progress.advance_error.is_none() || progress.state == NodeState::Failed)
         && match progress.state {
             NodeState::Pending | NodeState::Blocked => progress.outputs.is_none(),
-            NodeState::Skipped => {
-                progress.outputs.is_none() || unanswered_progress(progress, node)
-            }
+            NodeState::Skipped => progress.outputs.is_none() || unanswered_progress(progress, node),
             // A running decision without a link raises its ask again.
             NodeState::Running => progress.outputs.is_none(),
             NodeState::Succeeded => {
@@ -1271,9 +1269,7 @@ pub(super) fn validate_progress(
 
                     })
             }
-            NodeState::Failed => {
-                progress.outputs.is_none() || unanswered_progress(progress, node)
-            }
+            NodeState::Failed => progress.outputs.is_none() || unanswered_progress(progress, node),
         };
     if valid { Ok(()) } else { Err(()) }
 }

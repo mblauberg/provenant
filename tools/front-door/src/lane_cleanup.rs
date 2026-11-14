@@ -11,15 +11,15 @@
 use crate::gc_support::host_git_with_stderr;
 use provenant_confinement::repo::GitRefName;
 use provenant_confinement::worktrees::{
-    self, Artefact, ArtefactOutcome, ArtefactState, IntegrationEdge, LandingTarget, RefDeletion,
-    Landing, RefEndpoint, RefLedger, RefOrigin, RefRecord, Unproven, WorktreeContext,
+    self, Artefact, ArtefactOutcome, ArtefactState, IntegrationEdge, Landing, LandingTarget,
+    RefDeletion, RefEndpoint, RefLedger, RefOrigin, RefRecord, Unproven, WorktreeContext,
 };
 use provenant_core::{CancelToken, GitOid};
+use provenant_os::exec::Termination;
 use provenant_records::custody::{
     LandedEvidence, LandingPredicate, LandingSource, RemovalOutcome, RemovalRecord,
     RemovalUncertainty, Subject, SubjectKind,
 };
-use provenant_os::exec::Termination;
 use std::time::Duration;
 
 const REMOTE_READ: Duration = Duration::from_secs(30);
@@ -205,7 +205,12 @@ fn local_outcome(
         return out(ArtefactState::Retained)
             .with_reason(why)
             .with_head(tip)
-            .with_removal(ref_removal(context.binding.project_id(), &reference, tip, decision.removal));
+            .with_removal(ref_removal(
+                context.binding.project_id(),
+                &reference,
+                tip,
+                decision.removal,
+            ));
     }
     if sweep.dry_run {
         return out(ArtefactState::WouldRemove)
@@ -218,7 +223,12 @@ fn local_outcome(
             out(ArtefactState::Removed)
                 .with_reason(reason(decision.verdict))
                 .with_head(tip)
-                .with_removal(ref_removal(context.binding.project_id(), &reference, tip, decision.removal))
+                .with_removal(ref_removal(
+                    context.binding.project_id(),
+                    &reference,
+                    tip,
+                    decision.removal,
+                ))
         }
         Ok(RefDeletion::Absent) => {
             let _ = ledger.forget(record, context.clock, cancel);
@@ -305,10 +315,17 @@ fn remote_outcomes(
         cancel,
     );
     if let Verdict::Keep(why) = decision.verdict {
-        return vec![out(ArtefactState::Retained)
-            .with_reason(why)
-            .with_head(tip)
-            .with_removal(ref_removal(context.binding.project_id(), &reference, tip, decision.removal))];
+        return vec![
+            out(ArtefactState::Retained)
+                .with_reason(why)
+                .with_head(tip)
+                .with_removal(ref_removal(
+                    context.binding.project_id(),
+                    &reference,
+                    tip,
+                    decision.removal,
+                )),
+        ];
     }
     let mut outcomes = Vec::new();
     if sweep.dry_run {
@@ -339,7 +356,12 @@ fn remote_outcomes(
                 out(ArtefactState::Removed)
                     .with_reason(reason(decision.verdict))
                     .with_head(tip)
-                    .with_removal(ref_removal(context.binding.project_id(), &reference, tip, decision.removal.clone())),
+                    .with_removal(ref_removal(
+                        context.binding.project_id(),
+                        &reference,
+                        tip,
+                        decision.removal.clone(),
+                    )),
             );
             if let Some(tracking) = &tracking {
                 outcomes.extend(stale_tracking(
@@ -379,10 +401,17 @@ fn stale_tracking(
         cancel,
     );
     if let Verdict::Keep(why) = decision.verdict {
-        return Some(out(ArtefactState::Retained)
-            .with_reason(why)
-            .with_head(held)
-            .with_removal(ref_removal(context.binding.project_id(), tracking, held, decision.removal)));
+        return Some(
+            out(ArtefactState::Retained)
+                .with_reason(why)
+                .with_head(held)
+                .with_removal(ref_removal(
+                    context.binding.project_id(),
+                    tracking,
+                    held,
+                    decision.removal,
+                )),
+        );
     }
     if sweep.dry_run {
         return Some(out(ArtefactState::WouldRemove).with_head(held));
@@ -391,7 +420,12 @@ fn stale_tracking(
         Ok(RefDeletion::Removed) => out(ArtefactState::Removed)
             .with_reason("remote_branch_gone")
             .with_head(held)
-            .with_removal(ref_removal(context.binding.project_id(), tracking, held, decision.removal)),
+            .with_removal(ref_removal(
+                context.binding.project_id(),
+                tracking,
+                held,
+                decision.removal,
+            )),
         Ok(RefDeletion::Absent) => out(ArtefactState::Absent),
         Ok(_) => out(ArtefactState::Retained).with_reason("changed"),
         Err(error) => out(ArtefactState::Failed).with_reason(error.to_string()),
@@ -1047,9 +1081,15 @@ mod tests {
                 &Sweep::new(false),
                 cancel,
             );
-            let remote = outcomes.iter().find(|outcome| outcome.artefact == Artefact::RemoteBranch).unwrap();
+            let remote = outcomes
+                .iter()
+                .find(|outcome| outcome.artefact == Artefact::RemoteBranch)
+                .unwrap();
             assert_eq!(remote.outcome, ArtefactState::Absent);
-            let tracking_outcome = outcomes.iter().find(|outcome| outcome.artefact == Artefact::TrackingRef).unwrap();
+            let tracking_outcome = outcomes
+                .iter()
+                .find(|outcome| outcome.artefact == Artefact::TrackingRef)
+                .unwrap();
             assert_eq!(tracking_outcome.outcome, ArtefactState::Retained);
             assert_eq!(tracking_outcome.head, Some(fixture.unlanded));
             let kept = tracking_outcome.removal.as_ref().unwrap();

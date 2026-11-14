@@ -309,16 +309,16 @@ fn tree_entries(bytes: &[u8]) -> Result<Vec<Entry>, CheckError> {
     Ok(entries)
 }
 
-fn path_rules(
-    scan: &mut Scan,
-    path: &str,
-    worktree_roots: &[PathBuf],
-) -> Result<(), CheckError> {
+fn path_rules(scan: &mut Scan, path: &str, worktree_roots: &[PathBuf]) -> Result<(), CheckError> {
     let relative = Path::new(path);
     let private = worktree_roots.iter().any(|root| relative.starts_with(root))
         || path.split('/').any(|part| {
-            matches!(part, ".agent-run" | ".pytest_cache" | ".DS_Store" | ".ssh" | ".aws")
-        }) || path == ".claude/settings.local.json"
+            matches!(
+                part,
+                ".agent-run" | ".pytest_cache" | ".DS_Store" | ".ssh" | ".aws"
+            )
+        })
+        || path == ".claude/settings.local.json"
         || path == "plugins/marketplace.json"
         || path.split('/').any(|part| {
             part == ".env"

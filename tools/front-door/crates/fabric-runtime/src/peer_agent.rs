@@ -1398,7 +1398,11 @@ mod tests {
         assert!(!projects.own(&elsewhere, None));
         let registry = roots.state.as_path().join("worktrees/project");
         fs::create_dir_all(registry.join(name(&elsewhere))).unwrap();
-        assert!(Projects::registered(&roots, name).unwrap().own(&elsewhere, None));
+        assert!(
+            Projects::registered(&roots, name)
+                .unwrap()
+                .own(&elsewhere, None)
+        );
     }
 
     #[test]

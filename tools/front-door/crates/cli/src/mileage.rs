@@ -386,7 +386,11 @@ mod tests {
     fn row(at: i64) -> ingest::Row {
         ingest::Row {
             schema_version: ingest::ROW_SCHEMA_VERSION,
-            identity: provenant_telemetry::usage::AccountIdentity::known("claude", "work", "fixture-epoch"),
+            identity: provenant_telemetry::usage::AccountIdentity::known(
+                "claude",
+                "work",
+                "fixture-epoch",
+            ),
             provider: "claude".into(),
             model: "m".into(),
             effort: None,

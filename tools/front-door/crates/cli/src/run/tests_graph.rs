@@ -235,7 +235,11 @@ fn stats_text_lists_cache_share_only_where_a_provider_reported_it() {
     .unwrap();
     let chair = |usage| ChairSession {
         adapter: "claude".into(),
-        account_identity: provenant_telemetry::usage::AccountIdentity::known("claude", "work", "fixture-epoch"),
+        account_identity: provenant_telemetry::usage::AccountIdentity::known(
+            "claude",
+            "work",
+            "fixture-epoch",
+        ),
         session: "s".into(),
         project: None,
         config: None,

@@ -212,11 +212,7 @@ pub struct StopRule {
 const NEW: NextStep = NextStep::NewRoute;
 const CHAIR: NextStep = NextStep::Chair;
 
-const fn rule(
-    cause: StopCause,
-    default: NextStep,
-    source: crate::run::CauseSource,
-) -> StopRule {
+const fn rule(cause: StopCause, default: NextStep, source: crate::run::CauseSource) -> StopRule {
     StopRule {
         cause,
         source,
@@ -227,11 +223,7 @@ const fn rule(
 }
 
 /// A transient cause: one fresh attempt on the same route, then `default`.
-const fn once(
-    cause: StopCause,
-    default: NextStep,
-    source: crate::run::CauseSource,
-) -> StopRule {
+const fn once(cause: StopCause, default: NextStep, source: crate::run::CauseSource) -> StopRule {
     StopRule {
         cause,
         source,

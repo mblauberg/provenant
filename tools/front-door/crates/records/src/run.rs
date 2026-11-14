@@ -1193,7 +1193,9 @@ impl SettlementTerminalOutcome {
             Self::Preserve => observed,
             Self::ReviewRequired if observed == Outcome::Succeeded => Outcome::ReviewRequired,
             Self::ReviewRequired => observed,
-            Self::Uncommitted if matches!(observed, Outcome::Succeeded | Outcome::ReviewRequired) => {
+            Self::Uncommitted
+                if matches!(observed, Outcome::Succeeded | Outcome::ReviewRequired) =>
+            {
                 Outcome::Uncommitted
             }
             Self::Uncommitted => observed,
@@ -1286,8 +1288,13 @@ impl SettlementReason {
                 _ if partial.contains(&PartialSignal::HandoffMissing) => Self::HandoffMissing,
                 _ if partial.contains(&PartialSignal::ProviderStop) => Self::ProviderStop,
                 _ if partial.contains(&PartialSignal::UncommittedWork)
-                    || outcome == Outcome::Uncommitted => Self::UncommittedWork,
-                _ if matches!(outcome, Outcome::Succeeded | Outcome::ReviewRequired) => Self::Completed,
+                    || outcome == Outcome::Uncommitted =>
+                {
+                    Self::UncommittedWork
+                }
+                _ if matches!(outcome, Outcome::Succeeded | Outcome::ReviewRequired) => {
+                    Self::Completed
+                }
                 _ => Self::Failed,
             },
         }
@@ -1295,10 +1302,7 @@ impl SettlementReason {
 
     /// A typed stop keeps dependants closed even when the terminal provider
     /// outcome looked successful. With no stop, only Completed releases them.
-    pub const fn node_outcome(
-        self,
-        stop: Option<crate::stop::StopCause>,
-    ) -> SettlementNodeOutcome {
+    pub const fn node_outcome(self, stop: Option<crate::stop::StopCause>) -> SettlementNodeOutcome {
         if stop.is_some() {
             SettlementNodeOutcome::Failed
         } else {

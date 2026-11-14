@@ -127,7 +127,10 @@ fn session_identity_override_round_trips_its_declared_store_shape() -> Result {
     assert_eq!(decoded, record);
     assert_eq!(decoded.schema_version, IDENTITY_OVERRIDE_SCHEMA_VERSION);
     assert_eq!(decoded.provider, PROVIDER);
-    assert_eq!(decoded.identity, AccountIdentity::conflicting_provider_observations());
+    assert_eq!(
+        decoded.identity,
+        AccountIdentity::conflicting_provider_observations()
+    );
     Ok(())
 }
 
@@ -210,7 +213,10 @@ fn rerun_adds_nothing_and_unknown_identity_never_uses_directory_labels() -> Resu
     let again = f.run(&DIRS, &["s1"], None)?;
     assert_eq!((again.added, again.already_present), (0, 5));
     let rows = read_rows(&f.roots, &RowFilter::default())?;
-    assert!(rows.iter().all(|row| row.identity == AccountIdentity::unknown()));
+    assert!(
+        rows.iter()
+            .all(|row| row.identity == AccountIdentity::unknown())
+    );
     // Rows add up to the message usage, each message once at its largest counts.
     let m1 = rows.iter().find(|r| r.message == "m1").unwrap();
     assert_eq!(m1.buckets(), [10, 7, 60, 40, 5]);
@@ -221,7 +227,10 @@ fn rerun_adds_nothing_and_unknown_identity_never_uses_directory_labels() -> Resu
     let source = |id: &str| rows.iter().find(|r| r.message == id).unwrap().source;
     assert_eq!(source("m1"), Source::Chair);
     assert_eq!(
-        rows.iter().find(|row| row.message == "m1").unwrap().identity,
+        rows.iter()
+            .find(|row| row.message == "m1")
+            .unwrap()
+            .identity,
         AccountIdentity::unknown()
     );
     assert_eq!(source("m3"), Source::Subagent);
@@ -313,7 +322,9 @@ fn a_conflicting_session_identity_masks_old_rows_and_absorbs_future_known_eviden
         "projects/p/session-c.jsonl",
         &message("message-c", "2026-10-03T00:00:00Z", 1, 0, 0, 5),
     )?;
-    let dirs = [ConfigDir { path: f.dir("rotating") }];
+    let dirs = [ConfigDir {
+        path: f.dir("rotating"),
+    }];
     let known_a = AccountIdentity::provider_observation("claude", "account-a");
     let first = BTreeMap::from([("session-a".to_owned(), known_a.clone())]);
     ingest(
@@ -339,7 +350,13 @@ fn a_conflicting_session_identity_masks_old_rows_and_absorbs_future_known_eviden
     let files = segment_files(&f)?;
     let oldest = files.first().ok_or("no dated rows")?;
     assert!(files.len() > RECENT_SEGMENTS);
-    assert!(!files.iter().rev().take(RECENT_SEGMENTS).any(|name| name == oldest));
+    assert!(
+        !files
+            .iter()
+            .rev()
+            .take(RECENT_SEGMENTS)
+            .any(|name| name == oldest)
+    );
 
     let conflict = AccountIdentity::conflicting_provider_observations();
     let conflicted = BTreeMap::from([("session-a".to_owned(), conflict.clone())]);
@@ -388,10 +405,17 @@ fn a_conflicting_session_identity_masks_old_rows_and_absorbs_future_known_eviden
         .collect();
     assert_eq!(session_rows.len(), 2);
     assert!(session_rows.iter().all(|row| row.identity == conflict));
-    assert!(read_rows(
-        &f.roots,
-        &RowFilter { account: Some("claude/account-b".into()), ..Default::default() }
-    )?.iter().all(|row| row.session != "session-a"));
+    assert!(
+        read_rows(
+            &f.roots,
+            &RowFilter {
+                account: Some("claude/account-b".into()),
+                ..Default::default()
+            }
+        )?
+        .iter()
+        .all(|row| row.session != "session-a")
+    );
     Ok(())
 }
 

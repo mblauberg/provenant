@@ -3985,7 +3985,10 @@ mod writer_recovery_tests {
                         provenant_records::NextStep::Chair
                     );
                     assert_eq!(
-                        finished.settlement_reason.unwrap().node_outcome(Some(stop.cause())),
+                        finished
+                            .settlement_reason
+                            .unwrap()
+                            .node_outcome(Some(stop.cause())),
                         provenant_records::run::SettlementNodeOutcome::Failed
                     );
                     assert_eq!(

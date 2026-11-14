@@ -53,10 +53,9 @@ fn row(
         provider: Some(provider.into()),
         model: Some("m".into()),
         effort: None,
-        identity: account_key.map_or_else(
-            AccountIdentity::no_provider_account,
-            |key| AccountIdentity::known(provider, key, "fixture-epoch"),
-        ),
+        identity: account_key.map_or_else(AccountIdentity::no_provider_account, |key| {
+            AccountIdentity::known(provider, key, "fixture-epoch")
+        }),
         outcome: "succeeded".into(),
         started: None,
         finished: WallTime::from_micros(finished * 1_000_000)?,

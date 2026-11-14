@@ -70,7 +70,9 @@ impl PortCommand {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PortBackend {
     Builtin,
-    Command { command: PortCommand },
+    Command {
+        command: PortCommand,
+    },
     #[serde(rename = "none")]
     None,
 }
@@ -101,7 +103,10 @@ pub struct Port {
 
 impl Port {
     fn builtin() -> Self {
-        Self { source: PortSource::Builtin, backend: PortBackend::Builtin }
+        Self {
+            source: PortSource::Builtin,
+            backend: PortBackend::Builtin,
+        }
     }
 }
 
@@ -162,7 +167,9 @@ pub enum LandBackend {
     Builtin,
     /// The records owner declares the command and unknown exit code. Exit 0
     /// means landed; other nonzero exits refuse unless the declared unknown code.
-    Command { command: provenant_records::landing::RepositoryCommand },
+    Command {
+        command: provenant_records::landing::RepositoryCommand,
+    },
     #[serde(rename = "none")]
     None,
 }
@@ -197,7 +204,9 @@ impl WorktreeLayoutPort {
         let branch_component = template
             .split('/')
             .position(|component| component.contains(BRANCH_TOKEN))
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid worktree template"))?;
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "invalid worktree template")
+            })?;
         if rendered.len() > 4096
             || rendered.split('/').enumerate().any(|(index, component)| {
                 component.len() > if index == branch_component { 240 } else { 255 }
@@ -248,15 +257,29 @@ trait PortEntry {
 }
 
 impl PortEntry for Port {
-    fn source(&self) -> PortSource { self.source }
-    fn set_source(&mut self, source: PortSource) { self.source = source; }
-    fn backend_kind(&self) -> PortBackendKind { self.backend.kind() }
-    fn valid(&self) -> bool { self.backend.valid() }
+    fn source(&self) -> PortSource {
+        self.source
+    }
+    fn set_source(&mut self, source: PortSource) {
+        self.source = source;
+    }
+    fn backend_kind(&self) -> PortBackendKind {
+        self.backend.kind()
+    }
+    fn valid(&self) -> bool {
+        self.backend.valid()
+    }
 }
 impl PortEntry for VerifyPort {
-    fn source(&self) -> PortSource { self.source }
-    fn set_source(&mut self, source: PortSource) { self.source = source; }
-    fn backend_kind(&self) -> PortBackendKind { self.backend.kind() }
+    fn source(&self) -> PortSource {
+        self.source
+    }
+    fn set_source(&mut self, source: PortSource) {
+        self.source = source;
+    }
+    fn backend_kind(&self) -> PortBackendKind {
+        self.backend.kind()
+    }
     fn valid(&self) -> bool {
         self.backend.valid()
             && relative(&self.workspace, true)
@@ -266,12 +289,19 @@ impl PortEntry for VerifyPort {
             && self.load_per_cpu > 0.0
             && self.test_threads.map_or(true, |threads| threads > 0)
             && self.tiers.contains_key(&self.default_tier)
-            && self.tiers.iter().all(|(name, tier)| !name.is_empty() && !tier.commands.is_empty())
+            && self
+                .tiers
+                .iter()
+                .all(|(name, tier)| !name.is_empty() && !tier.commands.is_empty())
     }
 }
 impl PortEntry for LandPort {
-    fn source(&self) -> PortSource { self.source }
-    fn set_source(&mut self, source: PortSource) { self.source = source; }
+    fn source(&self) -> PortSource {
+        self.source
+    }
+    fn set_source(&mut self, source: PortSource) {
+        self.source = source;
+    }
     fn backend_kind(&self) -> PortBackendKind {
         match &self.backend {
             LandBackend::Builtin => PortBackendKind::Builtin,
@@ -287,14 +317,28 @@ impl PortEntry for LandPort {
     }
 }
 impl PortEntry for WorktreeLayoutPort {
-    fn source(&self) -> PortSource { self.source }
-    fn set_source(&mut self, source: PortSource) { self.source = source; }
-    fn backend_kind(&self) -> PortBackendKind { self.backend.kind() }
+    fn source(&self) -> PortSource {
+        self.source
+    }
+    fn set_source(&mut self, source: PortSource) {
+        self.source = source;
+    }
+    fn backend_kind(&self) -> PortBackendKind {
+        self.backend.kind()
+    }
     fn valid(&self) -> bool {
         self.backend.valid()
             && !self.roots.is_empty()
-            && self.roots.iter().all(|root| relative(root, false) && !root.to_string_lossy().contains(BRANCH_TOKEN))
-            && self.roots.iter().collect::<std::collections::BTreeSet<_>>().len() == self.roots.len()
+            && self
+                .roots
+                .iter()
+                .all(|root| relative(root, false) && !root.to_string_lossy().contains(BRANCH_TOKEN))
+            && self
+                .roots
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                == self.roots.len()
             && relative(&self.default, false)
             && self.default.to_string_lossy().matches(BRANCH_TOKEN).count() == 1
             && self.roots.iter().any(|root| self.default.starts_with(root))
@@ -303,7 +347,10 @@ impl PortEntry for WorktreeLayoutPort {
 
 fn relative(path: &Path, allow_current: bool) -> bool {
     !path.as_os_str().is_empty()
-        && path.components().all(|component| matches!(component, Component::Normal(_)) || (allow_current && component == Component::CurDir))
+        && path.components().all(|component| {
+            matches!(component, Component::Normal(_))
+                || (allow_current && component == Component::CurDir)
+        })
 }
 
 macro_rules! declare_ports {
@@ -372,8 +419,13 @@ impl PortTable {
     }
 
     pub fn validate(&self) -> io::Result<()> {
-        if self.schema_version != PORTS_SCHEMA_VERSION || self.entries().any(|(_, _, _, valid)| !valid) {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid port table"));
+        if self.schema_version != PORTS_SCHEMA_VERSION
+            || self.entries().any(|(_, _, _, valid)| !valid)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid port table",
+            ));
         }
         Ok(())
     }
@@ -390,7 +442,10 @@ impl PortTable {
         let mut bytes = Vec::new();
         file.take(MAX_PORTS_BYTES + 1).read_to_end(&mut bytes)?;
         if bytes.len() as u64 > MAX_PORTS_BYTES {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "port table exceeds size limit"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "port table exceeds size limit",
+            ));
         }
         let mut table: Self = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
         table.set_sources(PortSource::Project);
@@ -400,7 +455,9 @@ impl PortTable {
 }
 
 impl Default for PortTable {
-    fn default() -> Self { Self::builtin() }
+    fn default() -> Self {
+        Self::builtin()
+    }
 }
 
 #[cfg(test)]
@@ -413,43 +470,71 @@ mod tests {
         let value = serde_json::to_value(&table).unwrap();
         assert_eq!(PortTable::PORT_NAMES.len(), table.entries().count());
         for name in PortTable::PORT_NAMES {
-            assert!(value.get(name).is_some(), "port declaration {name} is encodable");
+            assert!(
+                value.get(name).is_some(),
+                "port declaration {name} is encodable"
+            );
         }
         assert_eq!(serde_json::from_value::<PortTable>(value).unwrap(), table);
 
         let cases = [
             PortBackend::Builtin,
-            PortBackend::Command { command: PortCommand {
-                argv: vec!["verify".into()],
-                exit_codes: CommandExitCodes { success: vec![0], unknown: vec![75], other: ExitDisposition::Refused },
-            }},
+            PortBackend::Command {
+                command: PortCommand {
+                    argv: vec!["verify".into()],
+                    exit_codes: CommandExitCodes {
+                        success: vec![0],
+                        unknown: vec![75],
+                        other: ExitDisposition::Refused,
+                    },
+                },
+            },
             PortBackend::None,
         ];
         for backend in cases {
             let value = serde_json::to_value(&backend).unwrap();
-            assert_eq!(serde_json::from_value::<PortBackend>(value).unwrap(), backend);
+            assert_eq!(
+                serde_json::from_value::<PortBackend>(value).unwrap(),
+                backend
+            );
         }
 
         let land_cases = [
             LandBackend::Builtin,
-            LandBackend::Command { command: provenant_records::landing::RepositoryCommand {
-                argv: vec!["provenant-land".into()], unknown_exit_code: 75, timeout_seconds: 30,
-            }},
+            LandBackend::Command {
+                command: provenant_records::landing::RepositoryCommand {
+                    argv: vec!["provenant-land".into()],
+                    unknown_exit_code: 75,
+                    timeout_seconds: 30,
+                },
+            },
             LandBackend::None,
         ];
         for backend in land_cases {
             let value = serde_json::to_value(&backend).unwrap();
-            assert_eq!(serde_json::from_value::<LandBackend>(value).unwrap(), backend);
+            assert_eq!(
+                serde_json::from_value::<LandBackend>(value).unwrap(),
+                backend
+            );
         }
 
-        let selection_cases = [VerifySelection::Packages, VerifySelection::Integrations, VerifySelection::All];
+        let selection_cases = [
+            VerifySelection::Packages,
+            VerifySelection::Integrations,
+            VerifySelection::All,
+        ];
         for selection in selection_cases {
             let value = serde_json::to_value(selection).unwrap();
-            assert_eq!(serde_json::from_value::<VerifySelection>(value).unwrap(), selection);
+            assert_eq!(
+                serde_json::from_value::<VerifySelection>(value).unwrap(),
+                selection
+            );
         }
 
         let command = provenant_records::landing::RepositoryCommand {
-            argv: vec!["land".into()], unknown_exit_code: 75, timeout_seconds: 30,
+            argv: vec!["land".into()],
+            unknown_exit_code: 75,
+            timeout_seconds: 30,
         };
         assert_eq!(
             command.outcome(0),
@@ -491,9 +576,11 @@ mod tests {
                 Some("feature-topic"),
             );
             assert!(custom.contains_worktree(Path::new(".worktrees/other")));
-            assert!(custom
-                .branch_component(Path::new(".claude/worktrees/deep/name"))
-                .is_none());
+            assert!(
+                custom
+                    .branch_component(Path::new(".claude/worktrees/deep/name"))
+                    .is_none()
+            );
             custom.roots = vec![PathBuf::from("trees"), PathBuf::from("legacy")];
             custom.default = PathBuf::from("trees/topic-<branch>/checkout");
             let path = custom.path_for_branch("feature/topic").unwrap();
@@ -521,8 +608,15 @@ mod tests {
         let bytes = serde_json::to_vec(&forged).unwrap();
         std::fs::write(root.path().join(PORTS_CONFIG), bytes).unwrap();
         let loaded = PortTable::read_project(root.path()).unwrap();
-        assert!(loaded.entries().all(|(_, source, _, _)| source == PortSource::Project));
+        assert!(
+            loaded
+                .entries()
+                .all(|(_, source, _, _)| source == PortSource::Project)
+        );
         forged.set_sources(PortSource::Project);
-        assert_eq!(serde_json::to_value(&loaded).unwrap(), serde_json::to_value(&forged).unwrap());
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap(),
+            serde_json::to_value(&forged).unwrap()
+        );
     }
 }

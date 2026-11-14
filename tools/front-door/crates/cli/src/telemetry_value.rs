@@ -228,8 +228,7 @@ fn value_inner(command: &TelemetryValue, edge: &Edge<'_>) -> Output {
         };
         let identity_key = format!("{provider}/{}", reading.account_key);
         let used = report::totals(in_window.iter().copied().filter(|row| {
-            row.provider.as_deref() == Some(provider)
-                && row.identity.account_key() == identity_key
+            row.provider.as_deref() == Some(provider) && row.identity.account_key() == identity_key
         }))
         .map_err(io)?;
         let price = provenant_quota::price_in_force(&entry.plans, reading.observed_unix_seconds);

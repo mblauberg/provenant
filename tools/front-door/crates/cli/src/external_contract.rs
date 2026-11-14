@@ -12,19 +12,42 @@ pub struct ExternalContract {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExternalInterface {
-    LaneEnvironment { name: String },
-    JsonOutput { command: String, schema: JsonOutputSchema },
-    WaitJsonLines { command: String, event_fields: Vec<String>, terminal_schema: SchemaReference },
-    ProcessTreeJson { command: String, environment: String, envelope: SchemaReference, sample: SchemaReference },
-    CommandSurface { commands: Vec<String> },
-    StableCommands { state: StableCommandState },
+    LaneEnvironment {
+        name: String,
+    },
+    JsonOutput {
+        command: String,
+        schema: JsonOutputSchema,
+    },
+    WaitJsonLines {
+        command: String,
+        event_fields: Vec<String>,
+        terminal_schema: SchemaReference,
+    },
+    ProcessTreeJson {
+        command: String,
+        environment: String,
+        envelope: SchemaReference,
+        sample: SchemaReference,
+    },
+    CommandSurface {
+        commands: Vec<String>,
+    },
+    StableCommands {
+        state: StableCommandState,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum JsonOutputSchema {
-    CommandResult { envelope: SchemaReference },
-    WorkIdentity { envelope: SchemaReference, identity: SchemaReference },
+    CommandResult {
+        envelope: SchemaReference,
+    },
+    WorkIdentity {
+        envelope: SchemaReference,
+        identity: SchemaReference,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -60,32 +83,68 @@ const fn command_result_schema() -> SchemaReference {
 /// The sole declaration of outward interfaces for the current release.
 pub fn external_contract() -> ExternalContract {
     use provenant_core::{RUN_STATE_DIRECTORY_ENV, STATE_DIRECTORY_ENV};
+    use provenant_os::lane_ports;
     use provenant_run::{LANE_DEPTH_ENV, PARENT_ATTEMPT_ENV};
     use provenant_supervisor::process_tree;
-    use provenant_os::lane_ports;
 
     let envelope = command_result_schema();
     ExternalContract {
         schema_version: 1,
         interfaces: vec![
-            ExternalInterface::LaneEnvironment { name: "PROVENANT_AGENT_LABEL".into() },
-            ExternalInterface::LaneEnvironment { name: LANE_DEPTH_ENV.into() },
-            ExternalInterface::LaneEnvironment { name: PARENT_ATTEMPT_ENV.into() },
-            ExternalInterface::LaneEnvironment { name: RUN_STATE_DIRECTORY_ENV.into() },
-            ExternalInterface::LaneEnvironment { name: STATE_DIRECTORY_ENV.into() },
-            ExternalInterface::LaneEnvironment { name: "HOME".into() },
-            ExternalInterface::LaneEnvironment { name: lane_ports::BASE_ENV.into() },
-            ExternalInterface::LaneEnvironment { name: lane_ports::COUNT_ENV.into() },
-            ExternalInterface::LaneEnvironment { name: "PROVENANT_ROOT".into() },
-            ExternalInterface::LaneEnvironment { name: "PROVENANT_GIT".into() },
-            ExternalInterface::LaneEnvironment { name: "PROVENANT_SANDBOX".into() },
-            ExternalInterface::LaneEnvironment { name: process_tree::ENV.into() },
-            ExternalInterface::LaneEnvironment { name: "PROVENANT_LANE_CARGO_LINT_TARGET".into() },
-            ExternalInterface::LaneEnvironment { name: "PROVENANT_BUILD_SLOT_STATE".into() },
-            ExternalInterface::LaneEnvironment { name: "PROVENANT_BUILD_SLOTS".into() },
-            ExternalInterface::LaneEnvironment { name: "PROVENANT_LOCAL_CARGO".into() },
-            ExternalInterface::LaneEnvironment { name: "PROVENANT_BUILD_DISK_FLOOR".into() },
-            ExternalInterface::LaneEnvironment { name: "PROVENANT_BUILD_DISK_RULE".into() },
+            ExternalInterface::LaneEnvironment {
+                name: "PROVENANT_AGENT_LABEL".into(),
+            },
+            ExternalInterface::LaneEnvironment {
+                name: LANE_DEPTH_ENV.into(),
+            },
+            ExternalInterface::LaneEnvironment {
+                name: PARENT_ATTEMPT_ENV.into(),
+            },
+            ExternalInterface::LaneEnvironment {
+                name: RUN_STATE_DIRECTORY_ENV.into(),
+            },
+            ExternalInterface::LaneEnvironment {
+                name: STATE_DIRECTORY_ENV.into(),
+            },
+            ExternalInterface::LaneEnvironment {
+                name: "HOME".into(),
+            },
+            ExternalInterface::LaneEnvironment {
+                name: lane_ports::BASE_ENV.into(),
+            },
+            ExternalInterface::LaneEnvironment {
+                name: lane_ports::COUNT_ENV.into(),
+            },
+            ExternalInterface::LaneEnvironment {
+                name: "PROVENANT_ROOT".into(),
+            },
+            ExternalInterface::LaneEnvironment {
+                name: "PROVENANT_GIT".into(),
+            },
+            ExternalInterface::LaneEnvironment {
+                name: "PROVENANT_SANDBOX".into(),
+            },
+            ExternalInterface::LaneEnvironment {
+                name: process_tree::ENV.into(),
+            },
+            ExternalInterface::LaneEnvironment {
+                name: "PROVENANT_LANE_CARGO_LINT_TARGET".into(),
+            },
+            ExternalInterface::LaneEnvironment {
+                name: "PROVENANT_BUILD_SLOT_STATE".into(),
+            },
+            ExternalInterface::LaneEnvironment {
+                name: "PROVENANT_BUILD_SLOTS".into(),
+            },
+            ExternalInterface::LaneEnvironment {
+                name: "PROVENANT_LOCAL_CARGO".into(),
+            },
+            ExternalInterface::LaneEnvironment {
+                name: "PROVENANT_BUILD_DISK_FLOOR".into(),
+            },
+            ExternalInterface::LaneEnvironment {
+                name: "PROVENANT_BUILD_DISK_RULE".into(),
+            },
             ExternalInterface::JsonOutput {
                 command: "commands emitting command-result JSON".into(),
                 schema: JsonOutputSchema::CommandResult { envelope },
@@ -102,7 +161,13 @@ pub fn external_contract() -> ExternalContract {
             },
             ExternalInterface::WaitJsonLines {
                 command: "provenant wait --json".into(),
-                event_fields: vec!["event".into(), "target".into(), "settle".into(), "line".into(), "digests".into()],
+                event_fields: vec![
+                    "event".into(),
+                    "target".into(),
+                    "settle".into(),
+                    "line".into(),
+                    "digests".into(),
+                ],
                 terminal_schema: envelope,
             },
             ExternalInterface::ProcessTreeJson {
@@ -114,8 +179,12 @@ pub fn external_contract() -> ExternalContract {
                     version: u64::from(process_tree::SAMPLE_SCHEMA_VERSION),
                 },
             },
-            ExternalInterface::CommandSurface { commands: crate::command_verbs() },
-            ExternalInterface::StableCommands { state: StableCommandState::NoneDeclared },
+            ExternalInterface::CommandSurface {
+                commands: crate::command_verbs(),
+            },
+            ExternalInterface::StableCommands {
+                state: StableCommandState::NoneDeclared,
+            },
         ],
     }
 }
@@ -128,7 +197,10 @@ mod tests {
     #[test]
     fn allocated_port_block_environment_is_declared() {
         let table = external_contract();
-        for variable in [provenant_os::lane_ports::BASE_ENV, provenant_os::lane_ports::COUNT_ENV] {
+        for variable in [
+            provenant_os::lane_ports::BASE_ENV,
+            provenant_os::lane_ports::COUNT_ENV,
+        ] {
             assert!(table.interfaces.iter().any(|interface| matches!(interface,
                 ExternalInterface::LaneEnvironment { name } if name == variable)));
         }
@@ -188,8 +260,12 @@ mod tests {
                         vec![envelope.owner, identity.owner]
                     }
                 },
-                ExternalInterface::WaitJsonLines { terminal_schema, .. } => vec![terminal_schema.owner],
-                ExternalInterface::ProcessTreeJson { envelope, sample, .. } => vec![envelope.owner, sample.owner],
+                ExternalInterface::WaitJsonLines {
+                    terminal_schema, ..
+                } => vec![terminal_schema.owner],
+                ExternalInterface::ProcessTreeJson {
+                    envelope, sample, ..
+                } => vec![envelope.owner, sample.owner],
                 _ => Vec::new(),
             })
             .collect();
@@ -202,7 +278,10 @@ mod tests {
             ])
         );
 
-        for state in [StableCommandState::NoneDeclared, StableCommandState::Declared(vec!["example".into()])] {
+        for state in [
+            StableCommandState::NoneDeclared,
+            StableCommandState::Declared(vec!["example".into()]),
+        ] {
             let encoded = serde_json::to_vec(&state).unwrap();
             let decoded: StableCommandState = serde_json::from_slice(&encoded).unwrap();
             assert_eq!(decoded, state);

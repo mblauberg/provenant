@@ -104,12 +104,11 @@ fn reusable(
     if path == primary {
         return refuse("the branch is checked out in the primary checkout");
     }
-    let expected = match
-        provenant_confinement::worktrees::managed_writer_relative_path(&primary, branch)
-    {
-        Ok(relative) => primary.join(relative),
-        Err(_) => return refuse("the repository worktree layout is unavailable"),
-    };
+    let expected =
+        match provenant_confinement::worktrees::managed_writer_relative_path(&primary, branch) {
+            Ok(relative) => primary.join(relative),
+            Err(_) => return refuse("the repository worktree layout is unavailable"),
+        };
     if path != expected {
         return refuse("it is not at the path this hook creates for that name");
     }
