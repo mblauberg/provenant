@@ -522,9 +522,12 @@ fn explicit_catalogued_model_is_ready_without_provider_listing()
     assert!(route.exclusions.is_empty());
     let mut with_effort = query.clone();
     with_effort.effort = Some("high".into());
-    let with_effort_route = resolve(&with_effort, &context)?;
-    assert_eq!(with_effort_route.effort, None);
-    assert!(with_effort_route.extra.contains_key("effort_warning"));
+    let error = resolve(&with_effort, &context)
+        .expect_err("an unsupported requested effort must not silently change the route");
+    assert!(
+        matches!(error, RoutingError::UnsupportedEffort { ref model, ref effort, ref support }
+        if model == "opencode/opencode/glm-5.3-flash-free" && effort == "high" && !support.is_empty())
+    );
     let mut confidential = query;
     confidential.confidential = true;
     assert!(resolve(&confidential, &context).is_ok());

@@ -15,6 +15,13 @@ itself. Grammar and bounds are in `provenant help --all`. Paths are relative to 
 Templates bind route and access controls before admission. The receipt reports
 the applied effort and effective network access.
 
+Every adapter launch passes through `finalise_provider_env`. Sandboxed and
+native lanes receive the resolved `HOME`, attempt `TMPDIR` and private lane
+`CARGO_HOME`, replacing inherited selectors even when ambient `HOME` is absent.
+An attempt whose provider never spawned retains `terminal_cause = "spawn_failure"`.
+With owner-proved custody release, the graph tries a new route; it never
+classifies that infrastructure failure as a failed task.
+
 ## Cargo home seed
 
 Writers share downloaded registry and Git data in a host-managed lane-only
@@ -736,8 +743,13 @@ A lost or unsettled outcome names its reason whatever evidence it
 carries; the process may have run even though custody was not proven. A failed, cancelled or lost
 lane whose final answer declares a stop records `declared_stop` (with any
 provider stop it already reported) and no other partial signal. The settled outcome is
-what the graph reads: `src/fabric.rs` maps any outcome other
-than `succeeded`, including `review_required`, to a failed graph node attempt.
+what the graph reads: a settled `review_required` attempt stays visible while
+its graph node succeeds and dependants proceed. It needs no acknowledgement;
+any acknowledgement is bookkeeping and grants or releases nothing. Explicit
+unfinished writer handoffs still follow the stop policy: committed `done`
+succeeds, `blocked` preserves the lane's stated cause, and no work without a
+handoff stays `stopped_no_work`. Result integrity and review contracts still
+apply before a node succeeds.
 Delivery is gated on the outcome before the stop, so a lane that succeeded
 before stopping still delivers its partial work once its publication is
 durable. The reason carries a `partial finish (...)` note, and `status` shows

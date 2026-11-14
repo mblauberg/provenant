@@ -538,8 +538,13 @@ fn failure_diagnostic(stderr: &[u8]) -> Option<String> {
     })
 }
 
-/// Extract only bounded protocol identifiers, never provider messages or bodies.
-pub fn stdout_error_diagnostic(stdout: &[u8]) -> Option<String> {
+/// Parse the error envelope, projecting identifiers and the requested route,
+/// never arbitrary provider messages or response bodies.
+pub fn stdout_error_diagnostic(
+    stdout: &[u8],
+    model: Option<&str>,
+    variant: Option<&str>,
+) -> Option<String> {
     fn identifier(value: Option<&str>) -> &str {
         value
             .filter(|s| {
@@ -549,6 +554,17 @@ pub fn stdout_error_diagnostic(stdout: &[u8]) -> Option<String> {
                         b.is_ascii_lowercase()
                             || b.is_ascii_digit()
                             || matches!(b, b'.' | b'_' | b'-')
+                    })
+            })
+            .unwrap_or("unknown")
+    }
+    fn selector(value: Option<&str>) -> &str {
+        value
+            .filter(|text| {
+                !text.is_empty()
+                    && text.len() <= 128
+                    && text.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-')
                     })
             })
             .unwrap_or("unknown")
@@ -576,9 +592,24 @@ pub fn stdout_error_diagnostic(stdout: &[u8]) -> Option<String> {
             .filter(|n| (100..=599).contains(n))
             .map(|n| n.to_string())
             .unwrap_or_else(|| "unknown".into());
+        let invalid_reference = [
+            error.get("message"), error.pointer("/data/message"),
+            body.as_ref().and_then(|body| body.pointer("/error/message")),
+            error.get("type"),
+        ].into_iter().flatten().filter_map(serde_json::Value::as_str).any(|message| {
+            let message = message.to_ascii_lowercase();
+            message.contains("invalid model reference")
+                || message.contains("unsupported variant")
+                || message.contains("unknown variant")
+                || message.contains("modelnotfound")
+                || message.contains("variantnotfound")
+                || ((message.contains("variant") || message.contains("effort"))
+                    && (message.contains("not supported") || message.contains("not found")))
+        });
+        let guidance = if invalid_reference { "; choose a supported model and variant (check the route's effort)" } else { "" };
         Some(provenant_confinement::redact::bounded_line(
-            &format!("opencode provider error: type={kind}, status={status}, code={code}"),
-            240,
+            &format!("opencode provider error: model={}, variant={}, type={kind}, status={status}, code={code}{guidance}", selector(model), selector(variant.or(Some("default")))),
+            640,
         ))
     })
 }

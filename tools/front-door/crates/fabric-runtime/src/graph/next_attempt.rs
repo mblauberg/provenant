@@ -315,6 +315,9 @@ fn fallback_cause(outcome: AttemptOutcome) -> Option<provenant_records::StopCaus
     match outcome {
         AttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
         AttemptOutcome::UsageLimited => Some(StopCause::UsageLimited),
+        AttemptOutcome::PreparationRefused(provenant_records::run::TerminalCause::SpawnFailure) => {
+            Some(StopCause::SpawnFailure)
+        }
         AttemptOutcome::AdapterUnavailable | AttemptOutcome::PreparationRefused(_) => {
             Some(StopCause::AdapterUnavailable)
         }

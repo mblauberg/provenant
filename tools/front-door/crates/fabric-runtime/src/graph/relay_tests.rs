@@ -295,6 +295,7 @@ fn child_decision_inherits_the_graph_chair_session() {
     });
     let receipt = add(&document, &mut checkpoint, "a", &request).unwrap();
     let mut owner = FakeOwner {
+        now: Some(provenant_core::WallTime::from_micros(0).unwrap()),
         observations: [AttemptObservation::Pending {
             attempt_ref: Some("attempt-a".into()),
         }]

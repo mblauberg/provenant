@@ -987,7 +987,11 @@ impl Registry<'_> {
         }
         if provenant_records::AdapterSpec::get(adapter.id())
             .is_some_and(|spec| spec.stdout_error_diagnostic)
-            && let Some(note) = provenant_providers::opencode::stdout_error_diagnostic(stdout)
+            && let Some(note) = provenant_providers::opencode::stdout_error_diagnostic(
+                stdout,
+                route.model.as_deref(),
+                route.effort.as_deref(),
+            )
         {
             decoded.reason = Some(match decoded.reason.take() {
                 Some(reason) => format!("{reason}; {note}"),

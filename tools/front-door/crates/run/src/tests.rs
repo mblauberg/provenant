@@ -1410,7 +1410,7 @@ fn streamed_verdict_evidence_validates_complete_large_artifacts() -> TestResult 
         done.result = &text;
         store.publish_terminal(id, 1, &done, &exit(), &call)?;
         let captured = store.stream_result(id, &call, None)?;
-        assert!(captured.source_truncated);
+        assert!(!captured.source_truncated);
         assert!(!captured.excerpt.contains("VERDICT: FAIL"));
         assert!(!captured.tail.contains("VERDICT: FAIL"));
         assert_eq!(

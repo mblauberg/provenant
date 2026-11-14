@@ -497,7 +497,10 @@ fn node_bound(
         let excerpt = 256;
         // digest, excerpt, path, verdict, verdict error, findings, branch,
         // commit, warnings, remaining
-        bytes += 80
+        // An oversized findings block uses the existing text artifact store;
+        // reserve its fixed-width reference beside the bounded summary.
+        bytes += 256
+            + 80
             + excerpt
             + REMAINING_BYTES
             + 256

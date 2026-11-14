@@ -1445,6 +1445,9 @@ fn native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation()
                     || matches!(
                         key,
                         "PATH"
+                            | "HOME"
+                            | "TMPDIR"
+                            | "TMPPREFIX"
                             | "CARGO_HOME"
                             | "RUSTUP_HOME"
                             | "RUSTUP_AUTO_INSTALL"
@@ -1468,9 +1471,16 @@ fn native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation()
                 "native adapter dropped a host environment binding"
             );
         }
-        let homes: Vec<_> = native.env.iter().filter(|(key, _)| key == "CARGO_HOME").collect();
+        let homes: Vec<_> = native
+            .env
+            .iter()
+            .filter(|(key, _)| key == "CARGO_HOME")
+            .collect();
         assert_eq!(homes.len(), 1);
-        assert_eq!(homes[0].1, "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/cargo-home");
+        assert_eq!(
+            homes[0].1,
+            "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/cargo-home"
+        );
         if let Some((_, host_path)) = host.iter().find(|(key, _)| key == "PATH") {
             let child_path = &native.env.iter().find(|(key, _)| key == "PATH").unwrap().1;
             let child_paths: Vec<_> = std::env::split_paths(child_path).collect();
@@ -1488,6 +1498,84 @@ fn native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation()
                 Some(&token),
             ))?;
             assert!(!confined.tool_requirements.exec.is_empty());
+        }
+    }
+    Ok(())
+}
+
+/// Small: all adapters use the same identity/cache bindings, including a
+/// sparse native environment. No process-global environment mutation is needed.
+#[test]
+fn every_adapter_finalises_missing_lane_environment() -> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture".into());
+    let token = fixture_token();
+    let argv = vec!["/bin/echo".to_owned(), "fixture".to_owned()];
+    for entry in REGISTRY {
+        let id = entry.adapter.id();
+        for native in [false, true] {
+            let auth = match id {
+                "codex" | "cursor" | "opencode" => Some("login"),
+                "agy" => Some("keychain"),
+                _ => None,
+            };
+            let plan = fixture_access_plan(Access::ReadOnly, auth, false);
+            let mut route = route(id, if id == "command" { "" } else { "fixture-model" });
+            route.account_key = None;
+            let host_var = |name: &str| {
+                (native && name == provenant_confinement::run_config::SANDBOX_ENV)
+                    .then(|| "off".into())
+            };
+            let mut input = fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                Path::new("/fixture/repo"),
+                (id == "claude").then_some(&token),
+            );
+            input.host_var = &host_var;
+            if id == "command" {
+                input.command = Some(command::Invocation {
+                    argv: &argv,
+                    program: Path::new("/bin/echo"),
+                    runtimes: &[],
+                });
+            }
+            let mut spec = entry.adapter.prepare(input)?;
+            let assert_bindings = |spec: &LaunchSpec| {
+                for (key, expected) in [
+                    ("HOME", Path::new("/fixture/home").to_path_buf()),
+                    ("TMPDIR", plan.permissions().scratch.path.clone()),
+                    (
+                        "CARGO_HOME",
+                        plan.permissions().scratch.path.join("cargo-home"),
+                    ),
+                ] {
+                    let values: Vec<_> = spec
+                        .env
+                        .iter()
+                        .filter(|(name, _)| name == key)
+                        .map(|(_, value)| value.as_os_str())
+                        .collect();
+                    assert_eq!(
+                        values,
+                        vec![expected.as_os_str()],
+                        "{id} native={native} {key}"
+                    );
+                }
+            };
+            assert_bindings(&spec);
+            spec.env
+                .retain(|(key, _)| !matches!(key.to_str(), Some("HOME" | "TMPDIR" | "CARGO_HOME")));
+            let mut input = fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                Path::new("/fixture/repo"),
+                (id == "claude").then_some(&token),
+            );
+            input.host_var = &host_var;
+            crate::launch::finalise_provider_env(&input, &mut spec);
+            assert_bindings(&spec);
         }
     }
     Ok(())

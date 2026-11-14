@@ -1598,8 +1598,14 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             return Ok(None);
         }
         let custody_released = store.custody_released(&record, &call).map_err(run_error)?;
-        Ok(record.preparation_failure.map(|failure| {
-            provenant_fabric_runtime::graph::PreparationFallbackEvidence {
+        let failure = record.preparation_failure.or_else(|| {
+            (record.provider_launched == Some(false)
+                && matches!(&record.state, provenant_records::run::AttemptState::Terminal { extra, .. }
+                    if extra.get("terminal_cause") == Some(&serde_json::json!(provenant_records::run::TerminalCause::SpawnFailure))))
+                .then_some(provenant_records::run::PreparationFailure::AdapterUnavailable)
+        });
+        Ok(failure.map(
+            |failure| provenant_fabric_runtime::graph::PreparationFallbackEvidence {
                 failure,
                 handoff: if record.provider_launched == Some(false) {
                     provenant_routing::FallbackHandoff::Local
@@ -1607,8 +1613,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     provenant_routing::FallbackHandoff::UncertainOrLaunched
                 },
                 custody_released,
-            }
-        }))
+            },
+        ))
     }
 
     fn quota_alias_redraw(

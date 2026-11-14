@@ -1478,20 +1478,6 @@ fn candidate(
     avoid_cooling: bool,
     intent: RouteIntent,
 ) -> Result<RouteAlternative, RoutingError> {
-    let dropped_effort = effort.filter(|value| {
-        provenant_records::AdapterSpec::get(model.adapter())
-            .is_some_and(|spec| spec.drops_unsupported_effort)
-            && crate::request::effort_valid(value)
-            && context
-                .catalogue
-                .model(model)
-                .is_some_and(|entry| !entry.efforts.iter().any(|allowed| allowed == value))
-    });
-    let effort = if dropped_effort.is_some() {
-        None
-    } else {
-        effort
-    };
     let entry = admissible(model, effort, context)?;
     #[cfg(test)]
     let spec = context
@@ -1619,15 +1605,6 @@ fn candidate(
         },
     };
     let mut extra = provenant_records::ExtraFields::default();
-    if let Some(value) = dropped_effort {
-        extra.insert(
-            "effort_warning".into(),
-            serde_json::json!(format!(
-                "unsupported effort {value} for {}; dropped",
-                model.as_str()
-            )),
-        );
-    }
     if matches!(
         &readiness,
         RouteReadiness::Unavailable {
@@ -2333,11 +2310,9 @@ fn classify_pool(
         let exclusion = if !privacy_allowed(&member.model, request.confidential, context.catalogue)
         {
             Some(("confidential", "confidential model"))
-        } else if !provenant_records::AdapterSpec::get(member.model.adapter())
-            .is_some_and(|spec| spec.drops_unsupported_effort)
-            && effort
-                .as_deref()
-                .is_some_and(|value| !member.efforts.iter().any(|allowed| allowed == value))
+        } else if effort
+            .as_deref()
+            .is_some_and(|value| !member.efforts.iter().any(|allowed| allowed == value))
         {
             Some(("effort", "unsupported effort"))
         } else {

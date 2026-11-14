@@ -215,11 +215,24 @@ pub fn loop_ask(graph_id: &str, node: &str, rounds: usize, session: &str) -> Ask
 }
 
 const PREVIOUS_ANSWER: &str = "\n\nThe previous answer was not applied: ";
+const DEFAULT_DECIDE_TIMEOUT_SECONDS: u64 = 300;
+
+fn decide_default(spec: &DecideSpec) -> Option<String> {
+    spec.default
+        .clone()
+        .or_else(|| spec.options.first().map(|option| option.id.clone()))
+}
 
 /// The rendered decide request body. A rejected previous answer is noted at
 /// the end, shortened to keep the body within the inbox limit.
 fn decide_body(graph_id: &str, node_id: &str, spec: &DecideSpec, previous: Option<&str>) -> String {
-    let fallback = match (&spec.default, spec.timeout_seconds) {
+    let fallback = match (
+        decide_default(spec),
+        Some(
+            spec.timeout_seconds
+                .unwrap_or(DEFAULT_DECIDE_TIMEOUT_SECONDS),
+        ),
+    ) {
         (Some(default), Some(seconds)) => {
             format!("\n\nWith no answer within {seconds} seconds, the graph takes {default}.")
         }
@@ -293,7 +306,7 @@ pub(super) fn decide_ask(
     );
     ask.node = Some(node.id.clone());
     ask.options = spec.options.clone();
-    ask.default = spec.default.clone();
+    ask.default = decide_default(spec);
     ask.wake_at = wake_at;
     ask
 }
@@ -370,9 +383,8 @@ pub(super) fn validate_decide(
         .default
         .as_ref()
         .is_some_and(|default| !ids.contains(default.as_str()))
-        || spec.timeout_seconds.is_some() && spec.default.is_none()
     {
-        return Err("decide default must name an option, and a timeout needs a default");
+        return Err("decide default must name an option");
     }
     // A timeout must be a representable duration that fits the wall-time
     // range at all; the deadline itself is checked when the ask is raised.
@@ -534,9 +546,9 @@ fn decide_deadline<R: AttemptOwner, J: Error + 'static>(
     spec: &DecideSpec,
     owner: &R,
 ) -> Result<Option<WallTime>, GraphError<R::Error, J>> {
-    let Some(seconds) = spec.timeout_seconds else {
-        return Ok(None);
-    };
+    let seconds = spec
+        .timeout_seconds
+        .unwrap_or(DEFAULT_DECIDE_TIMEOUT_SECONDS);
     let now = owner.wall_now().ok_or_else(|| {
         GraphError::Refused(format!(
             "node {}: no wall clock to set its decide deadline; retry the advance",
@@ -685,7 +697,7 @@ pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
         Ok(Some(reply)) => Some(answered(reply)),
         _ if due(link, now) => Some(Answer {
             source: AnswerSource::Default,
-            option: spec.default.clone(),
+            option: decide_default(spec),
             text: None,
             actor: None,
             rejected: None,
@@ -695,11 +707,19 @@ pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
     let Some(mut answer) = answer else {
         return Ok(());
     };
-    let chosen = answer
-        .option
-        .clone()
-        .or_else(|| answer.text.as_deref().map(|text| text.trim().to_owned()))
-        .filter(|id| spec.options.iter().any(|option| &option.id == id));
+    // Silence cannot grant a change of scope or a one-way-door authority.
+    // Settle the ask visibly without taking an approval edge.
+    let scope_timeout = answer.source == AnswerSource::Default
+        && repair_scope_gate(node.extra.get("repair_scope_gate"));
+    let chosen = if scope_timeout {
+        Some("timed_out".to_owned())
+    } else {
+        answer
+            .option
+            .clone()
+            .or_else(|| answer.text.as_deref().map(|text| text.trim().to_owned()))
+            .filter(|id| spec.options.iter().any(|option| &option.id == id))
+    };
     let ask_id = link.ask_id.clone();
     if answer.rejected.is_none() && chosen.is_none() {
         let ids: Vec<_> = spec
@@ -774,7 +794,13 @@ fn decision_outputs(ask_id: &str, option: &str, answer: &Answer) -> NodeOutputs 
         findings_available: None,
         branch: None,
         commit: None,
-        warnings: Vec::new(),
+        warnings: if answer.source == AnswerSource::Default {
+            vec![format!(
+                "decide timeout: proceeded with verdict {option}; no answer arrived before the deadline"
+            )]
+        } else {
+            Vec::new()
+        },
         plan: None,
         remaining: None,
     }
@@ -1098,6 +1124,7 @@ pub(super) fn validate_progress(
                         .zip(node.decide.as_ref())
                         .is_some_and(|(verdict, spec)| {
                             spec.options.iter().any(|option| option.id == verdict)
+                                || (repair_scope_gate(node.extra.get("repair_scope_gate")) && verdict == "timed_out")
                         })
             }
             NodeState::Failed => progress.outputs.is_none(),
