@@ -2068,13 +2068,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         &mut self,
         request: provenant_fabric_runtime::graph::LandRequest<'_>,
     ) -> Result<provenant_fabric_runtime::graph::LandObservation, Self::Error> {
+        // Graph landing submits through the one landing owner.
         Ok(crate::pr::land::graph_land(
             &self.factory.cwd,
             self.factory.context.roots.state.as_path(),
-            request.branch,
-            request.head,
-            request.pull_request,
-            request.authority.is_some(),
+            &request,
             self.factory.workers,
         ))
     }

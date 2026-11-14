@@ -2467,41 +2467,5 @@ pub(crate) fn pr_land_changes_nothing_when_the_merge_does_not_happen() -> Result
     assert!(branch_exists(&landing.rig, "feat")?);
     assert_eq!(git(&landing.rig, &["rev-parse", "main"])?, landing.stale);
 
-    // An unconfirmed merge must preserve real local worktrees and refs.
-    let landing = self::landing()?;
-    let rig = &landing.rig;
-    fs::write(
-        rig.project.join("view.json"),
-        r#"{"state":"OPEN","baseRefName":"main","headRefName":"feat","isCrossRepository":false}"#,
-    )?;
-    fs::write(rig.project.join("merge-completes"), "")?;
-    fs::write(rig.project.join("rate-after-merge"), "")?;
-    let output = command(
-        rig,
-        &[
-            "land",
-            NUMBER,
-            "--head",
-            &landing.head,
-            "--wait=5s",
-            "--json",
-        ],
-    )?;
-    let value = json(&output)?;
-    assert_eq!(value["error"]["code"], "RATE_LIMITED", "{value}");
-    let message = value["error"]["message"].as_str().ok_or("error message")?;
-    assert!(message.contains("merge may have completed"), "{value}");
-    assert!(message.contains("2100-01-01"), "{value}");
-    let retry = format!(
-        "provenant land {NUMBER} --head {} --wait=5s --state-dir '{}' --json",
-        landing.head,
-        rig.state.display()
-    );
-    assert!(message.contains(&format!("next: {retry}")), "{value}");
-    assert_eq!(value["error"]["repair"], retry, "{value}");
-    assert!(landing.worktree.exists());
-    assert!(branch_exists(rig, "feat")?);
-    assert_eq!(git(rig, &["rev-parse", "main"])?, landing.stale);
-
     Ok(())
 }

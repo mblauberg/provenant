@@ -3,11 +3,6 @@ use super::{LandingError, model::*, ports::*};
 use provenant_cli::domains::MergeMethod;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-type WaitReads = (
-    std::rc::Rc<std::cell::Cell<bool>>,
-    std::rc::Rc<std::cell::Cell<usize>>,
-);
-
 #[derive(Default)]
 pub struct FakeForge {
     pub target_branch: String,
@@ -15,7 +10,6 @@ pub struct FakeForge {
     pub move_after_merge: Option<(u64, String)>,
     pub pull_requests: BTreeMap<u64, PullRequestInfo>,
     pub stacks: BTreeMap<u64, Vec<StackMember>>,
-    pub after_wait_reads: Option<WaitReads>,
     pub heads: BTreeMap<u64, String>,
     pub head_reads: BTreeMap<u64, VecDeque<String>>,
     pub approvals_at_head: BTreeMap<(u64, String), Vec<Approval>>,
@@ -49,11 +43,6 @@ impl Forge for FakeForge {
         Ok("fake-repository".into())
     }
     fn pull_request(&mut self, number: u64) -> Result<PullRequestInfo, LandingError> {
-        if let Some((waited, reads)) = &self.after_wait_reads
-            && waited.get()
-        {
-            reads.set(reads.get() + 1);
-        }
         self.pull_requests
             .get(&number)
             .cloned()

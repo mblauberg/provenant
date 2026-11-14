@@ -1796,12 +1796,9 @@ mod tests {
     }
     #[test]
     fn batch_land_and_policy_explanation_parse() -> Result<(), Box<dyn std::error::Error>> {
-        let inv = valid(&[
-            "land", "12", "34", "--batch", "--shadow", "--tier", "crucial",
-        ]);
+        let inv = valid(&["land", "12", "34", "--shadow", "--tier", "crucial"]);
         let Command::Land {
             numbers,
-            batch,
             shadow,
             tier,
             ..
@@ -1810,11 +1807,11 @@ mod tests {
             return Err("expected land command".into());
         };
         assert_eq!(numbers, [12, 34]);
-        assert!(batch && shadow);
+        assert!(shadow);
         assert_eq!(tier.as_deref(), Some("crucial"));
         invalid(&["land", "12", "--tier", "high"]);
         valid(&["land", "--explain", "--json"]);
-        invalid(&["land", "0", "--batch"]);
+        invalid(&["land", "0", "--shadow"]);
         Ok(())
     }
 

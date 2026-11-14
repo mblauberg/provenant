@@ -37,7 +37,10 @@ pub fn lock(state: &Path) -> Result<provenant_os::fs::LockGuard, LandingError> {
             "publication.lock".as_ref(),
             provenant_os::fs::LockMode::Exclusive,
         )
-        .map_err(|e| failed("acquire landing publication lock", e))
+        .map_err(|e| match e {
+            provenant_os::fs::FsError::LockTimeout { .. } => LandingError::Busy,
+            e => failed("acquire landing publication lock", e),
+        })
 }
 
 fn receipt_dir(state: &Path) -> PathBuf {
@@ -45,7 +48,7 @@ fn receipt_dir(state: &Path) -> PathBuf {
 }
 
 /// Write `bytes` to `path` through a synced sibling file and a rename.
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), LandingError> {
+pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), LandingError> {
     use std::io::Write;
     let parent = path
         .parent()

@@ -91,7 +91,7 @@ retry TARGET [--brief TEXT | --extend KEY=VALUE...]
 steer TARGET --text-stdin [--operation-id ID]
 edit NAME --file PATCH
 templates [TEMPLATE] [--file PATH]
-land NUMBER... [--batch] [--shadow] [--tier TIER] [--head REV] [--wait[=SPAN]]
+land NUMBER... [--shadow] [--tier TIER] [--head REV] [--wait[=SPAN]]
     [--poll SECONDS] [--explain]
 reconcile [TARGET]... [--abandon TARGET --reason TEXT]
 telemetry value [--account ACCOUNT] [--window WINDOW] [--since WHEN]

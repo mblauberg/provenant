@@ -9,6 +9,7 @@
 #[cfg(test)]
 pub mod fakes;
 pub mod model;
+pub mod owner;
 pub mod policy;
 pub mod ports;
 
@@ -32,6 +33,12 @@ pub enum LandingError {
     CiUnavailable(String),
     #[error("landing target moved too many times")]
     Contention,
+    /// Another lander holds the publication lock; a resubmission resumes.
+    #[error("another landing run holds the publication lock; resubmit to resume")]
+    Busy,
+    /// CI is still running past this call's patience; a resubmission resumes.
+    #[error("{0}")]
+    Pending(String),
     #[error("landing target moved during publication")]
     TargetMoved,
     #[error("pull request {0} changed before publication")]
@@ -74,9 +81,10 @@ pub mod receipt;
 pub mod reconcile;
 pub mod split;
 
-/// `land N M ...` selects a batch; `--batch` selects a singleton batch.
-/// `--shadow` uses the batch path without publishing; `--explain --json`
-/// prints the policy and sources without requiring pull request numbers.
+/// `land N M ...` submits one landing request to the landing owner; `--head`
+/// pins the single member's head and `--wait` bounds this call's CI wait.
+/// `--shadow` runs it without publishing; `--explain --json` prints the
+/// policy and sources without requiring pull request numbers.
 pub struct Options {
     pub numbers: Vec<u64>,
     /// Any object name that resolves to one commit; resolved before landing.
@@ -84,7 +92,6 @@ pub struct Options {
     pub wait: Option<u64>,
     pub poll: Option<u64>,
     pub explain: bool,
-    pub batch: bool,
     pub shadow: bool,
     pub tier: Option<String>,
     /// Land a delta no review covers; the reason is recorded in the receipt.
@@ -169,6 +176,8 @@ fn batch_response(
             | LandingError::PublicationStale { .. }
             | LandingError::RecoveryRequired { .. },
         ) => (Outcome::Pending, "LAND_PUBLICATION_UNKNOWN"),
+        Some(LandingError::Pending(_)) => (Outcome::Pending, "LAND_PENDING"),
+        Some(LandingError::Busy) => (Outcome::Pending, "LAND_BUSY"),
         Some(LandingError::Contention | LandingError::TargetMoved) => {
             (Outcome::Refused, "LAND_CONTENTION")
         }
@@ -294,77 +303,22 @@ fn review_records(
     Ok(adapters::DeliveryReviews::new(state.clone(), scope))
 }
 
-/// Decide a single pull request's approval with the function batch landing uses.
-fn single_approval(
-    number: u64,
-    head: Option<String>,
-    options: &Options,
-    effective: &provenant_cli::domains::LandSettings,
-    (resolved, project): (&crate::roots::Resolved, Option<&str>),
-    globals: &provenant_cli::Globals,
-    workers: &dyn provenant_confinement::worktrees::WorkerObserver,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let (mut forge, mut repo, _, _) = adapters::connect(
-        &resolved.project,
-        resolved.roots.state.as_path(),
-        globals,
-        workers,
-        Default::default(),
-    )?;
-    let info = forge.pull_request(number)?;
-    if info.state != ports::PullRequestState::Open {
-        return Ok(());
-    }
-    if let Some(expected) = &head
-        && expected != &info.head
-    {
-        return Ok(());
-    }
-    let reviews = review_records(&mut *forge, effective, &resolved.roots.state, project)?;
-    let exempt = review_exempt(resolved.roots.state.as_path(), project);
-    let approvals = approval::Approvals::new(effective.approval, &reviews).governed(
-        effective.approval_tier,
-        &exempt,
-        options.accept_delta.as_deref(),
-    );
-    let target = if approvals.needs_target() {
-        repo.fetch_target_untracked(&info.base_branch)?
-    } else {
-        String::new()
-    };
-    let head = head.unwrap_or_else(|| info.head.clone());
-    match approvals
-        .at(&mut *repo, &target)
-        .decide(&mut *forge, number, &head, &info.author)?
-    {
-        approval::Decision::Approved(approved) => {
-            if let Some(accepted) = approved.accepted {
-                use std::io::Write;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: pull request #{number} lands without a review covering its delta; accepted by {}: {}",
-                    accepted.actor,
-                    accepted.reason
-                );
-            }
-            Ok(())
-        }
-        approval::Decision::Refused(reason) => Err(super::wait::failure(
-            "LAND_REFUSED",
-            format!(
-                "pull request #{number} was refused: {reason}; review the delta or pass --accept-delta REASON"
-            ),
-        )),
-    }
+/// The landing policy one adapter call resolved for a checkout.
+pub(crate) struct Prepared {
+    resolved: crate::roots::Resolved,
+    project: Option<String>,
+    policy: policy::LandPolicy,
+    effective: provenant_cli::domains::LandSettings,
+    tier_warning: Option<String>,
 }
 
-fn run_inner(
-    options: Options,
+/// Resolve the checkout, its project and the effective landing policy.
+pub(crate) fn prepare(
     globals: &provenant_cli::Globals,
-    workers: &dyn provenant_confinement::worktrees::WorkerObserver,
-) -> Result<u8, Box<dyn std::error::Error>> {
-    use provenant_cli::domains::{Integration, LandOverride, LandSettings};
-    use provenant_records::{CommandResult, Outcome};
+    tier: Option<&str>,
+    poll: Option<u64>,
+) -> Result<Prepared, Box<dyn std::error::Error>> {
+    use provenant_cli::domains::LandOverride;
     let resolved = crate::roots::resolve(
         globals,
         crate::roots::Workspace::Checkout,
@@ -383,20 +337,18 @@ fn run_inner(
         &provenant_core::CancelToken::new(),
     )?;
     let invocation = LandOverride {
-        poll_seconds: options.poll,
+        poll_seconds: poll,
         ..LandOverride::default()
     };
     let policy = policy::LandPolicy::resolve(
         &config.domains.pr.land,
         &config.origins,
         project.as_deref(),
-        options.tier.as_deref(),
+        tier,
         &invocation,
     )?;
     let effective = policy.settings()?;
-    let tier_warning = options
-        .tier
-        .as_ref()
+    let tier_warning = tier
         .filter(|tier| !config.domains.pr.land.tiers.contains_key(*tier))
         .map(|tier| {
             format!("no landing override is configured for tier {tier}; inherited settings apply")
@@ -415,8 +367,151 @@ fn run_inner(
         )
         .into());
     }
+    Ok(Prepared {
+        resolved,
+        project,
+        policy,
+        effective,
+        tier_warning,
+    })
+}
+
+/// One submission through the landing owner, with what an adapter renders.
+pub(crate) struct Submission {
+    pub(crate) id: Option<owner::LandingId>,
+    pub(crate) record: Option<owner::LandingRecord>,
+    pub(crate) report: driver::Report,
+    pub(crate) failure: Option<LandingError>,
+    pub(crate) repository: Option<String>,
+}
+
+/// Submit `request` to the one landing owner over the live forge and Git.
+pub(crate) fn submit(
+    prepared: &Prepared,
+    request: owner::LandRequest,
+    shadow: bool,
+    globals: &provenant_cli::Globals,
+    workers: &dyn provenant_confinement::worktrees::WorkerObserver,
+) -> Result<Submission, Box<dyn std::error::Error>> {
+    use owner::LandingOwner as _;
+    use provenant_cli::domains::Integration;
+    let Prepared {
+        resolved,
+        project,
+        policy,
+        effective,
+        ..
+    } = prepared;
+    let mut settings = effective.clone();
+    if settings.integration == Integration::Single {
+        // Single integration lands one pull request per candidate.
+        settings.batch_size = 1;
+    }
+    let mut tracking = std::collections::BTreeMap::new();
+    if !shadow && request.authority != owner::Authority::Observe {
+        for member in &request.members {
+            tracking.insert(
+                member.pr,
+                super::land::batch_track(&resolved.project, member.pr, globals)?,
+            );
+        }
+    }
+    let repository = tracking
+        .values()
+        .find_map(|entry| entry.repository().map(str::to_owned));
+    let mut definition = gate_definition(&settings.gate)?;
+    if let Some(patience) = request.policy.patience_seconds {
+        definition.timeout_seconds = patience;
+    }
+    let (mut forge, mut repo, mut runner, mut alarms) = adapters::connect(
+        &resolved.project,
+        resolved.roots.state.as_path(),
+        globals,
+        workers,
+        tracking,
+    )?;
+    let reviews = review_records(
+        &mut *forge,
+        &settings,
+        &resolved.roots.state,
+        project.as_deref(),
+    )?;
+    let exempt = review_exempt(resolved.roots.state.as_path(), project.as_deref());
+    let mut owner = owner::Owner {
+        forge: &mut *forge,
+        repo: &mut *repo,
+        runner: &mut *runner,
+        alarms: &mut *alarms,
+        state: resolved.roots.state.as_path(),
+        settings: &settings,
+        policy,
+        gate: &definition,
+        approvals: approval::Approvals::new(settings.approval, &reviews).governed(
+            settings.approval_tier,
+            &exempt,
+            None,
+        ),
+        shadow,
+        last: None,
+    };
+    let numbers: Vec<u64> = request.members.iter().map(|member| member.pr).collect();
+    let submitted = owner.submit(request);
+    let (id, record) = match &submitted {
+        Ok(id) => (Some(id.clone()), owner.record(id)?),
+        Err(_) => (None, None),
+    };
+    let (mut report, failure) = owner.last.take().unwrap_or_default();
+    let failure = failure.or(submitted.err());
+    if report.outcomes.is_empty()
+        && let Some(record) = &record
+    {
+        // A replayed landing reports its recorded outcomes.
+        for (number, outcome) in &record.outcomes {
+            report.outcomes.insert(
+                *number,
+                match outcome {
+                    owner::MemberOutcome::Landed { .. } => model::Outcome::Landed,
+                    owner::MemberOutcome::Pending { .. } => model::Outcome::Pending,
+                    owner::MemberOutcome::Unknown { .. } => model::Outcome::PendingUnknown,
+                    owner::MemberOutcome::Refused { reason } => {
+                        report.exclusion_reasons.insert(*number, reason.clone());
+                        model::Outcome::Excluded
+                    }
+                },
+            );
+        }
+    }
+    for number in numbers {
+        // A submission that failed before the driver ran reports each member.
+        report
+            .outcomes
+            .entry(number)
+            .or_insert(model::Outcome::Excluded);
+    }
+    Ok(Submission {
+        id,
+        record,
+        report,
+        failure,
+        repository,
+    })
+}
+
+fn run_inner(
+    options: Options,
+    globals: &provenant_cli::Globals,
+    workers: &dyn provenant_confinement::worktrees::WorkerObserver,
+) -> Result<u8, Box<dyn std::error::Error>> {
+    use provenant_cli::domains::{Integration, LandSettings};
+    use provenant_records::{CommandResult, Outcome};
+    let prepared = prepare(globals, options.tier.as_deref(), options.poll)?;
+    let (policy, effective) = (&prepared.policy, &prepared.effective);
     if options.explain {
-        let mut warnings = tier_warning.clone().into_iter().collect::<Vec<_>>();
+        let mut warnings = prepared
+            .tier_warning
+            .clone()
+            .into_iter()
+            .collect::<Vec<_>>();
         if effective.post_merge.revert_forward && !effective.post_merge.bisect {
             warnings.push(
                 "post_merge.revert_forward requires post_merge.bisect to identify a culprit".into(),
@@ -431,7 +526,8 @@ fn run_inner(
                     .into(),
             );
         }
-        let value = serde_json::json!({"fields": policy.fields, "budget_rate_micros_per_minute": policy.budget_rate_micros_per_minute, "retry_budget_seconds": options.wait.unwrap_or(60), "retry_budget_source": if options.wait.is_some() { "--wait" } else { "compiled default" }, "warnings": warnings});
+        let patience = options.wait.unwrap_or(effective.gate.timeout_seconds);
+        let value = serde_json::json!({"fields": policy.fields, "budget_rate_micros_per_minute": policy.budget_rate_micros_per_minute, "ci_patience_seconds": patience, "ci_patience_source": if options.wait.is_some() { "--wait" } else { "gate.timeout_seconds" }, "warnings": warnings});
         let text = format!("{}\n", serde_json::to_string_pretty(&value)?);
         return Ok(crate::emit(
             &CommandResult::new("land", Outcome::Ok, value),
@@ -443,110 +539,54 @@ fn run_inner(
     if options.numbers.is_empty() {
         return Err("supply at least one pull request number".into());
     }
-    let integration: Integration =
-        serde_json::from_value(policy.fields["integration"].value.clone())?;
-    let explicit_batch = options.batch || options.shadow || options.numbers.len() > 1;
-    let use_batch = explicit_batch
-        || (integration == Integration::Batch && options.head.is_none() && options.wait.is_none());
-    if integration == Integration::Single && explicit_batch {
-        return Err("single integration accepts one pull request without batch or shadow".into());
-    }
-    if integration == Integration::ForgeQueue {
+    if effective.integration == Integration::ForgeQueue {
         return Err(
             LandingError::Failed("land.integration=forge_queue is not supported".into()).into(),
         );
     }
-    if !use_batch {
-        if let Some(warning) = &tier_warning {
-            use std::io::Write;
-            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
-        }
-        let head = options
-            .head
-            .as_deref()
-            .map(|name| super::git::Git::new()?.resolve_commit(&resolved.project, name))
-            .transpose()?;
-        single_approval(
-            options.numbers[0],
-            head.map(|head| head.to_string()),
-            &options,
-            &effective,
-            (&resolved, project.as_deref()),
-            globals,
-            workers,
-        )?;
-        return Ok(super::land::run(
-            options.numbers[0],
-            head,
-            options.wait,
-            options.poll,
-            false,
-            globals,
-            workers,
-        ));
+    if options.head.is_some() && options.numbers.len() > 1 {
+        return Err("--head pins one pull request; land a batch without it".into());
     }
-    if options.head.is_some() || options.wait.is_some() {
-        return Err("--head and --wait apply only to single-pull-request landing".into());
-    }
-    let mut tracking = std::collections::BTreeMap::new();
-    if !options.shadow {
-        for number in &options.numbers {
-            tracking.insert(
-                *number,
-                super::land::batch_track(&resolved.project, *number, globals)?,
-            );
-        }
-    }
-    let tracked_repository = tracking
-        .values()
-        .find_map(|entry| entry.repository().map(str::to_owned));
-    let definition = gate_definition(&effective.gate)?;
-    let (mut forge, mut repo, mut runner, mut alarms) = adapters::connect(
-        &resolved.project,
-        resolved.roots.state.as_path(),
-        globals,
-        workers,
-        tracking,
-    )?;
-    let target = forge.target_branch()?;
-    let reviews = review_records(
-        &mut *forge,
-        &effective,
-        &resolved.roots.state,
-        project.as_deref(),
-    )?;
-    let exempt = review_exempt(resolved.roots.state.as_path(), project.as_deref());
-    let result = driver::run(
-        &mut *forge,
-        &mut *repo,
-        &mut *runner,
-        &mut *alarms,
-        driver::Request {
-            numbers: &options.numbers,
-            target: &target,
-            settings: &effective,
-            policy: &policy,
-            gate: &definition,
-            shadow: options.shadow,
-            state: resolved.roots.state.as_path(),
-            approvals: approval::Approvals::new(effective.approval, &reviews).governed(
-                effective.approval_tier,
-                &exempt,
-                options.accept_delta.as_deref(),
-            ),
+    let head = options
+        .head
+        .as_deref()
+        .map(|name| super::git::Git::new()?.resolve_commit(&prepared.resolved.project, name))
+        .transpose()?;
+    let review_proof = options
+        .accept_delta
+        .clone()
+        .map_or(owner::ReviewProof::Policy, |reason| {
+            owner::ReviewProof::Accepted { reason }
+        });
+    let request = owner::LandRequest {
+        members: options
+            .numbers
+            .iter()
+            .map(|number| owner::LandMember {
+                pr: *number,
+                head: head.map(|head| head.to_string()),
+                base: None,
+                review_proof: review_proof.clone(),
+            })
+            .collect(),
+        authority: owner::Authority::Chair,
+        policy: owner::PolicyChoice {
+            tier: options.tier.clone(),
+            poll_seconds: options.poll,
+            patience_seconds: options.wait,
         },
-    );
-    let (mut report, failure) = match result {
-        Ok(report) => (report, None),
-        Err(LandingError::RunFailed { cause, report }) => (*report, Some(*cause)),
-        Err(error) => (driver::Report::default(), Some(error)),
     };
-    if let Some(warning) = tier_warning {
+    let submission = submit(&prepared, request, options.shadow, globals, workers)?;
+    let mut report = submission.report;
+    if let Some(warning) = prepared.tier_warning.clone() {
         report.warnings.push(warning);
     }
-    let mut response = batch_response(report, failure);
+    let mut response = batch_response(report, submission.failure);
+    response.data["landing_id"] = serde_json::json!(submission.id);
+    response.data["members"] =
+        serde_json::json!(submission.record.as_ref().map(|record| &record.outcomes));
     response.data["lanes"] =
-        serde_json::json!(tracked_repository.as_deref().and_then(|repository| {
+        serde_json::json!(submission.repository.as_deref().and_then(|repository| {
             super::contributions::projected_lanes(globals, &options.numbers, repository)
         }));
     let text = match &response.error {

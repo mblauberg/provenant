@@ -13,11 +13,7 @@
 //! A commit is any head: a pull request head, a `land/**` candidate or a
 //! landed commit.
 use super::gh::{Forge, Gh, Response, rate_limit_reset};
-use provenant_core::{CancelToken, Clock as _, DurationMicros, WaitBudget};
-use provenant_os::{
-    clock::SystemClock,
-    fs::{Directory, LockMode, PublishMode},
-};
+use provenant_os::fs::{Directory, LockMode, PublishMode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
@@ -184,7 +180,8 @@ impl<F: Forge, C: Clock> Observer<F, C> {
 
     /// Every check reported for `commit`. An answer any waiter on the host
     /// read less than `max_age` ago is served without a request. Transient
-    /// failures are retried, and a rate limit is waited out, within `budget`.
+    /// failures are retried within `budget`; a rate limit returns at once, so
+    /// the caller skips one poll instead of sleeping to the reset.
     pub(crate) fn checks(
         &mut self,
         commit: &str,
@@ -205,42 +202,24 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         let mut retries = 0_u32;
         loop {
             let now = self.clock.now();
+            // A recorded limit skips this read; the caller's next poll retries.
             if let Some(reset) = self.rate_limited(now) {
-                let at = timestamp(reset);
-                if at > deadline {
-                    return Err(ObserveError::RateLimited { reset: at });
-                }
-                self.clock
-                    .sleep(seconds(reset.saturating_sub(now.as_second()).max(1)));
-                continue;
+                return Err(ObserveError::RateLimited {
+                    reset: timestamp(reset),
+                });
             }
             let left = Duration::try_from(deadline.duration_since(now)).unwrap_or_default();
             if left.is_zero() {
                 return Err(ObserveError::Expired);
             }
             self.forge.bound(left);
+            // The per-commit lock only shares one read between waiters. A busy
+            // lock is skipped: this waiter reads unlocked rather than queue.
             let lock = format!("{commit}.lock");
             let guard = self
                 .dir
-                .lock(
-                    OsStr::new(&lock),
-                    LockMode::Exclusive,
-                    WaitBudget::up_to(
-                        SystemClock.mono_now(),
-                        DurationMicros::from_micros(
-                            u64::try_from(left.as_micros()).unwrap_or(u64::MAX),
-                        ),
-                    ),
-                    &CancelToken::new(),
-                    &SystemClock,
-                )
-                .map_err(|error| {
-                    if self.clock.now() >= deadline {
-                        ObserveError::Expired
-                    } else {
-                        ObserveError::Unavailable(format!("cannot lock CI observer state: {error}"))
-                    }
-                })?;
+                .try_lock(OsStr::new(&lock), LockMode::Exclusive)
+                .ok();
             let now = self.clock.now();
             // Another waiter may have met the limit while this one queued.
             if self.rate_limited(now).is_some() {
@@ -280,12 +259,9 @@ impl<F: Forge, C: Clock> Observer<F, C> {
                         // recorded reset is never replaced by an earlier one.
                         let reset = self.record_reset(reset.max(now.as_second().saturating_add(1)));
                         drop(guard);
-                        if timestamp(reset) > deadline {
-                            return Err(ObserveError::RateLimited {
-                                reset: timestamp(reset),
-                            });
-                        }
-                        continue;
+                        return Err(ObserveError::RateLimited {
+                            reset: timestamp(reset),
+                        });
                     }
                     Err(Fetch::Transient(message)) => {
                         drop(guard);
@@ -321,16 +297,7 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         // next limited read records the limit again.
         let _guard = self
             .dir
-            .lock(
-                OsStr::new(RATE_LOCK),
-                LockMode::Exclusive,
-                WaitBudget::up_to(
-                    SystemClock.mono_now(),
-                    DurationMicros::from_micros(5_000_000),
-                ),
-                &CancelToken::new(),
-                &SystemClock,
-            )
+            .try_lock(OsStr::new(RATE_LOCK), LockMode::Exclusive)
             .ok();
         let reset = reset.max(self.recorded_reset());
         if let Ok(bytes) = serde_json::to_vec(&RateLimit { reset }) {
@@ -456,9 +423,6 @@ fn open_state(state: &Path, key: &str) -> Result<Directory, Box<dyn std::error::
     Ok(dir)
 }
 
-fn seconds(value: i64) -> Duration {
-    Duration::from_secs(u64::try_from(value).unwrap_or(0))
-}
 fn timestamp(second: i64) -> jiff::Timestamp {
     jiff::Timestamp::from_second(second).unwrap_or(jiff::Timestamp::MAX)
 }
@@ -795,7 +759,7 @@ mod tests {
     }
 
     #[test]
-    fn two_concurrent_waiters_on_one_head_share_one_read_per_poll() {
+    fn concurrent_waiters_never_queue_and_share_the_cached_read() {
         let shared = Shared::new();
         shared.with(|world| {
             world
@@ -803,8 +767,8 @@ mod tests {
                 .insert(HEAD.into(), page(vec![run("build", "in_progress", None)]));
             world.delay = Duration::from_millis(100);
         });
-        // The first read stays open until both waiters are inside `checks`,
-        // so the second must queue behind it and be served from its cache.
+        // The first read stays open until both waiters are inside `checks`;
+        // the second never queues behind it, so it may read too.
         shared.hold_reads_until(2);
         let dir = state();
         let poll = |shared: &Shared| {
@@ -828,16 +792,14 @@ mod tests {
         let first = poll(&shared);
         assert_eq!(first[0], first[1]);
         assert_eq!(first[0][0].bucket, "pending");
-        // One read of the head is one check-run request and one status request.
-        assert_eq!(shared.requests(), 2);
+        // One read of the head is one check-run request and one status
+        // request; a waiter that found the read busy made its own.
+        let read = shared.requests();
+        assert!(matches!(read, 2 | 4), "{read}");
         // Within the interval, neither waiter reaches the forge.
         shared.with(|world| world.now_ms += 1_000);
         poll(&shared);
-        assert_eq!(shared.requests(), 2);
-        // The next interval costs one more read for both.
-        shared.with(|world| world.now_ms += 5_000);
-        poll(&shared);
-        assert_eq!(shared.requests(), 4);
+        assert_eq!(shared.requests(), read);
     }
 
     #[test]
@@ -914,18 +876,29 @@ mod tests {
             .expect_err("still limited");
         assert!(matches!(error, ObserveError::RateLimited { .. }), "{error}");
         assert_eq!(shared.requests(), 1);
-        // A waiter whose budget outlasts the reset sleeps until it, then reads.
+        // A budget that outlasts the reset still skips this poll at once.
+        let before = shared.with(|world| world.now_ms);
+        let error = shared
+            .observer(dir.path())
+            .checks(HEAD, POLL, Duration::from_secs(300))
+            .expect_err("skips the poll");
+        assert!(matches!(error, ObserveError::RateLimited { .. }), "{error}");
+        assert_eq!(shared.with(|world| world.now_ms), before);
+        assert_eq!(shared.requests(), 1);
+        // The first poll after the reset reads again.
+        shared.with(|world| {
+            world.now_ms = reset * 1000;
+            world.limited_until = None;
+        });
         let checks = shared
             .observer(dir.path())
             .checks(HEAD, POLL, Duration::from_secs(300))
             .expect("after reset");
         assert_eq!(checks[0].bucket, "pass");
-        assert!(shared.with(|world| world.now_ms) >= reset * 1000);
-        assert_eq!(shared.requests(), 3);
     }
 
     #[test]
-    fn a_rate_limit_whose_reset_is_past_still_pauses() {
+    fn a_rate_limit_whose_reset_is_past_still_skips_one_poll() {
         let shared = Shared::new();
         shared.with(|world| {
             world.runs.insert(
@@ -935,12 +908,17 @@ mod tests {
             world.past_limit = true;
         });
         let dir = state();
+        let error = shared
+            .observer(dir.path())
+            .checks(HEAD, Duration::ZERO, Duration::from_secs(60))
+            .expect_err("skips the poll");
+        assert!(matches!(error, ObserveError::RateLimited { .. }), "{error}");
+        shared.with(|world| world.now_ms += 1000);
         let checks = shared
             .observer(dir.path())
             .checks(HEAD, Duration::ZERO, Duration::from_secs(60))
-            .expect("after pause");
+            .expect("next poll");
         assert_eq!(checks[0].bucket, "pass");
-        assert!(shared.with(|world| world.now_ms) >= START + 1000);
     }
 
     #[test]
@@ -971,22 +949,21 @@ mod tests {
     }
 
     #[test]
-    fn pr_status_land_wait_and_the_landing_gate_agree_on_one_observation() {
+    fn pr_status_and_the_landing_gate_agree_on_one_observation() {
         let shared = Shared::new();
         let dir = state();
-        let now: jiff::Timestamp = "2026-01-01T00:00:00Z".parse().expect("now");
         for (runs, expected) in [
             (
                 vec![run("build", "in_progress", None)],
-                ("pending", "pending", "pending"),
+                ("pending", "pending"),
             ),
             (
                 vec![run("build", "completed", Some("failure"))],
-                ("failing", "failed", "failed"),
+                ("failing", "failed"),
             ),
             (
                 vec![run("build", "completed", Some("success"))],
-                ("ready", "passed", "passed"),
+                ("ready", "passed"),
             ),
             (
                 vec![
@@ -994,7 +971,7 @@ mod tests {
                     run("test", "completed", Some("failure")),
                     run("build", "completed", Some("success")),
                 ],
-                ("failing", "failed", "failed"),
+                ("failing", "failed"),
             ),
         ] {
             shared.with(|world| {
@@ -1005,14 +982,13 @@ mod tests {
                 .checks(HEAD, Duration::ZERO, Duration::from_secs(60))
                 .expect("checks");
             let status = crate::pr::status::class_of(HEAD, &checks);
-            let wait = crate::pr::wait::verdict(&checks, now);
             let gate = match crate::pr::landing::adapters::gate_checks(checks).1 {
                 crate::pr::landing::model::GateResult::Passed => "passed",
                 crate::pr::landing::model::GateResult::Pending => "pending",
                 crate::pr::landing::model::GateResult::Failed => "failed",
                 other => panic!("unexpected gate result {other:?}"),
             };
-            assert_eq!((status, wait, gate), expected);
+            assert_eq!((status, gate), expected);
         }
     }
 

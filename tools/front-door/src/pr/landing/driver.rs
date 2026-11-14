@@ -20,6 +20,8 @@ pub struct Request<'a> {
     pub shadow: bool,
     pub state: &'a std::path::Path,
     pub approvals: Approvals<'a>,
+    /// Heads and bases the caller pinned; an unpinned member lands as found.
+    pub pins: &'a BTreeMap<u64, Pin>,
 }
 #[derive(Debug, Default)]
 pub struct Report {
@@ -117,6 +119,25 @@ fn recover(
     result
 }
 
+/// Why a pull request no longer matches the head or base its request pinned.
+fn pin_mismatch(pin: &Pin, info: &super::ports::PullRequestInfo) -> Option<String> {
+    if let Some(head) = pin.head.as_deref().filter(|head| *head != info.head) {
+        return Some(format!(
+            "HEAD_MOVED: pinned head {head}, pull request head is now {}",
+            info.head
+        ));
+    }
+    pin.base
+        .as_deref()
+        .filter(|base| *base != info.base_branch)
+        .map(|base| {
+            format!(
+                "BASE_CHANGED: pinned base {base}, pull request base is now {}",
+                info.base_branch
+            )
+        })
+}
+
 fn consume_rebuild(rebuilds: &mut u64, max: u64) -> Result<(), LandingError> {
     if !split::rebuild_allowed(*rebuilds, max)? {
         return Err(LandingError::Contention);
@@ -150,9 +171,12 @@ pub fn run(
                 | LandingError::PublicationStale { .. }
                 | LandingError::RecoveryRequired { .. }
         );
+        let waiting = matches!(error, LandingError::Pending(_) | LandingError::Busy);
         for number in numbers {
             report.outcomes.entry(*number).or_insert(if unknown {
                 Outcome::PendingUnknown
+            } else if waiting {
+                Outcome::Pending
             } else {
                 Outcome::Excluded
             });
@@ -225,6 +249,15 @@ fn run_inner(
     let mut open = Vec::new();
     for number in unique {
         let info = forge.pull_request(number)?;
+        if let Some(reason) = request
+            .pins
+            .get(&number)
+            .and_then(|pin| pin_mismatch(pin, &info))
+        {
+            report.outcomes.insert(number, Outcome::Excluded);
+            report.exclusion_reasons.insert(number, reason);
+            continue;
+        }
         if info.state == super::ports::PullRequestState::Merged && !request.shadow {
             let pr = EligiblePr {
                 number,
@@ -292,6 +325,7 @@ fn run_inner(
             &request.settings.pr_ci,
             &required_ci,
             request.settings.poll_seconds,
+            request.gate.timeout_seconds,
         )?;
         let mut rebuilds = 0;
         loop {
@@ -418,6 +452,15 @@ fn run_inner(
                 }
                 repo.delete_ref(&candidate.ref_name, &candidate.commit)?;
                 break;
+            }
+            if matches!(result, GateResult::Pending | GateResult::Missing) {
+                // Unsettled at the configured bound: a later submission
+                // resumes with a fresh candidate instead of failing the land.
+                let message = format!(
+                    "warning: candidate gate still running after {}s ({unmet}); resubmit to resume",
+                    request.gate.timeout_seconds
+                );
+                return cleanup_unpublished(Err(LandingError::Pending(message)), repo, &candidate);
             }
             if result != GateResult::Passed {
                 let checks = unmet.clone();
@@ -707,7 +750,7 @@ fn run_inner(
     unused_imports,
     reason = "custom worktree harness includes tests without the test runner"
 )]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::pr::landing::fakes::{FakeAlarms, FakeForge, FakeGate, FakeRepo};
     use provenant_cli::domains::{ApprovalSource, LandOverride};
@@ -745,6 +788,7 @@ mod tests {
             &mut runner,
             &mut alarms,
             Request {
+                pins: &Default::default(),
                 approvals: Approvals::forge(),
                 numbers: &[],
                 target: "main",
@@ -761,7 +805,9 @@ mod tests {
         assert!(runner.observed.is_empty());
         Ok(())
     }
-    fn fixture(count: u64) -> (FakeForge, FakeRepo, FakeGate, LandSettings, GateDefinition) {
+    pub(crate) fn fixture(
+        count: u64,
+    ) -> (FakeForge, FakeRepo, FakeGate, LandSettings, GateDefinition) {
         use super::super::ports::{Approval, PullRequestInfo, PullRequestState};
         let mut forge = FakeForge {
             direct_push: true,
@@ -869,6 +915,7 @@ mod tests {
             runner,
             &mut FakeAlarms::default(),
             Request {
+                pins: &Default::default(),
                 numbers,
                 target: "main",
                 settings,
@@ -1593,6 +1640,7 @@ mod tests {
             &mut gate,
             &mut FakeAlarms::default(),
             Request {
+                pins: &Default::default(),
                 approvals: Approvals::forge(),
                 numbers: &[1],
                 target: "main",
@@ -1623,6 +1671,7 @@ mod tests {
             &mut gate,
             &mut alarms,
             Request {
+                pins: &Default::default(),
                 approvals: Approvals::forge(),
                 numbers: &[1],
                 target: "main",
@@ -2421,9 +2470,6 @@ mod tests {
         forge.fail_merge = Some(1);
         assert!(forge.merge_stack(1, &head, settings.method).is_err());
         forge.approvals_at_head.clear();
-        let waited = std::rc::Rc::new(std::cell::Cell::new(false));
-        let reads = std::rc::Rc::new(std::cell::Cell::new(0));
-        forge.after_wait_reads = Some((waited.clone(), reads.clone()));
         let mut recovered = Vec::new();
         let result = reconcile::recover_pending_with(
             &mut forge,
@@ -2436,17 +2482,11 @@ mod tests {
             "main",
             false,
             &mut recovered,
-            &|duration| {
-                assert_eq!(duration, std::time::Duration::from_secs(7));
-                waited.set(true);
-            },
         );
         assert!(matches!(
             result,
             Err(LandingError::PublicationUnknownAt { .. })
         ));
-        assert!(waited.get());
-        assert!(reads.get() > 0);
         assert_eq!(
             receipt::pending(state.path(), "fake-repository", "main")?.len(),
             1
@@ -2467,7 +2507,6 @@ mod tests {
             "main",
             false,
             &mut recovered,
-            &|_| {},
         )?;
         assert_eq!(recovered[0].outcomes[&1], Outcome::Landed);
         assert_eq!(recovered[0].approved_to_landed[&head], "landed-1");
@@ -2507,7 +2546,6 @@ mod tests {
             "main",
             true,
             &mut Vec::new(),
-            &|_| panic!("shadow recovery waited"),
         );
         assert!(matches!(result, Err(LandingError::RecoveryRequired { .. })));
         assert!(forge.merge_attempts.is_empty());
@@ -2573,7 +2611,6 @@ mod tests {
             "main",
             false,
             &mut recovered,
-            &|_| {},
         );
         let error = unknown.unwrap_err();
         assert!(matches!(error, LandingError::PublicationStale { .. }));
@@ -2595,7 +2632,6 @@ mod tests {
             "main",
             false,
             &mut recovered,
-            &|_| {},
         )?;
         assert_eq!(recovered[0].outcomes[&1], Outcome::Landed);
         assert_eq!(recovered[0].outcomes[&2], Outcome::Excluded);
@@ -2859,6 +2895,7 @@ mod tests {
             &mut gate,
             &mut FakeAlarms::default(),
             Request {
+                pins: &Default::default(),
                 approvals: Approvals::forge(),
                 numbers: &[1, 2],
                 target: "main",
@@ -3001,6 +3038,7 @@ mod tests {
             &mut gate,
             &mut FakeAlarms::default(),
             Request {
+                pins: &Default::default(),
                 approvals: Approvals::forge(),
                 numbers: &[1, 2],
                 target: "main",
@@ -3057,6 +3095,7 @@ mod tests {
             &mut gate,
             &mut FakeAlarms::default(),
             Request {
+                pins: &Default::default(),
                 approvals: Approvals::forge(),
                 numbers: &[1, 2],
                 target: "main",
@@ -3144,6 +3183,7 @@ mod tests {
                 &mut gate,
                 &mut alarms,
                 Request {
+                    pins: &Default::default(),
                     approvals: Approvals::forge(),
                     numbers: &[1],
                     target: "main",
