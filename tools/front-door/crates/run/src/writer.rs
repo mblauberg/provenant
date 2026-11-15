@@ -2102,7 +2102,6 @@ mod cargo_setup_tests {
         let state = root.join("state");
         std::fs::create_dir_all(&seed)?;
         std::fs::create_dir_all(common.parent().ok_or("common parent")?)?;
-        std::fs::create_dir_all(writer_path.parent().ok_or("writer parent")?)?;
         std::fs::create_dir(&home)?;
         provenant_os::fixture::private_state_dir(&state)?;
         let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
@@ -2149,6 +2148,7 @@ mod cargo_setup_tests {
                 source.to_str().ok_or("source path")?,
             ],
         )?;
+        std::fs::create_dir_all(writer_path.parent().ok_or("writer parent")?)?;
         run_git(
             &root,
             &[
