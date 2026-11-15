@@ -884,7 +884,14 @@ fn production_owner_panel_uses_distinct_families_and_synthesises()
                 fixture_ref: "fixture".into(),
                 catalogue_revision: catalogue.revision().into(),
                 account_key: Some(format!("{adapter}-account")),
-                plan: None,
+                // A plan partitions an adapter's model namespace; take the one
+                // the declaration says serves this model.
+                plan: provenant_records::AdapterSpec::get(adapter).and_then(|spec| {
+                    spec.account_model_plans
+                        .iter()
+                        .find(|row| model.starts_with(row.model_prefix))
+                        .map(|row| row.plan.to_owned())
+                }),
                 observed_models: vec![model.into()],
                 observed_unix_seconds: now,
                 expires_unix_seconds: now + 300,
