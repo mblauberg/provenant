@@ -149,6 +149,13 @@ fn lane_rows_validate_with_and_without_optional_members() {
     );
     assert_eq!(value["steering"]["successor"], "5".repeat(32));
     assert!(value["steering"].get("text").is_none());
+    for cause in [
+        crate::run::TerminalCause::Steered,
+        crate::run::TerminalCause::EmptyWriterResult,
+    ] {
+        full.terminal_cause = Some(cause);
+        accepted(&schema, &full);
+    }
 }
 
 #[test]

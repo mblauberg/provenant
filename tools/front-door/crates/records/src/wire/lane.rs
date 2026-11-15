@@ -65,19 +65,19 @@ lane_row! {
         protected_paths: Value => nullable(array(super::schema::worktree_path()));
         delivery: Value => any();
         continuation: Value => any();
-        steering: crate::run::SteeringStatus => object(&[
-            ("state", choices(&["queued", "resumed", "not_continued"])),
-            ("operations", array(object(&[("operation_id", string()), ("message_id", string())], &[]))),
-            ("successor", nullable(string())),
-        ], &[]);
         cache_read_share: Option<f64> => nullable(number());
         result_path: Value => nullable(super::schema::worktree_path());
         transcript: Option<LaneTranscript> => nullable(object(&[("adapter", string()), ("session", string()), ("path", nullable(super::schema::worktree_path()))], &[]));
     }
     optional {
+        steering: crate::run::SteeringStatus => object(&[
+            ("state", choices(&["queued", "resumed", "not_continued"])),
+            ("operations", array(object(&[("operation_id", string()), ("message_id", string())], &[]))),
+            ("successor", nullable(string())),
+        ], &[]);
         git_import_failure: Value => object(&[("reason", string()), ("head", nullable(string())), ("retained_objects", nullable(super::schema::worktree_path()))], &[]);
         write_grants: Value => nullable(array(grant_schema()));
-        terminal_cause: crate::run::TerminalCause => choices(&["source_view_refused", "account_login_required", "route_resolution_refused", "access_policy_refused", "disk_floor", "disk_observation_unavailable", "stored_prompt_unreadable", "cloud_placement_removed", "write_grants_refused", "worktree_busy", "handoff_refused", "retained_writer_import", "unsupported_platform", "unknown_pacing_account", "unregistered_account", "delivery_prepare_credential_helper", "spawn_failure", "process_crash", "token_budget", "settlement_failure", "provider_early_stop", "free_pool_quota", "command_unavailable", "host_native_unconfigured", "identity_mismatch", "stopped_no_work", "context_handoff", "blocked", "lane_token_lost"]);
+        terminal_cause: crate::run::TerminalCause => choices(&["source_view_refused", "account_login_required", "route_resolution_refused", "access_policy_refused", "disk_floor", "disk_observation_unavailable", "stored_prompt_unreadable", "cloud_placement_removed", "write_grants_refused", "worktree_busy", "handoff_refused", "retained_writer_import", "unsupported_platform", "unknown_pacing_account", "unregistered_account", "delivery_prepare_credential_helper", "spawn_failure", "process_crash", "token_budget", "settlement_failure", "provider_early_stop", "free_pool_quota", "command_unavailable", "host_native_unconfigured", "identity_mismatch", "stopped_no_work", "empty_writer_result", "context_handoff", "blocked", "lane_token_lost", "steered"]);
         host: String => string();
         title: String => string();
         requested_priority: i64 => integer();
