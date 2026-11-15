@@ -103,20 +103,16 @@ fn codex_rollout_is_found_in_the_launched_candidate() -> Result<(), Box<dyn std:
         } else {
             candidate.clone()
         };
+        let route = codex_resolved_route("gpt-6-luna", Some("selected-account-key"));
         let day = home.join("sessions/2026/10/24");
         std::fs::create_dir_all(base.join("candidate-0"))?;
         std::fs::create_dir_all(&candidate)?;
         std::fs::create_dir_all(&day)?;
         if native {
-            let selector = base.join("codex-observation-candidate-1.json");
-            let bytes = serde_json::to_vec(&serde_json::json!({
-                "schema_version": 1,
-                "home": provenant_records::StructuredPathWire::from_path(&home)?,
-            }))?;
             // Host metadata uses its own explicit root, independently of
             // adapter setup's scratch-only file authority. Replay is idempotent.
             for _ in 0..2 {
-                write_setup_file(&[&base], &selector, &bytes, false)?;
+                write_native_codex_selector(&base, "candidate-1", &home, &route)?;
             }
         }
         // Candidate-local bytes cannot redirect host observation.
@@ -132,15 +128,37 @@ fn codex_rollout_is_found_in_the_launched_candidate() -> Result<(), Box<dyn std:
                 serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6-luna","effort":"low"}}),
             ),
         )?;
-        assert_eq!(observe_codex_rollout(&base, thread)?.model, "gpt-6-luna");
-        assert!(observe_codex_rollout(&base, "another-thread").is_err());
+        let route_record = codex_route_record("gpt-6-luna", Some("selected-account-key"));
+        let selected_home = native.then_some(home.as_path());
+        assert_eq!(
+            observe_codex_rollout(&base, thread, &route_record, selected_home, native)?.model,
+            "gpt-6-luna"
+        );
+        assert!(
+            observe_codex_rollout(
+                &base,
+                "another-thread",
+                &route_record,
+                selected_home,
+                native
+            )
+            .is_err()
+        );
         if native {
             // Two fallback candidates can launch against the same login home.
-            std::fs::copy(
-                base.join("codex-observation-candidate-1.json"),
-                base.join("codex-observation-candidate-0.json"),
-            )?;
-            assert_eq!(observe_codex_rollout(&base, thread)?.model, "gpt-6-luna");
+            write_native_codex_selector(&base, "candidate-0", &home, &route)?;
+            assert_eq!(
+                observe_codex_rollout(&base, thread, &route_record, selected_home, native)?.model,
+                "gpt-6-luna"
+            );
+            let wrong_model = codex_route_record("other-model", Some("selected-account-key"));
+            assert!(
+                observe_codex_rollout(&base, thread, &wrong_model, selected_home, native).is_err()
+            );
+            assert!(
+                find_native_codex_rollout(&base, thread, "gpt-6-luna", Some(candidate.as_path()))
+                    .is_err()
+            );
         }
         // Independent homes that claim the same thread remain ambiguous.
         let other = base.join("candidate-0");
@@ -152,12 +170,213 @@ fn codex_rollout_is_found_in_the_launched_candidate() -> Result<(), Box<dyn std:
         )?;
         if native {
             std::fs::remove_file(base.join("codex-observation-candidate-0.json"))?;
+        } else {
+            assert!(matches!(
+                observe_codex_rollout(&base, thread, &route_record, selected_home, native),
+                Err(provenant_providers::ProviderError::IdentityMismatch)
+            ));
         }
-        assert!(matches!(
-            observe_codex_rollout(&base, thread),
-            Err(provenant_providers::ProviderError::IdentityMismatch)
-        ));
     }
+    Ok(())
+}
+
+fn codex_resolved_route(
+    model: &str,
+    account_key: Option<&str>,
+) -> provenant_records::ResolvedRoute {
+    provenant_records::ResolvedRoute {
+        selection_context: Default::default(),
+        diagnostics: Default::default(),
+        user_skills: true,
+        extra: Default::default(),
+        adapter: "codex".into(),
+        model: model.into(),
+        effort: None,
+        catalogue_revision: "fixture".into(),
+        account_key: account_key.map(str::to_owned),
+        host: "fixture".into(),
+        alternatives: Default::default(),
+        exclusions: Vec::new(),
+        eligibility: provenant_records::RouteEligibility::Eligible,
+        readiness: provenant_records::RouteReadiness::Ready {
+            availability_warning: None,
+            extra: Default::default(),
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: 100,
+        },
+        confidentiality: provenant_records::RouteConfidentiality {
+            extra: Default::default(),
+            evidence_ref: "fixture".into(),
+        },
+        pool_selection: None,
+    }
+}
+
+fn codex_route_record(model: &str, account_key: Option<&str>) -> run::RouteRecord {
+    run::RouteRecord {
+        provider: Some("codex".into()),
+        model: Some(format!("codex/{model}")),
+        account_key: account_key.map(str::to_owned),
+        ..Default::default()
+    }
+}
+
+fn native_continuation_state<'a>(
+    state_root: &'a Path,
+    config_root: &'a Path,
+    private_state: &'a Path,
+    selected_native_home: Option<&'a Path>,
+) -> ContinuationState<'a> {
+    ContinuationState {
+        state_root,
+        config_root,
+        private_state,
+        selected_native_home,
+        native_home_required: true,
+    }
+}
+
+#[test]
+fn native_codex_continuation_uses_the_bound_account_home_without_copying_it()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{AttemptId, Digest};
+
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let state = base.join("state");
+    let attempt_id = AttemptId::from_bytes([7; 16]);
+    let provider_state = state
+        .join("attempts")
+        .join(attempt_id.to_string())
+        .join("provider-state");
+    std::fs::create_dir_all(provider_state.join("candidate-0"))?;
+    let native_home = base.join("registered-codex-home");
+    let session = "fixture-session-71";
+    let session_day = native_home.join("sessions/2026/11/16");
+    std::fs::create_dir_all(&session_day)?;
+    let rollout = session_day.join(format!("rollout-2026-11-16T00-00-00-{session}.jsonl"));
+    std::fs::write(
+        &rollout,
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"session_meta","payload":{"id":session}}),
+            serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6-luna"}}),
+        ),
+    )?;
+    std::fs::write(
+        native_home.join("auth.json"),
+        "account credential remains in place",
+    )?;
+    let unrelated_session = "another-session";
+    std::fs::write(
+        session_day.join(format!(
+            "rollout-2026-11-16T00-00-01-{unrelated_session}.jsonl"
+        )),
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"session_meta","payload":{"id":unrelated_session}}),
+            serde_json::json!({"type":"turn_context","payload":{"model":"other-model"}}),
+        ),
+    )?;
+    let route = codex_resolved_route("gpt-6-luna", Some("selected-account-key"));
+    write_native_codex_selector(&provider_state, "candidate-0", &native_home, &route)?;
+
+    let prior: run::AttemptRecord = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "attempt_id": attempt_id,
+        "key": {"project": "0123456789abcdef0123456789abcdef", "graph": "fixture", "node": "node", "attempt": 1},
+        "project_id": "0123456789abcdef0123456789abcdef",
+        "attempt_number": 1, "revision": 1, "generation": 0,
+        "requested_route": {"kind": "model", "provider": "codex", "model": "gpt-6-luna"},
+        "applied_route": {"provider": "codex", "model": "codex/gpt-6-luna", "account_key": "selected-account-key"},
+        "authority_digest": Digest::from_bytes([0; 32]), "read_only_writable": [], "protected_paths": [], "trace": {},
+        "session": session, "queued_at": "2026-10-25T00:00:00.000000Z",
+        "state": {"state": "queued"}, "usage": {},
+        "prompt": {"path": {"encoding": "utf8", "path": "prompt.txt"}, "digest": provenant_records::FileDigest::from_bytes([0; 32]), "bytes": 0, "complete": true, "redacted": false}
+    }))?;
+    let child_state = base.join("child/provider-state/candidate-0");
+    std::fs::create_dir_all(&child_state)?;
+    let continuation = continuation_for_policy(
+        &prior,
+        &route,
+        "fixture",
+        native_continuation_state(&state, &state, &child_state, Some(&native_home)),
+        &provenant_records::policy::Policy::default(),
+    )?;
+    assert_eq!(continuation.session(), session);
+    assert_eq!(
+        std::fs::read_dir(&child_state)?.count(),
+        0,
+        "the native account home is reused directly, not copied into child state"
+    );
+    assert!(native_home.join("auth.json").exists());
+    assert!(rollout.exists());
+    assert!(
+        session_day
+            .join(format!(
+                "rollout-2026-11-16T00-00-01-{unrelated_session}.jsonl"
+            ))
+            .exists()
+    );
+
+    std::fs::write(
+        &rollout,
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"session_meta","payload":{"id":session}}),
+            serde_json::json!({"type":"turn_context","payload":{"model":"other-model"}}),
+        ),
+    )?;
+    let wrong_session_model = continuation_for_policy(
+        &prior,
+        &route,
+        "fixture",
+        native_continuation_state(&state, &state, &child_state, Some(&native_home)),
+        &provenant_records::policy::Policy::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        wrong_session_model,
+        ContinuationError::NativeSessionUnavailable
+    ));
+    std::fs::write(
+        &rollout,
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"session_meta","payload":{"id":session}}),
+            serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6-luna"}}),
+        ),
+    )?;
+
+    let wrong_home = base.join("different-account-home");
+    let refusal = continuation_for_policy(
+        &prior,
+        &route,
+        "fixture",
+        native_continuation_state(&state, &state, &child_state, Some(&wrong_home)),
+        &provenant_records::policy::Policy::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        refusal,
+        ContinuationError::NativeSessionUnavailable
+    ));
+    assert!(refusal.to_string().contains("same registered account"));
+    assert!(!refusal.to_string().contains(session));
+
+    std::fs::remove_file(&rollout)?;
+    let missing = continuation_for_policy(
+        &prior,
+        &route,
+        "fixture",
+        native_continuation_state(&state, &state, &child_state, Some(&native_home)),
+        &provenant_records::policy::Policy::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        missing,
+        ContinuationError::NativeSessionUnavailable
+    ));
     Ok(())
 }
 
