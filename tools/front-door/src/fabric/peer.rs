@@ -296,24 +296,22 @@ pub fn peer(
         if provenant_os::fs::canonicalize(&common)? != common {
             return Err(PeerError::Project.into());
         }
-        let cwd = if common.file_name() == Some(std::ffi::OsStr::new(".git")) {
-            common.parent().ok_or(PeerError::Project)?.to_path_buf()
-        } else {
-            common
+        let location =
+            provenant_config::ProjectLocation::new(common).map_err(|_| PeerError::Project)?;
+        let binding = match provenant_config::lookup_project(&host.roots, &location)? {
+            Some(binding) => binding,
+            None if peer_read_only(&request.action) => return Err(PeerError::Project.into()),
+            None => provenant_config::bind_project(&host.roots, location)?,
         };
-        let resolved = crate::roots::resolve(
-            globals,
-            crate::roots::Workspace::At(&cwd),
-            crate::roots::Product::Required,
-        )?;
-        let assets = resolved.assets;
+        if !peer_read_only(&request.action) && provenant_config::lookup_host(&host.roots)?.is_none()
+        {
+            provenant_config::bind_host(&host.roots)?;
+        }
+        let assets = host.assets;
         // An answer without an operation ID is refused below, after peer validation,
         // and must not initialise writable project state on its way there.
-        let mut context = if peer_read_only(&request.action) {
-            Context::open_read_only(resolved.roots, &home, &cwd)?
-        } else {
-            Context::open(resolved.roots, &home, &cwd)?
-        };
+        let context = Context::open_for_project_in_workspace(globals, host.roots, &home, &binding)?;
+        let cwd = context.project_root.clone();
         request.validate(context.identity.host, &context.config, &home)?;
         if context.identity.federation.as_ref().map(|p| &p.key) != Some(&request.project.key) {
             return Err(PeerError::Project.into());
