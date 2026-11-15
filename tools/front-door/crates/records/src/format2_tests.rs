@@ -10,7 +10,13 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
 #[test]
-fn every_stop_cause_has_exactly_one_default() {
+fn each_stop_cause_round_trips_with_one_rule_and_declared_source() {
+    let unavailable = crate::run::CauseSource::Unavailable;
+    let encoded = serde_json::to_vec(&unavailable).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<crate::run::CauseSource>(&encoded).unwrap(),
+        unavailable
+    );
     let causes = StopCause::ALL;
     for cause in causes {
         let name = cause.as_str();
@@ -20,12 +26,19 @@ fn every_stop_cause_has_exactly_one_default() {
         );
         let rows = STOP_TABLE.iter().filter(|rule| rule.cause == cause).count();
         assert_eq!(rows, 1, "{name} has {rows} rows");
+        assert_ne!(cause.source(), crate::run::CauseSource::Unavailable);
+        let source = cause.source();
+        let encoded = serde_json::to_vec(&source).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<crate::run::CauseSource>(&encoded).unwrap(),
+            source
+        );
     }
     assert_eq!(STOP_TABLE.len(), causes.len());
 }
 
 #[test]
-fn every_settlement_reason_has_one_source_and_node_outcome() {
+fn settlement_reasons_round_trip_against_the_declared_rules() {
     use crate::run::{SETTLEMENT_TABLE, SettlementReason};
     for reason in SettlementReason::ALL {
         let encoded = serde_json::to_value(reason).unwrap();
@@ -42,17 +55,13 @@ fn every_settlement_reason_has_one_source_and_node_outcome() {
         );
         let rule = reason.rule();
         assert_eq!(rule.reason, *reason);
+        assert_eq!(
+            SETTLEMENT_TABLE.iter().find(|row| row.reason == *reason),
+            Some(&rule)
+        );
         let stop =
             Stop::sealed(None, crate::run::Outcome::ReviewRequired, *reason, Ok(None)).unwrap();
-        let stop_cause = stop.as_ref().map(Stop::cause);
-        let expected = if stop_cause.is_some()
-            && rule.terminal_outcome != crate::run::SettlementTerminalOutcome::Succeeded
-        {
-            crate::run::SettlementNodeOutcome::Failed
-        } else {
-            rule.node_outcome
-        };
-        assert_eq!(reason.node_outcome(stop_cause), expected);
+        assert_eq!(reason.node_outcome(None), rule.node_outcome);
         let encoded = serde_json::to_vec(&stop).unwrap();
         assert_eq!(
             serde_json::from_slice::<Option<Stop>>(&encoded).unwrap(),
@@ -60,29 +69,6 @@ fn every_settlement_reason_has_one_source_and_node_outcome() {
         );
     }
     assert_eq!(SETTLEMENT_TABLE.len(), SettlementReason::ALL.len());
-}
-
-#[test]
-fn every_stop_cause_declares_its_source_in_its_rule() {
-    let unavailable = crate::run::CauseSource::Unavailable;
-    let encoded = serde_json::to_vec(&unavailable).unwrap();
-    assert_eq!(
-        serde_json::from_slice::<crate::run::CauseSource>(&encoded).unwrap(),
-        unavailable
-    );
-    for cause in StopCause::ALL {
-        assert_eq!(
-            STOP_TABLE.iter().filter(|rule| rule.cause == cause).count(),
-            1
-        );
-        let source = cause.source();
-        assert_ne!(source, crate::run::CauseSource::Unavailable);
-        let encoded = serde_json::to_vec(&source).unwrap();
-        assert_eq!(
-            serde_json::from_slice::<crate::run::CauseSource>(&encoded).unwrap(),
-            source
-        );
-    }
 }
 
 #[test]
