@@ -1511,9 +1511,9 @@ mod tests {
     #[test]
     fn orphaned_provider_descendant_does_not_retain_writer_flock()
     -> Result<(), Box<dyn std::error::Error>> {
-        use crate::custody::Scope;
         use provenant_core::{AttemptId, CancelToken, Clock, WaitBudget};
         use provenant_os::{clock::SystemClock, fs::Directory};
+        use provenant_records::custody::Scope;
 
         let root = tempfile::tempdir()?;
         let directory = Directory::open_anchor(root.path())?;

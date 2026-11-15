@@ -108,10 +108,10 @@ fn with_edge<T>(
     }))
 }
 
+use provenant_records::custody::Scope;
 use provenant_run::Providers;
 use provenant_supervisor::custody::CaptureTotals;
 use provenant_supervisor::custody::PublicationState;
-use provenant_supervisor::custody::Scope;
 use provenant_supervisor::custody::SettlementEvidence;
 
 pub(super) fn trace_run(
@@ -758,6 +758,9 @@ fn keyed(
         "nodes":[{"id":node, "access":"read_only", "prompt":"Go", "route":{"alias":"senior"}}]
     }))?;
     journal.bind(GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+
         extra: Default::default(),
         bases: None,
         directory: edge.cwd.to_path_buf(),
@@ -784,7 +787,8 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
         return Ok(());
     }
     use provenant_os::fs::{Directory, LockMode, PublishMode};
-    use provenant_supervisor::custody::{self, Scope};
+    use provenant_records::custody::Scope;
+    use provenant_supervisor::custody::{self};
     use std::ffi::OsStr;
     for (import_done, settle_failed) in [(false, true), (false, false), (true, false)] {
         let reason = if import_done {
@@ -811,7 +815,8 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                 input.request.parent_attempt = None;
                 input.request.lane_depth = None;
                 input.request.task.writer = Some(run::WriterRequest {
-                    extra: [("custody_project".into(), json!(session.context.project_id))].into(),
+                    extra: Default::default(),
+                    custody_project: Some(session.context.project_id),
                     project: fixture.project.clone(),
                     worktree: fixture.tree.clone(),
                 });

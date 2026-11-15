@@ -142,10 +142,7 @@ fn slot_wait_ms(queued_at: WallTime, started_at: Option<WallTime>) -> Option<u64
 /// The published fact for a terminal record. A record read from a peer takes the
 /// same path as one read here.
 pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
-    let stop = r
-        .state
-        .stop()
-        .map_err(|_| RunError::Validation("terminal stop evidence"))?;
+    let stop = r.state.stop();
     let account_identity = usage_identity(
         r.resolved_route.as_ref(),
         r.applied_route.as_ref(),
@@ -855,16 +852,14 @@ impl RunStore {
                 RECORD_LIMIT,
             )?
         {
-            let overrun = crate::db::decode::<serde_json::Value>(&raw)?;
-            record
-                .extra
-                .insert("budget_overrun".into(), overrun.clone());
+            let overrun = crate::db::decode::<provenant_records::limit::BudgetOverrun>(&raw)?;
+            record.budget_overrun = Some(overrun.clone());
             if let Some(limit) = record
                 .limits
                 .as_mut()
                 .and_then(|limits| limits.token_budget.as_mut())
             {
-                limit.extra.insert("overrun".into(), overrun);
+                limit.overrun = Some(overrun);
             }
         }
         if let Ok(attempt) = self.attempt_dir(id, false)
@@ -874,16 +869,14 @@ impl RunStore {
                 RECORD_LIMIT,
             )?
         {
-            let refusal = crate::db::decode::<serde_json::Value>(&raw)?;
-            record
-                .extra
-                .insert("budget_wrap_up_refused".into(), refusal.clone());
+            let refusal = crate::db::decode::<provenant_records::limit::BudgetWrapUpRefused>(&raw)?;
+            record.budget_wrap_up_refused = Some(refusal.clone());
             if let Some(limit) = record
                 .limits
                 .as_mut()
                 .and_then(|limits| limits.token_budget.as_mut())
             {
-                limit.extra.insert("wrap_up_refused".into(), refusal);
+                limit.wrap_up_refused = Some(refusal);
             }
         }
         let (checkpoint, checkpoint_readable) = match self.attempt_dir(id, false) {
@@ -918,7 +911,7 @@ impl RunStore {
             #[derive(serde::Deserialize)]
             struct ProcessCheckpoint {
                 schema_version: u64,
-                scope: provenant_supervisor::custody::Scope,
+                scope: provenant_records::custody::Scope,
                 #[serde(default)]
                 last_output_at: Option<WallTime>,
                 #[serde(default)]
@@ -934,7 +927,7 @@ impl RunStore {
             let scoped = parsed.as_ref().is_ok_and(|observation| {
                 observation.schema_version == 1
                     && observation.scope
-                        == (provenant_supervisor::custody::Scope {
+                        == (provenant_records::custody::Scope {
                             attempt: record.attempt_id,
                             generation: record.generation,
                         })
@@ -1298,9 +1291,14 @@ pub(crate) fn valid_write_grants(grants: &[WriteGrantRecord]) -> bool {
 }
 
 pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
-    r.state
-        .stop()
-        .map_err(|_| RunError::Validation("terminal stop evidence"))?;
+    if r.repository_admission_binding
+        .as_ref()
+        .is_some_and(|binding| !binding.valid())
+    {
+        return Err(RunError::Validation(
+            "stored repository admission binding digest",
+        ));
+    }
     if r.preparation_failure.is_some()
         && (r.provider_launched != Some(false)
             || !matches!(

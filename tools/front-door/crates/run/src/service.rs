@@ -70,7 +70,7 @@ impl<'a> Service<'a> {
         let operation = self.store.operation(&input.operation_id, call)?;
         if let Some(operation) = &operation
             && operation.state == OperationState::Refused
-            && operation.extra.get("preflight_digest_version") == Some(&serde_json::json!(1))
+            && operation.preflight_digest_version == Some(1)
         {
             if operation.request_digest != preflight_digest(&input, cwd)? {
                 return Err(RunError::OperationConflict);
@@ -139,7 +139,7 @@ impl<'a> Service<'a> {
             if input.parent_attempt.is_some() {
                 let mut other_access = task.access.clone();
                 other_access.database_ipc = false;
-                other_access.extra.remove("capability_sources");
+                other_access.capability_sources.clear();
                 if !other_access.is_default() {
                     return Err(input_error(
                         ErrorKind::Unsupported,
@@ -315,6 +315,7 @@ impl<'a> Service<'a> {
             let mut request = TaskRequest {
                 context: task.context,
                 extra: Default::default(),
+                limit_extensions: Default::default(),
                 build_heavy: task.build_heavy,
                 title: task.title,
                 profile: task.profile,
@@ -332,18 +333,14 @@ impl<'a> Service<'a> {
                 deliver: task.deliver,
                 access: task.access,
             };
-            let policy_project = self.store.context.project_id.to_string();
-            request.profile.extra.insert(
-                "policy_project".into(),
-                serde_json::json!(policy_project.clone()),
+            let project_id = self.store.context.project_id;
+            request.profile.policy_project = Some(project_id);
+            let policy = crate::launch_policy(
+                self.store.writer_registry(),
+                &project_id.to_string(),
+                &request,
             );
-            let policy =
-                crate::launch_policy(self.store.writer_registry(), &policy_project, &request);
-            request.profile.extra.insert(
-                "launch_policy".into(),
-                serde_json::to_value(policy)
-                    .map_err(|_| RunError::Validation("launch policy snapshot"))?,
-            );
+            request.profile.launch_policy = Some(policy);
             (request, task.prompt)
         };
         let prepared = PreparedRun {
@@ -411,14 +408,15 @@ impl<'a> Service<'a> {
         error: RunError,
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
-        let mut extra = provenant_records::ExtraFields::default();
-        extra.insert("preflight_digest_version".into(), serde_json::json!(1));
-        if let Some(notice) = task.profile.knobs.get("chair.refusal_notice") {
-            extra.insert("refusal_notice".into(), notice.clone());
-        }
-        if let Some(digest) = self.refusal.intent_digest {
-            extra.insert("origin_intent_digest".into(), serde_json::json!(digest));
-        }
+        let refusal_notice = task
+            .profile
+            .knobs
+            .get("chair.refusal_notice")
+            .map(|notice| {
+                serde_json::from_value(notice.clone())
+                    .map_err(|_| RunError::Validation("refusal notice policy"))
+            })
+            .transpose()?;
         let diagnostic = ErrorKind::from(&error)
             .diagnostic()
             .detail(error.to_string());
@@ -429,13 +427,19 @@ impl<'a> Service<'a> {
             .and_then(|name| name.to_str())
             .map(str::to_owned);
         let record = OperationRecord {
-            extra,
+            extra: Default::default(),
+            preflight_digest_version: Some(1),
+            refusal_notice,
+            refusal_code: None,
+            refusal_notice_done: false,
+            origin_intent_digest: self.refusal.intent_digest,
             schema_version: 1,
             project_id: self.store.context.project_id,
             actor_id: self.store.context.actor_id,
             operation_id: input.operation_id.clone(),
             kind: OperationKind::Dispatch,
             request_digest: preflight_digest(input, cwd)?,
+            parent_attempt: None,
             state: OperationState::Refused,
             blocked_reason: None,
             refusal: Some(diagnostic),

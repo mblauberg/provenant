@@ -1,8 +1,9 @@
 //! One sourced, versioned declaration for repository integration ports.
 use provenant_records::{CanonicalV1, FileDigest};
 pub use provenant_records::{
-    DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, PortCommandBackend, PortCommandDisposition,
-    PortCommandReceipt, PortReceiptLifetime, PortSource,
+    CommandExitCodes, DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, ExitDisposition, PortCommand,
+    PortCommandBackend, PortCommandDisposition, PortCommandReceipt, PortReceiptLifetime,
+    PortSource,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -41,50 +42,6 @@ pub enum PortBackendKind {
     None,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExitDisposition {
-    Refused,
-    Unknown,
-}
-
-/// Success and unknown codes are declared. Other codes use the declared typed
-/// disposition, so a command never relies on an implicit exit-code guess.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CommandExitCodes {
-    pub success: Vec<i32>,
-    pub unknown: Vec<i32>,
-    pub other: ExitDisposition,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PortCommand {
-    pub argv: Vec<String>,
-    pub exit_codes: CommandExitCodes,
-}
-
-impl PortCommand {
-    /// Digest the exact stored command declaration in its deterministic schema order.
-    pub fn digest(&self) -> FileDigest {
-        command_digest(self)
-    }
-
-    fn valid(&self) -> bool {
-        let argv_valid = self.argv.first().is_some_and(|program| !program.is_empty());
-        let mut codes = std::collections::BTreeSet::new();
-        argv_valid
-            && !self.exit_codes.success.is_empty()
-            && self
-                .exit_codes
-                .success
-                .iter()
-                .chain(&self.exit_codes.unknown)
-                .all(|code| codes.insert(*code))
-    }
-}
-
 /// Typed result from executing a repository command port. The bounded process
 /// capture is retained as evidence; callers decide whether to render it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -104,16 +61,6 @@ impl PortCommandExecution {
             outcome: None,
         }
     }
-}
-
-#[allow(
-    clippy::expect_used,
-    reason = "PortCommand fields serialize infallibly"
-)]
-fn command_digest(command: &PortCommand) -> FileDigest {
-    let declaration = serde_json::to_vec(command)
-        .expect("PortCommand serialization is infallible for its declared fields");
-    CanonicalV1::file_digest(&declaration)
 }
 
 // Project declarations do not grant access to ambient credential variables.
@@ -198,7 +145,7 @@ pub fn execute_port_command_with_input(
 ) -> PortCommandExecution {
     use provenant_os::exec::{ExecOptions, StreamPolicy, Termination};
     let command_digest = command.digest();
-    if !command.valid() {
+    if !command.is_valid() {
         return PortCommandExecution {
             command_digest,
             disposition: PortCommandDisposition::Failed,
@@ -285,7 +232,7 @@ impl PortBackend {
 
     fn valid(&self) -> bool {
         match self {
-            Self::Command { command } => command.valid(),
+            Self::Command { command } => command.is_valid(),
             Self::Builtin | Self::None => true,
         }
     }
@@ -518,7 +465,7 @@ impl PortEntry for LandPort {
     }
     fn valid(&self) -> bool {
         match &self.backend {
-            LandBackend::Command { command } => command.valid(),
+            LandBackend::Command { command } => command.is_valid(),
             LandBackend::Builtin | LandBackend::None => true,
         }
     }

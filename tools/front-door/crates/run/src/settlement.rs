@@ -5,7 +5,7 @@ use provenant_core::{CancelToken, Clock, DurationMicros, GitOid};
 use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
 use provenant_supervisor::{
     census::{ProcessIdentity, ProcessObservation, SystemProcessObserver},
-    custody::Scope,
+    provenant_records::custody::Scope,
 };
 use serde::{Deserialize, Serialize};
 use std::{ffi::OsStr, sync::mpsc, time::Duration};
@@ -835,10 +835,7 @@ mod tests {
             crate::AttemptState::Running { .. } | crate::AttemptState::Starting { .. }
         ));
         let waits = store.lane_waits(std::slice::from_ref(&lane), &call);
-        assert_eq!(
-            waits[0].waiting_for,
-            "host_stalled: supervisor is in uninterruptible sleep"
-        );
+        assert_eq!(waits[0].waiting_for, crate::LaneWaitReason::HostStalled);
         let queued = store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
             panic!("stalled worker must not spawn")
         })?;
@@ -1481,7 +1478,10 @@ mod tests {
         let waits = store.lane_waits_with_resources(&[queued_lane], &call, &crate::SystemResources);
         assert_eq!(
             waits[0].waiting_for,
-            "launch: last recovery worker refused: user process count 950 of 1000"
+            crate::LaneWaitReason::RecoveryWorkerRefused {
+                used: 950,
+                limit: 1000
+            }
         );
         let mut retried = false;
         store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
@@ -2214,7 +2214,7 @@ impl crate::RunStore {
         &self,
         attempt: provenant_core::AttemptId,
         call: &crate::Request<'_>,
-    ) -> Option<String> {
+    ) -> Option<crate::LaneWaitReason> {
         let directory = self.attempt_dir(attempt, false).ok()?;
         let raw =
             read_sealed(&directory, "settlement-process-refusal.json", RECORD_LIMIT).ok()??;
@@ -2225,10 +2225,10 @@ impl crate::RunStore {
         {
             return None;
         }
-        Some(format!(
-            "launch: last recovery worker refused: user process count {} of {}",
-            refusal.used, refusal.limit
-        ))
+        Some(crate::LaneWaitReason::RecoveryWorkerRefused {
+            used: refusal.used,
+            limit: refusal.limit,
+        })
     }
 }
 

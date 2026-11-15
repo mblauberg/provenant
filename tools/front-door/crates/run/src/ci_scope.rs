@@ -107,10 +107,9 @@ mod tests {
             (CiScope::None, LimitSource::Default)
         );
         profile.knobs.insert(KNOB.into(), "full".into());
-        profile.extra.insert(
-            provenant_config::KNOB_SOURCES.into(),
-            serde_json::json!({ KNOB: "launch" }),
-        );
+        profile
+            .knob_sources
+            .insert(KNOB.into(), provenant_records::run::LimitSource::Launch);
         let set = ResolvedCiScope::resolve(&profile);
         assert_eq!(
             (set.value, set.source),

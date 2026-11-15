@@ -9,13 +9,26 @@ fn library() -> TemplateLibrary {
 
 fn document(nodes: Vec<GraphNode>) -> GraphDocument {
     GraphDocument {
+        exclude: Vec::new(),
+        network: None,
+        capability: Vec::new(),
+        no_capability: Vec::new(),
+        provenance: None,
+
         review_base: None,
         context: None,
+        replay_digest: None,
         extra: Default::default(),
         limits: None,
         integration_branch: Some("batch/fixture".into()),
         delivery: None,
         decision_session: None,
+        submission_patch: None,
+        template_library: Default::default(),
+        template_layers: Default::default(),
+        template_resolvers: Default::default(),
+        peer_origin_work_key: None,
+        review_tier_override: None,
         schema_version: 1,
         graph_id: "templates".into(),
         nodes,
@@ -176,7 +189,9 @@ fn over_binds_item_in_overrides_and_resolves_named_lists() {
         .to_string();
     assert!(error.contains("resolver @missing"), "{error}");
     let prose = Compiler::new(&library)
-        .compile(&json!({"id": "loose", "use": "task", "brief": "Describe ${item} and ${unknown}"}))
+        .compile(
+            &json!({"id": "loose", "use": "task", "prompt": "Describe ${item} and ${unknown}"}),
+        )
         .unwrap();
     assert!(prose.prompt.contains("${item}"));
     assert!(prose.prompt.contains("${unknown}"));
@@ -476,7 +491,7 @@ fn flavours_and_layers_resolve_in_order() {
         .compile(&json!({"id": "sec", "use": "review.security"}))
         .unwrap();
     assert!(node.prompt.contains("security lens"));
-    assert_eq!(node.extra.get("template"), Some(&json!("review.security")));
+    assert_eq!(node.template.as_deref(), Some("review.security"));
     assert!(library.resolve("review.missing").is_err());
 
     library
@@ -582,11 +597,10 @@ fn delivery_templates_admit_bounded_review_repairs() {
             .nodes
             .iter()
             .find(|node| {
-                node.id.contains("repair--cycles--r1--check--")
-                    && node.extra.contains_key("repair_lens")
+                node.id.contains("repair--cycles--r1--check--") && node.repair_lens.is_some()
             })
             .unwrap();
-        assert_eq!(delta.extra["repair_risk_assessment"], true);
+        assert!(delta.repair_risk_assessment);
         assert!(delta.prompt.contains("top-level risk_tier"));
         let repair = expanded
             .nodes
@@ -595,7 +609,7 @@ fn delivery_templates_admit_bounded_review_repairs() {
             .unwrap();
         let policy = repair.loop_body.as_ref().unwrap();
         assert_eq!(policy.max_rounds, 2);
-        assert_eq!(policy.extra["review_repair"], true);
+        assert!(policy.review_repair);
         assert!(repair.on_fail.as_ref().unwrap().ends_with("design"));
         let design = expanded
             .nodes
@@ -624,7 +638,7 @@ fn delivery_templates_admit_bounded_review_repairs() {
         let compiled = Compiler::new(&slices)
             .compile(&json!({"id":"slice", "use":"repair-slice"}))
             .unwrap();
-        assert_eq!(compiled.extra[TEMPLATE_FIELD], "implement.fix");
+        assert_eq!(compiled.template.as_deref(), Some("implement.fix"));
         if template == "deliver" {
             let accept = expanded
                 .nodes
@@ -682,16 +696,20 @@ fn review_behaviour_survives_brief_and_output_overrides() {
     ] {
         let node = Compiler::new(&bundled)
             .compile(&json!({
-                "id":"review", "use":name, "brief":"Inspect this", "require_findings":false,
+                "id":"review", "use":name, "prompt":"Inspect this", "require_findings":false,
                 "required_verdict":"anything", "role":"task"
             }))
             .unwrap();
         assert!(node.role.is_none());
-        assert_eq!(node.extra["review_behaviour"], behaviour);
+        assert_eq!(
+            node.review_behaviour
+                .map(|value| serde_json::to_value(value).unwrap()),
+            Some(behaviour)
+        );
         assert!(node.require_findings);
         assert_eq!(node.required_verdict.as_deref(), Some("VERDICT: PASS"));
         if name != "review.tests" {
-            assert!(!node.extra.contains_key("review_lens"));
+            assert!(node.review_lens.is_none());
         }
         if name == "review.synthesis" {
             assert_eq!(node.kind, Some(NodeKind::Synthesise));
@@ -968,7 +986,7 @@ custom = true
         .compile(&json!({"id":"stage", "use":"review.local"}))
         .unwrap();
     assert_eq!(node.extra["custom"], true);
-    assert_eq!(node.extra["review_lens"], "local");
+    assert_eq!(node.review_lens.as_deref(), Some("local"));
     library
         .insert_toml(
             Layer::Repository,
@@ -983,7 +1001,7 @@ review_lens = "explicit"
         .compile(&json!({"id":"stage", "use":"review.local.explicit"}))
         .unwrap();
     assert_eq!(node.extra["custom"], true);
-    assert_eq!(node.extra["review_lens"], "explicit");
+    assert_eq!(node.review_lens.as_deref(), Some("explicit"));
 }
 
 #[test]
@@ -1490,4 +1508,22 @@ fn a_name_without_room_for_its_suffix_is_refused_in_one_line() {
     let error = launch(&mut journal, &base, "d2", true).unwrap_err();
     assert!(!error.contains('\n') && error.contains("--name"), "{error}");
     assert_eq!(journal.len(), 1);
+}
+
+#[test]
+fn graph_node_accepts_prompt_and_refuses_removed_brief_spelling() {
+    let prompt = serde_json::from_value::<GraphNode>(json!({
+        "id":"work", "access":"read_only", "prompt":"Do the work"
+    }))
+    .unwrap();
+    assert_eq!(prompt.prompt, "Do the work");
+
+    let alias = serde_json::from_value::<GraphNode>(json!({
+        "id":"work", "access":"read_only", "brief":"Do the work"
+    }));
+    assert!(alias.is_err());
+    assert_eq!(
+        provenant_config::removed::graph_field_replacement("brief"),
+        Some("prompt")
+    );
 }

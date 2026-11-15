@@ -931,10 +931,10 @@ fn launch_resolvers_with(
             .slots
             .iter()
             .any(|slot| slot.required_family.is_some()))
-        && let Some(tier) = document.extra.get("review_tier_override")
+        && let Some(tier) = document.review_tier_override.as_ref()
     {
         for slot in &mut panel.slots {
-            slot.tier = tier.clone();
+            slot.tier = serde_json::Value::String(tier.clone());
         }
     }
     panel.resolve_families(eligible)?;
@@ -1735,6 +1735,9 @@ mod provisioning_tests {
             &clock,
         )?;
         journal.bind(GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+
             extra: Default::default(),
             bases: None,
             directory: project.clone(),
@@ -2074,6 +2077,9 @@ mod provisioning_tests {
                 &clock,
             )?;
             journal.bind(GraphExecution {
+                peer_origin_context: None,
+                peer_submission_digest: None,
+
                 extra: Default::default(),
                 bases: Some(bases),
                 directory: project.clone(),
@@ -2170,6 +2176,9 @@ mod provisioning_tests {
             {
                 let mut journal = open()?;
                 journal.bind(GraphExecution {
+                    peer_origin_context: None,
+                    peer_submission_digest: None,
+
                     extra: Default::default(),
                     bases: None,
                     directory: project.clone(),
@@ -2266,6 +2275,9 @@ mod provisioning_tests {
                 &clock,
             )?;
             journal.bind(GraphExecution {
+                peer_origin_context: None,
+                peer_submission_digest: None,
+
                 extra: Default::default(),
                 bases: None,
                 directory: project.clone(),
@@ -2349,6 +2361,9 @@ mod provisioning_tests {
             ]
         }))?;
         journal.bind(GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+
             extra: Default::default(),
             bases: None,
             directory: project.clone(),

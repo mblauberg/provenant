@@ -1988,7 +1988,8 @@ mod tests {
             use provenant_core::{AttemptId, GitOid};
             use provenant_os::clock::SystemClock;
             use provenant_os::fs::Directory;
-            use provenant_supervisor::custody::{self, CustodyError, Scope, WriterBinding};
+            use provenant_records::custody::Scope;
+            use provenant_supervisor::custody::{self, CustodyError, WriterBinding};
             use std::sync::atomic::{AtomicUsize, Ordering};
 
             let temporary = tempfile::tempdir()?;

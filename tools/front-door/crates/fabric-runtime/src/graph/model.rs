@@ -62,6 +62,35 @@ pub struct GraphDocument {
     pub review_base: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<provenant_records::run::WorkContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submission_patch: Option<super::patch::Patch>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub template_library: std::collections::BTreeMap<String, super::template::Template>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub template_layers: std::collections::BTreeMap<String, super::template::Layer>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub template_resolvers: std::collections::BTreeMap<String, Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_origin_work_key: Option<provenant_records::WorkKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_tier_override: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<GraphProvenance>,
+    /// Route exclusions inherited by every node launched from this graph.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+    /// Network policy inherited by every node launched from this graph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<GraphNetwork>,
+    /// Capabilities added to each launched node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capability: Vec<String>,
+    /// Capabilities removed from each launched node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub no_capability: Vec<String>,
+    /// Digest of the normalized user submission used to name/replay this graph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_digest: Option<String>,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -120,9 +149,32 @@ impl GraphRoute {
     }
 }
 
+/// Submission metadata that remains attached to its graph document.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphProvenance {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<provenant_core::OperationId>,
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub parameters: serde_json::Map<String, serde_json::Value>,
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
+}
+
+/// Network policy accepted on a graph document.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphNetwork {
+    On,
+    Off,
+}
+
 /// Host-only inputs retained for advancement after the submitting process exits.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphExecution {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_origin_context: Option<provenant_records::run::WorkContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_submission_digest: Option<provenant_core::Digest>,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     /// One stored authority for graph-wide bases; checkpoint and output
@@ -269,6 +321,12 @@ pub struct AttemptSpec {
     pub provider_timeout: Option<u64>,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
+    /// Declared project-relative write scope for writer lanes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub write_scope: Vec<String>,
+    /// Typed policy overrides requested by the graph author.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub policy_overrides: std::collections::BTreeMap<String, provenant_records::policy::Strength>,
     /// A writer worktree branch created from base.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_worktree: Option<crate::coordination::facade::NewWorktree>,
@@ -440,6 +498,8 @@ impl AttemptSpec {
             && self.capabilities.is_empty()
             && !self.build_heavy
             && self.write_roots.is_empty()
+            && self.write_scope.is_empty()
+            && self.policy_overrides.is_empty()
             && self.local_cargo.is_none()
             && self.ci_scope.is_none()
             && self.preset.is_none()
@@ -463,6 +523,14 @@ fn graph_node_extra<'de, D: serde::Deserializer<'de>>(
             "auto_continue_no_work was removed; use on_stop",
         ));
     }
+    if let Some((field, replacement)) = extra.iter().find_map(|(field, _)| {
+        provenant_config::removed::graph_field_replacement(field)
+            .map(|replacement| (field, replacement))
+    }) {
+        return Err(serde::de::Error::custom(format!(
+            "graph node field `{field}` is removed; use `{replacement}`"
+        )));
+    }
     Ok(extra)
 }
 
@@ -477,6 +545,10 @@ pub struct GraphNode {
     pub attempt: Option<AttemptSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub family_group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_base: Option<String>,
     /// Launch conditions resolved at submission; the node is skipped unless every term holds.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub when: Vec<WhenTerm>,
@@ -484,6 +556,8 @@ pub struct GraphNode {
     pub context: Option<provenant_records::run::WorkContext>,
     #[serde(flatten, deserialize_with = "graph_node_extra")]
     pub extra: provenant_records::ExtraFields,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub capability_sources: provenant_records::run::CapabilitySources,
     #[serde(skip)]
     pub(super) composite_members: Vec<String>,
     // Expansion journal presence, in composite_members / after_expansion order.
@@ -551,13 +625,42 @@ pub struct GraphNode {
     /// Wall-clock limit for this node's lane, in seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_seconds: Option<u64>,
-    #[serde(default, alias = "brief")]
+    #[serde(default)]
     pub prompt: String,
     #[serde(default)]
     pub depends_on: Vec<String>,
     /// Allow dependants to proceed after this node fails or is blocked.
     #[serde(default, skip_serializing_if = "is_false")]
     pub advisory: bool,
+    /// This decide node is the host-owned repair-scope approval barrier.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub repair_scope_gate: bool,
+    /// An explicitly detached child may outlive parent cancellation.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub detached: bool,
+    /// The host must create the declared worktree before launching this writer.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub provision_worktree: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_behaviour: Option<super::template::ReviewBehaviour>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_requirements: Vec<RemovedRequirement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_node: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_lens: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_lens: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub repair_writer: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub repair_triage: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub repair_risk_assessment: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub container_retry: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<GraphInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -712,19 +815,15 @@ pub enum AdmissionError {
     },
 }
 
-/// The `GraphDocument::extra` key holding a submission's replay digest.
-pub const REPLAY_DIGEST_FIELD: &str = "replay_digest";
-
 impl GraphDocument {
     /// The host digest of the input that created this graph. A named `run` whose
     /// input has the same digest finds this graph instead of starting another.
     pub fn replay_digest(&self) -> Option<&str> {
-        self.extra.get(REPLAY_DIGEST_FIELD)?.as_str()
+        self.replay_digest.as_deref()
     }
 
     pub fn set_replay_digest(&mut self, digest: &str) {
-        self.extra
-            .insert(REPLAY_DIGEST_FIELD.into(), serde_json::json!(digest));
+        self.replay_digest = Some(digest.to_owned());
     }
 
     /// Check nested composite structure with the same expansion safety bounds
@@ -995,6 +1094,17 @@ pub struct GateResult {
     pub on_fail: Option<String>,
 }
 
+/// A required edge removed because its producer is skipped.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemovedRequirement {
+    pub consumer: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_outputs: Vec<OutputKind>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub verdict_input: bool,
+}
+
 /// Select outputs from a direct dependency for inclusion in this node's brief.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphInput {
@@ -1019,8 +1129,54 @@ pub enum OutputKind {
     Remaining,
 }
 
-/// Compact, versioned settlement record. No provider transcript is retained.
+/// The structured repair-scope claim produced by a principal report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepairDesign {
+    pub within_scope: bool,
+    pub one_way_door: bool,
+}
+
+/// One grouped item a repair writer must resolve.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairItem {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
+    pub id: String,
+    pub status: RepairItemStatus,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alternative: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RepairItemStatus {
+    Fixed,
+    RemovedTheCase,
+    Disputed,
+    DesignCannotHold,
+}
+
+/// A retry allowance retained with the node's history across automatic resets.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetryAllowance {
+    pub retries: u8,
+    pub origin: String,
+}
+
+/// Content growth evidence retained only for the exact measured commits.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepairGrowth {
+    pub before: String,
+    pub after: String,
+    pub grew: bool,
+}
+
+/// Compact, versioned settlement record. No provider transcript is retained.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeOutputs {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
@@ -1036,6 +1192,33 @@ pub struct NodeOutputs {
     /// when no findings selection applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub findings_available: Option<bool>,
+    /// Parsed host-owned scope claim used by a downstream repair gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_design: Option<RepairDesign>,
+    #[serde(default, rename = "review_partial", skip_serializing_if = "is_false")]
+    pub partial: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_tier: Option<provenant_records::workflow::RiskTier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_items: Option<Vec<RepairItem>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec_concerns: Option<Vec<provenant_records::handoff::SpecConcern>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec_concern_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec_defect_count: Option<usize>,
+    #[serde(
+        default,
+        rename = "_artifact_findings",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub artifact_findings: Option<String>,
+    #[serde(
+        default,
+        rename = "_compact_disposition_findings",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub compact_disposition_findings: Option<String>,
     pub branch: Option<String>,
     pub commit: Option<String>,
     pub warnings: Vec<String>,
@@ -1102,6 +1285,32 @@ pub struct ResultOutput {
 pub struct Finding {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<FindingTrigger>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triage: Option<FindingTriage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_fix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lens: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub propagates: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub design_defect: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_grew: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_grew: Option<bool>,
     pub id: String,
     pub severity: String,
     pub file: String,
@@ -1145,25 +1354,24 @@ pub struct FindingTriage {
 
 impl Finding {
     pub fn trigger(&self) -> Option<FindingTrigger> {
-        serde_json::from_value(self.extra.get("trigger")?.clone()).ok()
+        self.trigger.clone()
     }
 
     pub fn triage(&self) -> Option<FindingTriage> {
-        serde_json::from_value(self.extra.get("triage")?.clone()).ok()
+        self.triage.clone()
     }
 
     pub fn boundary_or_data_loss(&self) -> bool {
-        self.triage().is_some_and(|triage| {
+        self.triage.as_ref().is_some_and(|triage| {
             matches!(triage.blocking_class.as_str(), "boundary" | "data_loss")
         }) || self
-            .extra
-            .get("class")
-            .and_then(serde_json::Value::as_str)
+            .class
+            .as_deref()
             .is_some_and(|class| matches!(class, "boundary" | "data_loss"))
     }
 
     pub fn default_path(&self) -> bool {
-        self.trigger().is_some_and(|trigger| {
+        self.trigger.as_ref().is_some_and(|trigger| {
             trigger.reach == FindingReach::DefaultPath && !trigger.sequence.trim().is_empty()
         })
     }
@@ -1177,14 +1385,10 @@ impl Finding {
     }
 
     pub fn falsified_with_evidence(&self) -> bool {
-        self.extra
-            .get("verification")
-            .and_then(serde_json::Value::as_str)
-            == Some("falsified")
+        self.verification.as_deref() == Some("falsified")
             && self
-                .extra
-                .get("evidence")
-                .and_then(serde_json::Value::as_str)
+                .evidence
+                .as_deref()
                 .is_some_and(|evidence| !evidence.trim().is_empty())
     }
 
@@ -1192,12 +1396,13 @@ impl Finding {
         self.boundary_or_data_loss()
             && (self.disposition.as_deref() == Some("rejected")
                 || self
-                    .triage()
+                    .triage
+                    .as_ref()
                     .is_some_and(|triage| triage.decision == "rejected"))
     }
 
     pub fn spec_defect(&self) -> bool {
-        self.extra.get("kind").and_then(serde_json::Value::as_str) == Some("spec_defect")
+        self.kind.as_deref() == Some("spec_defect")
     }
 }
 
@@ -1211,10 +1416,32 @@ pub enum AccessMode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingWriterProvisioning {
+    pub path: String,
+    pub source: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CancellationRequestReceipt {
+    pub request_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 // Bump STATE_FORMAT_VERSION for changes an older or newer binary cannot read.
 pub struct GraphCheckpoint {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancellation_request_receipt: Option<CancellationRequestReceipt>,
+    /// Worktree creation intents saved before the host performs Git effects.
+    #[serde(
+        default,
+        rename = "pending_writer_provisioning",
+        skip_serializing_if = "std::collections::BTreeMap::is_empty"
+    )]
+    pub pending_writer_provisioning: std::collections::BTreeMap<String, PendingWriterProvisioning>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub expansions: Vec<Expansion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1386,6 +1613,35 @@ pub struct NodeProgress {
     /// Review base awaiting a source location that has not yet been bound.
     #[serde(default, skip_serializing_if = "not_delivered")]
     pub review_base_pending: bool,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub settled_dependency_snapshots: std::collections::BTreeMap<String, NodeProgress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_worktree_base: Option<String>,
+    /// The host has notified the owner about the repair-scope decision.
+    #[serde(default, skip_serializing_if = "not_delivered")]
+    pub owner_notified: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetryAllowance>,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub quota_redraw_spent: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub quota_redraw_archived: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub container_retry: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency_warning: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_growth: Option<RepairGrowth>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_verdict_correction_refused: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provisioned_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_requirements: Vec<RemovedRequirement>,
     /// Bounded planner JSON retained until admission succeeds, including across resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fragment: Option<String>,
@@ -1467,6 +1723,8 @@ pub struct NodeProgress {
 pub struct WriterWorktreeBinding {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_directory_identity: Option<provenant_records::run::SourceIdentity>,
     pub worktree: String,
     pub head: String,
 }
@@ -1476,6 +1734,8 @@ pub struct GraphAttempt {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     pub launched: bool,
+    #[serde(default, skip_serializing_if = "not_delivered")]
+    pub host_refused_before_acceptance: bool,
     /// This attempt replaces a settled failed review member on its next route.
     #[serde(default, skip_serializing_if = "not_delivered")]
     pub review_substitution: bool,
@@ -1594,45 +1854,6 @@ pub struct UnknownUsageEvent {
     pub metric: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AttemptKey {
-    #[serde(flatten)]
-    pub extra: provenant_records::ExtraFields,
-    pub graph_id: String,
-    pub node_id: String,
-    /// One-based WorkKey attempt identity in the journal's project namespace.
-    /// A continuation advances this number without consuming another route.
-    pub attempt: u32,
-    /// Zero-based position in that node's ordered route list.
-    pub route_index: u16,
-}
-
-impl AttemptKey {
-    pub fn work_key(
-        &self,
-        project: provenant_core::ProjectId,
-    ) -> Result<provenant_records::WorkKey, provenant_records::work_key::WorkKeyError> {
-        provenant_records::WorkKey::new(project, &self.graph_id, &self.node_id, self.attempt)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NodeState {
-    Pending,
-    Running,
-    Succeeded,
-    Failed,
-    Blocked,
-    Skipped,
-}
-
-impl NodeState {
-    pub(super) fn settled(self) -> bool {
-        !matches!(self, Self::Pending | Self::Running)
-    }
 }
 
 impl GraphCheckpoint {
@@ -1848,23 +2069,6 @@ impl NodeProgress {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GraphOutcome {
-    Succeeded,
-    Partial,
-    Failed,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GraphStatus {
-    Pending,
-    Complete,
-    Cancelled,
-    Paused,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphRun {
     pub status: GraphStatus,
@@ -1953,7 +2157,7 @@ pub struct NodeInput<'a> {
     pub read_roots: &'a [String],
     pub attachments: &'a [String],
     pub capabilities: Option<&'a [String]>,
-    pub capability_sources: Option<&'a serde_json::Value>,
+    pub capability_sources: Option<&'a provenant_records::run::CapabilitySources>,
     /// The node's attempt spec: an account for routes that name none, and
     /// build weight. Capabilities are already folded into `capabilities`.
     pub attempt: Option<&'a AttemptSpec>,

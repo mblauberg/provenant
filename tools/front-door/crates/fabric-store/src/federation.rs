@@ -427,6 +427,7 @@ mod tests {
             revision,
             change: AttemptState::Running {
                 extra: Default::default(),
+                child_wait: None,
             },
             trace: Default::default(),
         }

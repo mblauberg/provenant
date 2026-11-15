@@ -83,7 +83,7 @@ pub struct SpawnSpec<'a> {
     pub input: bool,
     pub secret_input: Option<&'a crate::exec::SecretInput>,
     pub inherited_lease: Option<&'a crate::fs::LockGuard>,
-    pub inherited_profile: Option<&'a dyn super::profile::ProfileSource>,
+    pub inherited_profile: Option<&'a dyn super::profile::LimitSource>,
     /// A second descriptor the child and its descendants keep open; the lane
     /// port block, so it lasts as long as the process tree does.
     pub inherited_ports: Option<&'a crate::fs::LockGuard>,

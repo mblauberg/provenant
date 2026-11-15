@@ -321,7 +321,7 @@ fn synthesis_disposes_once_of_findings_propagated_through_verifier() {
     assert_eq!(run.status, GraphStatus::Complete);
     let finding = &run.checkpoint.nodes[2].outputs.as_ref().unwrap().findings[0];
     assert_eq!(finding.id, "F1");
-    assert_eq!(finding.extra["verification"], "upheld");
+    assert_eq!(finding.verification.as_deref().unwrap(), "upheld");
 }
 
 #[test]
@@ -394,19 +394,21 @@ fn large_synthesis_trims_metadata_and_replays_with_finding_identities() {
             .any(|warning| warning.contains("findings metadata trimmed"))
     );
     assert_eq!(outputs.findings.len(), 8 * MAX_FINDINGS);
-    assert!(
-        outputs.findings.iter().all(|finding| finding.id == "F1"
-            && finding.severity == "high"
-            && finding.trigger().is_none()
-            && finding.effective_severity() == "note"
-            && finding.file == "a.rs")
-    );
+    assert!(outputs.findings.iter().all(|finding| finding.id == "F1"
+        && finding.severity == "high"
+        && finding.trigger().is_none()
+        && finding.effective_severity() == "note"
+        && finding.file == "a.rs"));
     assert_eq!(
         run.checkpoint.nodes.last().unwrap().state,
         NodeState::Succeeded
     );
     let prompt = owner.prompts.last().unwrap();
-    assert!(prompt.contains("F1") && prompt.contains("\"severity\":\"high\"") && prompt.contains("a.rs"));
+    assert!(
+        prompt.contains("F1")
+            && prompt.contains("\"severity\":\"high\"")
+            && prompt.contains("a.rs")
+    );
     let stored = serde_json::to_vec(journal.0.as_ref().unwrap()).unwrap();
     journal.0 = Some(serde_json::from_slice(&stored).unwrap());
     let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
@@ -415,7 +417,8 @@ fn large_synthesis_trims_metadata_and_replays_with_finding_identities() {
 
 #[test]
 fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities() {
-    let trigger = serde_json::json!({"sequence":"run", "reach":"operator_mistake", "observed":true});
+    let trigger =
+        serde_json::json!({"sequence":"run", "reach":"operator_mistake", "observed":true});
     for verifying in [false, true] {
         let input = |id: &str| GraphInput {
             required_outputs: Vec::new(),
@@ -465,9 +468,7 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
         synthesis.depends_on = (0..20).map(|i| format!("verifier{i}")).collect();
         synthesis.inputs = synthesis.depends_on.iter().map(|id| input(id)).collect();
         if verifying {
-            synthesis
-                .extra
-                .insert("review_behaviour".into(), "verify".into());
+            synthesis.review_behaviour = Some(template::ReviewBehaviour::Verify);
         } else {
             synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
         }
@@ -506,7 +507,14 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
             node_prompt_bytes: 512 * 1024,
             ..Default::default()
         };
-        let run = advance_with_budget(&document, &mut owner, &mut journal, &limits, &Default::default()).unwrap();
+        let run = advance_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &limits,
+            &Default::default(),
+        )
+        .unwrap();
         let synthesis = run
             .checkpoint
             .nodes
@@ -551,30 +559,20 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
             assert!(
                 reconstructed
                     .iter()
-                    .all(|finding| finding.extra["verification"] == "falsified")
+                    .all(|finding| finding.verification.as_deref().unwrap() == "falsified")
             );
         }
         assert!(reconstructed.iter().all(|finding| {
             (finding.id == "F1" || finding.id == "F2")
                 && finding.severity == "high"
-                && finding.extra.get("trigger") == Some(&trigger)
+                && finding.trigger.as_ref().is_some_and(|value| {
+                    serde_json::to_value(value).is_ok_and(|value| value == trigger)
+                })
                 && finding.effective_severity() == "note"
                 && finding.file == long_file
-                && finding
-                    .extra
-                    .get("lens")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("tests")
-                && finding
-                    .extra
-                    .get("evidence")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("observed")
-                && finding
-                    .extra
-                    .get("proposed_fix")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("repair")
+                && finding.lens.as_deref() == Some("tests")
+                && finding.evidence.as_deref() == Some("observed")
+                && finding.proposed_fix.as_deref() == Some("repair")
         }));
         let consumer = run.checkpoint.nodes.last().unwrap();
         assert_eq!(
@@ -593,11 +591,23 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
         );
         let stored = serde_json::to_vec(journal.0.as_ref().unwrap()).unwrap();
         journal.0 = Some(serde_json::from_slice(&stored).unwrap());
-        let replay = advance_with_budget(&document, &mut FakeOwner::default(), &mut journal, &limits, &Default::default()).unwrap();
+        let replay = advance_with_budget(
+            &document,
+            &mut FakeOwner::default(),
+            &mut journal,
+            &limits,
+            &Default::default(),
+        )
+        .unwrap();
         assert_eq!(run.checkpoint, replay.checkpoint);
         assert_eq!(
             reconstructed,
-            materialised_findings(positions["synthesis"], &plan, &replay.checkpoint, &positions)
+            materialised_findings(
+                positions["synthesis"],
+                &plan,
+                &replay.checkpoint,
+                &positions
+            )
         );
         let checkpoint = journal.0.as_mut().unwrap();
         let outputs = checkpoint
@@ -608,12 +618,15 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
             .outputs
             .as_mut()
             .unwrap();
-        outputs.extra.insert(
-            "_compact_disposition_findings".into(),
-            serde_json::json!("{}"),
-        );
+        outputs.compact_disposition_findings = Some("{}".into());
         assert!(matches!(
-            advance_with_budget(&document, &mut FakeOwner::default(), &mut journal, &limits, &Default::default()),
+            advance_with_budget(
+                &document,
+                &mut FakeOwner::default(),
+                &mut journal,
+                &limits,
+                &Default::default()
+            ),
             Err(GraphError::BadCheckpoint { .. })
         ));
     }
@@ -728,7 +741,11 @@ fn compacted_synthesis_survives_composite_export_and_replay() {
         NodeState::Succeeded
     );
     let prompt = owner.prompts.last().unwrap();
-    assert!(prompt.contains("F1") && prompt.contains("\"severity\":\"high\"") && prompt.contains(&long_file));
+    assert!(
+        prompt.contains("F1")
+            && prompt.contains("\"severity\":\"high\"")
+            && prompt.contains(&long_file)
+    );
     let identities = truncated_finding_ids(
         &plan.nodes[positions["next"]],
         &plan,
@@ -742,7 +759,12 @@ fn compacted_synthesis_survives_composite_export_and_replay() {
     assert_eq!(run.checkpoint, replay.checkpoint);
     assert_eq!(
         reconstructed,
-        materialised_findings(positions["outer--synthesis"], &plan, &replay.checkpoint, &positions)
+        materialised_findings(
+            positions["outer--synthesis"],
+            &plan,
+            &replay.checkpoint,
+            &positions
+        )
     );
 }
 
@@ -820,10 +842,7 @@ fn settled_copies_keep_origin_and_evidence_for_downstream_disposition() {
     assert_eq!(
         findings
             .iter()
-            .filter(|f| f
-                .extra
-                .get("verification")
-                .is_some_and(|v| v == "verified-evidence"))
+            .filter(|f| f.verification.as_deref() == Some("verified-evidence"))
             .count(),
         1
     );
@@ -887,7 +906,7 @@ fn composite_qualified_propagation_resolves_identity_only_disposition() {
     assert!(
         findings
             .iter()
-            .any(|f| f.extra.get("verification").is_some_and(|v| v == "upheld"))
+            .any(|f| f.verification.as_deref() == Some("upheld"))
     );
 }
 

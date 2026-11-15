@@ -93,6 +93,22 @@ pub struct PlanSpec {
     pub fallback_read_roots: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_max_nodes: Option<usize>,
+    #[serde(default, skip_serializing_if = "not_delivered")]
+    pub planned_review: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_min_successful: Option<usize>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub resolvers: std::collections::BTreeMap<String, Vec<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_floor_patterns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub floor_candidate_patterns: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub floor_min_reviewers: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub floor_classes: Vec<String>,
 }
 
 impl PlanSpec {
@@ -105,10 +121,29 @@ impl PlanSpec {
 
 /// Only validated, normalised additions enter the checkpoint. The original
 /// document remains the digest authority, just as it does for loop rounds.
+/// The prior topology and progress retained by a container redo tombstone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetiredExpansion {
+    pub reason: String,
+    pub expansion: Expansion,
+    pub progress: Vec<NodeProgress>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Expansion {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retired: Option<Box<RetiredExpansion>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub final_result: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub final_fragment: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub floor_warnings: Vec<String>,
     pub source: String,
     #[serde(with = "expanded_nodes")]
     pub nodes: Vec<GraphNode>,
@@ -123,9 +158,7 @@ pub struct Expansion {
 impl Expansion {
     /// Live children and edits leave their producer open for its final output.
     pub(super) fn closes_producer(&self) -> bool {
-        self.patch.is_none()
-            || self.extra.get("final_result") == Some(&serde_json::Value::Bool(true))
-            || self.extra.get("final_fragment") == Some(&serde_json::Value::Bool(true))
+        self.patch.is_none() || self.final_result || self.final_fragment
     }
 }
 
@@ -239,13 +272,8 @@ pub fn prompt(node: &GraphNode) -> String {
         );
     }
     if let Some(spec) = &node.plan {
-        let planner_limit = spec
-            .extra
-            .get("model_max_nodes")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|n| usize::try_from(n).ok())
-            .unwrap_or(spec.max_nodes);
-        prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes, holding a patch: {{\"schema_version\":1,\"nodes\":[...],\"templates\":{{...}}}}. Emit 1..{planner_limit} nodes. A node is either `use` of a template with `with` parameters and overrides (`brief`, `tier`, `after`, `inputs`, `over`, `min_ok`, `repeat`), or compiled-node fields with a `kind` of task, composite, loop, gate, decide, synthesise or land (use `plan` for a planning brief); composites, loops and further plan nodes are allowed. `over` copies a node once per named item with `${{item}}`; `repeat = {{\"until\":\"gate\",\"max_rounds\":N}}` loops a composite until its gate passes. Bundled templates: task, plan, explore, research, design, implement, implement.fix, review, review.security, verify, synthesise, repair; `templates` may define more inline. Each agent node requires id, a `brief` (or `goal`), `acceptance_checks` and local `after` or depends_on. `access` defaults to read_only; writers set worktree_write and may include optional write_scope metadata, which the WRITE_SCOPE policy checks when the writer settles; omit `worktree` for a host-provisioned checkout or name an existing registered worktree. The tier defaults to senior. Synthesise nodes require `inputs` selecting dependency outputs, either as `{{\"node\":\"id\",\"outputs\":[\"result\"]}}` or the shorthand `\"id\"` (which selects `result`). Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 200 bytes."));
+        let planner_limit = spec.model_max_nodes.unwrap_or(spec.max_nodes);
+        prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes, holding a patch: {{\"schema_version\":1,\"nodes\":[...],\"templates\":{{...}}}}. Emit 1..{planner_limit} nodes. A node is either `use` of a template with `with` parameters and overrides (`prompt`, `tier`, `after`, `inputs`, `over`, `min_ok`, `repeat`), or compiled-node fields with a `kind` of task, composite, loop, gate, decide, synthesise or land (use `plan` for a planning brief); composites, loops and further plan nodes are allowed. `over` copies a node once per named item with `${{item}}`; `repeat = {{\"until\":\"gate\",\"max_rounds\":N}}` loops a composite until its gate passes. Bundled templates: task, plan, explore, research, design, implement, implement.fix, review, review.security, verify, synthesise, repair; `templates` may define more inline. Each agent node requires id, a `prompt`, `acceptance_checks` and local `after` or depends_on. `access` defaults to read_only; writers set worktree_write and may include optional write_scope metadata, which the WRITE_SCOPE policy checks when the writer settles; omit `worktree` for a host-provisioned checkout or name an existing registered worktree. The tier defaults to senior. Synthesise nodes require `inputs` selecting dependency outputs, either as `{{\"node\":\"id\",\"outputs\":[\"result\"]}}` or the shorthand `\"id\"` (which selects `result`). Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 200 bytes."));
         if !spec.templates.is_empty() {
             prompt.push_str(&format!(
                 " Host templates with their declared authority: {}.",
@@ -408,13 +436,7 @@ pub(super) fn expand(
             addition.source.is_empty() || expanded.nodes.iter().any(|n| n.id == addition.source)
         } else {
             !addition.nodes.is_empty()
-                && sources.insert((
-                    &addition.source,
-                    addition
-                        .extra
-                        .get("retry_generation")
-                        .and_then(serde_json::Value::as_u64),
-                ))
+                && sources.insert((&addition.source, addition.retry_generation))
                 && expanded.nodes.iter().any(|n| n.id == addition.source)
         };
         if !valid {
@@ -511,7 +533,7 @@ fn derive_topology(
         spec,
         document,
         planner.require_skill_location,
-        addition.extra.get("retry_generation"),
+        addition.retry_generation,
     )
     .map_err(|_| {
         (
@@ -578,11 +600,7 @@ fn check_patch_topology(
     let Some(spec) = planner.plan.as_ref() else {
         return Ok(());
     };
-    if spec
-        .extra
-        .get("planned_review")
-        .and_then(serde_json::Value::as_bool)
-        == Some(true)
+    if spec.planned_review
         && addition
             .nodes
             .iter()
@@ -594,17 +612,8 @@ fn check_patch_topology(
             "planned review lenses must retain the pinned subject",
         ));
     }
-    let names = |key: &str| -> Vec<String> {
-        spec.extra
-            .get(key)
-            .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(serde_json::Value::as_str)
-            .map(str::to_owned)
-            .collect()
-    };
-    if names("required_floor_patterns")
+    if spec
+        .required_floor_patterns
         .iter()
         .any(|name| !addition.uses.iter().any(|used| &used.name == name))
     {
@@ -613,13 +622,8 @@ fn check_patch_topology(
             "expanded plan must include required path-floor patterns",
         ));
     }
-    let candidates = names("floor_candidate_patterns");
-    let minimum = spec
-        .extra
-        .get("floor_min_reviewers")
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|n| usize::try_from(n).ok())
-        .unwrap_or(0);
+    let candidates = &spec.floor_candidate_patterns;
+    let minimum = spec.floor_min_reviewers;
     let count = addition
         .uses
         .iter()
@@ -662,18 +666,8 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
         .iter()
         .find(|node| node.id == expansion.source)
         .and_then(|node| node.plan.as_ref())
-        .filter(|plan| {
-            plan.extra
-                .get("planned_review")
-                .and_then(serde_json::Value::as_bool)
-                == Some(true)
-        })
-        .map(|plan| {
-            plan.extra
-                .get("review_min_successful")
-                .and_then(serde_json::Value::as_u64)
-                .map(|n| n as usize)
-        });
+        .filter(|plan| plan.planned_review)
+        .map(|plan| plan.review_min_successful);
     for node in &mut document.nodes {
         if node.dependencies().any(|name| name == &expansion.source) {
             node.after_expansion.extend(
@@ -682,8 +676,7 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
                     .iter()
                     .filter(|n| {
                         !expansion.nodes.iter().any(|root| {
-                            root.extra.get(super::relay::DETACHED)
-                                == Some(&serde_json::Value::Bool(true))
+                            root.detached
                                 && (n.id == root.id || n.id.starts_with(&format!("{}--", root.id)))
                         })
                     })
@@ -840,12 +833,7 @@ fn fragment_exports(document: &GraphDocument, expansion: &Expansion) -> Vec<Grap
             }],
         })
         .collect();
-    if spec
-        .extra
-        .get("planned_review")
-        .and_then(serde_json::Value::as_bool)
-        == Some(true)
-    {
+    if spec.planned_review {
         for (index, export) in exports.iter_mut().enumerate() {
             export.outputs.retain(|kind| {
                 matches!(kind, OutputKind::Result | OutputKind::Findings)
@@ -963,7 +951,7 @@ fn prepare_nested(
             ));
         }
         // Origin evidence is host-authored; a planner cannot assert it.
-        child.extra.remove("capability_sources");
+        child.capability_sources.clear();
         if let Some(root) = child
             .read_roots
             .iter()
@@ -1114,6 +1102,14 @@ fn fragment(
 ) -> Result<Expansion, String> {
     let default_spec = PlanSpec {
         extra: Default::default(),
+        model_max_nodes: None,
+        planned_review: false,
+        review_min_successful: None,
+        resolvers: Default::default(),
+        required_floor_patterns: Vec::new(),
+        floor_candidate_patterns: Vec::new(),
+        floor_min_reviewers: 0,
+        floor_classes: Vec::new(),
         kinds: Vec::new(),
         max_nodes: limits.nodes,
         templates: Vec::new(),
@@ -1129,10 +1125,7 @@ fn fragment(
     let spec = node.plan.as_ref().unwrap_or(&default_spec);
     let patch = super::patch::Patch::from_fragment(json)?;
     let model_limit = spec
-        .extra
-        .get("model_max_nodes")
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|n| usize::try_from(n).ok())
+        .model_max_nodes
         .unwrap_or(spec.max_nodes)
         .min(spec.max_nodes);
     if patch.schema_version != 1 || patch.nodes.len() > model_limit {
@@ -1140,22 +1133,8 @@ fn fragment(
             "fragment requires 1..{model_limit} nodes and schema_version 1"
         ));
     }
-    let snapshots: BTreeMap<String, Template> = source
-        .extra
-        .get("template_library")
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|error| format!("invalid template snapshot: {error}"))?
-        .unwrap_or_default();
-    let layers: BTreeMap<String, super::template::Layer> = source
-        .extra
-        .get("template_layers")
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|error| format!("invalid template layers: {error}"))?
-        .unwrap_or_default();
+    let snapshots = source.template_library.clone();
+    let layers = source.template_layers.clone();
     let mut library = bundled_templates().clone();
     for (name, template) in snapshots {
         library.insert(
@@ -1167,23 +1146,8 @@ fn fragment(
             template,
         )?;
     }
-    let mut resolvers: BTreeMap<String, Vec<String>> = source
-        .extra
-        .get("template_resolvers")
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|error| format!("invalid submission resolvers: {error}"))?
-        .unwrap_or_default();
-    let overrides: BTreeMap<String, Vec<String>> = spec
-        .extra
-        .get("resolvers")
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|error| format!("invalid planner resolvers: {error}"))?
-        .unwrap_or_default();
-    resolvers.extend(overrides);
+    let mut resolvers = source.template_resolvers.clone();
+    resolvers.extend(spec.resolvers.clone());
     let context = super::patch::PatchContext {
         library: &library,
         resolvers: &resolvers,
@@ -1208,10 +1172,7 @@ fn fragment(
         super::patch::Prepared::Ready(admission) => {
             let mut expansion = admission.expansion;
             if !admission.warnings.is_empty() {
-                expansion.extra.insert(
-                    "floor_warnings".into(),
-                    serde_json::json!(admission.warnings),
-                );
+                expansion.floor_warnings = admission.warnings;
             }
             Ok(expansion)
         }
@@ -1229,24 +1190,9 @@ pub(super) fn add_floor_uses(
     uses: &mut Vec<TemplateUse>,
     warnings: &mut Vec<String>,
 ) -> Result<(), String> {
-    let names = |key: &str| -> Vec<String> {
-        spec.extra
-            .get(key)
-            .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(serde_json::Value::as_str)
-            .map(str::to_owned)
-            .collect()
-    };
-    let mut required = names("required_floor_patterns");
-    let candidates = names("floor_candidate_patterns");
-    let minimum = spec
-        .extra
-        .get("floor_min_reviewers")
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|n| usize::try_from(n).ok())
-        .unwrap_or(0);
+    let mut required = spec.required_floor_patterns.clone();
+    let candidates = &spec.floor_candidate_patterns;
+    let minimum = spec.floor_min_reviewers;
     let mut selected: std::collections::BTreeSet<String> = uses
         .iter()
         .filter(|used| candidates.contains(&used.name))
@@ -1266,18 +1212,7 @@ pub(super) fn add_floor_uses(
             "path floor requires more distinct review lenses than the catalogue offers".into(),
         );
     }
-    let classes = spec
-        .extra
-        .get("floor_classes")
-        .and_then(serde_json::Value::as_array)
-        .map(|names| {
-            names
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .unwrap_or_default();
+    let classes = spec.floor_classes.join(", ");
     for (index, name) in required.iter().enumerate() {
         if uses.iter().any(|used| &used.name == name) {
             continue;
@@ -1361,7 +1296,7 @@ pub(super) fn flatten_fragment(
                     super::relay::child_worktree(worktree_layout, graph, &id)
                         .map_err(|error| error.to_string())?,
                 );
-                child.extra.insert("provision_worktree".into(), true.into());
+                child.provision_worktree = true;
             }
             if let Some(composite) = &mut child.composite {
                 // A composite exporting one member writer's commit (a planned
@@ -1384,9 +1319,7 @@ pub(super) fn flatten_fragment(
                         super::relay::child_worktree(worktree_layout, graph, &id)
                             .map_err(|error| error.to_string())?,
                     );
-                    writer
-                        .extra
-                        .insert("provision_worktree".into(), true.into());
+                    writer.provision_worktree = true;
                 }
                 provision_paths(&mut composite.nodes, graph, &id, worktree_layout)?;
             }
@@ -1417,9 +1350,22 @@ pub(super) fn flatten_fragment(
         local_nodes.push(stub);
     }
     let local = GraphDocument {
+        exclude: Vec::new(),
+        network: None,
+        capability: Vec::new(),
+        no_capability: Vec::new(),
+        provenance: None,
+
         review_base: None,
         context: document.context.clone(),
+        replay_digest: None,
         extra: Default::default(),
+        submission_patch: None,
+        template_library: Default::default(),
+        template_layers: Default::default(),
+        template_resolvers: Default::default(),
+        peer_origin_work_key: None,
+        review_tier_override: None,
         schema_version: document.schema_version,
         graph_id: "fragment".into(),
         nodes: local_nodes,
@@ -1767,13 +1713,12 @@ pub(super) fn settle(
         .nodes
         .iter()
         .find(|n| n.id == node.id)
-        .and_then(|n| n.extra.get("retry_generation"))
-        .cloned();
-    if checkpoint.expansions.iter().any(|e| {
-        e.source == node.id
-            && e.extra.get("retry_generation") == generation.as_ref()
-            && e.closes_producer()
-    }) {
+        .and_then(|node| node.retry_generation);
+    if checkpoint
+        .expansions
+        .iter()
+        .any(|e| e.source == node.id && e.retry_generation == generation && e.closes_producer())
+    {
         return None;
     }
     if node
@@ -1799,13 +1744,9 @@ pub(super) fn settle(
                 spec,
                 source,
                 node.require_skill_location,
-                generation.as_ref(),
+                generation,
             )?;
-            if let Some(generation) = &generation {
-                addition
-                    .extra
-                    .insert("retry_generation".into(), generation.clone());
-            }
+            addition.retry_generation = generation;
             let mut preview = document.clone();
             append(&mut preview, &addition);
             let (plan, positions) =
@@ -1929,24 +1870,13 @@ pub(super) fn settle(
         return None;
     };
     let result = addition.and_then(|mut addition| {
-        addition
-            .extra
-            .insert("final_result".into(), serde_json::Value::Bool(true));
-        if let Some(generation) = &generation {
-            addition
-                .extra
-                .insert("retry_generation".into(), generation.clone());
-        }
-        if let Some(warnings) = addition
-            .extra
-            .get("floor_warnings")
-            .and_then(serde_json::Value::as_array)
-            && let Some(outputs) = &mut checkpoint.nodes[index].outputs
-        {
+        addition.final_result = true;
+        addition.retry_generation = generation;
+        if let Some(outputs) = &mut checkpoint.nodes[index].outputs {
             outputs.warnings.extend(
-                warnings
+                addition
+                    .floor_warnings
                     .iter()
-                    .filter_map(serde_json::Value::as_str)
                     .map(|warning| bounded(warning, WARNING_BYTES)),
             );
         }
@@ -2041,13 +1971,9 @@ pub(super) fn settle(
                         spec,
                         source,
                         node.require_skill_location,
-                        generation.as_ref(),
+                        generation,
                     )?;
-                    if let Some(generation) = &generation {
-                        addition
-                            .extra
-                            .insert("retry_generation".into(), generation.clone());
-                    }
+                    addition.retry_generation = generation;
                     let mut preview = document.clone();
                     append(&mut preview, &addition);
                     validate_schema(&preview).map_err(|error| error.to_string())?;
@@ -2116,8 +2042,8 @@ pub(super) fn settle(
 /// The static stage a planner's `fallback` spec expands to in the original
 /// document. Deterministic, so `settle` appends it and checkpoint validation
 /// recomputes it to check what was persisted.
-fn generation_namespace(source: &str, generation: Option<&serde_json::Value>) -> String {
-    match generation.and_then(serde_json::Value::as_u64) {
+fn generation_namespace(source: &str, generation: Option<u64>) -> String {
+    match generation {
         Some(generation) => format!("{source}--redo-{generation}"),
         None => source.to_owned(),
     }
@@ -2126,7 +2052,7 @@ fn generation_namespace(source: &str, generation: Option<&serde_json::Value>) ->
 fn fallback_id(expansion: &Expansion) -> String {
     format!(
         "{}--fallback",
-        generation_namespace(&expansion.source, expansion.extra.get("retry_generation"))
+        generation_namespace(&expansion.source, expansion.retry_generation)
     )
 }
 
@@ -2135,16 +2061,12 @@ pub(super) fn fallback_expansion_for_generation(
     spec: &PlanSpec,
     source: &GraphDocument,
     require_skill_location: bool,
-    generation: Option<&serde_json::Value>,
+    generation: Option<u64>,
 ) -> Result<Expansion, String> {
     let namespace = generation_namespace(node_id, generation);
     let mut expansion = fallback_expansion(&namespace, spec, source, require_skill_location)?;
     expansion.source = node_id.to_owned();
-    if let Some(generation) = generation {
-        expansion
-            .extra
-            .insert("retry_generation".into(), generation.clone());
-    }
+    expansion.retry_generation = generation;
     Ok(expansion)
 }
 
@@ -2177,6 +2099,11 @@ pub(super) fn fallback_expansion(
         .map_err(|error| format!("fallback stage does not expand: {error}"))?;
     Ok(Expansion {
         extra: Default::default(),
+        retired: None,
+        retry_generation: None,
+        final_result: false,
+        final_fragment: false,
+        floor_warnings: Vec::new(),
         source: node_id.to_owned(),
         nodes: expanded
             .nodes

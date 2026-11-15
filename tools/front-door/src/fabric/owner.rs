@@ -134,6 +134,7 @@ fn bind_child_directory(
             network,
             capability: Vec::new(),
             no_capability: Vec::new(),
+            provenance: None,
         },
         state,
         credentials,
@@ -197,13 +198,16 @@ fn selected_writer_project(
 fn stored_graph_refusal(
     record: &provenant_run::OperationRecord,
 ) -> Result<FacadeError, FacadeError> {
-    if let Some(error) = record.extra.get("graph_refusal_error") {
-        return serde_json::from_value(error.clone()).map_err(|_| FacadeError::StateCorrupt);
-    }
     let diagnostic = record.refusal.clone().ok_or(FacadeError::StateCorrupt)?;
-    Ok(run_error(provenant_run::RunError::RecordedRefusal(
-        Box::new(diagnostic),
-    )))
+    Ok(match &record.refusal_code {
+        Some(refusal_code) => FacadeError::RecordedRefusal {
+            refusal_code: refusal_code.clone(),
+            diagnostic,
+        },
+        None => run_error(provenant_run::RunError::RecordedRefusal(Box::new(
+            diagnostic,
+        ))),
+    })
 }
 
 impl BoundGraphOwner<'_> {
@@ -285,43 +289,21 @@ impl BoundGraphOwner<'_> {
             .knobs
             .get("chair.refusal_notice")
             .map_or_else(|| serde_json::json!("inbox"), |knob| knob.value.clone());
-        // Retain the safe diagnostic reason for dispatch refusals; persisting
-        // the original error can include host paths. Relay codes need the
-        // same grammar check as the facade's public code projection.
-        let replay_error = match error {
-            FacadeError::GraphRelayRefused { detail, .. } => FacadeError::GraphRelayRefused {
-                refusal_code: error.code().to_owned(),
-                detail: detail.clone(),
-            },
-            FacadeError::DispatchRefused { disk, fact, .. } => FacadeError::DispatchRefused {
-                reason: diagnostic
-                    .detail
-                    .clone()
-                    .unwrap_or_else(|| "dispatch was refused".into()),
-                disk: disk.clone(),
-                fact: *fact,
-            },
-            error => error.clone(),
-        };
+        let notice = serde_json::from_value(notice).map_err(|_| FacadeError::StateCorrupt)?;
         let record = provenant_run::OperationRecord {
-            extra: [
-                (
-                    "graph_refusal_error".into(),
-                    serde_json::to_value(replay_error).map_err(|_| FacadeError::StateCorrupt)?,
-                ),
-                ("refusal_notice".into(), notice),
-                (
-                    "origin_intent_digest".into(),
-                    serde_json::json!(scope.digest),
-                ),
-            ]
-            .into(),
+            extra: Default::default(),
+            preflight_digest_version: None,
+            refusal_notice: Some(notice),
+            refusal_code: Some(error.code().to_owned()),
+            refusal_notice_done: false,
+            origin_intent_digest: Some(scope.digest),
             schema_version: 1,
             project_id: self.factory.context.identity.project,
             actor_id: scope.actor,
             operation_id: scope.operation.clone(),
             kind: provenant_run::OperationKind::Dispatch,
             request_digest: scope.digest,
+            parent_attempt: None,
             state: provenant_run::OperationState::Refused,
             blocked_reason: None,
             refusal: Some(diagnostic),
@@ -1002,17 +984,7 @@ pub(crate) fn writer_source_identity_matches(
         .iter()
         .filter_map(|node| node.writer_binding.as_ref())
         .filter(|binding| Path::new(&binding.worktree) == source)
-        .all(|binding| {
-            binding
-                .extra
-                .get("source_directory_identity")
-                .and_then(|value| {
-                    serde_json::from_value::<provenant_records::run::SourceIdentity>(value.clone())
-                        .ok()
-                })
-                .as_ref()
-                == Some(identity)
-        })
+        .all(|binding| binding.source_directory_identity.as_ref() == Some(identity))
 }
 
 pub(crate) fn unanimous_preparation_cause(
@@ -1289,18 +1261,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 &self.factory.context.roots,
                 &slot.tier,
                 family,
-                &document
-                    .extra
-                    .get("exclude")
-                    .and_then(serde_json::Value::as_array)
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(serde_json::Value::as_str)
-                            .map(str::to_owned)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default(),
+                &document.exclude,
             )
         })?;
         let single = panel.slots.len() == 1;
@@ -1621,9 +1582,14 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         let custody_released = store.custody_released(&record, &call).map_err(run_error)?;
         let failure = record.preparation_failure.or_else(|| {
             (record.provider_launched == Some(false)
-                && matches!(&record.state, provenant_records::run::AttemptState::Terminal { extra, .. }
-                    if extra.get("terminal_cause") == Some(&serde_json::json!(provenant_records::run::TerminalCause::SpawnFailure))))
-                .then_some(provenant_records::run::PreparationFailure::AdapterUnavailable)
+                && matches!(
+                    &record.state,
+                    provenant_records::run::AttemptState::Terminal {
+                        terminal_cause: Some(provenant_records::run::TerminalCause::SpawnFailure),
+                        ..
+                    }
+                ))
+            .then_some(provenant_records::run::PreparationFailure::AdapterUnavailable)
         });
         Ok(failure.map(
             |failure| provenant_fabric_runtime::graph::PreparationFallbackEvidence {
@@ -1829,13 +1795,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         let identity = writer.worktree.identity();
         Ok(Some(
             provenant_fabric_runtime::graph::WriterWorktreeBinding {
-                extra: [(
-                    "source_directory_identity".into(),
-                    serde_json::json!({
-                        "device": identity.device, "inode": identity.inode,
-                    }),
-                )]
-                .into(),
+                extra: Default::default(),
+                source_directory_identity: Some(provenant_records::run::SourceIdentity {
+                    device: identity.device,
+                    inode: identity.inode,
+                }),
                 worktree,
                 head: writer.source_commit().to_string(),
             },
@@ -2319,8 +2283,12 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 attempt: id.parse().map_err(|_| FacadeError::StateCorrupt)?,
             };
             let record = owner.snapshot(target, self.budget, self.cancel)?;
-            if record.extra.get("peer_subtree").is_some_and(|subtree| {
-                matches!(subtree["status"].as_str(), Some("pending" | "paused"))
+            if record.peer.peer_subtree.as_ref().is_some_and(|subtree| {
+                matches!(
+                    subtree.status,
+                    provenant_records::graph::GraphStatus::Pending
+                        | provenant_records::graph::GraphStatus::Paused
+                )
             }) {
                 return Ok(false);
             }
@@ -2454,10 +2422,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 && record.state == provenant_run::OperationState::Refused
             {
                 let intent = record
-                    .extra
-                    .get("origin_intent_digest")
+                    .origin_intent_digest
                     .ok_or(FacadeError::StateCorrupt)?;
-                if intent != &serde_json::json!(refusal.digest) {
+                if intent != refusal.digest {
                     return Err(run_error(provenant_run::RunError::OperationConflict));
                 }
                 self.post_graph_refusal(&store, &refusal.operation, &call);
@@ -2514,36 +2481,15 @@ pub(crate) fn recovered_attempt_spec(
     Ok(provenant_fabric_runtime::graph::AttemptSpec {
         account: task.account.clone(),
         build_heavy: task.build_heavy,
-        confidential: task
-            .profile
-            .extra
-            .get("confidential")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
-        parent_sandboxed: [&task.profile.extra, &task.extra]
-            .into_iter()
-            .filter_map(|extra| {
-                extra
-                    .get(provenant_records::run::PARENT_SANDBOXED_FIELD)
-                    .and_then(serde_json::Value::as_bool)
-            })
-            .any(|value| value)
+        confidential: task.profile.confidential,
+        parent_sandboxed: task.profile.parent_sandboxed
             || original.is_some_and(|spec| spec.parent_sandboxed),
         admitted_by: task
             .profile
-            .extra
-            .get("admitted_by")
-            .and_then(serde_json::Value::as_str)
-            .or_else(|| original.and_then(|spec| spec.admitted_by.as_deref()))
-            .map(str::to_owned),
-        launch_policy: task
-            .profile
-            .extra
-            .get(provenant_records::run::LAUNCH_POLICY_FIELD)
-            .map(|value| {
-                serde_json::from_value(value.clone()).map_err(|_| FacadeError::StateCorrupt)
-            })
-            .transpose()?,
+            .admitted_by
+            .clone()
+            .or_else(|| original.and_then(|spec| spec.admitted_by.clone())),
+        launch_policy: task.profile.repository_policy.clone(),
         policy_sealed: true,
         sealed_profile: Some(task.profile.clone()),
         provider_timeout: Some(task.provider_timeout_seconds),
@@ -3149,9 +3095,9 @@ impl BoundGraphOwner<'_> {
             .map_err(graph_journal_error)?
             .is_some_and(|execution| {
                 execution
-                    .extra
-                    .get("peer_origin_context")
-                    .and_then(|origin| origin["node_id"].as_str())
+                    .peer_origin_context
+                    .as_ref()
+                    .and_then(|origin| origin.node_id.as_deref())
                     == Some(key.node_id.as_str())
             });
             if peer_root && !accepted {
@@ -3414,20 +3360,33 @@ impl BoundGraphOwner<'_> {
                         network: self.network,
                         capability: capabilities.clone(),
                         no_capability: Vec::new(),
+                        provenance: None,
                     },
                     self.factory.context.roots.state.as_path(),
                     &self.factory.credential_roots()?,
                 )
                 .map_err(dispatch_refused)?;
                 if !capabilities.is_empty() {
-                    let sources: Vec<_> = capabilities.iter().map(|name| {
-                    let inherited = node.capability_sources.and_then(|v| v.as_array()).into_iter().flatten()
-                        .find(|entry| entry["name"] == *name).and_then(|entry| entry["source"].as_str());
-                    serde_json::json!({"name": name, "source": if self.capability_overrides.0.contains(name) { "flag" } else { inherited.unwrap_or(if node.capabilities.is_some() { "node" } else { "project default" }) }})
-                }).collect();
-                    grants
-                        .extra
-                        .insert("capability_sources".into(), serde_json::json!(sources));
+                    grants.capability_sources = capabilities
+                        .iter()
+                        .map(|name| {
+                            let inherited = node
+                                .capability_sources
+                                .and_then(|sources| sources.get(name));
+                            let source = if self.capability_overrides.0.contains(name) {
+                                "flag"
+                            } else {
+                                inherited.map(String::as_str).unwrap_or(
+                                    if node.capabilities.is_some() {
+                                        "node"
+                                    } else {
+                                        "project default"
+                                    },
+                                )
+                            };
+                            (name.clone(), source.to_owned())
+                        })
+                        .collect();
                 }
                 grants
             };
@@ -3597,7 +3556,7 @@ impl BoundGraphOwner<'_> {
             .map_err(|_| FacadeError::StateCorrupt)?;
         let identity_matches = if remote_target {
             attempt.key.node() == key.node_id
-                && super::peer::peer_origin_matches(&attempt.extra, &expected_origin)
+                && super::peer::peer_origin_matches(&attempt.peer, &expected_origin)
         } else {
             key.work_key(attempt.key.project()).ok().as_ref() == Some(&attempt.key)
         };
@@ -3607,11 +3566,13 @@ impl BoundGraphOwner<'_> {
         // A remote parent is one origin node until its receiver-owned graph
         // has drained, including children that outlive the provider process.
         if remote_target
-            && attempt
-                .extra
-                .get("peer_subtree")
-                .and_then(|value| value["status"].as_str())
-                .is_some_and(|status| matches!(status, "pending" | "paused"))
+            && attempt.peer.peer_subtree.as_ref().is_some_and(|subtree| {
+                matches!(
+                    subtree.status,
+                    provenant_records::graph::GraphStatus::Pending
+                        | provenant_records::graph::GraphStatus::Paused
+                )
+            })
         {
             return Ok(AttemptObservation::Pending {
                 attempt_ref: reference,
@@ -3627,9 +3588,8 @@ impl BoundGraphOwner<'_> {
                 let call = owner.call(self.cancel);
                 let custody = if remote {
                     attempt
-                        .extra
-                        .get("graph_custody_released")
-                        .and_then(serde_json::Value::as_bool)
+                        .peer
+                        .graph_custody_released
                         .ok_or(provenant_run::RunError::NotFound)
                 } else {
                     store.custody_released(&attempt, &call)
@@ -3659,20 +3619,11 @@ impl BoundGraphOwner<'_> {
                     .map(|(_, receipt)| receipt)
                     .or(attempt.delivery.as_ref());
                 let launched = attempt.provider_launched.unwrap_or(true);
-                let preparation_cause = match &attempt.state {
-                    AttemptState::Terminal { extra, .. } => {
-                        extra.get("terminal_cause").cloned().and_then(|value| {
-                            serde_json::from_value::<provenant_records::run::TerminalCause>(value)
-                                .ok()
-                        })
-                    }
-                    _ => None,
-                };
+                let preparation_cause = attempt.state.terminal_cause();
                 // The sealed stop, else the cause the outcome names.
                 let stop = attempt
                     .state
                     .stop()
-                    .map_err(|_| FacadeError::StateCorrupt)?
                     .map(|stop| stop.cause())
                     .or_else(|| {
                         attempt.preparation_failure.map(|failure| match failure {
@@ -3713,7 +3664,7 @@ impl BoundGraphOwner<'_> {
                                 result.digest = artifact.digest.to_string();
                                 // The peer's sealed settlement handoff, carried in its
                                 // status; the output pages hold only text.
-                                result.handoff = peer_handoff(attempt.extra.get("graph_handoff"));
+                                result.handoff = peer_handoff(attempt.peer.graph_handoff.as_ref());
                             }
                             (Some(Box::new(result)), None)
                         }
@@ -3771,13 +3722,9 @@ impl BoundGraphOwner<'_> {
                             Outcome::RateLimited | Outcome::QuotaLimited => {
                                 AttemptOutcome::UsageLimited
                             }
-                            Outcome::TimedOut if matches!(
-                                &attempt.state,
-                                AttemptState::Terminal { extra, .. }
-                                    if extra.get("terminal_cause").cloned()
-                                        .and_then(|value| serde_json::from_value::<provenant_records::run::TerminalCause>(value).ok())
-                                        == Some(provenant_records::run::TerminalCause::TokenBudget)
-                            ) => AttemptOutcome::OtherFailure,
+                            Outcome::TimedOut if attempt.state.terminal_cause()
+                                == Some(provenant_records::run::TerminalCause::TokenBudget)
+                                => AttemptOutcome::OtherFailure,
                             Outcome::TimedOut if node.deadline_seconds.is_some() => {
                                 AttemptOutcome::DeadlineExceeded
                             }
@@ -3787,8 +3734,7 @@ impl BoundGraphOwner<'_> {
                                 .map_or(AttemptOutcome::OtherFailure, AttemptOutcome::PreparationRefused),
                             Outcome::ReviewRequired if matches!(
                                 &attempt.state,
-                                AttemptState::Terminal { extra, .. }
-                                    if extra.get("terminal_cause") == Some(&serde_json::json!(provenant_records::run::TerminalCause::StoppedNoWork))
+                                AttemptState::Terminal { terminal_cause: Some(provenant_records::run::TerminalCause::StoppedNoWork), .. }
                             ) => AttemptOutcome::StoppedNoWork,
                             // A declared stop is one fact whether or not the
                             // writer left uncommitted edits; the graph restarts
@@ -3897,46 +3843,24 @@ pub(crate) fn graph_retry_allowance(
 /// selectors, inherited by every node it launches.
 pub(crate) fn graph_exclude(
     document: &provenant_fabric_runtime::graph::GraphDocument,
-) -> Result<Vec<String>, FacadeError> {
-    match document.extra.get("exclude") {
-        None => Ok(Vec::new()),
-        Some(value) => value
-            .as_array()
-            .ok_or(FacadeError::InvalidInput { detail: None })?
-            .iter()
-            .map(|item| {
-                item.as_str()
-                    .map(str::to_owned)
-                    .ok_or(FacadeError::InvalidInput { detail: None })
-            })
-            .collect(),
-    }
+) -> Vec<String> {
+    document.exclude.clone()
 }
 /// A graph document's optional top-level `network` (`"on"` or `"off"`),
 /// applied to every node lane it launches.
 pub(crate) fn graph_network(
     document: &provenant_fabric_runtime::graph::GraphDocument,
-) -> Result<Option<provenant_cli::Switch>, FacadeError> {
-    match document.extra.get("network") {
-        None => Ok(None),
-        Some(value) => match value.as_str() {
-            Some("on") => Ok(Some(provenant_cli::Switch::On)),
-            Some("off") => Ok(Some(provenant_cli::Switch::Off)),
-            _ => Err(FacadeError::InvalidInput { detail: None }),
-        },
-    }
+) -> Option<provenant_cli::Switch> {
+    document.network.map(|network| match network {
+        provenant_fabric_runtime::graph::GraphNetwork::On => provenant_cli::Switch::On,
+        provenant_fabric_runtime::graph::GraphNetwork::Off => provenant_cli::Switch::Off,
+    })
 }
 
 pub(crate) fn graph_capability_overrides(
     document: &provenant_fabric_runtime::graph::GraphDocument,
-) -> Result<(Vec<String>, Vec<String>), FacadeError> {
-    let parse = |key| {
-        document.extra.get(key).map_or(Ok(Vec::new()), |value| {
-            serde_json::from_value(value.clone())
-                .map_err(|_| FacadeError::InvalidInput { detail: None })
-        })
-    };
-    Ok((parse("capability")?, parse("no_capability")?))
+) -> (Vec<String>, Vec<String>) {
+    (document.capability.clone(), document.no_capability.clone())
 }
 
 /// A graph route's exact model in `ADAPTER/ID` form.
@@ -4141,6 +4065,9 @@ mod journal_error_tests {
             &factory.clock,
         )?;
         journal.bind(graph::GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+
             bases: bound,
             directory: factory.cwd.clone(),
             extra: Default::default(),
@@ -4517,7 +4444,7 @@ mod journal_error_tests {
         };
         let mut missing = first.clone();
         missing.operation_id = graph_operation("graph-attempt-operation", &missing_key)?;
-        missing.extra.remove("origin_intent_digest");
+        missing.origin_intent_digest = None;
         store.insert_refusal(missing, &call)?;
         let missing = owner
             .observe_or_start(
@@ -4560,11 +4487,8 @@ mod journal_error_tests {
         let saved = store
             .operation(&operation, &call)?
             .ok_or("service refusal")?;
-        assert_eq!(
-            saved.extra.get("preflight_digest_version"),
-            Some(&serde_json::json!(1))
-        );
-        assert!(saved.extra.contains_key("origin_intent_digest"));
+        assert_eq!(saved.preflight_digest_version, Some(1));
+        assert!(saved.origin_intent_digest.is_some());
         let repeated = owner
             .observe_or_start(
                 &service_key,
@@ -4660,28 +4584,16 @@ mod journal_error_tests {
 /// The serving host verifies each artifact read; capture remains on the chair.
 /// A peer's handoff is untrusted at this boundary: validate it as any decoded
 /// handoff, then redact it, before a continuation prompt can carry it.
-/// An absent key means no captured handoff; a present key uses the sealed typed outcome.
-fn peer_handoff(sealed: Option<&serde_json::Value>) -> provenant_records::handoff::HandoffResult {
-    use provenant_records::handoff::{HandoffError, HandoffResult};
-    let Some(value) = sealed else {
+/// An absent key means no captured handoff; a present key is the peer's sealed
+/// typed outcome, already revalidated by the record decoder. Redact it again
+/// before it reaches the capture.
+fn peer_handoff(
+    sealed: Option<&provenant_records::handoff::HandoffResult>,
+) -> provenant_records::handoff::HandoffResult {
+    let Some(sealed) = sealed else {
         return Ok(None);
     };
-    // Peers send the same sealed parse outcome, not a fresh text parse.
-    let handoff: HandoffResult = serde_json::from_value(value.clone()).unwrap_or_else(|error| {
-        Err(HandoffError::new(
-            "$",
-            format!("peer handoff unreadable: {error}"),
-        ))
-    });
-    let handoff = match handoff {
-        Ok(Some(handoff)) => {
-            let bytes = serde_json::to_vec(&handoff)
-                .map_err(|_| HandoffError::new("$", "peer handoff unreadable"))?;
-            provenant_records::handoff::Handoff::from_json(&bytes).map(Some)
-        }
-        other => other,
-    };
-    provenant_run::sanitise_handoff_result(handoff)
+    provenant_run::sanitise_handoff_result(sealed.clone())
 }
 
 fn remote_graph_result(
@@ -4776,22 +4688,16 @@ mod peer_handoff_tests {
                 "remaining":[],"decisions":[],"verify":[]}})
         };
         let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
-        let clean = peer_handoff(Some(&sealed(&format!("key {token}"))));
+        let decode = |value: serde_json::Value| -> provenant_records::handoff::HandoffResult {
+            serde_json::from_value(value).unwrap()
+        };
+        let clean = peer_handoff(Some(&decode(sealed(&format!("key {token}")))));
         let note = clean.unwrap().unwrap().note;
         assert!(!note.contains(token));
-        let mut bad = sealed("x");
-        bad["Ok"]["schema_version"] = 1.into();
-        let error = peer_handoff(Some(&bad)).unwrap_err();
-        assert_eq!(error.dropped[0].field, "schema_version");
-        assert!(peer_handoff(Some(&sealed(" "))).is_err());
-        assert!(peer_handoff(Some(&sealed(&"n".repeat(5000)))).is_err());
-        let malformed = serde_json::json!({"Err": error});
-        assert_eq!(peer_handoff(Some(&malformed)), Err(error));
-        assert_eq!(
-            peer_handoff(Some(&serde_json::json!({"Ok":null}))),
-            Ok(None)
-        );
-        assert!(peer_handoff(Some(&serde_json::Value::Null)).is_err());
+        // A malformed outcome stays explicit evidence; absence stays absence.
+        let error = provenant_records::handoff::HandoffError::new("schema_version", "expected 2");
+        assert_eq!(peer_handoff(Some(&Err(error.clone()))), Err(error));
+        assert_eq!(peer_handoff(Some(&Ok(None))), Ok(None));
         assert_eq!(peer_handoff(None), Ok(None));
     }
 }
@@ -4824,7 +4730,14 @@ mod peer_capture_tests {
         let chunk = |offset: u64| {
             let end = (offset + provenant_records::run::OUTPUT_LIMIT).min(text.len() as u64);
             OutputResult::Chunk {
-                extra: [("peer_origin_work_key".into(), serde_json::json!(origin))].into(),
+                peer: provenant_records::run::PeerOutputFields {
+                    graph: provenant_records::run::PeerGraphFields {
+                        peer_origin_work_key: Some(origin.clone()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                extra: Default::default(),
                 target: target.clone(),
                 part: OutputPart::Result,
                 state: "succeeded".into(),
@@ -4854,7 +4767,7 @@ mod peer_capture_tests {
                         offset: start,
                         next_offset,
                         digest,
-                        extra,
+                        peer,
                         ..
                     } = &mut response
                     {
@@ -4864,13 +4777,11 @@ mod peer_capture_tests {
                             2 => *next_offset = offset,
                             3 => *digest = provenant_core::Digest::from_bytes([9; 32]),
                             4 => {
-                                extra.insert(
-                                    "peer_origin_work_key".into(),
-                                    serde_json::json!(origin.next_attempt().unwrap()),
-                                );
+                                peer.graph.peer_origin_work_key =
+                                    Some(origin.next_attempt().unwrap());
                             }
                             _ => {
-                                extra.remove("peer_origin_work_key");
+                                peer.graph.peer_origin_work_key = None;
                             }
                         }
                     }
@@ -4921,34 +4832,25 @@ mod recovery_rebuild_tests {
                                 profile
                                     .knobs
                                     .insert("lanes.sandbox_floor".into(), "strict".into());
-                                profile.extra.insert(
-                                    provenant_config::KNOB_SOURCES.into(),
-                                    serde_json::json!({"lanes.sandbox_floor":"host"}),
+                                profile.knob_sources.insert(
+                                    "lanes.sandbox_floor".into(),
+                                    provenant_records::run::LimitSource::Host,
                                 );
                                 if spec.confidential {
-                                    profile
-                                        .extra
-                                        .insert("confidential".into(), serde_json::json!(true));
+                                    profile.confidential = true;
                                 }
                                 if spec.parent_sandboxed {
-                                    profile.extra.insert(
-                                        provenant_records::run::PARENT_SANDBOXED_FIELD.into(),
-                                        serde_json::json!(true),
-                                    );
+                                    profile.parent_sandboxed = true;
                                 }
 
-                                profile.extra.insert(
-                                    provenant_records::run::LAUNCH_POLICY_FIELD.into(),
-                                    serde_json::to_value(&spec.launch_policy)?,
-                                );
+                                profile.repository_policy = spec.launch_policy.clone();
                                 if let Some(admitter) = &spec.admitted_by {
-                                    profile
-                                        .extra
-                                        .insert("admitted_by".into(), serde_json::json!(admitter));
+                                    profile.admitted_by = Some(admitter.clone());
                                 }
                                 let original_task = provenant_records::run::TaskRequest {
                                     context: None,
                                     extra: Default::default(),
+                                    limit_extensions: Default::default(),
                                     build_heavy: spec.build_heavy,
                                     title: None,
                                     profile,

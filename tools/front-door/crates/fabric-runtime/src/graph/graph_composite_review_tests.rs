@@ -141,9 +141,11 @@ fn malformed_finding_fields_reach_composite_and_consumer() {
     assert_eq!(outputs.findings[0].status, "open");
     assert_eq!(outputs.findings[2].id, "F3");
     assert_eq!(outputs.findings[2].severity, "high");
-    assert!(outputs.findings.iter().all(|finding| {
-        finding.effective_severity() == "note" && finding.trigger().is_none()
-    }));
+    assert!(
+        outputs.findings.iter().all(|finding| {
+            finding.effective_severity() == "note" && finding.trigger().is_none()
+        })
+    );
     assert_eq!(outputs.findings[2].summary, "valid finding");
     assert!(outputs.warnings.iter().any(|w| w.contains("field status")));
     assert!(
@@ -175,7 +177,11 @@ fn malformed_finding_fields_reach_composite_and_consumer() {
             .any(|w| w.contains("field status"))
     );
     assert_eq!(composite.findings.len(), 3);
-    for (finding, severity) in composite.findings.iter().zip(["blocking", "blocking", "high"]) {
+    for (finding, severity) in composite
+        .findings
+        .iter()
+        .zip(["blocking", "blocking", "high"])
+    {
         assert_eq!(finding.severity, severity);
         assert_eq!(finding.effective_severity(), "note");
         assert!(finding.trigger().is_none());
@@ -527,6 +533,9 @@ fn status_and_replay_agree_on_persisted_partial_composite() {
         FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
     journal
         .bind(GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+
             extra: Default::default(),
             bases: None,
             directory: inputs.checkout.clone(),
@@ -587,9 +596,9 @@ fn qualified_findings_survive_model_synthesis() {
             assert!(finding.id.ends_with(":F1"));
             assert_eq!(finding.effective_severity(), "note");
             assert_eq!((finding.file.as_str(), finding.line), ("a.rs", None));
-            assert_eq!(finding.extra["lens"], "tests");
-            assert_eq!(finding.extra["evidence"], "observed failure");
-            assert_eq!(finding.extra["proposed_fix"], "repair branch");
+            assert_eq!(finding.lens.as_deref().unwrap(), "tests");
+            assert_eq!(finding.evidence.as_deref().unwrap(), "observed failure");
+            assert_eq!(finding.proposed_fix.as_deref().unwrap(), "repair branch");
         }
         assert!(owner.prompts[1].contains("\"lens\":\"tests\""));
         assert!(owner.prompts[1].contains("\"evidence\":\"observed failure\""));
@@ -636,9 +645,9 @@ fn qualified_findings_survive_deterministic_review_reduction() {
     let findings = &panel.outputs.as_ref().unwrap().findings;
     assert_eq!(findings.len(), 2);
     for (finding, lens) in findings.iter().zip(["tests", "security"]) {
-        assert_eq!(finding.extra["lens"], lens);
-        assert_eq!(finding.extra["evidence"], "observed");
-        assert_eq!(finding.extra["proposed_fix"], "repair");
+        assert_eq!(finding.lens.as_deref().unwrap(), lens);
+        assert_eq!(finding.evidence.as_deref().unwrap(), "observed");
+        assert_eq!(finding.proposed_fix.as_deref().unwrap(), "repair");
     }
     assert_eq!(
         advance(&document, &mut FakeOwner::default(), &mut journal)

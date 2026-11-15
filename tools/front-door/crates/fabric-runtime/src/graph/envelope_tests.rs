@@ -25,6 +25,7 @@ fn worst_handoff() -> provenant_records::handoff::Handoff {
         decisions: Vec::new(),
         verify: Vec::new(),
         spec_concerns: Vec::new(),
+        write_scope: None,
         extra: Default::default(),
     }
 }
@@ -90,6 +91,19 @@ fn planned(document: &GraphDocument) -> PlannedGraph {
 fn findings(cap: usize) -> Vec<Finding> {
     let finding = |summary: String| Finding {
         extra: Default::default(),
+        url: None,
+        trigger: None,
+        triage: None,
+        class: None,
+        verification: None,
+        evidence: None,
+        proposed_fix: None,
+        kind: None,
+        lens: None,
+        propagates: None,
+        design_defect: None,
+        risk_grew: None,
+        scope_grew: None,
         id: "F1".into(),
         severity: "high".into(),
         file: "src/lib.rs".into(),
@@ -104,7 +118,8 @@ fn findings(cap: usize) -> Vec<Finding> {
     // Long individual strings are externalised; spread the allowance so the
     // findings remain inline in the checkpoint representation being measured.
     for (index, finding) in findings.iter_mut().enumerate() {
-        finding.summary = "x".repeat(spare / MAX_FINDINGS + usize::from(index < spare % MAX_FINDINGS));
+        finding.summary =
+            "x".repeat(spare / MAX_FINDINGS + usize::from(index < spare % MAX_FINDINGS));
     }
     assert_eq!(canonical_len(&findings), cap);
     findings
@@ -121,12 +136,15 @@ fn filled_outputs(node: &PlannedNode) -> NodeOutputs {
         Some(worst(4 * OUTPUT_FIELD_BYTES)),
         Some(worst(4 * OUTPUT_FIELD_BYTES)),
     );
-    outputs.extra.insert(review::PARTIAL.into(), true.into());
+    outputs.partial = true;
     outputs.verdict = Some(worst(OUTPUT_FIELD_BYTES));
     outputs.verdict_error = Some("verdict malformed, repeated or not final".into());
     let cap = if node.dispositions.is_empty()
         && node.composite.is_none()
-        && !node.inputs.iter().any(|input| input.outputs.contains(&OutputKind::Findings))
+        && !node
+            .inputs
+            .iter()
+            .any(|input| input.outputs.contains(&OutputKind::Findings))
     {
         FINDINGS_BYTES
     } else {
@@ -136,7 +154,9 @@ fn filled_outputs(node: &PlannedNode) -> NodeOutputs {
     if plans::writer(node) {
         outputs.warnings.push(worst(WARNING_BYTES));
     }
-    if node.composite.is_some() && let Some(result) = &mut outputs.result {
+    if node.composite.is_some()
+        && let Some(result) = &mut outputs.result
+    {
         result.excerpt = worst(COMPOSITE_EXCERPT_BYTES);
     }
     assert!(outputs.warnings.len() <= MAX_WARNINGS);
@@ -181,12 +201,7 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<AskLink> {
                 .max()
                 .unwrap_or(0);
             asks.extend((1..=rounds).map(|round| {
-                let mut ask = asks::loop_ask(
-                    &plan.graph_id,
-                    &node.id,
-                    usize::MAX - round,
-                    session,
-                );
+                let mut ask = asks::loop_ask(&plan.graph_id, &node.id, usize::MAX - round, session);
                 ask.ask_id.push_str(&format!(".retry-{}", u64::MAX));
                 filled_ask(ask)
             }));
@@ -202,7 +217,8 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<AskLink> {
             )));
         }
         if let Some(spec) = &node.decide {
-            let session = asks::decide_session(spec, plan.decision_session.as_deref()).unwrap_or(&plan.graph_id);
+            let session = asks::decide_session(spec, plan.decision_session.as_deref())
+                .unwrap_or(&plan.graph_id);
             let mut ask = asks::decide_ask(
                 &plan.graph_id,
                 node,
@@ -274,18 +290,25 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
         .map(|node| {
             let boundary = node.condition.is_some() || node.loop_body.is_some();
             NodeProgress {
+                children_cancelled: false,
+                detached_from_graph_cancel: false,
+                subtree_cancel: None,
+                yielded_slot: false,
+                stop_fence: false,
+                owner_notified: false,
                 extra: if template::review_behaviour(node) == Some(template::ReviewBehaviour::Lens) {
                     [(review::CORRECTION_REFUSED.into(), worst(MAX_ADVANCE_ERROR_BYTES).into())].into()
                 } else {
                     Default::default()
                 },
+                warnings: Vec::new(),
                 children: node.composite_members.clone(),
                 source_binding: node.source.clone(),
                 min_successful: node.composite.as_ref().and_then(|spec| spec.min_successful),
                 source_commit: node.source.as_ref().map(|_| "1".repeat(64)),
                 writer_binding: None,
         writer_binding_pending: plans::writer(node),
-                review_base: node.extra.get("review_base").map(|_| "1".repeat(64)),
+                review_base: node.review_base.as_ref().map(|_| "1".repeat(64)),
         review_base_pending: false,
                 fragment: node.plan.as_ref().map(|_| "\"".repeat(plans::STORED_BLOCK_BYTES / 2 - 1)),
                 handoff: plans::writer(node).then(worst_handoff),
@@ -319,6 +342,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 round: node.round.clone(),
                 gate: node.condition.as_ref().map(|_| GateResult {
                     extra: Default::default(),
+        cancellation_request_receipt: None,
                     passed: false,
                     reason: Some(worst(OUTPUT_FIELD_BYTES)),
                     on_fail: node.on_fail.clone(),
@@ -353,6 +377,8 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 land: node.land.as_ref().map(|spec| filled_land(spec.tier)),
                 title: Some(node.title.clone().unwrap_or_else(|| node.id.clone())),
                 worktree: node.worktree.clone(),
+settled_dependency_snapshots: Default::default(),
+new_worktree_base: None,
                 id: node.id.clone(),
                 state: NodeState::Succeeded,
                 cancelled_from: Some(NodeState::Running),
@@ -387,9 +413,12 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                     .map(|(index, route)| GraphAttempt {
                         review_substitution: false,
                         extra: Default::default(),
+host_refused_before_acceptance: false,
                         launched: true,
                         key: AttemptKey {
                             extra: Default::default(),
+                            retry_generation: None,
+                            previous_attempt_ref: None,
                             graph_id: plan.graph_id.clone(),
                             node_id: node.id.clone(),
                             route_index: u16::MAX - index as u16,
@@ -406,13 +435,13 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                         input_manifest: Some(AttemptInputManifest {
                             extra: Default::default(), schema_version: 1,
                             source_commit: node.source.as_ref().map(|_| "a".repeat(64)),
-                            source_producer: node.source.as_ref().map(|_| AttemptKey { extra: Default::default(), graph_id: plan.graph_id.clone(), node_id: "n".repeat(64), route_index: u16::MAX, attempt: 1 }),
+                            source_producer: node.source.as_ref().map(|_| AttemptKey { extra: Default::default(), retry_generation: None, previous_attempt_ref: None, graph_id: plan.graph_id.clone(), node_id: "n".repeat(64), route_index: u16::MAX, attempt: 1 }),
                             writer_head: plans::writer(node).then(|| "a".repeat(64)),
-                            review_base: node.extra.get("review_base").map(|_| "a".repeat(64)),
+                            review_base: node.review_base.as_ref().map(|_| "a".repeat(64)),
                             graph_review_base: Some("a".repeat(64)), integration_base: Some("a".repeat(64)), integration_source: Some("a".repeat(64)),
                             applied_route: Some(GraphRoute { extra: Default::default(), adapter: Some("a".repeat(256)), model: Some("m".repeat(256)), effort: Some("e".repeat(256)), account: Some("a".repeat(256)), name: None, alias: None, tier: None, }),
                             dependencies: Some(node.depends_on.iter().take(MANIFEST_INPUT_LIMIT).cloned().collect()), dependencies_omitted: node.depends_on.len().saturating_sub(MANIFEST_INPUT_LIMIT),
-                            inputs: node.inputs.iter().flat_map(|input| input.outputs.iter().map(move |kind| AttemptInputEvidence { extra: Default::default(), producer_node: input.node.clone(), producer_attempt: Some(AttemptKey { extra: Default::default(), graph_id: plan.graph_id.clone(), node_id: input.node.clone(), route_index: u16::MAX, attempt: 1 }), kind: *kind, required: true, producer_result_digest: Some("a".repeat(71)), commit: Some("a".repeat(64)), delivery: InputDelivery::Delivered, file_delivery: InputDelivery::Delivered })).take(MANIFEST_INPUT_LIMIT).collect(),
+                            inputs: node.inputs.iter().flat_map(|input| input.outputs.iter().map(move |kind| AttemptInputEvidence { extra: Default::default(), producer_node: input.node.clone(), producer_attempt: Some(AttemptKey { extra: Default::default(), retry_generation: None, previous_attempt_ref: None, graph_id: plan.graph_id.clone(), node_id: input.node.clone(), route_index: u16::MAX, attempt: 1 }), kind: *kind, required: true, producer_result_digest: Some("a".repeat(71)), commit: Some("a".repeat(64)), delivery: InputDelivery::Delivered, file_delivery: InputDelivery::Delivered })).take(MANIFEST_INPUT_LIMIT).collect(),
                             omitted: node.inputs.iter().map(|input| input.outputs.len()).sum::<usize>().saturating_sub(MANIFEST_INPUT_LIMIT),
                         }),
                         settled: u64::MAX,
@@ -433,6 +462,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
     GraphCheckpoint {
         bases,
         extra: Default::default(),
+        pending_writer_provisioning: Default::default(),
         expansions: Vec::new(),
         remaining: Some(RemainingBudgets {
             extra: Default::default(),
@@ -565,25 +595,31 @@ fn assert_fits_with_repair_metadata(document: GraphDocument, tier: &str, grew: b
         .collect();
     for (node, planned) in checkpoint.nodes.iter_mut().zip(&plan.nodes) {
         if repair::is_repair_gate(planned, &plan, &positions) {
-            node.extra.insert(
-                "repair_growth".into(),
-                json!({"before":"1".repeat(64),"after":"2".repeat(64),"grew":grew}),
-            );
+            node.repair_growth = Some(RepairGrowth {
+                before: "1".repeat(64),
+                after: "2".repeat(64),
+                grew,
+            });
         }
-        if planned.extra.get("repair_scope_gate") == Some(&json!(true)) {
-            node.extra.insert("owner_notified".into(), true.into());
+        if planned.repair_scope_gate {
+            node.owner_notified = true;
         }
         if let Some(outputs) = &mut node.outputs {
-            outputs.extra.insert("risk_tier".into(), tier.into());
+            outputs.risk_tier = serde_json::from_value(tier).ok();
             if plan.nodes.iter().any(|consumer| {
-                consumer.extra.get("repair_scope_gate") == Some(&json!(true))
-                    && consumer.depends_on.contains(&planned.id)
+                consumer.repair_scope_gate && consumer.depends_on.contains(&planned.id)
             }) {
-                outputs.extra.insert("repair_design".into(), json!({"within_scope":false,"one_way_door":false}));
+                outputs.repair_design = Some(RepairDesign {
+                    within_scope: false,
+                    one_way_door: false,
+                });
             }
         }
     }
     let execution = GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+
         extra: Default::default(),
         bases: checkpoint.bases,
         directory: format!("/{}", "\u{1}".repeat(4095)).into(),
@@ -838,6 +874,9 @@ fn a_checkpoint_within_the_byte_limit_loads_past_the_old_member_limit() {
         FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
     journal
         .bind(GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+
             extra: Default::default(),
             bases: None,
             directory: inputs.checkout.clone(),
@@ -929,6 +968,9 @@ fn a_delivery_retry_takes_a_fresh_settlement_order() {
             FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
         journal
             .bind(GraphExecution {
+                peer_origin_context: None,
+                peer_submission_digest: None,
+
                 extra: Default::default(),
                 bases: None,
                 directory: inputs.checkout.clone(),
@@ -1031,6 +1073,9 @@ fn ci_failed_checks_and_findings_fit_the_configured_envelope() {
                 }
             }
             let execution = GraphExecution {
+                peer_origin_context: None,
+                peer_submission_digest: None,
+
                 extra: Default::default(),
                 bases: checkpoint.bases,
                 directory: "/fixture".into(),
@@ -1068,6 +1113,19 @@ fn disposition_checkpoint_fits_its_reduced_bound() {
         .unwrap();
     let finding = Finding {
         extra: Default::default(),
+        url: None,
+        trigger: None,
+        triage: None,
+        class: None,
+        verification: None,
+        evidence: None,
+        proposed_fix: None,
+        kind: None,
+        lens: None,
+        propagates: None,
+        design_defect: None,
+        risk_grew: None,
+        scope_grew: None,
         id: "F".into(),
         severity: "high".into(),
         file: worst(OUTPUT_FIELD_BYTES),
@@ -1088,6 +1146,9 @@ fn disposition_checkpoint_fits_its_reduced_bound() {
     }
     let bound = graph_envelope_bound(&document, &[], &checkpoint.extensions, &plan);
     let execution = GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+
         extra: Default::default(),
         bases: checkpoint.bases,
         directory: format!("/{}", "\u{1}".repeat(4095)).into(),
@@ -1105,10 +1166,7 @@ fn disposition_checkpoint_fits_its_reduced_bound() {
     assert!(size(&checkpoint) <= bound);
     let outputs = checkpoint.nodes[index].outputs.as_mut().unwrap();
     outputs.findings.clear();
-    outputs.extra.insert(
-        "_compact_disposition_findings".into(),
-        json!("\u{1}".repeat(16 * 1024)),
-    );
+    outputs.compact_disposition_findings = Some("\u{1}".repeat(16 * 1024));
     assert!(size(&checkpoint) <= bound);
 }
 
@@ -1131,7 +1189,6 @@ fn routing_stratum_flows_from_graph_to_nodes() {
     assert_eq!(context.task_kind.as_deref(), Some("review"));
 }
 
-
 #[test]
 fn principal_scope_report_notification_and_assessment_fit_checkpoint_bound() {
     let document: GraphDocument = serde_json::from_value(json!({
@@ -1153,17 +1210,29 @@ fn live_child_patch_keeps_the_planners_final_fragment_envelope_reserve() {
     let live: Expansion = serde_json::from_value(json!({
         "source":"plan",  "nodes":[],
         "patch":{"revision":1,"digest":format!("sha256:{}", "a".repeat(64)),"parent":"plan"}
-    })).unwrap();
+    }))
+    .unwrap();
     let live_bound = envelope::checkpoint_bound(&document, std::slice::from_ref(&live), &[], &plan);
-    assert!(live_bound >= before, "a live child patch must retain space for the planner's final fragment");
+    assert!(
+        live_bound >= before,
+        "a live child patch must retain space for the planner's final fragment"
+    );
 
     let mut final_fragment = live.clone();
-    final_fragment.extra.insert("final_fragment".into(), true.into());
+    final_fragment
+        .extra
+        .insert("final_fragment".into(), true.into());
     let closed_bound = envelope::checkpoint_bound(&document, &[final_fragment], &[], &plan);
-    assert!(closed_bound < live_bound, "a final fragment releases its producer's fragment reserve");
+    assert!(
+        closed_bound < live_bound,
+        "a final fragment releases its producer's fragment reserve"
+    );
 
     let mut fallback = live;
     fallback.patch = None;
     let fallback_bound = envelope::checkpoint_bound(&document, &[fallback], &[], &plan);
-    assert!(fallback_bound < live_bound, "a fallback expansion also closes its producer");
+    assert!(
+        fallback_bound < live_bound,
+        "a fallback expansion also closes its producer"
+    );
 }

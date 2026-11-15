@@ -685,13 +685,10 @@ pub(crate) fn enrich_status_rows_within(
             target.attempt.ok_or(FacadeError::StateCorrupt)?.get(),
         )
         .map_err(|_| FacadeError::StateCorrupt)?;
-        let peer_graph = record.extra.get("peer_graph");
+        let peer_graph = record.peer.peer_graph.as_ref();
         let origin_matches = host != context.identity.host
-            && peer_graph.is_some_and(|graph| {
-                graph["host"] == serde_json::json!(host)
-                    && graph["graph_id"].as_str().is_some_and(|id| !id.is_empty())
-            })
-            && super::peer::peer_origin_matches(&record.extra, &expected);
+            && peer_graph.is_some_and(|graph| graph.host == host && !graph.graph_id.is_empty())
+            && super::peer::peer_origin_matches(&record.peer, &expected);
         if (host != context.identity.host && !origin_matches)
             || (host == context.identity.host && record.key != expected)
         {
@@ -700,10 +697,11 @@ pub(crate) fn enrich_status_rows_within(
         if retain_collected_peer_row(row, &record, host, context.identity.host) {
             continue;
         }
-        for field in ["peer_graph", "peer_subtree"] {
-            if let Some(value) = record.extra.get(field) {
-                row[field] = value.clone();
-            }
+        if let Some(graph) = &record.peer.peer_graph {
+            row["peer_graph"] = json!(graph);
+        }
+        if let Some(subtree) = &record.peer.peer_subtree {
+            row["peer_subtree"] = json!(subtree);
         }
         let mut projected = provenant_cli::run::project_lane(
             &record,
@@ -804,28 +802,26 @@ pub(super) fn retain_collected_peer_row(
     peer: provenant_core::HostId,
     local: provenant_core::HostId,
 ) -> bool {
-    let Some(graph) = record.extra.get("peer_graph") else {
+    let Some(graph) = record.peer.peer_graph.as_ref() else {
         return false;
     };
     if peer == local
-        || record.extra.get("peer_graph_collected") != Some(&json!(true))
+        || record.peer.peer_graph_collected != Some(true)
         || !matches!(
             record.state,
             provenant_records::run::AttemptState::Terminal { .. }
         )
-        || graph["host"] != json!(peer)
-        || graph["graph_id"]
-            .as_str()
-            .is_none_or(|id| !id.starts_with("peer-"))
+        || graph.host != peer
+        || !graph.graph_id.starts_with("peer-")
         || record
             .context
             .as_ref()
             .and_then(|context| context.graph_id.as_deref())
-            != graph["graph_id"].as_str()
+            != Some(graph.graph_id.as_str())
     {
         return false;
     }
-    row["peer_graph"] = graph.clone();
+    row["peer_graph"] = json!(graph);
     row["peer_graph_collected"] = json!(true);
     true
 }
@@ -1282,28 +1278,17 @@ pub(crate) fn unified_graph_steer(
             }
             None => None,
         };
-        let extra = if target.target.host != Some(factory.context.identity.host) {
-            [
-                ("graph_steer".into(), json!(true)),
-                (
-                    "graph_launch_actor".into(),
-                    json!(target.launch_actor.to_string()),
-                ),
-                (
-                    "graph_launch_operation".into(),
-                    serde_json::to_value(&target.launch_operation)?,
-                ),
-                (
-                    "graph_origin_work_key".into(),
-                    serde_json::to_value(&target.work_key)?,
-                ),
-            ]
-            .into()
-        } else {
-            Default::default()
-        };
+        let graph_context =
+            (target.target.host != Some(factory.context.identity.host)).then(|| {
+                provenant_fabric_runtime::inbox::GraphSteerContext {
+                    launch_actor: target.launch_actor,
+                    launch_operation: target.launch_operation.clone(),
+                    origin_work_key: target.work_key.clone(),
+                }
+            });
         let input = provenant_fabric_runtime::inbox::InboxInput::Steer {
-            extra,
+            extra: Default::default(),
+            graph_context,
             attempt: id.parse()?,
             text,
             operation_id,
@@ -2595,8 +2580,7 @@ mod tests {
     }
 
     #[test]
-    fn graph_peer_status_wait_preserves_disk_sample_and_remedy()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn graph_peer_status_preserves_typed_wait_facts() -> Result<(), Box<dyn std::error::Error>> {
         let id = "11111111111111111111111111111111";
         let digest = format!("sha256:{}", "ab".repeat(32));
         let attempt: provenant_records::run::AttemptRecord = serde_json::from_value(json!({
@@ -2609,41 +2593,41 @@ mod tests {
             "prompt":{"path":{"encoding":"utf8","path":"prompt.md"},
                 "digest":digest,"bytes":0,"complete":true,"redacted":false}
         }))?;
-        let sample = "host capacity: disk space: 123 bytes available; gc.free_floor is 456 bytes (source: explicit)";
         let waits = vec![provenant_records::run::LaneWait {
             extra: Default::default(),
             attempt_id: attempt.attempt_id,
             lane_class: provenant_records::run::LaneClass::Writer,
-            waiting_for: sample.into(),
+            waiting_for: provenant_records::run::LaneWaitReason::ProviderSilence {
+                silent_for_ms: 123_000,
+            },
         }];
-        let mut extra = provenant_records::ExtraFields::default();
-        extra.insert("lane_waits".into(), serde_json::to_value(&waits)?);
         let response = RunResult::Status {
-            extra,
+            extra: Default::default(),
+            lane_waits: waits.clone(),
             attempt: attempt.clone(),
         };
         let decoded: RunResult = serde_json::from_value(serde_json::to_value(response)?)?;
         let RunResult::Status {
             attempt: peer_attempt,
-            extra,
+            lane_waits: peer_waits,
+            ..
         } = decoded
         else {
             return Err("status response changed kind".into());
         };
-        let peer_waits: Vec<provenant_records::run::LaneWait> = serde_json::from_value(
-            extra
-                .get("lane_waits")
-                .ok_or("peer disk waits missing")?
-                .clone(),
-        )?;
-        for (record, waits) in [(&attempt, &waits), (&peer_attempt, &peer_waits)] {
-            let projected =
-                provenant_cli::run::project_lane(record, waits, Path::new("/unused"), None, false);
-            assert_eq!(projected.waiting_for.as_deref(), Some(sample));
-            let reason = projected.reason.ok_or("disk remedy missing")?;
-            assert!(reason.contains(sample));
-            assert!(reason.contains("provenant gc --apply"));
-        }
+        assert_eq!(peer_waits, waits);
+        let local =
+            provenant_cli::run::project_lane(&attempt, &waits, Path::new("/unused"), None, false);
+        let peer = provenant_cli::run::project_lane(
+            &peer_attempt,
+            &peer_waits,
+            Path::new("/unused"),
+            None,
+            false,
+        );
+        assert!(local.waiting_for.is_some());
+        assert_eq!(peer.waiting_for, local.waiting_for);
+        assert_eq!(peer.reason, local.reason);
         Ok(())
     }
 
@@ -3020,6 +3004,9 @@ mod tests {
         let mut journal =
             FileJournal::open(&roots.state, project, "g", budget, &cancel, &factory.clock)?;
         journal.bind(GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+
             extra: Default::default(),
             bases: None,
             directory: rig.project.clone(),
@@ -3045,7 +3032,7 @@ mod tests {
         assert_eq!(stopped.checkpoint.nodes[2], before.nodes[2]);
         assert_eq!(stopped.checkpoint.nodes[3], before.nodes[3]);
         let mut durable = stopped.checkpoint.clone();
-        durable.extra.remove("cancellation_request_receipt");
+        durable.cancellation_request_receipt = None;
         assert_eq!(
             FileJournal::read_checkpoint(&roots.state, project, "g")?,
             Some(durable)
@@ -3150,7 +3137,7 @@ mod tests {
             .ok_or("stopped checkpoint missing")?;
             let node = checkpoint.nodes.first().ok_or("stopped node missing")?;
             assert_eq!(node.state, NodeState::Skipped);
-            assert_eq!(node.extra.get("subtree_cancel"), Some(&json!(node.id)));
+            assert_eq!(node.subtree_cancel.as_deref(), Some(node.id.as_str()));
             assert_eq!(node.attempts.len(), 1);
             assert_eq!(node.attempts[0].attempt_ref.as_deref(), Some(reference));
             let owner = BinaryRunOwner {
@@ -3222,6 +3209,9 @@ mod tests {
             let mut journal =
                 FileJournal::open(&roots.state, project, graph, budget, &cancel, &clock)?;
             journal.bind(GraphExecution {
+                peer_origin_context: None,
+                peer_submission_digest: None,
+
                 extra: Default::default(),
                 bases: None,
                 directory: base.clone(),

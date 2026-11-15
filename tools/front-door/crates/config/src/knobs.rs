@@ -151,12 +151,9 @@ impl<D> crate::ResolvedConfig<D> {
             .iter()
             .filter_map(|(name, knob)| {
                 let source = layer(knob.source, launch_overrides.contains(name.as_str()));
-                let value = serde_json::to_value(source).ok()?;
-                (source != provenant_records::LimitSource::Default).then(|| (name.clone(), value))
+                (source != provenant_records::LimitSource::Default).then(|| (name.clone(), source))
             })
-            .collect::<serde_json::Map<_, _>>();
-        let mut extra = provenant_records::ExtraFields::default();
-        extra.insert(KNOB_SOURCES.into(), Value::Object(knob_sources));
+            .collect();
         Ok(provenant_records::run::HarnessProfile {
             name: profile_name(self.profile).into(),
             // Sealed records carry no floats, so a fraction travels as its
@@ -179,15 +176,11 @@ impl<D> crate::ResolvedConfig<D> {
                 })
                 .collect(),
             overrides: overrides.to_vec(),
-            extra,
+            knob_sources,
             ..Default::default()
         })
     }
 }
-
-/// Profile field naming the layer (`launch` or `host`) that set each
-/// effective knob not at its registry default. Read it with [`knob_source`].
-pub const KNOB_SOURCES: &str = "knob_sources";
 
 /// The layer a lane reports for a knob: a launch override, host
 /// configuration (its `[knobs]` table or the profile preset it selected), or
@@ -209,10 +202,9 @@ pub fn knob_source(
     name: &str,
 ) -> provenant_records::LimitSource {
     profile
-        .extra
-        .get(KNOB_SOURCES)
-        .and_then(|sources| sources.get(name))
-        .and_then(|source| serde_json::from_value(source.clone()).ok())
+        .knob_sources
+        .get(name)
+        .copied()
         .unwrap_or(provenant_records::LimitSource::Default)
 }
 

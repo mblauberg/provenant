@@ -3,9 +3,12 @@ use crate::metadata::CatalogueArg;
 use crate::{Globals, fabric::Context};
 use clap::{Args, Subcommand, ValueEnum};
 use provenant_core::{Clock, HumanAnswerId, HumanRequestId, OperationId, WaitBudget};
-use provenant_fabric_runtime::inbox::{InboxError, InboxInput, InboxResult};
+use provenant_fabric_runtime::inbox::{
+    InboxError, InboxInput, InboxProject, InboxProjectPath, InboxResult,
+};
 use provenant_records::{CommandError, CommandResult, Outcome, inbox::*};
 use std::{
+    collections::BTreeMap,
     io::{self, Read},
     path::{Path, PathBuf},
 };
@@ -830,7 +833,7 @@ fn project_label(common_dir: &Path) -> Option<String> {
 type HostListing = (
     Vec<HumanRequest>,
     Option<provenant_fabric_runtime::inbox::InboxCursor>,
-    serde_json::Map<String, serde_json::Value>,
+    BTreeMap<String, InboxProject>,
 );
 
 /// This host's requests across the given registered projects, with each
@@ -870,10 +873,13 @@ fn host_listing(
             let binding = bindings.iter().find(|b| b.project_id() == project);
             (
                 project.to_string(),
-                serde_json::json!({
-                    "label": binding.and_then(|b| project_label(b.common_dir())),
-                    "path": binding.map(|b| b.common_dir().display().to_string()),
-                }),
+                InboxProject {
+                    label: binding.and_then(|b| project_label(b.common_dir())),
+                    path: binding.map_or(InboxProjectPath::Unavailable, |b| {
+                        InboxProjectPath::Local(b.common_dir().display().to_string())
+                    }),
+                    host: None,
+                },
             )
         })
         .collect();
@@ -918,15 +924,15 @@ fn host_wide(
             let (items, next_cursor, projects) =
                 host_listing(&roots, &bindings, session.as_deref(), state, limit, cursor)?;
             let truncated = next_cursor.is_some();
-            let mut extra = provenant_records::ExtraFields::default();
-            extra.insert("projects".into(), projects.into());
             Ok(HostWide::Done(InboxResult::Listed {
-                extra,
+                extra: Default::default(),
                 items,
                 next_cursor,
                 truncated,
                 coverage: "local_only; registered projects on this host; peer inboxes are unknown"
                     .into(),
+                projects,
+                peers: Default::default(),
             }))
         }
         input => {

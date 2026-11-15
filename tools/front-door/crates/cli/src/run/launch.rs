@@ -313,10 +313,8 @@ impl PreparedProvider<'_> {
     fn identity_refusal(&self, task: &run::TaskRequest, detail: &str) -> Box<run::PrepareRefusal> {
         let project = task
             .profile
-            .extra
-            .get("policy_project")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
+            .policy_project
+            .map(|project| project.to_string())
             .or_else(|| self.fallback.project_id.map(|project| project.to_string()))
             .unwrap_or_default();
         let state = self

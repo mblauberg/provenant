@@ -11,6 +11,8 @@ pub struct Removed {
     pub config_key: Option<&'static str>,
     /// Exact diagnostic code emitted for a removed configuration contract.
     pub diagnostic_code: Option<&'static str>,
+    /// Exact graph-node field removed from authored graph documents.
+    pub graph_field: Option<&'static str>,
 }
 
 pub const fn verb(words: &'static [&'static str], replacement: &'static str) -> Removed {
@@ -20,6 +22,7 @@ pub const fn verb(words: &'static [&'static str], replacement: &'static str) -> 
         replacement,
         config_key: None,
         diagnostic_code: None,
+        graph_field: None,
     }
 }
 
@@ -34,6 +37,7 @@ pub const fn flag(
         replacement,
         config_key: None,
         diagnostic_code: None,
+        graph_field: None,
     }
 }
 
@@ -44,6 +48,19 @@ pub const fn config_key(key: &'static str, replacement: &'static str) -> Removed
         replacement,
         config_key: Some(key),
         diagnostic_code: None,
+        graph_field: None,
+    }
+}
+
+/// Describe a removed graph-node field and its replacement.
+pub const fn graph_field(field: &'static str, replacement: &'static str) -> Removed {
+    Removed {
+        words: &[],
+        flag: None,
+        replacement,
+        config_key: None,
+        diagnostic_code: None,
+        graph_field: Some(field),
     }
 }
 
@@ -55,6 +72,7 @@ pub const fn diagnostic_code(code: &'static str, replacement: &'static str) -> R
         replacement,
         config_key: None,
         diagnostic_code: Some(code),
+        graph_field: None,
     }
 }
 
@@ -246,11 +264,18 @@ pub const REMOVED: &[Removed] = &[
         "retired.bundle_bytes",
         "no direct equivalent; delete this setting; Git transport controls bundle sizing",
     ),
+    graph_field("brief", "prompt"),
 ];
 
 impl Removed {
     /// The one line a removed command spelling prints.
     pub fn message(&self) -> String {
+        if let Some(field) = self.graph_field {
+            return format!(
+                "graph node field `{field}` is removed; use `{}`",
+                self.replacement
+            );
+        }
         if let Some(key) = self.config_key {
             return format!("`{key}` is removed; {}", self.replacement);
         }
@@ -268,6 +293,13 @@ impl Removed {
             None => format!("`{path}` is removed; {message}"),
         }
     }
+}
+
+pub fn graph_field_replacement(field: &str) -> Option<&'static str> {
+    REMOVED
+        .iter()
+        .find(|removed| removed.graph_field == Some(field))
+        .map(|removed| removed.replacement)
 }
 
 pub fn config_key_replacement(key: &str) -> Option<&'static str> {

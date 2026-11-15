@@ -7,27 +7,27 @@ pub(super) fn naming_and_post_create_ports_are_advisory_and_evidenced() -> Resul
     let marker = marker_path.to_str().ok_or("marker path")?.to_owned();
     let mut ports = provenant_config::PortTable::builtin();
     ports.naming = provenant_config::Port {
-        source: provenant_config::PortSource::Project,
+        source: provenant_records::PortSource::Project,
         backend: provenant_config::PortBackend::Command {
-            command: provenant_config::PortCommand {
+            command: provenant_records::PortCommand {
                 argv: vec![
                     "/bin/sh".into(),
                     "-c".into(),
                     r#"printf 'derived-%s\n' "$1""#.into(),
                     "--".into(),
                 ],
-                exit_codes: provenant_config::CommandExitCodes {
+                exit_codes: provenant_records::CommandExitCodes {
                     success: vec![0],
                     unknown: vec![],
-                    other: provenant_config::ExitDisposition::Refused,
+                    other: provenant_records::ExitDisposition::Refused,
                 },
             },
         },
     };
     ports.post_create = provenant_config::Port {
-        source: provenant_config::PortSource::Project,
+        source: provenant_records::PortSource::Project,
         backend: provenant_config::PortBackend::Command {
-            command: provenant_config::PortCommand {
+            command: provenant_records::PortCommand {
                 argv: vec![
                     "/bin/sh".into(),
                     "-c".into(),
@@ -35,10 +35,10 @@ pub(super) fn naming_and_post_create_ports_are_advisory_and_evidenced() -> Resul
                     "--".into(),
                     marker.clone(),
                 ],
-                exit_codes: provenant_config::CommandExitCodes {
+                exit_codes: provenant_records::CommandExitCodes {
                     success: vec![0],
                     unknown: vec![],
-                    other: provenant_config::ExitDisposition::Refused,
+                    other: provenant_records::ExitDisposition::Refused,
                 },
             },
         },
@@ -94,30 +94,30 @@ pub(super) fn naming_and_post_create_ports_are_advisory_and_evidenced() -> Resul
     }
 
     ports.naming.backend = provenant_config::PortBackend::Command {
-        command: provenant_config::PortCommand {
+        command: provenant_records::PortCommand {
             argv: vec![
                 "/bin/sh".into(),
                 "-c".into(),
                 "printf 'bad\\nbranch\\n'".into(),
             ],
-            exit_codes: provenant_config::CommandExitCodes {
+            exit_codes: provenant_records::CommandExitCodes {
                 success: vec![0],
                 unknown: vec![],
-                other: provenant_config::ExitDisposition::Refused,
+                other: provenant_records::ExitDisposition::Refused,
             },
         },
     };
     ports.post_create.backend = provenant_config::PortBackend::Command {
-        command: provenant_config::PortCommand {
+        command: provenant_records::PortCommand {
             argv: vec![
                 "/bin/sh".into(),
                 "-c".into(),
                 "printf 'port failure\n' >&2; exit 7".into(),
             ],
-            exit_codes: provenant_config::CommandExitCodes {
+            exit_codes: provenant_records::CommandExitCodes {
                 success: vec![0],
                 unknown: vec![],
-                other: provenant_config::ExitDisposition::Refused,
+                other: provenant_records::ExitDisposition::Refused,
             },
         },
     };

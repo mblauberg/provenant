@@ -370,11 +370,7 @@ fn reviewed_head(
         .review_base
         .as_deref()
         .or(graph_review_base.as_deref())
-        .or_else(|| {
-            node.extra
-                .get("review_base")
-                .and_then(serde_json::Value::as_str)
-        });
+        .or(node.review_base.as_deref());
     for decision in &progress.decisions {
         let decision_base = decision.reviewed_base()?;
         if review_base.is_none_or(|b| provenant_core::GitOid::parse(b).ok() != Some(decision_base))
@@ -659,6 +655,15 @@ fn outputs(record: &LandRecord) -> NodeOutputs {
     );
     NodeOutputs {
         extra: Default::default(),
+        repair_design: None,
+        partial: false,
+        risk_tier: None,
+        repair_items: None,
+        spec_concerns: None,
+        spec_concern_count: None,
+        spec_defect_count: None,
+        artifact_findings: None,
+        compact_disposition_findings: None,
         verdict_error: None,
         schema_version: 2,
         decide_outcome: None,

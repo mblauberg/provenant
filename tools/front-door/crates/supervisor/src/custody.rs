@@ -16,11 +16,7 @@ use thiserror::Error;
 
 pub(crate) const RECORD_LIMIT: u64 = 1024 * 1024;
 pub(crate) const EXIT_LIMIT: u64 = 16 * 1024;
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Scope {
-    pub attempt: AttemptId,
-    pub generation: u64,
-}
+use provenant_records::custody::Scope;
 
 /// Run seals this beside the reservation when private Git must be retained.
 /// The run directory is verified against the reservation's device and inode.

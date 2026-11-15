@@ -2309,11 +2309,13 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
         &clock,
     )?;
     receiver.bind(GraphExecution {
-        extra: [(
-            "peer_origin_context".into(),
-            json!({"graph_id":"remote-graph","node_id":"one"}),
-        )]
-        .into(),
+        peer_origin_context: Some(provenant_records::run::WorkContext {
+            graph_id: Some("remote-graph".into()),
+            node_id: Some("one".into()),
+            ..Default::default()
+        }),
+        peer_submission_digest: None,
+        extra: Default::default(),
         bases: None,
         directory: rig.project.clone(),
         document: receiver_document.clone(),
@@ -2340,12 +2342,26 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
         json!(origin_key)
     );
     assert_eq!(
-        execution.extra["peer_origin_context"],
-        json!({"graph_id":"remote-graph","node_id":"one"})
+        execution
+            .peer_origin_context
+            .as_ref()
+            .and_then(|context| context.graph_id.as_deref()),
+        Some("remote-graph")
     );
+    assert_eq!(
+        execution
+            .peer_origin_context
+            .as_ref()
+            .and_then(|context| context.node_id.as_deref()),
+        Some("one")
+    );
+    assert!(!execution.extra.contains_key("peer_origin_context"));
     assert_ne!(execution.document.graph_id, document.graph_id);
     let mut journal = FileJournal::open(&state, project, "remote-graph", budget, &cancel, &clock)?;
     journal.bind(GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+
         extra: Default::default(),
         bases: None,
         directory: rig.project.clone(),
@@ -2484,6 +2500,7 @@ fn seed_attempt_in_state(
                 task: TaskRequest {
                     context: Some(work_context),
                     extra: Default::default(),
+                    limit_extensions: Default::default(),
                     build_heavy: false,
                     title: None,
                     base: None,

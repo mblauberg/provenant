@@ -83,7 +83,7 @@ pub use install_artifacts::{
     ArtifactDisposition, LEGACY_1X_ARTIFACTS, LegacyArtifact, STABLE_BINARY_NAME,
     legacy_launch_agent_label, legacy_launch_agent_path,
 };
-pub use knobs::{KNOB_SOURCES, KnobEdit, KnobSource, KnobValue, knob_source};
+pub use knobs::{KnobEdit, KnobSource, KnobValue, knob_source};
 pub use loader::{
     config_show, inspect_config, load, load_with_domains, read, read_knobs, read_with_domains,
 };

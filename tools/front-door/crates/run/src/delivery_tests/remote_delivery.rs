@@ -295,8 +295,8 @@ fn delivery_records_dirty_failure_and_checked_out_integration_after_start()
         assert!(matches!(receipt.state, WriterDeliveryState::Failed { .. }));
         if !dirty {
             assert!(matches!(receipt.state, WriterDeliveryState::Failed {
-                stage: WriterDeliveryStage::Integrate, ref extra
-            } if extra.get("reason").and_then(serde_json::Value::as_str).is_some_and(|reason| reason.contains("parent_busy"))));
+                stage: WriterDeliveryStage::Integrate, ref reason, ..
+            } if reason.as_deref().is_some_and(|reason| reason.contains("parent_busy"))));
         }
         let raw =
             artifacts::read_sealed(&attempt, "delivery.json", RECORD_LIMIT)?.ok_or("delivery")?;
@@ -317,6 +317,7 @@ fn two_lanes_contend_for_integration_without_losing_either_head()
     let first = fixture.prepare()?;
     let second_writer = WriterRequest {
         extra: fixture.writer.extra.clone(),
+        custody_project: fixture.writer.custody_project,
         project: fixture.writer.project.clone(),
         worktree: fixture.root.join("second-lane"),
     };
@@ -913,14 +914,11 @@ fn a_late_host_limit_fails_the_receipt_at_its_stage_and_keeps_the_reason()
     };
     let receipt = deliver(true)?;
     assert!(flag.exists(), "the commit body was never built");
-    let WriterDeliveryState::Failed { stage, extra } = &receipt.state else {
+    let WriterDeliveryState::Failed { stage, reason, .. } = &receipt.state else {
         panic!("expected a failed delivery, got {:?}", receipt.state);
     };
     assert_eq!(*stage, WriterDeliveryStage::Head);
-    let reason = extra
-        .get("reason")
-        .and_then(serde_json::Value::as_str)
-        .ok_or("reason")?;
+    let reason = reason.as_deref().ok_or("reason")?;
     let expected = provenant_confinement::utility::UtilityError::Truncated { stream: "stdout" };
     assert!(reason.contains(&expected.to_string()), "{reason}");
     Ok(())

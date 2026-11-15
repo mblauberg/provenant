@@ -2297,10 +2297,8 @@ pub(super) fn prepare_candidates(
     }
     let policy_project = task
         .profile
-        .extra
-        .get("policy_project")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
+        .policy_project
+        .map(|project| project.to_string())
         .or_else(|| registry.project_id.map(|project| project.to_string()))
         .unwrap_or_default();
     let launch_policy = registry

@@ -219,6 +219,8 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
         require_skill_location: false,
         access: AccessMode::ReadOnly,
         worktree: None,
+        template: None,
+        review_base: None,
         id: "node".to_owned(),
         title: None,
         deadline_seconds: None,
@@ -467,7 +469,9 @@ fn route_with_exact_model_alias_fails_validation_for_dry_run_and_launch() {
     .unwrap();
     assert_eq!(
         validate_plan(&document).err(),
-        Some("node one: route alias must be an identifier; exact models require an adapter or --model")
+        Some(
+            "node one: route alias must be an identifier; exact models require an adapter or --model"
+        )
     );
     let mut exact = document.clone();
     let route = exact.nodes[0].route.as_mut().unwrap();
@@ -517,6 +521,8 @@ fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
             require_skill_location: false,
             access: AccessMode::ReadOnly,
             worktree: None,
+            template: None,
+            review_base: None,
             id: "node".to_owned(),
             title: None,
             deadline_seconds: None,
@@ -614,7 +620,8 @@ fn exhausted_pool_names_the_cause_and_the_pool() {
         alias: Some("junior".into()),
         effort: None,
         account: None,
-    tier: None, };
+        tier: None,
+    };
     let mut lens = node("lens", route("first"));
     lens.route = None;
     lens.routes = Some(vec![alias.clone(), alias]);
@@ -780,18 +787,21 @@ fn reader_auth_restart_uses_the_declared_successor_account() {
     task.route = None;
     task.routes = Some(vec![first, second]);
     let mut owner = FakeOwner {
-        observations: VecDeque::from([AttemptObservation::Terminal {
-            attempt_ref: Some("host/attempt".into()),
-            outcome: AttemptOutcome::AuthRequired,
-            launched: true,
-            result: None,
-            result_warning: None,
-            result_path: None,
-            branch: None,
-            commit: None,
-            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
-            stop: None,
-        }, terminal(AttemptOutcome::Succeeded)]),
+        observations: VecDeque::from([
+            AttemptObservation::Terminal {
+                attempt_ref: Some("host/attempt".into()),
+                outcome: AttemptOutcome::AuthRequired,
+                launched: true,
+                result: None,
+                result_warning: None,
+                result_path: None,
+                branch: None,
+                commit: None,
+                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                stop: None,
+            },
+            terminal(AttemptOutcome::Succeeded),
+        ]),
         ..FakeOwner::default()
     };
     let run = advance(

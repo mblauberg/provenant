@@ -227,6 +227,10 @@ jobs:
           echo "$TOOL_DIR/bin" >> "$GITHUB_PATH"
       - name: Check spelling
         run: git ls-files | typos --file-list - --force-exclude
+      - name: Check ExtraFields ownership
+        run: |
+          scripts/test-check-extra-fields
+          scripts/check-extra-fields
       - name: Check skill and library writing style
         run: |
           scripts/test-check-writing

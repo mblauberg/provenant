@@ -1,12 +1,8 @@
 //! Deterministic contract for review template results and coverage.
 use super::*;
 
-pub(super) const CORRECTION_REFUSED: &str = "review_verdict_correction_refused";
-
-pub(super) const PARTIAL: &str = "review_partial";
-
 pub(super) fn partial(outputs: &NodeOutputs) -> bool {
-    outputs.extra.get(PARTIAL) == Some(&serde_json::Value::Bool(true))
+    outputs.partial
 }
 
 /// Coverage is separate from whether the consumer wrote a parseable block.
@@ -58,7 +54,7 @@ pub(super) fn retained_findings(node: &PlannedNode, progress: &NodeProgress) -> 
 }
 
 pub(super) fn mark_partial(outputs: &mut NodeOutputs) {
-    outputs.extra.insert(PARTIAL.into(), true.into());
+    outputs.partial = true;
     outputs.findings_available = Some(false);
     // Blocking evidence still warrants FAIL; approval cannot restore coverage.
     if outputs
@@ -91,7 +87,7 @@ pub(super) fn contract_error(
     outputs: &NodeOutputs,
     result: Option<&provenant_records::result_capture::CapturedResult>,
 ) -> Option<(&'static str, String)> {
-    let repair_triage = node.extra.get("repair_triage") == Some(&serde_json::Value::Bool(true));
+    let repair_triage = node.repair_triage;
     if template::review_behaviour(node).is_none() && !repair_triage {
         return None;
     }
@@ -139,20 +135,8 @@ pub(super) fn contract_error(
             ("file", Some(finding.file.as_str())),
             ("summary", Some(finding.summary.as_str())),
             ("status", Some(finding.status.as_str())),
-            (
-                "evidence",
-                finding
-                    .extra
-                    .get("evidence")
-                    .and_then(serde_json::Value::as_str),
-            ),
-            (
-                "proposed_fix",
-                finding
-                    .extra
-                    .get("proposed_fix")
-                    .and_then(serde_json::Value::as_str),
-            ),
+            ("evidence", finding.evidence.as_deref()),
+            ("proposed_fix", finding.proposed_fix.as_deref()),
         ] {
             if value.is_none_or(|value| value.trim().is_empty()) {
                 return Some((
@@ -193,17 +177,9 @@ pub(super) fn contract_error(
         && outputs.findings.iter().any(|finding| {
             (contradicts_pass(finding)
                 && !(upstream.iter().any(|source| source.id == finding.id)
-                    && finding
-                        .extra
-                        .get("verification")
-                        .and_then(serde_json::Value::as_str)
-                        == Some("falsified")
+                    && finding.verification.as_deref() == Some("falsified")
                     && finding.falsified_with_evidence()))
-                || finding
-                    .extra
-                    .get("verification")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("unverifiable")
+                || finding.verification.as_deref() == Some("unverifiable")
         })
     {
         return Some((
@@ -229,11 +205,7 @@ pub(super) fn repair_result_error(
         .filter_map(Finding::triage)
         .map(|triage| triage.root_cause)
         .collect();
-    let Some(items) = outputs
-        .extra
-        .get("repair_items")
-        .and_then(serde_json::Value::as_array)
-    else {
+    let Some(items) = outputs.repair_items.as_ref() else {
         return Some((
             "repair_items_missing",
             "repair writer must report every grouped item with a typed outcome".into(),
@@ -241,11 +213,7 @@ pub(super) fn repair_result_error(
     };
     let mut seen = std::collections::BTreeSet::new();
     for item in items {
-        let id = item
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        if !required.contains(id) || !seen.insert(id.to_owned()) {
+        if !required.contains(&item.id) || !seen.insert(item.id.clone()) {
             return Some((
                 "repair_items_invalid",
                 "repair outcomes must name each grouped item exactly once".into(),
@@ -277,8 +245,8 @@ pub(super) fn correct_verdict(
         template::review_behaviour(node) == Some(template::ReviewBehaviour::Lens)
             && checkpoint.nodes[*index].state == NodeState::Failed
             && !checkpoint.nodes[*index]
-                .extra
-                .contains_key(CORRECTION_REFUSED)
+                .review_verdict_correction_refused
+                .is_none()
             && checkpoint.nodes[*index].advance_error_code.as_deref()
                 == Some("review_verdict_invalid")
             && !checkpoint
@@ -316,10 +284,8 @@ pub(super) fn correct_verdict(
         // Admission is atomic: keep the failed attempt and fence further
         // automatic corrections so coverage can settle on subsequent advances.
         next = checkpoint.clone();
-        next.nodes[index].extra.insert(
-            CORRECTION_REFUSED.into(),
-            bounded(&error.to_string(), MAX_ADVANCE_ERROR_BYTES).into(),
-        );
+        next.nodes[index].review_verdict_correction_refused =
+            Some(bounded(&error.to_string(), MAX_ADVANCE_ERROR_BYTES));
         return Ok(Some(next));
     }
     transitions::retain_automatic_retry_accounting(

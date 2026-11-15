@@ -199,7 +199,7 @@ fn checked_out_parent_integration_defers_without_touching_edits()
         );
         assert!(error.to_string().contains("retry delivery"));
         assert!(
-            matches!(super::delivery::failed_state(&error), WriterDeliveryState::Failed { stage: WriterDeliveryStage::Integrate, ref extra } if extra.get("reason").and_then(serde_json::Value::as_str).is_some_and(|reason| reason.contains("parent_busy")))
+            matches!(super::delivery::failed_state(&error), WriterDeliveryState::Failed { stage: WriterDeliveryStage::Integrate, ref reason, .. } if reason.as_deref().is_some_and(|reason| reason.contains("parent_busy")))
         );
         assert_eq!(std::fs::read(&index_path)?, index);
         assert_eq!(

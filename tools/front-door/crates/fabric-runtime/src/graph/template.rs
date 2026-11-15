@@ -28,6 +28,9 @@ pub const TEMPLATE_FIELD: &str = "template";
 /// decodes as a known optional field or fails its known type; an unknown field
 /// instead survives in `extra`.
 fn compiled_field(field: &str) -> bool {
+    if provenant_config::removed::graph_field_replacement(field).is_some() {
+        return false;
+    }
     let mut probe = serde_json::json!({"id":"probe", "access":"read_only"});
     probe[field] = Value::Null;
     match serde_json::from_value::<GraphNode>(probe) {
@@ -42,6 +45,9 @@ fn check_extensions(node: &Map<String, Value>) -> Result<(), String> {
             .as_object()
             .ok_or("node extensions must be a table")?;
         for field in fields.keys() {
+            if let Some(replacement) = provenant_config::removed::graph_field_replacement(field) {
+                return Err(format!("node field {field} is removed; use {replacement}"));
+            }
             if compiled_field(field) || template_syntax(field) || field == "extensions" {
                 return Err(format!("reserved node field {field} in extensions"));
             }
@@ -114,6 +120,11 @@ fn check_authored_fields(
 ) -> Result<(), String> {
     check_extensions(node).map_err(|error| format!("node {stage}: {error}"))?;
     for field in node.keys() {
+        if let Some(replacement) = provenant_config::removed::graph_field_replacement(field) {
+            return Err(format!(
+                "node {stage}: field {field} is removed; use {replacement}"
+            ));
+        }
         // This control selects findings collection for review-panel instances.
         if field != "extensions"
             && !matches!(field.as_str(), "after" | "tier")
@@ -742,9 +753,7 @@ impl ReviewBehaviour {
 }
 
 pub(super) fn review_behaviour(node: &PlannedNode) -> Option<ReviewBehaviour> {
-    node.extra
-        .get("review_behaviour")
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
+    node.review_behaviour
 }
 
 pub(super) fn review_verifier(node: &PlannedNode) -> bool {
@@ -1568,7 +1577,7 @@ impl<'a> Compiler<'a> {
             // A planner catalogue keeps its own placeholders for run time.
             let value = if bindings.is_empty() || key == "plan" {
                 value.clone()
-            } else if matches!(key.as_str(), "brief" | "goal" | "prompt") {
+            } else if key == "prompt" {
                 interpolate_prose(value, bindings)?
             } else {
                 interpolate(value, bindings)?
@@ -2017,7 +2026,7 @@ impl<'a> Compiler<'a> {
         check_authored_fields(&template.node, stage, false)?;
         check_authored_fields(&overrides, stage, true)?;
         if template.is_composite() {
-            if let Some(key) = ["brief", "goal", "prompt", "tier", "route", "routes"]
+            if let Some(key) = ["prompt", "tier", "route", "routes"]
                 .into_iter()
                 .find(|key| overrides.contains_key(*key))
             {
@@ -2245,11 +2254,9 @@ impl<'a> Compiler<'a> {
         if template.outputs.contains(&OutputKind::Findings) {
             leaf.insert("require_findings".into(), Value::Bool(true));
         }
-        // Node overrides win; a brief override replaces the template's.
-        for key in ["brief", "goal", "prompt"] {
-            if let Some(brief) = overrides.remove(key) {
-                leaf.insert("prompt".into(), brief);
-            }
+        // A node's sole prompt spelling overrides the template default.
+        if let Some(prompt) = overrides.remove("prompt") {
+            leaf.insert("prompt".into(), prompt);
         }
         if overrides.contains_key("route") || overrides.contains_key("routes") {
             leaf.remove("tier");
@@ -2304,7 +2311,7 @@ impl<'a> Compiler<'a> {
             .unwrap_or_else(|| serde_json::json!([]));
         let planner = self.lower_in(&serde_json::json!({
             "id": "plan", "use": "plan", "tier": "senior",
-            "brief": format!("Size and split this implementation brief before the writer starts. Return a plan artefact with bounded slices, their acceptance evidence, optional write-scope metadata and dependency order. The writer will implement those slices in order in the supplied worktree. Changed paths outside declared scope are reported at settlement. Declared write-scope metadata: {scope}.\n\n{brief}")
+            "prompt": format!("Size and split this implementation brief before the writer starts. Return a plan artefact with bounded slices, their acceptance evidence, optional write-scope metadata and dependency order. The writer will implement those slices in order in the supplied worktree. Changed paths outside declared scope are reported at settlement. Declared write-scope metadata: {scope}.\n\n{brief}")
         }), &Map::new(), stack)?;
         writer.insert("id".into(), Value::String("writer".into()));
         writer.insert("after".into(), serde_json::json!(["plan"]));
@@ -2397,14 +2404,6 @@ impl<'a> Compiler<'a> {
             }
             let tier = tier.as_str().ok_or("`tier` must name a route alias")?;
             node.insert("route".into(), serde_json::json!({"alias": tier}));
-        }
-        for alias in ["brief", "goal"] {
-            if let Some(brief) = node.remove(alias) {
-                if node.contains_key("prompt") {
-                    return Err(format!("a node sets `{alias}` and `prompt`; keep one").into());
-                }
-                node.insert("prompt".into(), brief);
-            }
         }
         Ok(Value::Object(node))
     }

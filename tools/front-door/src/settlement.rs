@@ -43,7 +43,7 @@ fn post_verified_refusal(
 ) -> Result<(), Error> {
     if record.state != provenant_run::OperationState::Refused
         || record.refusal_chair.is_none()
-        || record.extra.get("refusal_notice_done") == Some(&serde_json::json!(true))
+        || record.refusal_notice_done
     {
         return Ok(());
     }
@@ -132,17 +132,12 @@ pub(crate) fn post_refusal_notice(
         return Ok(());
     };
     let config = provenant_cli::config_reads::read_for(roots, "fabric context")?;
-    let notice = record
-        .extra
-        .get("refusal_notice")
-        .and_then(|value| value.as_str())
-        .or_else(|| {
-            config
-                .knobs
-                .get("chair.refusal_notice")
-                .and_then(|knob| knob.value.as_str())
-        });
-    if notice != Some("inbox") {
+    let notice = record.refusal_notice.or(config
+        .knobs
+        .get("chair.refusal_notice")
+        .map(|knob| serde_json::from_value(knob.value.clone()))
+        .transpose()?);
+    if notice != Some(provenant_records::run::RefusalNotice::Inbox) {
         return Ok(());
     }
     let diagnostic = record
@@ -614,12 +609,18 @@ mod tests {
         let chair = reaction("unused", None).chair.unwrap();
         let mut record = provenant_run::OperationRecord {
             extra: Default::default(),
+            preflight_digest_version: None,
+            refusal_notice: None,
+            refusal_code: None,
+            refusal_notice_done: false,
+            origin_intent_digest: None,
             schema_version: 1,
             project_id: ProjectId::from_bytes([3; 16]),
             actor_id: ActorId::from_bytes([4; 16]),
             operation_id: OperationId::parse("refused-1").unwrap(),
             kind: provenant_run::OperationKind::Dispatch,
             request_digest: provenant_core::Digest::from_bytes([7; 32]),
+            parent_attempt: None,
             state: provenant_run::OperationState::Refused,
             blocked_reason: None,
             refusal: Some(provenant_records::diagnostic::Diagnostic::new(
@@ -633,12 +634,10 @@ mod tests {
         post_refusal_notice(&record, &roots).unwrap();
         assert_eq!(inbox(&roots), ["operation refused-1 refused: REFUSED"]);
         record.operation_id = OperationId::parse("refused-override").unwrap();
-        record
-            .extra
-            .insert("refusal_notice".into(), serde_json::json!("off"));
+        record.refusal_notice = Some(provenant_records::run::RefusalNotice::Off);
         post_refusal_notice(&record, &roots).unwrap();
         assert_eq!(inbox(&roots).len(), 1);
-        record.extra.remove("refusal_notice");
+        record.refusal_notice = None;
         std::fs::write(
             roots.state.as_path().join("config.toml"),
             "schema_version=1\n[knobs]\n'chair.refusal_notice'='off'\n",

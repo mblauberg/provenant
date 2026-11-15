@@ -1400,11 +1400,7 @@ pub fn depletion_facts(
         host_native,
         exclusions,
         intent,
-        confidential: profile
-            .extra
-            .get("confidential")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
+        confidential: profile.confidential,
         now,
     })
 }

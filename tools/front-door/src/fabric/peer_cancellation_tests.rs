@@ -25,17 +25,8 @@ fn submission_cancellation_drains_only_attached_work() -> TestResult {
     }))?;
     for state in [graph::NodeState::Pending, graph::NodeState::Running] {
         checkpoint.nodes[1].state = state;
-        for marker in [
-            None,
-            Some(json!(false)),
-            Some(json!("true")),
-            Some(json!(true)),
-        ] {
-            let key = "detached_from_graph_cancel";
-            checkpoint.nodes[1].extra.remove(key);
-            if let Some(value) = marker.clone() {
-                checkpoint.nodes[1].extra.insert(key.into(), value);
-            }
+        for marker in [false, true] {
+            checkpoint.nodes[1].detached_from_graph_cancel = marker;
             let mut journal = FileJournal::open(
                 &factory.context.roots.state,
                 factory.context.identity.project,
@@ -45,6 +36,9 @@ fn submission_cancellation_drains_only_attached_work() -> TestResult {
                 &factory.clock,
             )?;
             journal.bind(graph::GraphExecution {
+                peer_origin_context: None,
+                peer_submission_digest: None,
+
                 extra: Default::default(),
                 bases: None,
                 directory: rig.project.clone(),
@@ -60,8 +54,8 @@ fn submission_cancellation_drains_only_attached_work() -> TestResult {
                 super::super::super::peer::peer_cancel_submission(
                     &factory, actor, &operation, false, budget, &cancel,
                 )?,
-                marker == Some(json!(true)),
-                "state={state:?}, detached marker={marker:?}"
+                marker,
+                "state={state:?}, detached marker={marker}"
             );
         }
     }
@@ -87,9 +81,12 @@ fn lost_peer_reply_cancellation_survives_reconnect_and_stops_receiver_subtree() 
     };
     let operation = graph_operation("graph-attempt-operation", &key)?;
     let receipt = submit_parent(&receiver_factory, operation.as_str(), &cancel)?;
-    let receiver_graph = receipt.extra["peer_graph"]["graph_id"]
-        .as_str()
-        .ok_or("graph")?;
+    let receiver_graph = receipt
+        .peer_graph
+        .as_ref()
+        .ok_or("graph")?
+        .graph_id
+        .as_str();
     let parent = receipt.targets[0].attempt;
     add_child(&receiver_factory, parent, "lost-reply-child", &cancel)?;
     let receiver_run = advance_receiver(&receiver_factory, receiver_graph, &cancel)?;
@@ -171,7 +168,7 @@ fn lost_peer_reply_cancellation_survives_reconnect_and_stops_receiver_subtree() 
         .attempt
         .get_or_insert_with(Default::default)
         .host = Some("removed-old-alias".into());
-    execution.document.extra.remove("submission_patch");
+    execution.document.submission_patch = None;
     graph::patch::submission(
         &mut execution.document,
         "origin-lost-reply",

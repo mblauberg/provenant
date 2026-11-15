@@ -672,9 +672,8 @@ fn contribution_terminal(
     outcome: provenant_run::Outcome,
     call: &provenant_run::Request<'_>,
 ) -> Result {
-    use provenant_supervisor::custody::{
-        ExitObservation, PublicationState, Scope, SettlementEvidence,
-    };
+    use provenant_records::custody::Scope;
+    use provenant_supervisor::custody::{ExitObservation, PublicationState, SettlementEvidence};
     use std::os::unix::fs::OpenOptionsExt;
     let record = store.record(id, call)?;
     let exit = ExitObservation {
@@ -1499,7 +1498,8 @@ pub(crate) fn pr_land_writer_lock_preserves_dirty_and_output_cases() -> Result {
 
 fn pr_land_writer_cases(cases: &[&str]) -> Result {
     use provenant_core::Clock;
-    use provenant_supervisor::custody::{Scope, WriterBinding};
+    use provenant_records::custody::Scope;
+    use provenant_supervisor::custody::WriterBinding;
     for &case in cases {
         let landing = landing()?;
         let (_, context) = super::worktree_tests::writer_context(&landing.rig)?;
@@ -1678,9 +1678,10 @@ fn pr_land_writer_cases(cases: &[&str]) -> Result {
 pub(crate) fn pr_land_preserves_terminal_writer_evidence_in_host_store() -> Result {
     use provenant_core::{Clock, WaitBudget};
     use provenant_os::fs::Directory;
+    use provenant_records::custody::Scope;
     use provenant_run::{AttemptState, RouteRecord, RunStore, TerminalPublication};
     use provenant_supervisor::custody::{
-        ExitObservation, PublicationState, Scope, SettlementEvidence, WriterBinding,
+        ExitObservation, PublicationState, SettlementEvidence, WriterBinding,
     };
     use std::os::unix::fs::OpenOptionsExt;
     {
@@ -1704,6 +1705,7 @@ pub(crate) fn pr_land_preserves_terminal_writer_evidence_in_host_store() -> Resu
         running.generation = 1;
         running.state = AttemptState::Running {
             extra: Default::default(),
+            child_wait: None,
         };
         running.started_at = Some(clock.wall_now()?);
         running.provider_launched = Some(true);
@@ -2355,6 +2357,7 @@ pub(crate) fn pr_open_refuses_what_the_receipts_cannot_support() -> Result {
     let prepared = super::worktree_tests::writer_run(
         provenant_run::WriterRequest {
             extra: Default::default(),
+            custody_project: Some(context.project_id),
             project: rig.project.clone(),
             worktree: rig.project.join(".worktrees/unstarted"),
         },

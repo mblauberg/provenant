@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 /// Implemented by the owner of the verified, immutable profile file. This keeps
 /// the utility executor below the custody layer without bypassing verification.
-pub trait ProfileSource: Send + Sync {
+pub trait LimitSource: Send + Sync {
     fn prepare(&self, argv: &[OsString]) -> io::Result<ProfilePipe>;
 }
 

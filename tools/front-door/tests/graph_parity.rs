@@ -87,6 +87,7 @@ impl AttemptOwner for Provider {
             .as_ref()
             .map(|head| graph::WriterWorktreeBinding {
                 extra: Default::default(),
+                source_directory_identity: None,
                 worktree: worktree.into(),
                 head: head.clone(),
             }))
@@ -200,6 +201,9 @@ impl Harness {
         )?;
         // Binding is per handle: a new supervisor rebinds the same execution.
         journal.bind(GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+
             extra: Default::default(),
             bases: None,
             directory: self.rig.project.clone(),

@@ -425,7 +425,8 @@ fn lane(seed: u8, writer: bool) -> PreparedRun {
     crate::tests::rekey(&mut run);
     if writer {
         run.request.task.writer = Some(WriterRequest {
-            extra: crate::tests::writer_extra(),
+            extra: Default::default(),
+            custody_project: Some(crate::tests::writer_project()),
             project: "/project".into(),
             worktree: format!("/project/.worktrees/lane-{seed}").into(),
         });
@@ -563,7 +564,7 @@ fn child_wait_lease_cycle(block_reclaim: bool) -> TestResult {
         assert!(
             store.lane_waits_with_resources(&[store.record(parent_id, &call)?], &call, &facts)[0]
                 .waiting_for
-                .contains("children")
+                == LaneWaitReason::Children
         );
     }
     let child_record = store
@@ -868,7 +869,8 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
     let worktree = temp.path().join("lane");
     std::fs::create_dir(&worktree)?;
     run.request.task.writer = Some(WriterRequest {
-        extra: crate::tests::writer_extra(),
+        extra: Default::default(),
+        custody_project: Some(crate::tests::writer_project()),
         project: temp.path().to_path_buf(),
         worktree: worktree.clone(),
     });
@@ -1105,7 +1107,8 @@ fn recover_rebooted_writer_inner(
     std::fs::create_dir(&worktree)?;
     std::fs::write(worktree.join("unfinished.rs"), "keep my work")?;
     run.request.task.writer = writer.then(|| WriterRequest {
-        extra: crate::tests::writer_extra(),
+        extra: Default::default(),
+        custody_project: Some(crate::tests::writer_project()),
         project: temp.path().to_path_buf(),
         worktree: worktree.clone(),
     });

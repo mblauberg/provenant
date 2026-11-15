@@ -32,12 +32,12 @@ fn unplanned_delivery_links_resolve_to_its_exported_writer() {
                 && node.continues.is_none()
         })
         .unwrap();
-    assert!(expanded.nodes.iter().any(|node| {
-        node.extra
-            .get(template::TEMPLATE_FIELD)
-            .and_then(serde_json::Value::as_str)
-            == Some("plan")
-    }));
+    assert!(
+        expanded
+            .nodes
+            .iter()
+            .any(|node| { node.template.as_deref() == Some("plan") })
+    );
     let mut continuations = 0;
     let mut head_sources = 0;
     let boundary = expanded

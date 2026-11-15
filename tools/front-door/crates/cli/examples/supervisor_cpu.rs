@@ -7,6 +7,7 @@ use provenant_os::{
     clock::SystemClock,
     fs::{Directory, LockMode},
 };
+use provenant_records::custody::Scope;
 use provenant_supervisor::{GuardianHooks, Holder, custody::*, fixture, machine::StopReason};
 use std::{
     ffi::{OsStr, OsString},
@@ -127,6 +128,9 @@ fn capture(root: &Path, churn: bool) -> Result {
         serde_json::json!({"schema_version":2,"graph_id":"cpu","nodes":[{"id":"parent","access":"read_only","prompt":"fixture","route":{"alias":"junior"}}]}),
     )?;
     journal.bind(GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+
         extra: Default::default(),
         bases: None,
         directory: project,

@@ -18,7 +18,7 @@ thread_local! {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct TerminalEffects {
     pub schema_version: u64,
-    pub scope: provenant_supervisor::custody::Scope,
+    pub scope: provenant_records::custody::Scope,
     pub effects: Vec<(SettlementEffect, EffectDisposition)>,
 }
 
@@ -26,7 +26,7 @@ pub(crate) struct TerminalEffects {
 /// Unreadable evidence counts as no request.
 pub(crate) fn cancel_requested(
     attempt: &provenant_os::fs::Directory,
-    scope: provenant_supervisor::custody::Scope,
+    scope: provenant_records::custody::Scope,
 ) -> bool {
     read_sealed(attempt, "cancel.json", RECORD_LIMIT)
         .ok()
@@ -37,11 +37,11 @@ pub(crate) fn cancel_requested(
 
 pub(crate) fn import_cancelled(
     attempt: &provenant_os::fs::Directory,
-    scope: provenant_supervisor::custody::Scope,
+    scope: provenant_records::custody::Scope,
     owner: provenant_core::ActorId,
 ) -> Result<bool> {
     let marked = read_sealed(attempt, "import-cancelled.json", RECORD_LIMIT)?
-        .map(|raw| crate::db::decode_column::<provenant_supervisor::custody::Scope>(&raw))
+        .map(|raw| crate::db::decode_column::<provenant_records::custody::Scope>(&raw))
         .transpose()?
         .is_some_and(|saved| saved == scope);
     if !marked {
@@ -145,13 +145,11 @@ impl RunStore {
                 || current.refusal != expected.refusal
                 || current.refusal_chair != expected.refusal_chair
                 || current.refused_at != expected.refused_at
-                || current.extra.get("refusal_notice") != expected.extra.get("refusal_notice")
+                || current.refusal_notice != expected.refusal_notice
             {
                 return Err(RunError::Conflict);
             }
-            current
-                .extra
-                .insert("refusal_notice_done".into(), serde_json::json!(true));
+            current.refusal_notice_done = true;
             tx.execute(
                 "UPDATE attempts SET operation_record=?1 WHERE project=?2 AND actor=?3 AND operation=?4",
                 params![
@@ -200,15 +198,24 @@ impl RunStore {
             return Err(RunError::Validation("worktree identifier"));
         }
         let digest = input.request.digest()?;
-        let mut extra = provenant_records::ExtraFields::default();
-        if let Some(notice) = input.request.task.profile.knobs.get("chair.refusal_notice") {
-            extra.insert("refusal_notice".into(), notice.clone());
-        }
-        if let Some(digest) = context.intent_digest {
-            extra.insert("origin_intent_digest".into(), serde_json::json!(digest));
-        }
+        let refusal_notice = input
+            .request
+            .task
+            .profile
+            .knobs
+            .get("chair.refusal_notice")
+            .map(|notice| {
+                serde_json::from_value(notice.clone())
+                    .map_err(|_| RunError::Validation("refusal notice policy"))
+            })
+            .transpose()?;
         let operation = OperationRecord {
-            extra,
+            extra: Default::default(),
+            preflight_digest_version: None,
+            refusal_notice,
+            refusal_code: None,
+            refusal_notice_done: false,
+            origin_intent_digest: context.intent_digest,
             schema_version: 1,
             project_id: self.context.project_id,
             actor_id: self.context.actor_id,
@@ -219,6 +226,7 @@ impl RunStore {
                 OperationKind::Dispatch
             },
             request_digest: digest,
+            parent_attempt: None,
             state: OperationState::Refused,
             blocked_reason: None,
             refusal: Some(diagnostic),
@@ -759,12 +767,13 @@ impl RunStore {
         // but a stored refusal replays without depending on current host state.
         let task = &input.request.task;
         let telemetry_context = crate::telemetry_context::capture(task, input.created_at);
-        let mut operation_extra = provenant_records::ExtraFields::default();
-        if let Some(parent) = input.request.parent_attempt {
-            operation_extra.insert("parent_attempt".into(), serde_json::json!(parent));
-        }
         let operation = OperationRecord {
-            extra: operation_extra,
+            extra: Default::default(),
+            preflight_digest_version: None,
+            refusal_notice: None,
+            refusal_code: None,
+            refusal_notice_done: false,
+            origin_intent_digest: None,
             schema_version: 1,
             project_id: context.project_id,
             actor_id: context.actor_id,
@@ -775,6 +784,7 @@ impl RunStore {
                 OperationKind::Dispatch
             },
             request_digest: digest,
+            parent_attempt: input.request.parent_attempt,
             state: OperationState::Prepared,
             blocked_reason: None,
             refusal: None,
@@ -824,6 +834,8 @@ impl RunStore {
             if queued >= sql_int(crate::admission::HOST_QUEUED)? { return Err(RunError::Capacity); }
             let attempt_id = input.attempt_id;
             let attempt = AttemptRecord {extra: Default::default(),
+                budget_overrun: None, budget_wrap_up_refused: None,
+                repository_admission_binding: None,
                 key: key.clone(),
                 context: task.context.clone(),
                 title: task.title.clone(),
@@ -1106,7 +1118,8 @@ impl RunStore {
                             exit_code: None,
                             finished_at,
                             reason,
-                            extra,
+                            terminal_cause,
+                            terminal_note,
                             ..
                         } if saved.attempt_id == id
                             && saved.attempt_id == old.attempt_id
@@ -1120,13 +1133,8 @@ impl RunStore {
                                 finished_at,
                                 reason,
                                 saved.preparation_failure,
-                                extra
-                                    .get("terminal_cause")
-                                    .and_then(|value| serde_json::from_value(value.clone()).ok()),
-                                extra
-                                    .get("terminal_note")
-                                    .and_then(|value| value.as_str())
-                                    .map(str::to_owned),
+                                terminal_cause,
+                                terminal_note,
                             )
                         }
                         _ => return Err(RunError::TerminalRecoveryRequired),
@@ -1206,20 +1214,17 @@ impl RunStore {
     pub(crate) fn record_admission_binding(
         &self,
         expected: &AttemptRecord,
-        binding: serde_json::Value,
+        binding: RepositoryAdmissionBinding,
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
         if !matches!(expected.state, AttemptState::Queued { .. })
-            || expected
-                .extra
-                .contains_key(crate::launch::ADMISSION_PORT_BINDING_FIELD)
+            || expected.repository_admission_binding.is_some()
         {
             return Err(RunError::Conflict);
         }
         let mut next = expected.clone();
         next.revision = expected.revision.checked_add(1).ok_or(RunError::Conflict)?;
-        next.extra
-            .insert(crate::launch::ADMISSION_PORT_BINDING_FIELD.into(), binding);
+        next.repository_admission_binding = Some(binding);
         super::reader::validate_attempt(&next)?;
         self.write(call, |tx| {
             let changed = tx.execute(
@@ -1243,16 +1248,13 @@ impl RunStore {
     pub(crate) fn record_admission_phase(
         &self,
         expected: &AttemptRecord,
-        phase: crate::launch::AdmissionPhase,
+        phase: RepositoryAdmissionPhase,
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
-        let value = expected
-            .extra
-            .get(crate::launch::ADMISSION_PORT_BINDING_FIELD)
-            .cloned()
+        let mut binding = expected
+            .repository_admission_binding
+            .clone()
             .ok_or(RunError::Conflict)?;
-        let mut binding: crate::launch::AdmissionPortBinding = serde_json::from_value(value)
-            .map_err(|_| RunError::Validation("stored repository admission binding"))?;
         if !binding.valid() {
             return Err(RunError::Validation(
                 "stored repository admission binding digest",
@@ -1271,8 +1273,8 @@ impl RunStore {
         if !binding.can_transition_to(phase, active_owner) {
             return Err(RunError::Conflict);
         }
-        if binding.phase == crate::launch::AdmissionPhase::Released
-            && phase == crate::launch::AdmissionPhase::AcquirePending
+        if binding.phase == RepositoryAdmissionPhase::Released
+            && phase == RepositoryAdmissionPhase::AcquirePending
         {
             binding.lease_epoch = binding
                 .lease_epoch
@@ -1285,11 +1287,7 @@ impl RunStore {
         // These terminal projections have independent durable owners.
         next.settlement_receipts = None;
         next.custody_pending = None;
-        next.extra.insert(
-            crate::launch::ADMISSION_PORT_BINDING_FIELD.into(),
-            serde_json::to_value(binding)
-                .map_err(|_| RunError::Validation("repository admission binding"))?,
-        );
+        next.repository_admission_binding = Some(binding);
         super::reader::validate_attempt(&next)?;
         let terminal = matches!(&expected.state, AttemptState::Terminal { .. });
         self.write(call, |tx| {
@@ -1483,29 +1481,14 @@ impl RunStore {
             publication.handoff.as_ref().map(Option::as_ref),
         )
         .map_err(|_| RunError::Validation("terminal classification could not be sealed"))?;
-        let mut terminal_extra = provenant_records::ExtraFields::default();
-        if let Some(cause) = publication.terminal_cause {
-            terminal_extra.insert(
-                "terminal_cause".into(),
-                serde_json::to_value(cause)
-                    .map_err(|_| RunError::Validation("terminal cause could not be encoded"))?,
-            );
-        }
-        if let Some(stop) = &classification.stop {
-            terminal_extra.insert(
-                "stop".into(),
-                serde_json::to_value(stop)
-                    .map_err(|_| RunError::Validation("stop could not be encoded"))?,
-            );
-        }
-        if let Some(note) = publication.terminal_note.as_deref() {
-            terminal_extra.insert(
-                "terminal_note".into(),
-                serde_json::Value::String(provenant_records::diagnostic::safe_text(note)),
-            );
-        }
         next.state = AttemptState::Terminal {
-            extra: terminal_extra,
+            extra: Default::default(),
+            terminal_cause: publication.terminal_cause,
+            terminal_note: publication
+                .terminal_note
+                .as_deref()
+                .map(provenant_records::diagnostic::safe_text),
+            stop: classification.stop,
             outcome: classification.outcome,
             exit_code: outcome_exit,
             finished_at: publication.finished_at,
@@ -1676,7 +1659,7 @@ impl RunStore {
 
     pub(crate) fn commit_lost(
         &self,
-        scope: provenant_supervisor::custody::Scope,
+        scope: provenant_records::custody::Scope,
         reason: &str,
         call: &Request<'_>,
     ) -> Result<()> {
@@ -1707,6 +1690,9 @@ impl RunStore {
         next.settlement_reason = Some(SettlementReason::Lost);
         next.state = AttemptState::Terminal {
             extra: Default::default(),
+            terminal_cause: None,
+            terminal_note: None,
+            stop: None,
             outcome: Outcome::Lost,
             exit_code: None,
             finished_at: call
@@ -2064,7 +2050,7 @@ pub(crate) fn insert_event(db: &rusqlite::Connection, attempt: &AttemptRecord) -
 // the bounded codec still rejects duplicate members and malformed records.
 #[derive(serde::Deserialize)]
 struct SealedExit {
-    scope: provenant_supervisor::custody::Scope,
+    scope: provenant_records::custody::Scope,
     termination: Option<Termination>,
     never_spawned: bool,
     stop_reason: Option<provenant_supervisor::machine::StopReason>,
@@ -2078,7 +2064,7 @@ struct SealedExit {
 pub(crate) struct CancellationEvidence {
     #[serde(rename = "request_id")]
     pub(crate) _request_id: provenant_core::OperationId,
-    pub(crate) scope: provenant_supervisor::custody::Scope,
+    pub(crate) scope: provenant_records::custody::Scope,
     pub(crate) requester: provenant_core::ActorId,
     pub(crate) reason: provenant_supervisor::machine::StopReason,
 }
@@ -2086,7 +2072,7 @@ impl CancellationEvidence {
     /// The owner's own explicit stop request for exactly this attempt scope.
     pub(crate) fn requests_stop(
         &self,
-        scope: provenant_supervisor::custody::Scope,
+        scope: provenant_records::custody::Scope,
         owner: provenant_core::ActorId,
     ) -> bool {
         self.scope == scope

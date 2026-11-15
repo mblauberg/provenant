@@ -200,7 +200,7 @@ pub(super) fn make_outputs_with_upstream(
         }
     }
     let handoff_remaining = (!kept_remaining.is_empty()).then_some(kept_remaining);
-    let spec_concerns = (spec_concern_count > 0).then(|| serde_json::json!(kept_concerns));
+    let spec_concerns = (spec_concern_count > 0).then_some(kept_concerns);
     let verdict_error = result.and_then(|capture| {
         if capture.source_truncated {
             Some("result truncated before the verdict could be verified".to_owned())
@@ -210,69 +210,80 @@ pub(super) fn make_outputs_with_upstream(
                 .then(|| capture.verdict_cause.clone().unwrap_or_default())
         }
     });
-    let assessed_risk = result
+    let parsed_risk = result
         .filter(|capture| !capture.source_truncated && findings_available == Some(true))
         .and_then(|capture| findings_block(capture).ok())
         .and_then(|block| serde_json::from_str::<serde_json::Value>(block).ok())
-        .and_then(|block| {
-            block
-                .get("risk_tier")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        })
-        .filter(|tier| {
-            matches!(
-                tier.as_str(),
-                "routine" | "substantial" | "crucial" | "terminal"
-            )
-        });
-    let repair_design = result
+        .and_then(|block| block.get("risk_tier").cloned())
+        .map(serde_json::from_value::<provenant_records::workflow::RiskTier>);
+    let assessed_risk = match parsed_risk {
+        Some(Ok(tier)) => Some(tier),
+        Some(Err(error)) => {
+            warnings.push(bounded(
+                &format!("risk_tier is malformed: {error}"),
+                WARNING_BYTES,
+            ));
+            None
+        }
+        None => None,
+    };
+    let parsed_repair_design = result
         .filter(|capture| !capture.source_truncated && findings_available == Some(true))
         .and_then(|capture| findings_block(capture).ok())
         .and_then(|block| serde_json::from_str::<serde_json::Value>(block).ok())
         .and_then(|block| block.get("repair_design").cloned())
-        .filter(|design| design.get("within_scope").is_some_and(serde_json::Value::is_boolean)
-            && design.get("one_way_door").is_some_and(serde_json::Value::is_boolean))
-        .map(|design| serde_json::json!({"within_scope":design["within_scope"],"one_way_door":design["one_way_door"]}));
+        .map(serde_json::from_value::<RepairDesign>);
+    let (repair_design, repair_design_error) = match parsed_repair_design {
+        Some(Ok(design)) => (Some(design), None),
+        Some(Err(error)) => (None, Some(error)),
+        None => (None, None),
+    };
+    if let Some(error) = repair_design_error {
+        warnings.push(bounded(
+            &format!("repair_design is malformed; scope approval is unavailable: {error}"),
+            WARNING_BYTES,
+        ));
+    }
     let spec_defect_count = findings
         .iter()
         .filter(|finding| finding.spec_defect())
         .count();
-    let repair_items = result
+    let parsed_repair_items = result
         .filter(|capture| !capture.source_truncated)
         .and_then(|capture| findings_block(capture).ok())
         .and_then(|block| serde_json::from_str::<serde_json::Value>(block).ok())
         .and_then(|block| block.get("repair_items").cloned())
-        .filter(|items| {
-            canonical_len(items) <= FINDINGS_BYTES
-                && items.as_array().is_some_and(|items| {
-                    items.len() <= MAX_FINDINGS
-                        && items.iter().all(|item| {
-                            let text = |key| {
-                                item.get(key)
-                                    .and_then(serde_json::Value::as_str)
-                                    .is_some_and(|value| {
-                                        !value.trim().is_empty()
-                                            && value.len() <= OUTPUT_FIELD_BYTES
-                                    })
-                            };
-                            text("id")
-                                && text("reason")
-                                && item
-                                    .get("status")
-                                    .and_then(serde_json::Value::as_str)
-                                    .is_some_and(|status| {
-                                        matches!(
-                                            status,
-                                            "fixed"
-                                                | "removed-the-case"
-                                                | "disputed"
-                                                | "design-cannot-hold"
-                                        ) && (status != "design-cannot-hold" || text("alternative"))
-                                    })
-                        })
-                })
-        });
+        .map(serde_json::from_value::<Vec<RepairItem>>);
+    let repair_items = match parsed_repair_items {
+        Some(Ok(items))
+            if canonical_len(&items) <= FINDINGS_BYTES
+                && items.len() <= MAX_FINDINGS
+                && items.iter().all(|item| {
+                    !item.id.trim().is_empty()
+                        && item.id.len() <= OUTPUT_FIELD_BYTES
+                        && !item.reason.trim().is_empty()
+                        && item.reason.len() <= OUTPUT_FIELD_BYTES
+                        && (item.status != RepairItemStatus::DesignCannotHold
+                            || item.alternative.as_deref().is_some_and(|value| {
+                                !value.trim().is_empty() && value.len() <= OUTPUT_FIELD_BYTES
+                            }))
+                }) =>
+        {
+            Some(items)
+        }
+        Some(Ok(_)) => {
+            warnings.push("repair_items exceed the bounded output contract".to_owned());
+            None
+        }
+        Some(Err(error)) => {
+            warnings.push(bounded(
+                &format!("repair_items is malformed: {error}"),
+                WARNING_BYTES,
+            ));
+            None
+        }
+        None => None,
+    };
     let result = result.map(|capture| {
         let excerpt = bounded(&capture.excerpt, RESULT_EXCERPT_BYTES);
         ResultOutput {
@@ -287,21 +298,16 @@ pub(super) fn make_outputs_with_upstream(
     });
     let remaining = handoff_remaining;
     NodeOutputs {
-        extra: assessed_risk
-            .map(|tier| ("risk_tier".into(), tier.into()))
-            .into_iter()
-            .chain(repair_design.map(|design| ("repair_design".into(), design)))
-            .chain(repair_items.map(|items| ("repair_items".into(), items)))
-            .chain(spec_concerns.map(|concerns| ("spec_concerns".into(), concerns)))
-            .chain(
-                (spec_concern_count > 0)
-                    .then(|| ("spec_concern_count".into(), spec_concern_count.into())),
-            )
-            .chain(
-                (spec_defect_count > 0)
-                    .then(|| ("spec_defect_count".into(), spec_defect_count.into())),
-            )
-            .collect(),
+        repair_design,
+        extra: Default::default(),
+        partial: false,
+        risk_tier: assessed_risk,
+        repair_items,
+        spec_concerns,
+        spec_concern_count: (spec_concern_count > 0).then_some(spec_concern_count),
+        spec_defect_count: (spec_defect_count > 0).then_some(spec_defect_count),
+        artifact_findings: None,
+        compact_disposition_findings: None,
         verdict_error,
         schema_version: 2,
         decide_outcome: None,
@@ -359,11 +365,7 @@ fn names_finding(finding: &Finding, id: &str) -> bool {
     };
     qualifies(&finding.id, id)
         || qualifies(id, &finding.id)
-        || finding
-            .extra
-            .get("propagates")
-            .and_then(serde_json::Value::as_str)
-            == Some(id)
+        || finding.propagates.as_deref() == Some(id)
 }
 
 /// Parse entries individually, preserving usable evidence when a field is malformed.
@@ -548,7 +550,7 @@ fn parse_findings(
             if let Some(source) = source {
                 if (entry.contains_key("disposition") || entry.contains_key("verification"))
                     && !entry.contains_key("propagates")
-                    && let Some(marker) = source.extra.get("propagates")
+                    && let Some(marker) = source.propagates.as_deref()
                 {
                     entry.insert("propagates".into(), marker.clone());
                 }
@@ -633,22 +635,9 @@ fn parse_findings(
                 break;
             }
             let before = canonical_len(finding);
-            finding.extra.retain(|key, _| {
-                matches!(
-                    key.as_str(),
-                    "propagates"
-                        | "verification"
-                        | "lens"
-                        | "evidence"
-                        | "proposed_fix"
-                        | "design_defect"
-                        | "risk_grew"
-                        | "scope_grew"
-                        | "trigger"
-                        | "triage"
-                        | "kind"
-                )
-            });
+            // Host-owned finding fields have typed owners. Keep those fields
+            // intact and discard only unknown extension data in this display projection.
+            finding.extra.clear();
             finding.summary.clear();
             let after = canonical_len(finding);
             if after < before {
@@ -728,7 +717,7 @@ pub(super) fn compact_findings(
     {
         let count = outputs.findings.len();
         if let Some(block) = capture.and_then(|capture| findings_block(capture).ok()) {
-            outputs.extra.insert(ARTIFACT_FINDINGS.into(), block.into());
+            outputs.artifact_findings = Some(block.to_owned());
         }
         summarise_findings(&mut outputs.findings, cap);
         outputs.warnings.truncate(MAX_WARNINGS.saturating_sub(1));
@@ -739,7 +728,7 @@ pub(super) fn compact_findings(
         return;
     }
     if let Some(block) = capture.and_then(|capture| findings_block(capture).ok()) {
-        outputs.extra.insert(COMPACT_FINDINGS.into(), block.into());
+        outputs.compact_disposition_findings = Some(block.to_owned());
         let count = outputs.findings.len();
         outputs.findings.clear();
         outputs.warnings.truncate(MAX_WARNINGS - 1);
@@ -769,6 +758,29 @@ fn summarise_findings(findings: &mut Vec<Finding>, cap: usize) {
             }
         }
         finding.extra.retain(|_, value| canonical_len(value) <= 512);
+        finding.url = finding.url.as_deref().map(|text| bounded(text, 128));
+        finding.class = finding.class.as_deref().map(|text| bounded(text, 128));
+        finding.verification = finding
+            .verification
+            .as_deref()
+            .map(|text| bounded(text, 128));
+        finding.evidence = finding.evidence.as_deref().map(|text| bounded(text, 128));
+        finding.proposed_fix = finding
+            .proposed_fix
+            .as_deref()
+            .map(|text| bounded(text, 128));
+        finding.kind = finding.kind.as_deref().map(|text| bounded(text, 128));
+        finding.lens = finding.lens.as_deref().map(|text| bounded(text, 128));
+        finding.propagates = finding.propagates.as_deref().map(|text| bounded(text, 128));
+        if let Some(trigger) = finding.trigger.as_mut() {
+            trigger.sequence = bounded(&trigger.sequence, 128);
+        }
+        if let Some(triage) = finding.triage.as_mut() {
+            triage.decision = bounded(&triage.decision, 64);
+            triage.reason = bounded(&triage.reason, 128);
+            triage.root_cause = bounded(&triage.root_cause, 128);
+            triage.blocking_class = bounded(&triage.blocking_class, 64);
+        }
     }
     while canonical_len(findings) > cap {
         if findings.iter().any(|finding| {
@@ -789,12 +801,9 @@ fn summarise_findings(findings: &mut Vec<Finding>, cap: usize) {
 pub(super) fn upstream_finding(node: &PlannedNode, source: &str, mut finding: Finding) -> Finding {
     if template::review_behaviour(node) == Some(template::ReviewBehaviour::Verify) {
         // A delta verifier replaces prior verification; synthesis inherits it.
-        finding.extra.remove("verification");
+        finding.verification = None;
     }
-    finding.extra.insert(
-        "propagates".into(),
-        format!("{source}:{}", finding.id).into(),
-    );
+    finding.propagates = Some(format!("{source}:{}", finding.id));
     finding
 }
 
@@ -808,20 +817,15 @@ pub(super) fn valid_compacted_findings(
     let Some(outputs) = checkpoint.nodes[index].outputs.as_ref() else {
         return true;
     };
-    if let Some(value) = outputs.extra.get(ARTIFACT_FINDINGS) {
+    if let Some(value) = outputs.artifact_findings.as_ref() {
         let upstream: Vec<_> = selected_findings(&plan.nodes[index], plan, checkpoint, positions)
             .into_iter()
             .map(|(source, finding)| upstream_finding(&plan.nodes[index], &source, finding))
             .collect();
-        return value
-            .as_str()
-            .is_some_and(|block| parse_findings(block, &upstream).is_ok());
+        return parse_findings(value, &upstream).is_ok();
     }
-    let Some(value) = outputs.extra.get(COMPACT_FINDINGS) else {
+    let Some(block) = outputs.compact_disposition_findings.as_deref() else {
         return true;
-    };
-    let Some(block) = value.as_str() else {
-        return false;
     };
     if block.len() > 16 * 1024
         || !outputs.findings.is_empty()
@@ -851,11 +855,7 @@ pub(super) fn materialised_findings(
     let Some(outputs) = checkpoint.nodes[index].outputs.as_ref() else {
         return Vec::new();
     };
-    if let Some(block) = outputs
-        .extra
-        .get(ARTIFACT_FINDINGS)
-        .and_then(|value| value.as_str())
-    {
+    if let Some(block) = outputs.artifact_findings.as_deref() {
         let node = &plan.nodes[index];
         let upstream: Vec<_> = selected_findings(node, plan, checkpoint, positions)
             .into_iter()
@@ -868,25 +868,17 @@ pub(super) fn materialised_findings(
             .role
             .as_deref()
             .and_then(|role| role.strip_prefix("lens."))
-            .or_else(|| {
-                node.extra
-                    .get("review_lens")
-                    .and_then(serde_json::Value::as_str)
-            })
+            .or_else(|| node.review_lens.as_deref())
         {
             for finding in &mut findings {
                 if !upstream.iter().any(|source| source.id == finding.id) {
-                    finding.extra.insert("lens".into(), lens.into());
+                    finding.lens = Some(lens.to_owned());
                 }
             }
         }
         return findings;
     }
-    let Some(block) = outputs
-        .extra
-        .get(COMPACT_FINDINGS)
-        .and_then(|value| value.as_str())
-    else {
+    let Some(block) = outputs.compact_disposition_findings.as_deref() else {
         return outputs.findings.clone();
     };
     let upstream: Vec<_> = selected_findings(&plan.nodes[index], plan, checkpoint, positions)
@@ -906,8 +898,7 @@ pub(super) fn materialise_checkpoint_findings(
 ) -> Result<(), String> {
     if !checkpoint.nodes.iter().any(|node| {
         node.outputs.as_ref().is_some_and(|outputs| {
-            outputs.extra.contains_key(COMPACT_FINDINGS)
-                || outputs.extra.contains_key(ARTIFACT_FINDINGS)
+            outputs.compact_disposition_findings.is_some() || outputs.artifact_findings.is_some()
         })
     }) {
         return Ok(());
@@ -1049,9 +1040,8 @@ fn resolved_inputs_inner(
         for finding in &materialised_findings(index, plan, checkpoint, positions) {
             let default = (input.node.clone(), finding.id.clone());
             let root = finding
-                .extra
-                .get("propagates")
-                .and_then(|v| v.as_str())
+                .propagates
+                .as_deref()
                 .and_then(|marker| {
                     if plan.nodes[index].composite.is_some() {
                         // The exporting member already resolved propagation
@@ -1141,12 +1131,8 @@ pub(super) fn propagation_warnings(
         .findings
         .iter()
         .filter_map(|finding| {
-            let marker = finding.extra.get("propagates")?;
-            if marker
-                .as_str()
-                .and_then(|marker| marker_root(marker, upstream))
-                .is_some()
-            {
+            let marker = finding.propagates.as_deref()?;
+            if marker_root(marker, upstream).is_some() {
                 return None;
             }
             Some(format!(
@@ -1189,7 +1175,7 @@ pub(super) fn selected_findings(
 }
 
 pub(super) fn repair_writer(node: &PlannedNode) -> bool {
-    node.extra.get("repair_writer") == Some(&serde_json::Value::Bool(true))
+    node.repair_writer
 }
 
 /// Full identities from selected truncated composites, including nested members.
@@ -1449,9 +1435,7 @@ pub(super) fn render_input(
                 }
             }
         }
-        if input.outputs.contains(&OutputKind::Findings)
-            && outputs.extra.contains_key(ARTIFACT_FINDINGS)
-        {
+        if input.outputs.contains(&OutputKind::Findings) && outputs.artifact_findings.is_some() {
             let section = format!(
                 "{} findings are summarised below; read the staged full result artifact for every finding and its complete evidence.\n",
                 input.node
@@ -1470,7 +1454,7 @@ pub(super) fn render_input(
                 prompt.push_str(&section);
             }
             let value = match kind {
-                OutputKind::Result => serde_json::to_string(&outputs.result.as_ref().map(|result| serde_json::json!({"digest": result.digest, "excerpt": result.excerpt, "truncated": result.truncated,"repair_items":outputs.extra.get("repair_items")}))),
+                OutputKind::Result => serde_json::to_string(&outputs.result.as_ref().map(|result| serde_json::json!({"digest": result.digest, "excerpt": result.excerpt, "truncated": result.truncated,"repair_items":outputs.repair_items}))),
                 OutputKind::Verdict => serde_json::to_string(&outputs.verdict.as_ref().filter(|_| positions.get(&input.node).is_some_and(|index| verdict_available(&plan.nodes[*index], &checkpoint.nodes[*index], outputs)))),
                 OutputKind::Findings => {
                     // A composite may retain a useful partial selection. Its
@@ -1484,7 +1468,7 @@ pub(super) fn render_input(
                         selected.iter().filter(|(source, _)| source == &input.node)
                             .map(|(_, finding)| finding.clone()).collect::<Vec<_>>()
                     });
-                    if outputs.extra.contains_key(ARTIFACT_FINDINGS)
+                    if outputs.artifact_findings.is_some()
                         && let Some(findings) = &mut projection
                     {
                         summarise_findings(findings, FINDINGS_BYTES);
@@ -1930,7 +1914,11 @@ mod alias_tests {
         assert_eq!(findings[0].effective_severity(), "note");
         assert!(!repair::blocking(&findings[0]));
         let mut restored = findings[0].clone();
-        restored.extra.insert("trigger".into(), serde_json::json!({"sequence":"default invocation", "reach":"default_path", "observed":true}));
+        restored.trigger = Some(FindingTrigger {
+            sequence: "default invocation".into(),
+            reach: FindingReach::DefaultPath,
+            observed: true,
+        });
         assert_eq!(restored.effective_severity(), "high");
     }
 
@@ -2007,13 +1995,8 @@ mod alias_tests {
             None,
             None,
         );
-        assert_eq!(outputs.extra["spec_concern_count"], 2);
-        assert!(
-            outputs.extra["spec_concerns"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
+        assert_eq!(outputs.spec_concern_count, Some(2));
+        assert!(outputs.spec_concerns.as_ref().is_some_and(Vec::is_empty));
         assert_eq!(
             outputs.remaining.as_deref(),
             Some(["continue delivery".to_owned()].as_slice())
@@ -2021,8 +2004,8 @@ mod alias_tests {
         assert!(
             canonical_len(&serde_json::json!({
                 "remaining":outputs.remaining,
-                "spec_concerns":outputs.extra["spec_concerns"],
-                "spec_concern_count":outputs.extra["spec_concern_count"],
+                "spec_concerns":outputs.spec_concerns,
+                "spec_concern_count":outputs.spec_concern_count,
             })) <= REMAINING_BYTES
         );
         assert!(
@@ -2045,8 +2028,8 @@ mod alias_tests {
         captured.handoff = provenant_records::handoff::Handoff::from_turns(&text, &[]);
         let outputs = make_outputs(Some(&captured), None, None, None, None);
         assert_eq!(outputs.remaining.as_ref().unwrap(), &vec!["r".repeat(4090)]);
-        assert!(!outputs.extra.contains_key("spec_concerns"));
-        assert!(!outputs.extra.contains_key("spec_concern_count"));
+        assert!(outputs.spec_concerns.is_none());
+        assert!(outputs.spec_concern_count.is_none());
         assert!(
             !outputs
                 .warnings
@@ -2159,19 +2142,13 @@ mod alias_tests {
             assert_eq!(finding.line, Some(17));
             assert_eq!(finding.disposition.as_deref(), Some("accepted"));
             assert_eq!(finding.reason.as_deref(), Some("yes"));
-            assert_eq!(finding.extra["lens"], "tests");
-            assert_eq!(finding.extra["evidence"], "observed");
-            assert_eq!(finding.extra["proposed_fix"], "repair");
-            for field in ["design_defect", "risk_grew", "scope_grew"] {
-                assert_eq!(finding.extra[field], true);
-            }
-            assert_eq!(
-                finding
-                    .extra
-                    .get("propagates")
-                    .and_then(|value| value.as_str()),
-                Some("review:F1")
-            );
+            assert_eq!(finding.lens.as_deref(), Some("tests"));
+            assert_eq!(finding.evidence.as_deref(), Some("observed"));
+            assert_eq!(finding.proposed_fix.as_deref(), Some("repair"));
+            assert_eq!(finding.design_defect, Some(true));
+            assert_eq!(finding.risk_grew, Some(true));
+            assert_eq!(finding.scope_grew, Some(true));
+            assert_eq!(finding.propagates.as_deref(), Some("review:F1"));
         }
     }
 

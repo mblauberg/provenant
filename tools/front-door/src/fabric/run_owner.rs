@@ -357,12 +357,7 @@ pub(crate) fn facade_error_for_kind(kind: provenant_run::ErrorKind) -> FacadeErr
 fn terminal_cause(
     lane: &provenant_run::AttemptRecord,
 ) -> Option<provenant_records::run::TerminalCause> {
-    match &lane.state {
-        provenant_records::run::AttemptState::Terminal { extra, .. } => extra
-            .get("terminal_cause")
-            .and_then(|value| serde_json::from_value(value.clone()).ok()),
-        _ => None,
-    }
+    lane.state.terminal_cause()
 }
 /// Only positive sealed evidence of a pre-launch refusal can reject a replay.
 pub(crate) fn durable_launch_refusal(
@@ -673,6 +668,7 @@ impl BinaryRunOwner<'_> {
             });
         }
         Ok(SubmissionReceipt {
+            peer_graph: None,
             extra: Default::default(),
             worktree: None,
             operation_id,
@@ -933,6 +929,7 @@ impl BinaryRunOwner<'_> {
             return Ok(None);
         }
         Ok(Some(SubmissionReceipt {
+            peer_graph: None,
             extra: Default::default(),
             operation_id: operation_id.clone(),
             worktree: None,
@@ -1040,26 +1037,14 @@ impl BinaryRunOwner<'_> {
             let mut attempt = attempt.unwrap_or_default();
             attempt.host = None;
             attempt.parent_sandboxed |= floored;
-            let mut extra = provenant_records::ExtraFields::default();
-            extra.insert(
-                "graph_launch_actor".into(),
-                serde_json::json!(
-                    self.actor
-                        .unwrap_or(self.factory.context.identity.inbox.actor)
-                ),
-            );
-            extra.insert(
-                "graph_attempt".into(),
-                serde_json::to_value(attempt).map_err(|_| FacadeError::StateCorrupt)?,
-            );
-            extra.insert(
-                "graph_retry_limit".into(),
-                serde_json::json!(settlement_retry_limit),
-            );
-            extra.insert(
-                "graph_network".into(),
-                serde_json::to_value(access.network).map_err(|_| FacadeError::StateCorrupt)?,
-            );
+            let graph_context = provenant_fabric_runtime::hosts::GraphSubmitContext {
+                launch_actor: self
+                    .actor
+                    .unwrap_or(self.factory.context.identity.inbox.actor),
+                attempt,
+                retry_limit: settlement_retry_limit,
+                network: access.network,
+            };
             let input = Box::new(SubmitInput::Submit {
                 extra: Default::default(),
                 origin_work_key: Some(origin_work_key.ok_or(FacadeError::StateCorrupt)?),
@@ -1068,7 +1053,16 @@ impl BinaryRunOwner<'_> {
                 knobs,
                 host: None,
             });
-            return match self.peer(host, PeerAction::Submit { extra, input }, budget, cancel)? {
+            return match self.peer(
+                host,
+                PeerAction::Submit {
+                    extra: Default::default(),
+                    graph_context,
+                    input,
+                },
+                budget,
+                cancel,
+            )? {
                 PeerResult::Submitted { data, .. }
                     if data.operation_id == operation_id
                         && data.worktree.is_none()
@@ -1278,6 +1272,7 @@ impl BinaryRunOwner<'_> {
                         return Err(FacadeError::OutputTooLarge);
                     }
                     return Ok(OutputResult::Chunk {
+                        peer: Default::default(),
                         extra: chunk_fields,
                         target,
                         part,
@@ -1311,7 +1306,7 @@ impl BinaryRunOwner<'_> {
                 // The serving side reads its own graph, so `output --host` can
                 // name the planner fallback it recorded.
                 let mut extra = chunk_fields;
-                extra.insert("length".into(), serde_json::Value::from(chunk.len));
+                let output_length = chunk.len;
                 if matches!(part, OutputPart::Result)
                     && let Some(reason) = provenant_cli::run::planner_fallback_reason(
                         &self.factory.context.roots.state,
@@ -1325,6 +1320,10 @@ impl BinaryRunOwner<'_> {
                     );
                 }
                 Ok(OutputResult::Chunk {
+                    peer: provenant_records::run::PeerOutputFields {
+                        length: Some(output_length),
+                        ..Default::default()
+                    },
                     extra,
                     target,
                     part,
@@ -1370,6 +1369,10 @@ impl BinaryRunOwner<'_> {
                     bytes.extend_from_slice(&chunk.bytes);
                     if chunk.eof {
                         return Ok(OutputResult::Artifact {
+                            peer: provenant_records::run::PeerOutputFields {
+                                length: Some(chunk.len),
+                                ..Default::default()
+                            },
                             extra: fields,
                             target,
                             artifact,
@@ -1417,12 +1420,11 @@ impl BinaryRunOwner<'_> {
                 let attempt = self.snapshot(target, budget, cancel)?;
                 let store = self.store(cancel)?;
                 let waits = store.lane_waits(std::slice::from_ref(&attempt), &self.call(cancel));
-                let mut extra = provenant_records::ExtraFields::default();
-                extra.insert(
-                    "lane_waits".into(),
-                    serde_json::to_value(waits).map_err(|_| FacadeError::StateCorrupt)?,
-                );
-                Ok(RunResult::Status { extra, attempt })
+                Ok(RunResult::Status {
+                    extra: Default::default(),
+                    lane_waits: waits,
+                    attempt,
+                })
             }
             RunInput::Wait {
                 targets,

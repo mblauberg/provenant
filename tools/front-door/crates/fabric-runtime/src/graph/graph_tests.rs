@@ -220,6 +220,7 @@ impl AttemptOwner for FakeOwner {
         self.implicit_bindings += 1;
         Ok(Some(WriterWorktreeBinding {
             extra: Default::default(),
+            source_directory_identity: None,
             worktree: if std::path::Path::new(worktree).is_absolute() {
                 worktree.to_owned()
             } else {
@@ -493,6 +494,7 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
         attachments: Vec::new(),
         family_group: None,
         context: None,
+        replay_digest: None,
         extra: Default::default(),
         composite_members: Vec::new(),
         when: Vec::new(),
@@ -521,6 +523,8 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
         require_skill_location: false,
         access: AccessMode::ReadOnly,
         worktree: None,
+        template: None,
+        review_base: None,
         id: id.to_owned(),
         title: None,
         deadline_seconds: None,
@@ -538,6 +542,12 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
 
 fn graph(nodes: Vec<GraphNode>) -> GraphDocument {
     GraphDocument {
+        exclude: Vec::new(),
+        network: None,
+        capability: Vec::new(),
+        no_capability: Vec::new(),
+        provenance: None,
+
         review_base: None,
         context: None,
         extra: Default::default(),
@@ -545,6 +555,12 @@ fn graph(nodes: Vec<GraphNode>) -> GraphDocument {
         integration_branch: None,
         delivery: None,
         limits: None,
+        submission_patch: None,
+        template_library: Default::default(),
+        template_layers: Default::default(),
+        template_resolvers: Default::default(),
+        peer_origin_work_key: None,
+        review_tier_override: None,
         schema_version: 1,
         graph_id: "g-test".to_owned(),
         nodes,

@@ -37,7 +37,7 @@ pub struct SubmittedTask {
     pub capabilities: Option<Vec<String>>,
     /// Provenance for explicitly supplied capabilities.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub capability_sources: std::collections::BTreeMap<String, String>,
+    pub capability_sources: provenant_records::run::CapabilitySources,
     #[serde(default)]
     pub worktree: Option<String>,
     pub prompt: String,
@@ -402,6 +402,12 @@ impl InvalidInputDetail {
 #[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum FacadeError {
+    /// A refusal replay uses its original safe, typed diagnostic.
+    #[error("recorded refusal: {}", diagnostic.detail.as_deref().unwrap_or(&diagnostic.code))]
+    RecordedRefusal {
+        refusal_code: String,
+        diagnostic: provenant_records::diagnostic::Diagnostic,
+    },
     #[error("{operation} failed (Git reported lock failure: {lock_failure})")]
     GitMutationFailed {
         operation: provenant_confinement::worktrees::GitMutationOperation,
@@ -763,6 +769,7 @@ impl FacadeError {
         use provenant_records::diagnostic::Diagnostic;
         let mut projected = Diagnostic::new(self.code());
         match self {
+            Self::RecordedRefusal { diagnostic, .. } => return diagnostic.clone(),
             Self::GitMutationFailed { operation, lock_failure } => {
                 projected = projected.detail(format!("{operation} failed (Git reported lock failure: {lock_failure})"))
                     .next("inspect repository Git mutation state before retrying");
@@ -885,7 +892,8 @@ impl FacadeError {
     }
 
     pub fn code(&self) -> &str {
-        if let Self::GraphRelayRefused { refusal_code, .. } = self
+        if let Self::GraphRelayRefused { refusal_code, .. }
+        | Self::RecordedRefusal { refusal_code, .. } = self
             && !refusal_code.is_empty()
             && refusal_code.len() <= 128
             && refusal_code
@@ -900,6 +908,7 @@ impl FacadeError {
     /// Error category for callers projecting a temporary facade conversion.
     pub const fn static_code(&self) -> &'static str {
         match self {
+            Self::RecordedRefusal { .. } => "recorded_refusal",
             Self::UnknownHost => "UNKNOWN_HOST",
             Self::WorktreeNotApplicable => "WORKTREE_NOT_APPLICABLE",
             Self::OwnerUnavailable => "owner_unavailable",
@@ -2061,6 +2070,8 @@ impl OutputBytes {
 pub enum OutputResult {
     Chunk {
         #[serde(flatten)]
+        peer: provenant_records::run::PeerOutputFields,
+        #[serde(flatten)]
         extra: provenant_records::ExtraFields,
         target: AttemptTarget,
         part: OutputPart,
@@ -2076,6 +2087,8 @@ pub enum OutputResult {
         bytes: OutputBytes,
     },
     Artifact {
+        #[serde(flatten)]
+        peer: provenant_records::run::PeerOutputFields,
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
         target: AttemptTarget,

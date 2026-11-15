@@ -8,7 +8,6 @@ use provenant_records::{
 use std::path::Path;
 
 /// The task setting that carries `retry --extend` raises to the next launch.
-pub const EXTENSIONS: &str = "limit_extensions";
 
 /// Host settings that bound one lane.
 #[derive(Clone, Copy, Debug, Default)]
@@ -73,7 +72,7 @@ pub fn lane_limits(
         budget_policy: writer.then_some(budget_policy),
         // Wrap-up must spend its remaining allowance in the same session;
         // a context restart here would reset that allowance on another route.
-        context_handoff: (writer && !task.profile.extra.contains_key("budget_wrap_up"))
+        context_handoff: (writer && task.profile.budget_wrap_up.is_none())
             .then(|| knob("lanes.context_handoff_tokens"))
             .flatten(),
         deadline_seconds,
@@ -82,12 +81,8 @@ pub fn lane_limits(
     };
     // Raises the owner asked for with `retry --extend`; the command refused a
     // ceiling already, and one that arrives here anyway stays as it is.
-    if let Some(raises) = task.extra.get(EXTENSIONS).and_then(|v| v.as_object()) {
-        for (name, value) in raises {
-            if let Some(value) = value.as_u64() {
-                let _ = limits.extend(name, value);
-            }
-        }
+    for (name, value) in &task.limit_extensions {
+        let _ = limits.extend(name, *value);
     }
     limits
 }
@@ -151,12 +146,7 @@ pub fn writer_budget_limits(
     }
     let mut budget = Limit::resolve(budgets, LimitStrength::Default);
     let mut policy = BudgetPolicy::resolve(actions, graces);
-    if let Some(remaining) = profile
-        .extra
-        .get("budget_wrap_up")
-        .and_then(|wrap| wrap.get("remaining"))
-        .and_then(serde_json::Value::as_u64)
-    {
+    if let Some(remaining) = profile.budget_wrap_up.as_ref().map(|wrap| wrap.remaining) {
         let mut allowance = Limit::new(remaining, LimitSource::Launch, LimitStrength::Default);
         if let Some(target) = budget {
             allowance
@@ -201,7 +191,9 @@ mod tests {
     fn writer_task() -> TaskRequest {
         let mut task = crate::tests::input().request.task.clone();
         task.writer = Some(provenant_records::run::WriterRequest {
-            extra: crate::tests::writer_extra(),
+            extra: Default::default(),
+            limit_extensions: Default::default(),
+            custody_project: Some(crate::tests::writer_project()),
             project: "/p".into(),
             worktree: "/p/lane".into(),
         });
@@ -233,10 +225,9 @@ mod tests {
             .knobs
             .insert("lanes.context_handoff_tokens".into(), 200_000.into());
         // The sealed profile names the layer that set the knob.
-        task.profile.extra.insert(
-            provenant_config::KNOB_SOURCES.into(),
-            serde_json::json!({"lanes.context_handoff_tokens": "host"}),
-        );
+        task.profile
+            .knob_sources
+            .insert("lanes.context_handoff_tokens".into(), LimitSource::Host);
         task.provider_timeout_seconds = 3600;
         let caps = HostCaps {
             runtime_seconds: Some(600),
@@ -311,9 +302,7 @@ mod tests {
                 .context_handoff
                 .is_some()
         );
-        task.profile
-            .extra
-            .insert("budget_wrap_up".into(), serde_json::json!({"remaining":17}));
+        task.profile.budget_wrap_up = Some(provenant_records::run::BudgetWrapUp { remaining: 17 });
         let limits = lane_limits(&task, state.path(), "p", "claude", HostCaps::default());
         assert!(limits.context_handoff.is_none());
         assert_eq!(crate::launch::capture_plan(&task, &limits).token_budget, 17);
@@ -326,10 +315,11 @@ mod tests {
         let state = state("[domains.run]\nwriter_token_budget = 700\n");
         let mut task = writer_task();
         task.provider_timeout_seconds = 3600;
-        task.extra.insert(
-            EXTENSIONS.into(),
-            serde_json::json!({"token_budget": 5000, "deadline_seconds": 9000}),
-        );
+        task.limit_extensions = [
+            ("token_budget".into(), 5000),
+            ("deadline_seconds".into(), 9000),
+        ]
+        .into();
         let caps = HostCaps {
             runtime_seconds: Some(600),
         };
@@ -411,9 +401,7 @@ budget_grace = 0.03
                 .0
                 .is_none()
         );
-        profile
-            .extra
-            .insert("budget_wrap_up".into(), serde_json::json!({"remaining":17}));
+        profile.budget_wrap_up = Some(provenant_records::run::BudgetWrapUp { remaining: 17 });
         let (budget, policy) =
             writer_budget_limits(&config, "p", &profile, Some(&context), Some("junior"));
         assert_eq!(budget.unwrap().value, 17);

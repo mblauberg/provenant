@@ -17,7 +17,8 @@ fn reconcile_rebooted_handoff_after_device_numbers_change() -> TestResult {
     std::fs::create_dir(&worktree)?;
     std::fs::write(worktree.join("unfinished.rs"), "keep my work")?;
     run.request.task.writer = Some(WriterRequest {
-        extra: crate::tests::writer_extra(),
+        extra: Default::default(),
+        custody_project: Some(crate::tests::writer_project()),
         project: temp.path().to_path_buf(),
         worktree: worktree.clone(),
     });
@@ -386,7 +387,7 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
         None,
         &call,
     )?;
-    let scope = provenant_supervisor::custody::Scope {
+    let scope = provenant_records::custody::Scope {
         attempt: orphan,
         generation: 1,
     };
@@ -432,7 +433,8 @@ fn reconcile_settles_a_writer_attempt_whose_worktree_was_removed() -> TestResult
     let store = RunStore::open(&context, &call)?;
     let mut run = input();
     run.request.task.writer = Some(WriterRequest {
-        extra: crate::tests::writer_extra(),
+        extra: Default::default(),
+        custody_project: Some(crate::tests::writer_project()),
         project: temp.path().join("checkout"),
         worktree: temp.path().join("removed-lane"),
     });
@@ -450,7 +452,7 @@ fn reconcile_settles_a_writer_attempt_whose_worktree_was_removed() -> TestResult
         .claim(id, &at_micros(100), &call)?
         .ok_or("not admitted")?;
     let attempt = store.attempt_dir(id, false)?;
-    let scope = provenant_supervisor::custody::Scope {
+    let scope = provenant_records::custody::Scope {
         attempt: id,
         generation: 1,
     };

@@ -70,10 +70,7 @@ fn planner_fragment_writers_use_the_declared_worktree_template() {
         flattened[0].worktree.as_deref(),
         Some("trees/planned-writer")
     );
-    assert_eq!(
-        flattened[0].extra.get("provision_worktree"),
-        Some(&serde_json::Value::Bool(true))
-    );
+    assert_eq!(flattened[0].provision_worktree, true);
 }
 
 #[test]
@@ -1005,6 +1002,9 @@ fn refused_planner_fragment_retries_after_file_journal_reopen() {
                 FileJournal::open(&root, project, &doc.graph_id, budget, &cancel, &clock).unwrap();
             journal
                 .bind(GraphExecution {
+                    peer_origin_context: None,
+                    peer_submission_digest: None,
+
                     extra: Default::default(),
                     bases: None,
                     directory: base.clone(),
@@ -2360,18 +2360,11 @@ fn planner_adds_lenses_omitted_by_a_path_floor() {
             "exports":[{"node":"lens", "outputs":["result"]}]
         })).unwrap());
     }
-    spec.extra.insert(
-        "required_floor_patterns".into(),
-        json!(["lens-security-privacy"]),
-    );
-    spec.extra
-        .insert("floor_classes".into(), json!(["security"]));
-    spec.extra.insert(
-        "floor_candidate_patterns".into(),
-        json!(["lens-tests", "lens-security-privacy"]),
-    );
-    spec.extra.insert("floor_min_reviewers".into(), json!(2));
-    spec.extra.insert("model_max_nodes".into(), json!(3));
+    spec.required_floor_patterns = vec!["lens-security-privacy".into()];
+    spec.floor_classes = vec!["security".into()];
+    spec.floor_candidate_patterns = vec!["lens-tests".into(), "lens-security-privacy".into()];
+    spec.floor_min_reviewers = 2;
+    spec.model_max_nodes = Some(3);
     let output = pattern_result(json!({"id":"tests", "pattern":"lens-tests"}));
     let mut owner = fixture_owner(&[&output, "reviewed", "reviewed", "checked"]);
     let mut journal = MemoryJournal::default();
@@ -2390,9 +2383,10 @@ fn planner_adds_lenses_omitted_by_a_path_floor() {
             .any(|item| item.name == "lens-security-privacy")
     );
     assert!(
-        expansion.extra["floor_warnings"]
-            .to_string()
-            .contains("security")
+        expansion
+            .floor_warnings
+            .iter()
+            .any(|warning| warning.contains("security"))
     );
     let mut tampered = serde_json::to_value(journal.0.as_ref().unwrap()).unwrap();
     tampered["expansions"][0]["patterns"]
@@ -2982,7 +2976,7 @@ fn admit_patch_refuses_cycles_conflicts_and_secrets() {
         admit(&document, &mut checkpoint, both).unwrap_err().code,
         "conflict"
     );
-    let secret = json!({"schema_version":1, "nodes":[{"id":"leak", "use":"task", "brief":"use sk-fixture-secret"}]});
+    let secret = json!({"schema_version":1, "nodes":[{"id":"leak", "use":"task", "prompt":"use sk-fixture-secret"}]});
     let error = admit_with(&document, &mut checkpoint, None, secret, &|text| {
         if text.contains("sk-fixture-secret") {
             Err("credential-shaped text".into())
@@ -3050,7 +3044,7 @@ fn admit_patch_confines_lane_edits_but_allows_owner_and_planner_edits() {
     let (document, checkpoint) = running_graph();
     for edit in [
         json!({"schema_version":1, "skip":["b"]}),
-        json!({"schema_version":1, "replace":[{"id":"b", "use":"task", "brief":"Replacement"}]}),
+        json!({"schema_version":1, "replace":[{"id":"b", "use":"task", "prompt":"Replacement"}]}),
     ] {
         let mut refused = checkpoint.clone();
         let error = admit_with(
@@ -3103,8 +3097,8 @@ fn admitted_nodes_name_their_admitter_for_the_sandbox_floor() {
     .unwrap();
     let mut planner = checkpoint.clone();
     admit_with(&planned, &mut planner, Some("a"), json!({"schema_version":1,
-        "nodes":[{"id":"child", "use":"task", "brief":"Child"}],
-        "replace":[{"id":"b", "use":"task", "brief":"Replacement", "attempt":{"admitted_by":"elsewhere"}}]}),
+        "nodes":[{"id":"child", "use":"task", "prompt":"Child"}],
+        "replace":[{"id":"b", "use":"task", "prompt":"Replacement", "attempt":{"admitted_by":"elsewhere"}}]}),
         &|_| Ok(())).unwrap();
     let expansion = planner.expansions.last().unwrap();
     assert_eq!(admitted_by(&expansion.nodes[0]).as_deref(), Some("a"));
@@ -3118,7 +3112,7 @@ fn admitted_nodes_name_their_admitter_for_the_sandbox_floor() {
         &document,
         &mut owner,
         json!({"schema_version":1,
-        "replace":[{"id":"b", "use":"task", "brief":"Replacement"}]}),
+        "replace":[{"id":"b", "use":"task", "prompt":"Replacement"}]}),
     )
     .unwrap();
     assert_eq!(
@@ -3158,13 +3152,13 @@ fn admit_patch_allows_lane_edits_in_its_subtree() {
         &document,
         &mut checkpoint,
         Some("a"),
-        json!({"schema_version":1,"nodes":[{"id":"child", "use":"task", "brief":"Child"}]}),
+        json!({"schema_version":1,"nodes":[{"id":"child", "use":"task", "prompt":"Child"}]}),
         &|_| Ok(()),
     )
     .unwrap();
     for edit in [
         json!({"schema_version":1, "skip":["a--child"]}),
-        json!({"schema_version":1, "replace":[{"id":"a--child", "use":"task", "brief":"Replacement"}]}),
+        json!({"schema_version":1, "replace":[{"id":"a--child", "use":"task", "prompt":"Replacement"}]}),
     ] {
         let mut edited = checkpoint.clone();
         admit_with(&document, &mut edited, Some("a"), edit, &|_| Ok(())).unwrap();
@@ -3193,8 +3187,9 @@ fn admit_patch_journals_before_commit_and_tags_its_nodes_with_the_parent() {
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
     };
-    let patch =
-        host_patch(json!({"schema_version":1, "nodes":[{"id":"x", "use":"task", "brief":"Work"}]}));
+    let patch = host_patch(
+        json!({"schema_version":1, "nodes":[{"id":"x", "use":"task", "prompt":"Work"}]}),
+    );
     admit_patch(
         &mut LiveGraph {
             document: &document,
@@ -3209,8 +3204,8 @@ fn admit_patch_journals_before_commit_and_tags_its_nodes_with_the_parent() {
     assert_eq!(*journaled.borrow(), [(1, Some("a".to_owned()), false)]);
     assert!(checkpoint.expansions[0].patch.as_ref().unwrap().journaled);
     assert_eq!(
-        checkpoint.expansions[0].nodes[0].extra.get("parent_node"),
-        Some(&json!("a"))
+        checkpoint.expansions[0].nodes[0].parent_node.as_deref(),
+        Some("a")
     );
 
     let failing = |_: &PatchRecord| Err("disk full".to_owned());
@@ -3223,8 +3218,9 @@ fn admit_patch_journals_before_commit_and_tags_its_nodes_with_the_parent() {
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
     };
-    let patch =
-        host_patch(json!({"schema_version":1, "nodes":[{"id":"y", "use":"task", "brief":"Work"}]}));
+    let patch = host_patch(
+        json!({"schema_version":1, "nodes":[{"id":"y", "use":"task", "prompt":"Work"}]}),
+    );
     let error = admit_patch(
         &mut LiveGraph {
             document: &document,
@@ -3258,7 +3254,7 @@ fn submit_compiles_a_patch_into_a_new_graph() {
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
     };
     let patch = host_patch(json!({"schema_version":1, "templates":{"pair":{"nodes":[
-            {"id":"one", "use":"task", "brief":"First"}, {"id":"two", "use":"task", "brief":"Second", "after":["one"]}]}},
+            {"id":"one", "use":"task", "prompt":"First"}, {"id":"two", "use":"task", "prompt":"Second", "after":["one"]}]}},
         "nodes":[{"id":"map", "use":"explore", "over":["src"]}, {"id":"work", "use":"pair", "after":["map"]}]}));
     let document = patch::submit("submitted", &patch, &context, None).unwrap();
     assert_eq!(document.nodes.len(), 2);
@@ -3286,7 +3282,7 @@ fn submit_compiles_a_patch_into_a_new_graph() {
 fn planner_fragments_may_emit_composites_and_loops() {
     let fragment = json!({"schema_version":1,
         "templates":{"attempt":{"nodes":[
-            {"id":"work", "use":"task", "brief":"Try the slice", "acceptance_checks":["It works"]},
+            {"id":"work", "use":"task", "prompt":"Try the slice", "acceptance_checks":["It works"]},
             {"id":"done", "kind":"gate", "access":"read_only", "after":["work"],
              "inputs":[{"node":"work", "outputs":["verdict"]}],
              "condition":{"type":"verdict", "expected":"VERDICT: PASS", "threshold":"all"}}],
@@ -3364,14 +3360,14 @@ fn initial_submission_is_a_durable_revision_and_replays_template_evidence() {
         resolvers: &resolvers,
     };
     let node = compiler
-        .compile(&json!({"id":"work", "use":"task", "brief":"Do the work"}))
+        .compile(&json!({"id":"work", "use":"task", "prompt":"Do the work"}))
         .unwrap();
     let second = compiler
-        .compile(&json!({"id":"then", "use":"task", "brief":"Continue", "after":["work"]}))
+        .compile(&json!({"id":"then", "use":"task", "prompt":"Continue", "after":["work"]}))
         .unwrap();
     let mut document: GraphDocument = serde_json::from_value(json!({
         "schema_version":1, "graph_id":"submitted", "nodes":[node, second],
-        "provenance":{"parameters":{"brief":"Do the work"}}
+        "provenance":{"parameters":{"prompt":"Do the work"}}
     }))
     .unwrap();
     let limits = plans::generous();
@@ -3419,7 +3415,7 @@ fn initial_submission_is_a_durable_revision_and_replays_template_evidence() {
     let receipt = admit(
         &document,
         &mut checkpoint,
-        document.extra["submission_patch"].clone(),
+        serde_json::to_value(document.submission_patch.as_ref().unwrap()).unwrap(),
     )
     .unwrap();
     assert!(receipt.replayed);
@@ -3434,7 +3430,7 @@ fn initial_submission_is_a_durable_revision_and_replays_template_evidence() {
     let retained = journal.0.clone();
     let mut changed = document.clone();
     changed.nodes[0].prompt = "Different work under the same operation".into();
-    changed.extra.remove("submission_patch");
+    changed.submission_patch = None;
     patch::submission(
         &mut changed,
         "operation-one",
@@ -3455,7 +3451,7 @@ fn initial_submission_refuses_changed_snapshot_before_checkpoint_or_launch() {
         resolvers: &resolvers,
     };
     let node = compiler
-        .compile(&json!({"id":"work", "use":"task", "brief":"Do the work"}))
+        .compile(&json!({"id":"work", "use":"task", "prompt":"Do the work"}))
         .unwrap();
     let mut document: GraphDocument = serde_json::from_value(json!({
         "schema_version":1, "graph_id":"secret-submission", "nodes":[node]
@@ -3468,8 +3464,7 @@ fn initial_submission_refuses_changed_snapshot_before_checkpoint_or_launch() {
         provenant_config::PortTable::builtin().worktree_layout,
     )
     .unwrap();
-    document.extra.get_mut("submission_patch").unwrap()["nodes"][0]["prompt"] =
-        json!("changed prompt");
+    document.submission_patch.as_mut().unwrap().nodes[0]["prompt"] = json!("changed prompt");
     let mut journal = MemoryJournal::default();
     let mut owner = FakeOwner::default();
     assert!(advance(&document, &mut owner, &mut journal).is_err());
@@ -3485,7 +3480,7 @@ fn initial_submission_envelope_counts_prompt_references_not_brief_copies() {
         resolvers: &resolvers,
     };
     let base = compiler
-        .compile(&json!({"id":"work", "use":"task", "brief":"Work"}))
+        .compile(&json!({"id":"work", "use":"task", "prompt":"Work"}))
         .unwrap();
     let brief = "work ".repeat(220_000);
     let nodes: Vec<_> = (0..8)
@@ -3560,7 +3555,7 @@ fn ordinary_reviewer_final_patch_adds_a_follow_up() {
     let output = format!(
         "```findings\n{{\"schema_version\":1,\"findings\":[]}}\n```\n```patch\n{}\n```\nVERDICT: PASS",
         json!({"schema_version":1,
-        "nodes":[{"id":"follow-up", "use":"task", "brief":"Verify the review finding"}]})
+        "nodes":[{"id":"follow-up", "use":"task", "prompt":"Verify the review finding"}]})
     );
     let run = advance(
         &document,
@@ -3607,17 +3602,19 @@ fn planner_template_defaults_satisfy_acceptance_checks() {
 #[test]
 fn planner_uses_snapshotted_repository_flavour_and_review_panel() {
     let mut document = planner(8);
-    document.extra.insert(
-        "template_library".into(),
-        json!({
-            "review.repository":{"brief":"Check the repository-specific contract", "tier":"senior"}
-        }),
+    document.template_library.insert(
+        "review.repository".into(),
+        serde_json::from_value(json!({
+            "brief":"Check the repository-specific contract", "tier":"senior"
+        }))
+        .unwrap(),
     );
-    document.extra.insert(
-        "template_resolvers".into(),
-        json!({
-            "review-panel":["correctness", "tests"]
-        }),
+    document
+        .template_layers
+        .insert("review.repository".into(), super::template::Layer::Inline);
+    document.template_resolvers.insert(
+        "review-panel".into(),
+        vec!["correctness".into(), "tests".into()],
     );
     let output = result(vec![
         json!({"id":"repository", "use":"review.repository"}),
@@ -3906,12 +3903,10 @@ fn raw_submission_preserves_raw_reporting_label() {
         provenant_config::PortTable::builtin().worktree_layout,
     )
     .unwrap();
-    assert_eq!(document.nodes[0].extra["template"], "raw");
-    assert_eq!(document.extra["submission_patch"]["nodes"][0]["use"], "raw");
-    assert_eq!(
-        document.extra["submission_patch"]["nodes"][0]["extensions"]["template"],
-        "raw"
-    );
+    assert_eq!(document.nodes[0].template.as_deref(), Some("raw"));
+    let submitted = document.submission_patch.as_ref().unwrap();
+    assert_eq!(submitted.nodes[0]["use"], "raw");
+    assert_eq!(document.nodes[0].template.as_deref(), Some("raw"));
 }
 
 #[test]

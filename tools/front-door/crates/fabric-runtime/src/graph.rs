@@ -7,6 +7,9 @@
 
 use provenant_core::{CancelToken, Clock, DurationMicros, ProjectId, StateRoot, WaitBudget};
 use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, PublishMode};
+pub use provenant_records::graph::{
+    AttemptKey, AttemptOutcome, AttemptState, GraphOutcome, GraphStatus, NodeState,
+};
 use provenant_records::pause::PauseCause;
 use provenant_records::{CanonicalError, CanonicalV1, DecodeError, Limits};
 use serde::{Deserialize, Serialize};
@@ -69,6 +72,9 @@ mod cutover_g_tests;
 #[cfg(test)]
 mod fallback_invariants;
 #[cfg(test)]
+#[path = "graph/graph_host_typed_invariants.rs"]
+mod graph_host_typed_invariants;
+#[cfg(test)]
 mod implement_invariants;
 #[cfg(test)]
 mod implementation_delivery_invariants;
@@ -76,6 +82,9 @@ mod implementation_delivery_invariants;
 mod next_step_tests;
 #[cfg(test)]
 mod submission_implement_invariants;
+#[cfg(test)]
+#[path = "graph/typed_finding_tests.rs"]
+mod typed_finding_tests;
 #[cfg(test)]
 mod typed_records_tests;
 #[cfg(test)]
@@ -93,10 +102,12 @@ pub fn is_review_node(node: &GraphNode) -> bool {
         && (node.role.as_deref().is_some_and(|role| {
             role == "lens" || role.starts_with("lens.") || role.starts_with("review.")
         }) || matches!(
-            node.extra
-                .get("review_behaviour")
-                .and_then(serde_json::Value::as_str),
-            Some("lens" | "verify" | "synthesis")
+            node.review_behaviour,
+            Some(
+                template::ReviewBehaviour::Lens
+                    | template::ReviewBehaviour::Verify
+                    | template::ReviewBehaviour::Synthesis
+            )
         ))
 }
 
@@ -166,7 +177,7 @@ pub use loops::{InvalidLoopDecision, LoopDecision, LoopRound, LoopSpec};
 pub use patch::{
     Admitted, LiveGraph, Patch, PatchContext, PatchError, PatchRecord, TemplateUse, admit_patch,
 };
-pub use plans::{Expansion, PlanSpec, RemainingBudgets};
+pub use plans::{Expansion, PlanSpec, RemainingBudgets, RetiredExpansion};
 pub use template::{Compiler, Layer, Template, TemplateLibrary, TemplateParameter};
 
 /// Review range resolved for an immutable attempt.
@@ -956,16 +967,8 @@ fn node_context(plan: &PlannedGraph, node: &PlannedNode) -> provenant_records::r
             .or_else(|| graph.shadow_of.clone()),
         // The requested tier is set by the launch, from the route it asks for.
         tier: None,
-        template: node
-            .extra
-            .get(template::TEMPLATE_FIELD)
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
-        parent_node: node
-            .extra
-            .get(patch::PARENT_NODE_FIELD)
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
+        template: node.template.clone(),
+        parent_node: node.parent_node.clone(),
         selection_source: context
             .selection_source
             .clone()
@@ -1204,7 +1207,7 @@ pub fn cancel_node_subtree(
             .iter()
             .any(|a| a.state != AttemptState::Terminal)
         {
-            node.extra.insert("subtree_cancel".into(), id.into());
+            node.subtree_cancel = Some(id.to_owned());
             effect.running.push(id.to_owned());
         } else {
             node.cancelled_from = Some(node.state);
@@ -1245,8 +1248,7 @@ pub fn mark_cancelled_nodes_without_live_attempts(checkpoint: &mut GraphCheckpoi
     let mut changed = false;
     for node in &mut checkpoint.nodes {
         if matches!(node.state, NodeState::Pending | NodeState::Running)
-            && node.extra.get(relay::DETACHED_FROM_GRAPH_CANCEL)
-                != Some(&serde_json::Value::Bool(true))
+            && !node.detached_from_graph_cancel
             && node
                 .attempts
                 .iter()
@@ -1280,10 +1282,7 @@ pub fn settle_cancelled_nodes<R: AttemptOwner, J: GraphJournal>(
     let mut first_error = None;
     for index in 0..checkpoint.nodes.len() {
         let node = &checkpoint.nodes[index];
-        if node.state != NodeState::Running
-            || node.extra.get(relay::DETACHED_FROM_GRAPH_CANCEL)
-                == Some(&serde_json::Value::Bool(true))
-        {
+        if node.state != NodeState::Running || node.detached_from_graph_cancel {
             continue;
         }
         let mut settled = true;
@@ -1429,9 +1428,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 instance_id,
                 ask_actor,
             );
-            if let Some(raw) = document.extra.get("submission_patch") {
-                let patch: patch::Patch = serde_json::from_value(raw.clone())
-                    .map_err(|error| GraphError::Invalid(error.to_string()))?;
+            if let Some(submission) = document.submission_patch.as_ref() {
                 let library = template::TemplateLibrary::bundled();
                 let resolvers = Default::default();
                 patch::admit_patch(
@@ -1440,7 +1437,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         checkpoint: &mut checkpoint,
                     },
                     None,
-                    &patch,
+                    submission,
                     &patch::PatchContext {
                         library: &library,
                         resolvers: &resolvers,
@@ -1465,11 +1462,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 // A loop round's worktree is advanced by earlier rounds; its
                 // starting head becomes known only at that round.
                 if plans::writer(node)
-                    && node
-                        .extra
-                        .get("provision_worktree")
-                        .and_then(serde_json::Value::as_bool)
-                        != Some(true)
+                    && !node.provision_worktree
                     && node.round.is_none()
                     && node
                         .attempt
@@ -1533,9 +1526,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     continue;
                 }
                 let reference = node
-                    .extra
-                    .get("review_base")
-                    .and_then(serde_json::Value::as_str)
+                    .review_base
+                    .as_deref()
                     .ok_or_else(|| GraphError::Invalid("node review base missing".into()))?;
                 let base = owner.resolve_review_base(reference, location).map_err(GraphError::Run)?
                     .filter(|base| base.parse::<provenant_core::GitOid>().is_ok())
@@ -1764,11 +1756,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         for node in &plan.nodes {
             if (!checkpoint.cancelled
                 || resume
-                || checkpoint.nodes.iter().any(|progress| {
-                    progress.id == node.id
-                        && progress.extra.get(relay::DETACHED_FROM_GRAPH_CANCEL)
-                            == Some(&serde_json::Value::Bool(true))
-                }))
+                || checkpoint
+                    .nodes
+                    .iter()
+                    .any(|progress| progress.id == node.id && progress.detached_from_graph_cancel))
                 && checkpoint.nodes.iter().any(|n| {
                     n.id == node.id
                         && (n.handoff.is_some()
@@ -1815,11 +1806,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         if checkpoint.cancelled {
             if !resume {
                 settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
-                let detached_live = checkpoint.nodes.iter().any(|node| {
-                    !node.state.settled()
-                        && node.extra.get(relay::DETACHED_FROM_GRAPH_CANCEL)
-                            == Some(&serde_json::Value::Bool(true))
-                });
+                let detached_live = checkpoint
+                    .nodes
+                    .iter()
+                    .any(|node| !node.state.settled() && node.detached_from_graph_cancel);
                 if !detached_live {
                     return Ok(GraphRun {
                         status: GraphStatus::Cancelled,
@@ -1845,25 +1835,18 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
                 continue 'schedule;
             }
-            if checkpoint.cancelled
-                && checkpoint.nodes[node_index]
-                    .extra
-                    .get(relay::DETACHED_FROM_GRAPH_CANCEL)
-                    != Some(&serde_json::Value::Bool(true))
-            {
+            if checkpoint.cancelled && !checkpoint.nodes[node_index].detached_from_graph_cancel {
                 continue;
             }
-            if checkpoint.nodes[node_index]
-                .extra
-                .contains_key(relay::SUBTREE_CANCEL)
-            {
+            if checkpoint.nodes[node_index].subtree_cancel.is_some() {
                 continue;
             }
             // A parent earlier in this wave may just have settled.
-            if checkpoint.nodes.iter().any(|node| {
-                node.state.settled()
-                    && node.extra.get("children_cancelled") != Some(&serde_json::Value::Bool(true))
-            }) {
+            if checkpoint
+                .nodes
+                .iter()
+                .any(|node| node.state.settled() && !node.children_cancelled)
+            {
                 relay::settle_subtrees(
                     document,
                     &mut checkpoint,
@@ -2214,7 +2197,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 }
                 transitions::NodeAction::Attempt => {}
             }
-            if !checkpoint.nodes[node_index].extra.contains_key("retry")
+            if checkpoint.nodes[node_index].retry.is_none()
                 && let Some((retries, origin)) = owner
                     .retry_allowance(&node.extra, &plan.extra)
                     .map_err(GraphError::Run)?
@@ -2227,11 +2210,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
             }
             let requested_review_base = (node.access == AccessMode::ReadOnly)
-                .then(|| {
-                    node.extra
-                        .get("review_base")
-                        .and_then(serde_json::Value::as_str)
-                })
+                .then_some(node.review_base.as_deref())
                 .flatten()
                 .filter(|base| !base.is_empty());
             if let Some(reference) = requested_review_base {
@@ -2361,11 +2340,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         .worktree
                         .as_deref()
                         .ok_or_else(|| GraphError::Invalid("writer worktree missing".into()))?;
-                    if node
-                        .extra
-                        .get("provision_worktree")
-                        .and_then(serde_json::Value::as_bool)
-                        == Some(true)
+                    if node.provision_worktree
                         && (relay::pending_provisioning(&checkpoint)
                             .iter()
                             .any(|(id, _, _)| id == &node.id)
@@ -2383,13 +2358,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             let source = if let Some(source) = checkpoint.nodes[node_index]
                                 .source_commit
                                 .clone()
-                                .or_else(|| {
-                                    checkpoint.nodes[node_index]
-                                        .extra
-                                        .get("provisioned_source")
-                                        .and_then(serde_json::Value::as_str)
-                                        .map(str::to_owned)
-                                }) {
+                                .or_else(|| checkpoint.nodes[node_index].provisioned_source.clone())
+                            {
                                 Some(source)
                             } else {
                                 match &node.source {
@@ -2490,11 +2460,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     {
                         // Retain the resolved base before any Git effect. Recovery
                         // adopts only the clean worktree at this exact commit.
-                        let base = match checkpoint.nodes[node_index]
-                            .extra
-                            .get("new_worktree_base")
-                            .and_then(serde_json::Value::as_str)
-                        {
+                        let base = match checkpoint.nodes[node_index].new_worktree_base.as_deref() {
                             Some(base) => base.to_owned(),
                             None => {
                                 let base = owner
@@ -2926,11 +2892,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             .previous_attempts
                             .len()
                             .saturating_sub(
-                                checkpoint.nodes[node_index]
-                                    .extra
-                                    .get("quota_redraw_archived")
-                                    .and_then(serde_json::Value::as_u64)
-                                    .unwrap_or(0) as usize,
+                                checkpoint.nodes[node_index].quota_redraw_archived as usize,
                             ),
                     )
                     .chain(
@@ -3016,7 +2978,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         read_roots: &node.read_roots,
                         attachments: &node.attachments,
                         capabilities: node.capabilities.as_deref(),
-                        capability_sources: node.extra.get("capability_sources"),
+                        capability_sources: (!node.capability_sources.is_empty())
+                            .then_some(&node.capability_sources),
                         attempt: Some(&launch_attempt),
                         distinct_from_attempts: &distinct_attempts,
                         require_distinct,
@@ -3271,9 +3234,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         ..
                     } if node.access == AccessMode::ReadOnly && template::review_node(node) => {
                         let explicit_base = node
-                            .extra
-                            .get("review_base")
-                            .and_then(serde_json::Value::as_str)
+                            .review_base
+                            .as_deref()
                             .is_some_and(|base| !base.is_empty());
                         owner
                             .review_range(reference, explicit_base)
@@ -3402,10 +3364,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             }
             if (!checkpoint.cancelled
                 || resume
-                || checkpoint.nodes[node_index]
-                    .extra
-                    .get(relay::DETACHED_FROM_GRAPH_CANCEL)
-                    == Some(&serde_json::Value::Bool(true)))
+                || checkpoint.nodes[node_index].detached_from_graph_cancel)
                 && checkpoint.nodes.iter().any(|progress| {
                     progress.id == plan.nodes[node_index].id
                         && progress.state == NodeState::Failed
@@ -3513,6 +3472,15 @@ impl PlannedNode {
 fn gate_outputs(passed: bool) -> NodeOutputs {
     NodeOutputs {
         extra: Default::default(),
+        repair_design: None,
+        partial: false,
+        risk_tier: None,
+        repair_items: None,
+        spec_concerns: None,
+        spec_concern_count: None,
+        spec_defect_count: None,
+        artifact_findings: None,
+        compact_disposition_findings: None,
         verdict_error: None,
         schema_version: 2,
         decide_outcome: None,

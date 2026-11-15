@@ -551,10 +551,8 @@ impl run::Providers for Registry<'_> {
         };
         let project = task
             .profile
-            .extra
-            .get("policy_project")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
+            .policy_project
+            .map(|project| project.to_string())
             .or_else(|| self.project_id.map(|project| project.to_string()))
             .unwrap_or_default();
         let policy = self
@@ -1260,12 +1258,7 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
         choice,
         effort,
         fallback: Fallback::None,
-        confidential: task
-            .profile
-            .extra
-            .get("confidential")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
+        confidential: task.profile.confidential,
     })
 }
 

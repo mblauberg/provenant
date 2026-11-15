@@ -96,7 +96,7 @@ fn skipped_required_and_verdict_inputs_are_disclosed_through_settlement() {
         .unwrap();
     assert_eq!(skipped.state, NodeState::Skipped);
     assert_eq!(
-        skipped.extra["removed_requirements"],
+        serde_json::to_value(&skipped.removed_requirements).unwrap(),
         row["removed_requirements"]
     );
 }

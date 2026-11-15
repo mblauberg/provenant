@@ -593,7 +593,8 @@ pub(super) fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> 
 
 pub(super) fn recreated_worktree_accepts_writer_after_settlement() -> Result {
     use provenant_os::fs::Directory;
-    use provenant_supervisor::custody::{Scope, WriterBinding};
+    use provenant_records::custody::Scope;
+    use provenant_supervisor::custody::WriterBinding;
 
     let rig = repository()?;
     ok(&rig, &["worktree", "create", "reused", "--json"])?;

@@ -26,21 +26,13 @@ fn dispatch_preserves_launch_fields_on_request_reopen() -> TestResult {
         assert_eq!(task.account.as_deref(), Some("account-a"));
         assert!(task.build_heavy);
         assert_eq!(task.access.write_roots, roots);
-        let project_id = store.context.project_id.to_string();
-        assert_eq!(
-            task.profile
-                .extra
-                .get("policy_project")
-                .and_then(serde_json::Value::as_str),
-            Some(project_id.as_str())
-        );
-        let policy: provenant_records::policy::Policy = serde_json::from_value(
-            task.profile
-                .extra
-                .get("launch_policy")
-                .cloned()
-                .ok_or("launch policy snapshot")?,
-        )?;
+        let project_id = store.context.project_id;
+        assert_eq!(task.profile.policy_project, Some(project_id));
+        let policy = task
+            .profile
+            .launch_policy
+            .as_ref()
+            .ok_or("launch policy snapshot")?;
         assert_eq!(
             policy.rule("WRITE_SCOPE").source,
             provenant_records::policy::Source::CompiledDefault
@@ -654,7 +646,10 @@ fn preflight_refusal_replays_and_rejects_changed_inputs() -> TestResult {
             .and_then(|chair| chair.session.as_deref()),
         Some("original")
     );
-    assert_eq!(saved.extra["refusal_notice"], "off");
+    assert_eq!(
+        saved.refusal_notice,
+        Some(provenant_records::run::RefusalNotice::Off)
+    );
     assert!(!serde_json::to_string(&saved)?.contains("first"));
     Ok(())
 }
@@ -707,8 +702,8 @@ fn refusal_only_chair_leaves_accepted_identity_and_settlement_unbound() -> TestR
         !store
             .operation(&accepted_operation, &call)?
             .ok_or("accepted operation")?
-            .extra
-            .contains_key("origin_intent_digest")
+            .origin_intent_digest
+            .is_some()
     );
     for nested in [false, true] {
         let make = || {
@@ -746,8 +741,8 @@ fn refusal_only_chair_leaves_accepted_identity_and_settlement_unbound() -> TestR
         let saved = store.operation(&operation, &call)?.ok_or("refusal")?;
         assert_eq!(saved.refusal_chair, Some(chair.clone()));
         assert_eq!(
-            saved.extra["origin_intent_digest"],
-            serde_json::json!(provenant_core::Digest::from_bytes([6; 32]))
+            saved.origin_intent_digest,
+            Some(provenant_core::Digest::from_bytes([6; 32]))
         );
     }
     Ok(())
@@ -1142,10 +1137,7 @@ fn writer_replay_preserves_current_request_and_authority() -> TestResult {
     let saved_writer = current.task.writer.as_ref().ok_or("current writer")?;
     let mut resolved = resolve_writer(context.state_root.as_path(), &root, &saved_writer.worktree)?;
     assert!(equivalent_writer(saved_writer, &resolved));
-    resolved.extra.insert(
-        "custody_project".into(),
-        serde_json::json!(provenant_core::ProjectId::from_bytes([99; 16])),
-    );
+    resolved.custody_project = Some(provenant_core::ProjectId::from_bytes([99; 16]));
     assert!(!equivalent_writer(saved_writer, &resolved));
     resolved = saved_writer.clone();
     resolved.extra.insert("unknown".into(), true.into());

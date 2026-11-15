@@ -448,7 +448,12 @@ fn findings_and_verdict_at_the_end_of_a_large_result_are_parsed() {
     let captured = capture(&format!("```findings\n{oversized}\n```"));
     let outputs = make_outputs(Some(&captured), None, None, None, None);
     assert_eq!(outputs.findings_available, Some(false));
-    assert!(outputs.warnings.iter().any(|warning| warning.starts_with(FINDINGS_INVALID)));
+    assert!(
+        outputs
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with(FINDINGS_INVALID))
+    );
 }
 
 #[test]
@@ -1160,12 +1165,22 @@ fn checked_findings_group_before_writer_and_dispute_reaches_synthesis() {
     second["id"] = "same-cause".into();
     let review_text = findings_text(&format!("{confirmed},{rejected},{second}"));
     let mut writer = node("writer", route("fixture"));
-    writer.extra.insert("repair_writer".into(), true.into());
+    writer.repair_writer = true;
     writer.depends_on = vec!["review".into()];
-    writer.inputs = vec![GraphInput { extra: Default::default(), required_outputs: vec![], node: "review".into(), outputs: vec![OutputKind::Findings] }];
+    writer.inputs = vec![GraphInput {
+        extra: Default::default(),
+        required_outputs: vec![],
+        node: "review".into(),
+        outputs: vec![OutputKind::Findings],
+    }];
     let mut synthesis = node("synthesis", route("fixture"));
     synthesis.depends_on = vec!["writer".into()];
-    synthesis.inputs = vec![GraphInput { extra: Default::default(), required_outputs: vec![], node: "writer".into(), outputs: vec![OutputKind::Result] }];
+    synthesis.inputs = vec![GraphInput {
+        extra: Default::default(),
+        required_outputs: vec![],
+        node: "writer".into(),
+        outputs: vec![OutputKind::Result],
+    }];
     let mut owner = FakeOwner {
         observations: [
             terminal_with_result(AttemptOutcome::Succeeded, &review_text),
@@ -1174,16 +1189,44 @@ fn checked_findings_group_before_writer_and_dispute_reaches_synthesis() {
         ].into(),
         ..Default::default()
     };
-    let run = advance(&graph(vec![node("review", route("fixture")), writer, synthesis]), &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(run.checkpoint.nodes[0].outputs.as_ref().unwrap().findings.len(), 3);
+    let run = advance(
+        &graph(vec![node("review", route("fixture")), writer, synthesis]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        run.checkpoint.nodes[0]
+            .outputs
+            .as_ref()
+            .unwrap()
+            .findings
+            .len(),
+        3
+    );
     assert_eq!(run.checkpoint.nodes[1].state, NodeState::Succeeded);
     assert_eq!(run.checkpoint.nodes[2].state, NodeState::Succeeded);
     assert!(!owner.prompts[1].contains("REJECTED_DO_NOT_REPAIR"));
-    let writer_files = owner.file_requests.iter().find(|requests| requests.iter().any(|request| request.label == "review")).unwrap();
-    assert!(writer_files.iter().all(|request| request.attempt_ref.is_none()));
-    let staged = writer_files.iter().flat_map(|request| request.inline_findings.as_ref().unwrap()).collect::<Vec<_>>();
+    let writer_files = owner
+        .file_requests
+        .iter()
+        .find(|requests| requests.iter().any(|request| request.label == "review"))
+        .unwrap();
+    assert!(
+        writer_files
+            .iter()
+            .all(|request| request.attempt_ref.is_none())
+    );
+    let staged = writer_files
+        .iter()
+        .flat_map(|request| request.inline_findings.as_ref().unwrap())
+        .collect::<Vec<_>>();
     assert_eq!(staged.len(), 2);
-    assert!(staged.iter().all(|finding| finding.summary != "REJECTED_DO_NOT_REPAIR"));
+    assert!(
+        staged
+            .iter()
+            .all(|finding| finding.summary != "REJECTED_DO_NOT_REPAIR")
+    );
     let (_, input) = owner.prompts[1].split_once("review findings: ").unwrap();
     let groups: serde_json::Value = serde_json::from_str(input.lines().next().unwrap()).unwrap();
     assert_eq!(groups.as_array().unwrap().len(), 1);

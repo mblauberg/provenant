@@ -818,14 +818,16 @@ fn identity_observations_warn_when_missing_and_hold_when_contradictory() -> Test
             Some("requested-account")
         );
         assert_eq!(record.observed_route, observed_route);
-        let AttemptState::Terminal { outcome, extra, .. } = &record.state else {
+        let AttemptState::Terminal {
+            outcome,
+            terminal_cause,
+            stop,
+            ..
+        } = &record.state
+        else {
             return Err("not terminal".into());
         };
-        let stop = extra
-            .get("stop")
-            .cloned()
-            .map(serde_json::from_value::<provenant_records::Stop>)
-            .transpose()?;
+        let stop = stop.clone();
         if missing {
             assert_eq!(*outcome, Outcome::Succeeded);
             assert!(
@@ -834,13 +836,10 @@ fn identity_observations_warn_when_missing_and_hold_when_contradictory() -> Test
                     .contains(&PartialSignal::IdentityUnobserved)
             );
             assert!(stop.is_none());
-            assert!(!extra.contains_key("terminal_cause"));
+            assert_eq!(*terminal_cause, None);
         } else {
             assert_eq!(*outcome, Outcome::Failed);
-            assert_eq!(
-                extra.get("terminal_cause"),
-                Some(&serde_json::to_value(TerminalCause::IdentityMismatch)?)
-            );
+            assert_eq!(*terminal_cause, Some(TerminalCause::IdentityMismatch));
             assert_eq!(
                 stop.as_ref().map(|stop| stop.cause()),
                 Some(provenant_records::StopCause::IdentityMismatch)
@@ -965,7 +964,8 @@ fn admission_holds_spacing_floors_and_deadline() -> TestResult {
     assert_eq!(
         running.state,
         AttemptState::Running {
-            extra: Default::default()
+            extra: Default::default(),
+            child_wait: None,
         }
     );
     assert_eq!(running.started_at, Some(now.wall_now()?));

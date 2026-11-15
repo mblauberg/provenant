@@ -3,7 +3,7 @@ use super::*;
 use std::collections::BTreeMap;
 
 pub(super) fn spec_is_repair(spec: &loops::LoopSpec) -> bool {
-    spec.extra.get("review_repair") == Some(&serde_json::Value::Bool(true))
+    spec.review_repair
 }
 
 pub(super) fn is_repair(node: &PlannedNode) -> bool {
@@ -161,18 +161,15 @@ pub(super) fn blocking_severity(finding: &Finding) -> bool {
 
 fn design_defect(finding: &Finding) -> bool {
     blocking(finding)
-        && finding.extra.get("design_defect") == Some(&serde_json::Value::Bool(true))
+        && finding.design_defect == Some(true)
         && finding
-            .extra
-            .get("evidence")
-            .and_then(serde_json::Value::as_str)
+            .evidence
+            .as_deref()
             .is_some_and(|evidence| !evidence.trim().is_empty())
 }
 
 fn grows_review(finding: &Finding) -> bool {
-    ["risk_grew", "scope_grew"]
-        .iter()
-        .any(|field| finding.extra.get(*field) == Some(&serde_json::Value::Bool(true)))
+    finding.risk_grew == Some(true) || finding.scope_grew == Some(true)
 }
 
 /// Construct the host patch that reviews the repaired commit through a fresh
@@ -222,10 +219,8 @@ pub(super) fn replan_source<'a>(
 
 /// A growth observation is reusable only for the exact commits measured.
 pub(super) fn cached_growth(progress: &NodeProgress, before: &str, after: &str) -> Option<bool> {
-    let cache = progress.extra.get("repair_growth")?;
-    (cache.get("before")?.as_str()? == before && cache.get("after")?.as_str()? == after)
-        .then(|| cache.get("grew").and_then(serde_json::Value::as_bool))
-        .flatten()
+    let cache = progress.repair_growth.as_ref()?;
+    (cache.before == before && cache.after == after).then_some(cache.grew)
 }
 
 pub(super) fn repair_commits<'a>(
@@ -273,13 +268,12 @@ pub(super) fn risk_assessment_missing(
             .round
             .as_ref()
             .is_some_and(|item| item.loop_id == round.loop_id && item.round == round.round)
-            && member.extra.get("repair_risk_assessment") == Some(&serde_json::Value::Bool(true))
+            && member.repair_risk_assessment
             && checkpoint.nodes[index].state != NodeState::Skipped
             && checkpoint.nodes[index]
                 .outputs
                 .as_ref()
-                .and_then(|output| output.extra.get("risk_tier"))
-                .is_none()
+                .is_none_or(|output| output.risk_tier.is_none())
     })
 }
 
@@ -468,10 +462,14 @@ pub(super) fn growth_in_round(
         }) && progress.outputs.as_ref().is_some_and(|output| {
             output.findings.iter().any(grows_review)
                 || output
-                    .extra
-                    .get("risk_tier")
-                    .and_then(serde_json::Value::as_str)
-                    .and_then(rank)
+                    .risk_tier
+                    .as_ref()
+                    .and_then(|tier| match tier {
+                        provenant_records::workflow::RiskTier::Routine => Some(0),
+                        provenant_records::workflow::RiskTier::Substantial => Some(1),
+                        provenant_records::workflow::RiskTier::Crucial => Some(2),
+                        provenant_records::workflow::RiskTier::Terminal => Some(3),
+                    })
                     .is_some_and(|current| baseline.is_none_or(|baseline| current > baseline))
         })
     })
@@ -480,30 +478,24 @@ pub(super) fn growth_in_round(
 fn same_finding(left: &Finding, right: &Finding) -> bool {
     left.id.rsplit(':').next() == right.id.rsplit(':').next()
         && left.file == right.file
-        && left.extra.get("lens") == right.extra.get("lens")
+        && left.lens == right.lens
 }
 
 fn shared_flaw(findings: &[&Finding]) -> bool {
     findings.iter().any(|finding| {
         finding
-            .extra
-            .get("triage")
-            .and_then(|triage| triage.get("shared_flaw"))
-            .and_then(serde_json::Value::as_bool)
-            == Some(true)
+            .triage
+            .as_ref()
+            .is_some_and(|triage| triage.shared_flaw)
     })
 }
 
 fn design_cannot_hold(outputs: &NodeOutputs) -> bool {
-    outputs
-        .extra
-        .get("repair_items")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|items| {
-            items.iter().any(|item| {
-                item.get("status").and_then(serde_json::Value::as_str) == Some("design-cannot-hold")
-            })
-        })
+    outputs.repair_items.as_ref().is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item.status == RepairItemStatus::DesignCannotHold)
+    })
 }
 
 /// Default repair-cycle budget of the review-repair composites.
@@ -646,11 +638,7 @@ pub(super) fn inactive_lens(
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
 ) -> bool {
-    let Some(lens) = node
-        .extra
-        .get("repair_lens")
-        .and_then(serde_json::Value::as_str)
-    else {
+    let Some(lens) = node.repair_lens.as_deref() else {
         return false;
     };
     if dependency_state(node, plan, checkpoint, positions).is_some() {
@@ -671,12 +659,7 @@ pub(super) fn inactive_lens(
     }
     let mut known = false;
     for (_, finding) in findings.iter().filter(|(_, finding)| blocking(finding)) {
-        let Some(raising) = finding
-            .extra
-            .get("lens")
-            .and_then(serde_json::Value::as_str)
-            .filter(|lens| !lens.is_empty())
-        else {
+        let Some(raising) = finding.lens.as_deref().filter(|lens| !lens.is_empty()) else {
             return false;
         };
         if raising == lens {
@@ -692,8 +675,7 @@ pub(super) fn intentionally_skipped_lens(
     plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
 ) -> bool {
-    checkpoint.nodes[index].state == NodeState::Skipped
-        && plan.nodes[index].extra.contains_key("repair_lens")
+    checkpoint.nodes[index].state == NodeState::Skipped && plan.nodes[index].repair_lens.is_some()
 }
 
 /// Escalation carries the latest complete qualified findings to the principal;
@@ -745,9 +727,7 @@ pub(super) fn terminal_outputs(
         .find(|output| design_cannot_hold(output))
     {
         outputs.result.clone_from(&writer.result);
-        if let Some(items) = writer.extra.get("repair_items") {
-            outputs.extra.insert("repair_items".into(), items.clone());
-        }
+        outputs.repair_items.clone_from(&writer.repair_items);
     }
     outputs
 }
@@ -761,7 +741,7 @@ mod tests {
     #[test]
     fn repair_eligibility_uses_checked_reach_and_preserves_boundaries() {
         let mut item = finding("F1", "correctness");
-        item.extra.get_mut("triage").unwrap()["blocking_class"] = "none".into();
+        item.triage.as_mut().unwrap().blocking_class = "none".into();
         for severity in [
             "critical",
             "BLOCKER",
@@ -779,23 +759,22 @@ mod tests {
         item.severity = "p2".into();
         assert!(!blocking(&item));
         item.severity = "should-fix".into();
-        item.extra.get_mut("trigger").unwrap()["reach"] = "operator_mistake".into();
+        item.trigger.as_mut().unwrap().reach = FindingReach::OperatorMistake;
         assert!(!blocking(&item));
         for class in ["boundary", "data_loss"] {
-            item.extra.get_mut("triage").unwrap()["blocking_class"] = class.into();
+            item.triage.as_mut().unwrap().blocking_class = class.into();
             assert!(blocking(&item));
         }
-        item.extra.insert("kind".into(), "spec_defect".into());
+        item.kind = Some("spec_defect".into());
         assert!(blocking(&item));
-        item.extra.remove("kind");
-        item.extra.get_mut("triage").unwrap()["decision"] = "rejected".into();
+        item.kind = None;
+        item.triage.as_mut().unwrap().decision = "rejected".into();
         item.disposition = Some("rejected".into());
         assert!(blocking(&item));
-        item.extra.insert("verification".into(), "falsified".into());
-        item.extra.remove("evidence");
+        item.verification = Some("falsified".into());
+        item.evidence = None;
         assert!(blocking(&item));
-        item.extra
-            .insert("evidence".into(), "test disproves trigger".into());
+        item.evidence = Some("test disproves trigger".into());
         assert!(!blocking(&item));
     }
 
@@ -803,16 +782,15 @@ mod tests {
     fn rejected_boundaries_require_falsification_with_evidence() {
         for class in ["boundary", "data_loss"] {
             let mut item = finding("F1", "security");
-            item.extra.get_mut("triage").unwrap()["blocking_class"] = class.into();
-            item.extra.get_mut("triage").unwrap()["decision"] = "rejected".into();
-            item.extra.get_mut("triage").unwrap()["worth_fixing"] = false.into();
+            item.triage.as_mut().unwrap().blocking_class = class.into();
+            item.triage.as_mut().unwrap().decision = "rejected".into();
+            item.triage.as_mut().unwrap().worth_fixing = false;
             item.disposition = Some("rejected".into());
             assert!(blocking(&item));
-            item.extra.insert("verification".into(), "falsified".into());
-            item.extra.remove("evidence");
+            item.verification = Some("falsified".into());
+            item.evidence = None;
             assert!(blocking(&item));
-            item.extra
-                .insert("evidence".into(), "test disproves trigger".into());
+            item.evidence = Some("test disproves trigger".into());
             assert!(!blocking(&item));
         }
     }
@@ -832,9 +810,9 @@ mod tests {
     fn design_escalation_needs_concrete_evidence() {
         let mut item = finding("F1", "design");
         assert!(!design_defect(&item));
-        item.extra.insert("design_defect".into(), true.into());
+        item.design_defect = Some(true);
         assert!(design_defect(&item));
-        item.extra.insert("evidence".into(), "".into());
+        item.evidence = Some(String::new());
         assert!(!design_defect(&item));
     }
     #[test]

@@ -131,12 +131,17 @@ generation as unknown and re-read.
 Unsupported versions fail before mutation. The reader rejects ambiguous or
 unbounded input and never echoes the rejected value. Closed codecs reject or
 discard unknown fields; records with explicit extension maps preserve their
-extensions. Edge-built facts are `Serialize` only.
+extensions. Host-owned semantics belong to typed fields on their owning record;
+malformed values fail decoding instead of becoming absent facts. Extension maps
+preserve only unknown fields, so a newer writer's data can survive a round trip.
+Edge-built facts are `Serialize` only.
 - Why: a forged file must not become evidence.
 - Test: `crates/records/tests/contracts.rs::bounded_decode_fails_closed_for_duplicates_utf8_trailing_and_integer_overflow`;
   `crates/records/tests/contracts.rs::typed_decode_errors_do_not_disclose_rejected_values`;
   `crates/records/src/port_receipt.rs::tests::receipt_round_trips_through_bounded_decoder`;
   `crates/records/src/port_receipt.rs::tests::receipt_decoder_rejects_unknown_schema_version`
+- Lint: `scripts/check-extra-fields` rejects host literal and constant keys in
+  non-test extension-map reads and writes, with no allowlist.
 - Owner: `crates/records/src/`
 
 Landing records retain the current snapshot and consumer revisions without an unconsumed event outbox. Their readers use the common bounded records decoder and reject removed fields.

@@ -45,10 +45,8 @@ pub(super) fn cancellation_receipt(
     mut run: provenant_fabric_runtime::graph::GraphRun,
     request_id: String,
 ) -> provenant_fabric_runtime::graph::GraphRun {
-    run.checkpoint.extra.insert(
-        "cancellation_request_receipt".into(),
-        serde_json::json!({"request_id":request_id}),
-    );
+    run.checkpoint.cancellation_request_receipt =
+        Some(provenant_fabric_runtime::graph::CancellationRequestReceipt { request_id });
     run
 }
 
@@ -180,9 +178,9 @@ pub(crate) fn tick_graphs(
                     factory: &factory,
                     integration_base: checkpoint.bases,
                     integration_branch: execution.document.integration_branch.clone(),
-                    network: graph_network(&execution.document)?,
-                    capability_overrides: graph_capability_overrides(&execution.document)?,
-                    exclude: graph_exclude(&execution.document)?,
+                    network: graph_network(&execution.document),
+                    capability_overrides: graph_capability_overrides(&execution.document),
+                    exclude: graph_exclude(&execution.document),
                     budget,
                     cancel: &cancel,
                     prices: None,
@@ -515,13 +513,16 @@ impl Factory {
                     }
                     document
                 };
-                if !document.extra.contains_key("submission_patch") {
+                if document.submission_patch.is_none() {
                     let submission_key = document
-                        .extra
-                        .get("provenance")
-                        .and_then(|value| value.get("operation_id"))
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned)
+                        .provenance
+                        .as_ref()
+                        .and_then(|provenance| {
+                            provenance
+                                .operation_id
+                                .as_ref()
+                                .map(|id| id.as_str().to_owned())
+                        })
                         .unwrap_or_else(|| format!("submit:{}", document.graph_id));
                     provenant_fabric_runtime::graph::patch::submission(
                         &mut document,
@@ -646,6 +647,8 @@ impl Factory {
                 status: GraphStatus::Paused,
                 outcome: None,
                 checkpoint: GraphCheckpoint {
+                    cancellation_request_receipt: None,
+
                     bases: None,
                     extra: Default::default(),
                     expansions: Vec::new(),
@@ -974,6 +977,8 @@ impl Factory {
             };
             journal
                 .bind(provenant_fabric_runtime::graph::GraphExecution {
+                    peer_origin_context: None,
+                    peer_submission_digest: None,
                     extra: Default::default(),
                     bases: GraphBaseBinding::new(review_base, integration_base),
                     directory: self.cwd.clone(),
@@ -1002,9 +1007,9 @@ impl Factory {
                 factory: rebound.as_ref().unwrap_or(self),
                 integration_base: GraphBaseBinding::new(review_base, integration_base),
                 integration_branch: document.integration_branch.clone(),
-                network: graph_network(document)?,
-                capability_overrides: graph_capability_overrides(document)?,
-                exclude: graph_exclude(document)?,
+                network: graph_network(document),
+                capability_overrides: graph_capability_overrides(document),
+                exclude: graph_exclude(document),
                 budget,
                 cancel,
                 prices: None,
@@ -1316,11 +1321,13 @@ impl Factory {
         match owner.peer(
             host,
             PeerAction::CancelSubmission {
-                extra: [(
-                    "graph_launch_actor".into(),
-                    serde_json::json!(attempt.launch_actor),
-                )]
-                .into(),
+                extra: Default::default(),
+                graph_context: provenant_fabric_runtime::hosts::GraphCancelContext {
+                    launch_actor: attempt
+                        .launch_actor
+                        .parse()
+                        .map_err(|_| FacadeError::StateCorrupt)?,
+                },
                 submission,
                 operation_id,
                 stop,

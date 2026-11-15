@@ -59,7 +59,7 @@ pub fn skipped(nodes: &[GraphNode]) -> Vec<(&str, &[WhenTerm])> {
 }
 
 /// Required inputs removed because a producer is skipped.
-fn removed_requirements(nodes: &[GraphNode], producer: &str) -> Vec<serde_json::Value> {
+fn removed_requirements(nodes: &[GraphNode], producer: &str) -> Vec<RemovedRequirement> {
     let mut removed = Vec::new();
     for node in nodes.iter().filter(|node| holds(&node.when)) {
         for input in node
@@ -67,7 +67,11 @@ fn removed_requirements(nodes: &[GraphNode], producer: &str) -> Vec<serde_json::
             .iter()
             .filter(|input| input.node == producer && !input.required_outputs.is_empty())
         {
-            removed.push(serde_json::json!({"consumer": node.id, "required_outputs": input.required_outputs}));
+            removed.push(RemovedRequirement {
+                consumer: node.id.clone(),
+                required_outputs: input.required_outputs.clone(),
+                verdict_input: false,
+            });
         }
         if let Some(spec) = &node.composite
             && spec.reduce_verdict
@@ -75,7 +79,11 @@ fn removed_requirements(nodes: &[GraphNode], producer: &str) -> Vec<serde_json::
                 export.node == producer && export.outputs.contains(&OutputKind::Verdict)
             })
         {
-            removed.push(serde_json::json!({"consumer": node.id, "verdict_input": true}));
+            removed.push(RemovedRequirement {
+                consumer: node.id.clone(),
+                required_outputs: Vec::new(),
+                verdict_input: true,
+            });
         }
     }
     removed
@@ -156,8 +164,7 @@ pub(super) fn prune(document: &GraphDocument) -> Result<Option<GraphDocument>, A
         if skipped.contains(node.id.as_str()) {
             let removed = removed_requirements(&document.nodes, &node.id);
             if !removed.is_empty() {
-                node.extra
-                    .insert("removed_requirements".into(), serde_json::json!(removed));
+                node.removed_requirements = removed;
             }
         }
     }

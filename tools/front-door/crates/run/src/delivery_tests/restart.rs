@@ -149,6 +149,7 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                     head: Some(head),
                     review_acceptance: None,
                     state: WriterDeliveryState::Failed {
+                        reason: None,
                         extra: Default::default(),
                         stage: WriterDeliveryStage::Interrupted,
                     },
@@ -188,6 +189,7 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                     head: Some(head),
                     review_acceptance: None,
                     state: WriterDeliveryState::Failed {
+                        reason: None,
                         extra: Default::default(),
                         stage: WriterDeliveryStage::Push,
                     },

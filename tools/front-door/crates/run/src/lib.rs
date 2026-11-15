@@ -37,9 +37,7 @@ mod store;
 mod telemetry_context;
 pub use telemetry_context::set_build_identity;
 mod limits;
-pub use limits::{
-    EXTENSIONS as LIMIT_EXTENSIONS, HostCaps, gh_budget, lane_limits, writer_budget_limits,
-};
+pub use limits::{HostCaps, gh_budget, lane_limits, writer_budget_limits};
 mod ci_scope;
 pub use ci_scope::{CiScope, ResolvedCiScope};
 mod gh_usage;
@@ -812,16 +810,13 @@ impl RunError {
             }
             Self::RetainedWriterImport { fence, worktree } => {
                 let path = safe_path(&fence.fence, destination);
-                diagnostic.extra.insert(
-                    "custody".into(),
-                    serde_json::json!({
-                        "scope": fence.scope,
-                        "fence": path,
-                        "lane": fence.lane,
-                        "reconcile": fence.reconcile(),
-                        "abandon": fence.abandon(),
-                    }),
-                );
+                diagnostic.custody = Some(provenant_records::diagnostic::RetainedCustody {
+                    scope: fence.scope,
+                    fence: path.clone(),
+                    lane: fence.lane.clone(),
+                    reconcile: fence.reconcile(),
+                    abandon: fence.abandon(),
+                });
                 diagnostic = diagnostic
                     .detail(format!(
                         "lane {}; retained attempt {}; fence {}; worktree {}",

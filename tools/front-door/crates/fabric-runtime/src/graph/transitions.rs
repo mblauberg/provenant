@@ -77,10 +77,7 @@ pub(super) fn continue_attempt(
         .ok_or("continuation has no predecessor")?;
     let mut current = previous.clone();
     current.key.attempt = successor.key.attempt();
-    current
-        .key
-        .extra
-        .insert("previous_attempt_ref".into(), reference.into());
+    current.key.previous_attempt_ref = Some(reference.clone());
     current.attempt_ref = Some(successor.attempt_ref);
     current.state = AttemptState::Running;
     current.outcome = None;
@@ -133,9 +130,7 @@ pub(super) fn apply_launch_metadata(
     warnings: Vec<String>,
 ) {
     if !warnings.is_empty() {
-        checkpoint.nodes[node_index]
-            .extra
-            .insert("warnings".into(), serde_json::json!(warnings));
+        checkpoint.nodes[node_index].warnings = warnings;
     }
 }
 
@@ -324,13 +319,12 @@ pub(super) fn apply_attempt_observation(
                     &upstream_findings,
                 );
                 if !repair::may_report_items(node, plan) {
-                    outputs.extra.remove("repair_items");
+                    outputs.repair_items = None;
                 }
                 if !plan.nodes.iter().any(|consumer| {
-                    consumer.extra.get("repair_scope_gate") == Some(&serde_json::Value::Bool(true))
-                        && consumer.depends_on.contains(&node.id)
+                    consumer.repair_scope_gate && consumer.depends_on.contains(&node.id)
                 }) {
-                    outputs.extra.remove("repair_design");
+                    outputs.repair_design = None;
                 }
                 if node.kind == Some(NodeKind::Synthesise) && node.dispositions.is_empty() {
                     retain_synthesis_findings(&mut outputs, &upstream_findings);
@@ -340,18 +334,14 @@ pub(super) fn apply_attempt_observation(
                         .role
                         .as_deref()
                         .and_then(|role| role.strip_prefix("lens."))
-                        .or_else(|| {
-                            node.extra
-                                .get("review_lens")
-                                .and_then(serde_json::Value::as_str)
-                        })
+                        .or_else(|| node.review_lens.as_deref())
                 {
                     for finding in &mut outputs.findings {
                         if !upstream_findings
                             .iter()
                             .any(|source| source.id == finding.id)
                         {
-                            finding.extra.insert("lens".into(), lens.into());
+                            finding.lens = Some(lens.to_owned());
                         }
                     }
                 }
@@ -447,7 +437,7 @@ pub(super) fn apply_attempt_observation(
                                         let verifier = node.dispositions.is_empty() && template::review_verifier(node);
                                         let mismatch = outputs.findings.iter().any(|finding| {
                                             if !overflow_ids.iter().any(|(id, _)| id == &finding.id) { return false; }
-                                            let status = if verifier { finding.extra.get("verification").and_then(serde_json::Value::as_str) } else { finding.disposition.as_deref() };
+                                            let status = if verifier { finding.verification.as_deref() } else { finding.disposition.as_deref() };
                                             status.is_none_or(|status| !proof.agrees(&finding.id, status, &overflow_ids))
                                         });
                                         mismatch.then(|| ("disposition_overflow_inconsistent", "structured findings disagree with their DISPOSITION lines".to_owned()))
@@ -461,7 +451,7 @@ pub(super) fn apply_attempt_observation(
                     retain_synthesis_findings(&mut outputs, &upstream_findings);
                     if let Some((code, _)) = &disposition_error {
                         outputs.verdict_error = Some((*code).into());
-                        outputs.extra.insert(review::PARTIAL.into(), true.into());
+                        outputs.partial = true;
                         outputs.findings_available = Some(false);
                     } else if partial_review {
                         review::mark_partial(&mut outputs);
@@ -641,11 +631,7 @@ pub(super) fn apply_attempt_observation(
                                         .review_base
                                         .as_deref()
                                         .or(graph_review_base.as_deref())
-                                        .or_else(|| {
-                                            node.extra
-                                                .get("review_base")
-                                                .and_then(serde_json::Value::as_str)
-                                        })
+                                        .or_else(|| node.review_base.as_deref())
                                         .and_then(|b| GitOid::parse(b).ok())
                                 });
                                 let findings = progress
@@ -806,6 +792,8 @@ pub(super) fn initial_checkpoint(
     GraphCheckpoint {
         bases,
         extra: Default::default(),
+        cancellation_request_receipt: None,
+        pending_writer_provisioning: Default::default(),
         expansions: Vec::new(),
         remaining: None,
         instance_id,
@@ -834,15 +822,8 @@ pub(super) fn initial_checkpoint(
             .nodes
             .iter()
             .map(|node| NodeProgress {
-                extra: node
-                    .extra
-                    .get("removed_requirements")
-                    .map(|value| {
-                        [("removed_requirements".into(), value.clone())]
-                            .into_iter()
-                            .collect()
-                    })
-                    .unwrap_or_default(),
+                extra: Default::default(),
+                removed_requirements: node.removed_requirements.clone(),
                 children: node.composite_members.clone(),
                 min_successful: node.composite.as_ref().and_then(|spec| spec.min_successful),
                 source_binding: node.source.clone(),
@@ -854,7 +835,23 @@ pub(super) fn initial_checkpoint(
                 writer_binding_pending: plans::writer(node),
                 review_base: None,
                 review_base_pending: node.access == AccessMode::ReadOnly
-                    && node.extra.contains_key("review_base"),
+                    && node.review_base.is_some(),
+                owner_notified: false,
+                children_cancelled: false,
+                detached_from_graph_cancel: false,
+                subtree_cancel: None,
+                yielded_slot: false,
+                stop_fence: false,
+                retry: None,
+                quota_redraw_spent: 0,
+                quota_redraw_archived: 0,
+                retry_generation: None,
+                container_retry: false,
+                concurrency_warning: None,
+                repair_growth: None,
+                review_verdict_correction_refused: None,
+                provisioned_source: None,
+                warnings: Vec::new(),
                 fragment: None,
                 handoff: None,
                 blocked: false,
@@ -871,6 +868,8 @@ pub(super) fn initial_checkpoint(
                 separation: None,
                 ci: None,
                 land: None,
+                settled_dependency_snapshots: Default::default(),
+                new_worktree_base: None,
                 id: node.id.clone(),
                 title: Some(node.title.as_deref().unwrap_or(&node.id).to_owned()),
                 worktree: node.worktree.clone(),
@@ -1031,9 +1030,7 @@ pub(super) fn admit_attempt(
             .count()
             >= cap
     });
-    checkpoint.nodes[node_index]
-        .extra
-        .remove("concurrency_warning");
+    checkpoint.nodes[node_index].concurrency_warning = None;
     if over_concurrency_cap {
         use provenant_records::policy::{Effect, Facts};
         let effect = policy.check(
@@ -1043,9 +1040,7 @@ pub(super) fn admit_attempt(
         match effect {
             Effect::Proceed => {}
             Effect::Warn(message) => {
-                checkpoint.nodes[node_index]
-                    .extra
-                    .insert("concurrency_warning".into(), message.into());
+                checkpoint.nodes[node_index].concurrency_warning = Some(message);
             }
             Effect::Refuse(diagnostic) => {
                 return Admission::PolicyRefused {
@@ -1171,6 +1166,7 @@ pub(super) fn begin_attempt(
         stop: None,
         attempt_ref: None,
         outcome: None,
+        host_refused_before_acceptance: false,
         launched: true,
         launch_actor,
         settled: 0,
@@ -1308,12 +1304,9 @@ pub(super) fn redraw_quota_alias(
 
 /// An automatic reset must retain the sealed allowance and all spent launches.
 pub(super) fn retain_automatic_retry_accounting(prior: &NodeProgress, next: &mut NodeProgress) {
-    let retry_policy = prior.extra.get("retry").cloned();
+    let retry_policy = prior.retry.clone();
     let spent = prior
-        .extra
-        .get("quota_redraw_spent")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0)
+        .quota_redraw_spent
         .saturating_add(
             prior
                 .attempts
@@ -1328,17 +1321,11 @@ pub(super) fn retain_automatic_retry_accounting(prior: &NodeProgress, next: &mut
                 .is_some_and(|attempt| !attempt.launched),
         ));
     let archived = prior
-        .extra
-        .get("quota_redraw_archived")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0)
+        .quota_redraw_archived
         .saturating_add(prior.attempts.len() as u64);
-    if let Some(policy) = retry_policy {
-        next.extra.insert("retry".into(), policy);
-    }
-    next.extra.insert("quota_redraw_spent".into(), spent.into());
-    next.extra
-        .insert("quota_redraw_archived".into(), archived.into());
+    next.retry = retry_policy;
+    next.quota_redraw_spent = spent;
+    next.quota_redraw_archived = archived;
 }
 
 fn attribute_blocker(
@@ -1477,12 +1464,8 @@ pub(super) fn node_action<'a>(
         return NodeAction::Wait { changed };
     }
     if checkpoint.nodes[index]
-        .extra
-        .get("retry_generation")
-        .is_none_or(|_| {
-            checkpoint.nodes[index].extra.get("container_retry")
-                == Some(&serde_json::Value::Bool(true))
-        })
+        .retry_generation
+        .is_none_or(|_| checkpoint.nodes[index].container_retry)
         && (loops::inactive_round(node, plan, checkpoint, positions)
             || repair::inactive_lens(node, plan, checkpoint, positions))
     {
@@ -1618,17 +1601,18 @@ pub(super) fn record_repair_growth(
     after: &str,
     grew: bool,
 ) {
-    progress.extra.insert(
-        "repair_growth".into(),
-        serde_json::json!({"before":before,"after":after,"grew":grew}),
-    );
+    progress.repair_growth = Some(RepairGrowth {
+        before: before.to_owned(),
+        after: after.to_owned(),
+        grew,
+    });
 }
 
 pub(super) fn record_retry_allowance(progress: &mut NodeProgress, retries: u8, origin: &str) {
-    progress.extra.insert(
-        "retry".into(),
-        serde_json::json!({"retries":retries,"origin":origin}),
-    );
+    progress.retry = Some(RetryAllowance {
+        retries,
+        origin: origin.to_owned(),
+    });
 }
 
 pub(super) fn record_provisioning(
@@ -1638,9 +1622,7 @@ pub(super) fn record_provisioning(
     path: &str,
     source: &str,
 ) {
-    checkpoint.nodes[node_index]
-        .extra
-        .insert("provisioned_source".into(), source.to_owned().into());
+    checkpoint.nodes[node_index].provisioned_source = Some(source.to_owned());
     if node.source.is_some() {
         checkpoint.nodes[node_index].source_commit = Some(source.to_owned());
     }
@@ -1653,9 +1635,7 @@ pub(super) fn record_provisioning(
 }
 
 pub(super) fn record_creation_base(progress: &mut NodeProgress, base: &str) {
-    progress
-        .extra
-        .insert("new_worktree_base".into(), base.into());
+    progress.new_worktree_base = Some(base.into());
 }
 
 pub(super) fn record_separation(progress: &mut NodeProgress, record: FamilySeparation) {
@@ -1846,20 +1826,17 @@ pub(super) fn attempt_key(
     {
         return Ok(attempt.key.clone());
     }
-    let mut attempt_extra = provenant_records::ExtraFields::default();
-    if let Some(generation) = checkpoint.nodes[node_index].extra.get("retry_generation") {
-        attempt_extra.insert("retry_generation".into(), generation.clone());
-    }
+    let retry_generation = checkpoint.nodes[node_index].retry_generation;
     let predecessor = checkpoint.nodes[node_index]
         .recorded_attempts()
         .filter(|attempt| attempt.state == AttemptState::Terminal)
         .filter_map(|attempt| attempt.attempt_ref.as_ref())
         .next_back();
-    if let Some(reference) = predecessor {
-        attempt_extra.insert("previous_attempt_ref".into(), reference.clone().into());
-    }
+    let previous_attempt_ref = predecessor.cloned();
     let key = AttemptKey {
-        extra: attempt_extra,
+        extra: Default::default(),
+        retry_generation,
+        previous_attempt_ref,
         graph_id: plan.graph_id.clone(),
         node_id: node.id.clone(),
         attempt: checkpoint.nodes[node_index]

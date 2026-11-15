@@ -69,14 +69,14 @@ pub(crate) fn recovery_refused(error: &RunError) -> bool {
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
 struct LaunchBinding {
     schema_version: u64,
-    scope: provenant_supervisor::custody::Scope,
+    scope: provenant_records::custody::Scope,
     push_url: String,
     lane_branch: String,
     pull_request_repo: Option<String>,
     destination: WriterDeliveryRequest,
 }
 impl LaunchBinding {
-    fn new(scope: provenant_supervisor::custody::Scope, bound: &BoundDelivery) -> Self {
+    fn new(scope: provenant_records::custody::Scope, bound: &BoundDelivery) -> Self {
         Self {
             schema_version: 1,
             scope,
@@ -155,7 +155,7 @@ impl HostDeliveryContext {
         writer: &WriterRequest,
         request: &WriterDeliveryRequest,
         attempt: &Directory,
-        scope: provenant_supervisor::custody::Scope,
+        scope: provenant_records::custody::Scope,
         head: GitOid,
         base: GitOid,
     ) -> Result<Self> {
@@ -174,7 +174,7 @@ impl HostDeliveryContext {
     pub(crate) fn seal_launch_binding(
         &self,
         attempt: &Directory,
-        scope: provenant_supervisor::custody::Scope,
+        scope: provenant_records::custody::Scope,
     ) -> Result<()> {
         let bound = self
             .bound
@@ -193,7 +193,7 @@ impl HostDeliveryContext {
     fn verify_launch_binding(
         &self,
         attempt: &Directory,
-        scope: provenant_supervisor::custody::Scope,
+        scope: provenant_records::custody::Scope,
     ) -> Result<()> {
         let sealed = crate::artifacts::read_sealed(attempt, BINDING_FILE, crate::RECORD_LIMIT)?
             .ok_or(RunError::Validation(BINDING_MISSING))?;
@@ -362,6 +362,7 @@ impl HostDeliveryContext {
     pub fn check_delivery_branch_with_facts(&self, project: &Path, target: &str) -> Result<()> {
         let writer = WriterRequest {
             extra: Default::default(),
+            custody_project: None,
             project: project.into(),
             worktree: project.into(),
         };
@@ -478,6 +479,7 @@ impl HostDeliveryContext {
             .ok_or(RunError::Validation("graph PR destination"))?;
         let writer = WriterRequest {
             extra: Default::default(),
+            custody_project: None,
             project: project.into(),
             worktree: project.into(),
         };
@@ -2527,11 +2529,11 @@ pub(crate) fn failed_state(error: &RunError) -> WriterDeliveryState {
         RunError::DeliveryPrepare { .. } => (Stage::Prepare, Some(prepare_reason(error))),
         _ => (Stage::Push, None),
     };
-    let mut extra = provenant_records::ExtraFields::default();
-    if let Some(reason) = reason {
-        extra.insert("reason".into(), reason.into());
+    WriterDeliveryState::Failed {
+        extra: Default::default(),
+        stage,
+        reason,
     }
-    WriterDeliveryState::Failed { extra, stage }
 }
 
 /// The subcommand words of a host call, for diagnostics. Global options and
@@ -3096,6 +3098,7 @@ pub(crate) fn deliver_once(
             head: host.head(writer).ok(),
             review_acceptance: None,
             state: WriterDeliveryState::Failed {
+                reason: None,
                 extra: Default::default(),
                 stage: Stage::Interrupted,
             },

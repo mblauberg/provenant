@@ -3,8 +3,9 @@
 //! resolves routes, applies fallback and builds the exact invocation.
 use crate::{artifacts::read_sealed, db::decode, *};
 use provenant_core::{ActorId, AttemptId, OperationId};
+use provenant_records::custody::Scope;
 use provenant_supervisor::custody::{
-    self, CapturePlan, ExitObservation, OwnedLaunch, ProviderCommand, PublicationReservation, Scope,
+    self, CapturePlan, ExitObservation, OwnedLaunch, ProviderCommand, PublicationReservation,
 };
 use rusqlite::params;
 use std::{
@@ -583,10 +584,7 @@ impl RunStore {
         if let Some(parent) = request.parent_attempt
             && self.attempt_floors_children(parent, call)
         {
-            task.extra.insert(
-                provenant_records::run::PARENT_SANDBOXED_FIELD.into(),
-                true.into(),
-            );
+            task.profile.parent_sandboxed = true;
         }
     }
     pub(crate) fn prepare_fresh_start(
@@ -819,90 +817,17 @@ pub enum Started {
     },
 }
 
-pub(crate) const ADMISSION_PORT_BINDING_FIELD: &str =
-    provenant_records::run::REPOSITORY_ADMISSION_BINDING_FIELD;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum AdmissionPhase {
-    AcquirePending,
-    Acquired,
-    ReleasePending,
-    Released,
-}
-
-impl AdmissionPhase {
-    fn command(self) -> Option<&'static str> {
-        match self {
-            Self::AcquirePending => Some("acquire"),
-            Self::ReleasePending => Some("release"),
-            Self::Acquired | Self::Released => None,
-        }
-    }
-}
-
-/// The command, source and lifecycle phase stay frozen with the attempt across
-/// config rotation and recovery. Repository commands key their idempotent
-/// acquire/release operations by attempt ID and lease epoch; release fences late
-/// acquire work for that epoch.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct AdmissionPortBinding {
-    pub(crate) source: provenant_config::PortSource,
-    pub(crate) command: provenant_config::PortCommand,
-    pub(crate) command_digest: provenant_records::FileDigest,
-    pub(crate) lease_epoch: u64,
-    pub(crate) phase: AdmissionPhase,
-}
-
-impl AdmissionPortBinding {
-    fn new(source: provenant_config::PortSource, command: &provenant_config::PortCommand) -> Self {
-        Self {
-            source,
-            command: command.clone(),
-            command_digest: command.digest(),
-            lease_epoch: 1,
-            phase: AdmissionPhase::AcquirePending,
-        }
-    }
-
-    pub(crate) fn valid(&self) -> bool {
-        self.lease_epoch != 0 && self.command_digest == self.command.digest()
-    }
-
-    pub(crate) fn can_transition_to(&self, next: AdmissionPhase, active_owner: bool) -> bool {
-        matches!(
-            (self.phase, next),
-            (AdmissionPhase::AcquirePending, AdmissionPhase::Acquired)
-                | (
-                    AdmissionPhase::AcquirePending,
-                    AdmissionPhase::ReleasePending
-                )
-                | (AdmissionPhase::Acquired, AdmissionPhase::ReleasePending)
-                | (AdmissionPhase::ReleasePending, AdmissionPhase::Released)
-        ) || (active_owner
-            && self.phase == AdmissionPhase::Released
-            && next == AdmissionPhase::AcquirePending)
-    }
-}
-
 pub(crate) fn mark_admission_release_pending(record: &mut AttemptRecord) -> Result<()> {
-    let Some(value) = record.extra.get(ADMISSION_PORT_BINDING_FIELD).cloned() else {
+    let Some(binding) = record.repository_admission_binding.as_mut() else {
         return Ok(());
     };
-    let mut binding: AdmissionPortBinding = serde_json::from_value(value)
-        .map_err(|_| RunError::Validation("stored repository admission binding"))?;
     if !binding.valid() {
         return Err(RunError::Validation(
             "stored repository admission binding digest",
         ));
     }
-    if binding.phase != AdmissionPhase::Released {
-        binding.phase = AdmissionPhase::ReleasePending;
-        record.extra.insert(
-            ADMISSION_PORT_BINDING_FIELD.into(),
-            serde_json::to_value(binding)
-                .map_err(|_| RunError::Validation("repository admission binding"))?,
-        );
+    if binding.phase != RepositoryAdmissionPhase::Released {
+        binding.phase = RepositoryAdmissionPhase::ReleasePending;
     }
     Ok(())
 }
@@ -1164,14 +1089,13 @@ impl RunStore {
         request: &CanonicalRequest,
         record: &AttemptRecord,
         call: &Request<'_>,
-    ) -> std::result::Result<(AttemptRecord, Option<AdmissionPortBinding>), &'static str> {
-        if let Some(value) = record.extra.get(ADMISSION_PORT_BINDING_FIELD) {
-            let binding: AdmissionPortBinding = serde_json::from_value(value.clone())
-                .map_err(|_| "stored repository admission binding is invalid")?;
+    ) -> std::result::Result<(AttemptRecord, Option<RepositoryAdmissionBinding>), &'static str>
+    {
+        if let Some(binding) = &record.repository_admission_binding {
             if !binding.valid() {
                 return Err("stored repository admission binding digest is invalid");
             }
-            return Ok((record.clone(), Some(binding)));
+            return Ok((record.clone(), Some(binding.clone())));
         }
         let Some(writer) = request.task.writer.as_ref() else {
             return Ok((record.clone(), None));
@@ -1188,19 +1112,14 @@ impl RunStore {
         let Some(command) = command else {
             return Ok((record.clone(), None));
         };
-        let source = ports.admission.source;
-        let binding = AdmissionPortBinding::new(source, command);
-        let encoded = serde_json::to_value(&binding)
-            .map_err(|_| "repository admission binding could not be encoded")?;
+        let binding = RepositoryAdmissionBinding::new(ports.admission.source, command);
         let updated = self
-            .record_admission_binding(record, encoded, call)
+            .record_admission_binding(record, binding, call)
             .map_err(|_| "repository admission binding could not be stored")?;
-        let value = updated
-            .extra
-            .get(ADMISSION_PORT_BINDING_FIELD)
+        let binding = updated
+            .repository_admission_binding
+            .clone()
             .ok_or("repository admission binding was not stored")?;
-        let binding: AdmissionPortBinding = serde_json::from_value(value.clone())
-            .map_err(|_| "stored repository admission binding is invalid")?;
         if !binding.valid() {
             return Err("stored repository admission binding digest is invalid");
         }
@@ -1211,8 +1130,8 @@ impl RunStore {
         &self,
         request: &CanonicalRequest,
         attempt: AttemptId,
-        binding: &AdmissionPortBinding,
-        phase: AdmissionPhase,
+        binding: &RepositoryAdmissionBinding,
+        phase: RepositoryAdmissionPhase,
         cancel: &provenant_core::CancelToken,
     ) -> bool {
         let Ok(executor) = provenant_os::exec::SystemExecutor::new(1) else {
@@ -1225,8 +1144,8 @@ impl RunStore {
         &self,
         request: &CanonicalRequest,
         attempt: AttemptId,
-        binding: &AdmissionPortBinding,
-        phase: AdmissionPhase,
+        binding: &RepositoryAdmissionBinding,
+        phase: RepositoryAdmissionPhase,
         cancel: &provenant_core::CancelToken,
         executor: &dyn provenant_os::exec::Executor,
     ) -> bool {
@@ -1331,8 +1250,8 @@ impl RunStore {
         run_phase: &mut dyn FnMut(
             &CanonicalRequest,
             AttemptId,
-            &AdmissionPortBinding,
-            AdmissionPhase,
+            &RepositoryAdmissionBinding,
+            RepositoryAdmissionPhase,
             &provenant_core::CancelToken,
         ) -> bool,
     ) -> (AttemptRecord, Option<String>) {
@@ -1352,13 +1271,13 @@ impl RunStore {
         &self,
         request: &CanonicalRequest,
         record: &AttemptRecord,
-        binding: Option<AdmissionPortBinding>,
+        binding: Option<RepositoryAdmissionBinding>,
         call: &Request<'_>,
         run_phase: &mut dyn FnMut(
             &CanonicalRequest,
             AttemptId,
-            &AdmissionPortBinding,
-            AdmissionPhase,
+            &RepositoryAdmissionBinding,
+            RepositoryAdmissionPhase,
             &provenant_core::CancelToken,
         ) -> bool,
     ) -> (AttemptRecord, Option<String>) {
@@ -1375,8 +1294,12 @@ impl RunStore {
                 Some("attempt state changed during repository admission".into()),
             );
         }
-        if binding.phase == AdmissionPhase::Released {
-            match self.record_admission_phase(&record, AdmissionPhase::AcquirePending, call) {
+        if binding.phase == RepositoryAdmissionPhase::Released {
+            match self.record_admission_phase(
+                &record,
+                RepositoryAdmissionPhase::AcquirePending,
+                call,
+            ) {
                 Ok(updated) => {
                     record = updated;
                     binding = match self.admission_binding(request, &record, call) {
@@ -1398,10 +1321,10 @@ impl RunStore {
                 }
             }
         }
-        if binding.phase == AdmissionPhase::Acquired {
+        if binding.phase == RepositoryAdmissionPhase::Acquired {
             return (record, None);
         }
-        if binding.phase == AdmissionPhase::ReleasePending {
+        if binding.phase == RepositoryAdmissionPhase::ReleasePending {
             let released = self.release_admission_with_phase(&record, call, run_phase);
             if !released {
                 let _ = writeln!(
@@ -1429,11 +1352,11 @@ impl RunStore {
             request,
             record.attempt_id,
             &binding,
-            AdmissionPhase::AcquirePending,
+            RepositoryAdmissionPhase::AcquirePending,
             call.cancel,
         );
         let current = if acquired {
-            match self.record_admission_phase(&record, AdmissionPhase::Acquired, call) {
+            match self.record_admission_phase(&record, RepositoryAdmissionPhase::Acquired, call) {
                 Ok(updated) => return (updated, None),
                 Err(_) => self.record(record.attempt_id, call).unwrap_or(record),
             }
@@ -1441,11 +1364,10 @@ impl RunStore {
             self.record(record.attempt_id, call).unwrap_or(record)
         };
         let current_phase = current
-            .extra
-            .get(ADMISSION_PORT_BINDING_FIELD)
-            .and_then(|value| serde_json::from_value::<AdmissionPortBinding>(value.clone()).ok())
+            .repository_admission_binding
+            .as_ref()
             .map(|binding| binding.phase);
-        if current_phase == Some(AdmissionPhase::Acquired)
+        if current_phase == Some(RepositoryAdmissionPhase::Acquired)
             && matches!(
                 current.state,
                 AttemptState::Queued { .. } | AttemptState::Starting { .. }
@@ -1466,11 +1388,14 @@ impl RunStore {
                 Some("attempt state changed during repository admission".into()),
             );
         }
-        let current =
-            match self.record_admission_phase(&current, AdmissionPhase::ReleasePending, call) {
-                Ok(updated) => updated,
-                Err(_) => self.record(current.attempt_id, call).unwrap_or(current),
-            };
+        let current = match self.record_admission_phase(
+            &current,
+            RepositoryAdmissionPhase::ReleasePending,
+            call,
+        ) {
+            Ok(updated) => updated,
+            Err(_) => self.record(current.attempt_id, call).unwrap_or(current),
+        };
         let released = self.release_admission_with_phase(&current, call, run_phase);
         if !released {
             let _ = writeln!(
@@ -1506,7 +1431,7 @@ impl RunStore {
     fn admission_release_receipt_confirmed(
         &self,
         attempt: AttemptId,
-        binding: &AdmissionPortBinding,
+        binding: &RepositoryAdmissionBinding,
     ) -> bool {
         let key = format!("{attempt}:{}", binding.lease_epoch);
         provenant_config::port_command_receipt_proof(
@@ -1530,71 +1455,72 @@ impl RunStore {
         run_phase: &mut dyn FnMut(
             &CanonicalRequest,
             AttemptId,
-            &AdmissionPortBinding,
-            AdmissionPhase,
+            &RepositoryAdmissionBinding,
+            RepositoryAdmissionPhase,
             &provenant_core::CancelToken,
         ) -> bool,
     ) -> bool {
-        let Some(value) = record.extra.get(ADMISSION_PORT_BINDING_FIELD) else {
+        let Some(mut binding) = record.repository_admission_binding.clone() else {
             return true;
         };
-        let mut binding = match serde_json::from_value::<AdmissionPortBinding>(value.clone()) {
-            Ok(binding) if binding.valid() => binding,
-            _ => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: stored repository admission binding is invalid; release was not run"
-                );
-                return false;
-            }
-        };
-        if binding.phase == AdmissionPhase::Released {
+        if !binding.valid() {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: stored repository admission binding digest is invalid; release was not run"
+            );
+            return false;
+        }
+        if binding.phase == RepositoryAdmissionPhase::Released {
             return true;
         }
         let mut current = match self.record(record.attempt_id, call) {
             Ok(current) => current,
             Err(_) => return false,
         };
-        let Some(current_value) = current.extra.get(ADMISSION_PORT_BINDING_FIELD) else {
+        let Some(current_binding) = current.repository_admission_binding.clone() else {
             return false;
         };
-        binding = match serde_json::from_value::<AdmissionPortBinding>(current_value.clone()) {
-            Ok(binding) if binding.valid() => binding,
-            _ => return false,
-        };
-        if binding.phase == AdmissionPhase::Released {
+        if !current_binding.valid() {
+            return false;
+        }
+        binding = current_binding;
+        if binding.phase == RepositoryAdmissionPhase::Released {
             return true;
         }
         if matches!(current.state, AttemptState::Terminal { .. })
-            && binding.phase == AdmissionPhase::ReleasePending
+            && binding.phase == RepositoryAdmissionPhase::ReleasePending
             && self.admission_release_receipt_confirmed(record.attempt_id, &binding)
         {
             return true;
         }
-        if binding.phase != AdmissionPhase::ReleasePending {
-            match self.record_admission_phase(&current, AdmissionPhase::ReleasePending, call) {
+        if binding.phase != RepositoryAdmissionPhase::ReleasePending {
+            match self.record_admission_phase(
+                &current,
+                RepositoryAdmissionPhase::ReleasePending,
+                call,
+            ) {
                 Ok(updated) => current = updated,
                 Err(_) => {
                     current = match self.record(record.attempt_id, call) {
                         Ok(current) => current,
                         Err(_) => return false,
                     };
-                    let Some(value) = current.extra.get(ADMISSION_PORT_BINDING_FIELD) else {
+                    let Some(current_binding) = current.repository_admission_binding.clone() else {
                         return false;
                     };
-                    binding = match serde_json::from_value::<AdmissionPortBinding>(value.clone()) {
-                        Ok(binding) if binding.valid() => binding,
-                        _ => return false,
-                    };
-                    if binding.phase == AdmissionPhase::Released {
+                    if !current_binding.valid() {
+                        return false;
+                    }
+                    binding = current_binding;
+                    if binding.phase == RepositoryAdmissionPhase::Released {
                         return true;
                     }
-                    if binding.phase != AdmissionPhase::ReleasePending {
+                    if binding.phase != RepositoryAdmissionPhase::ReleasePending {
                         return false;
                     }
                 }
             }
-            binding.phase = AdmissionPhase::ReleasePending;
+            binding.phase = RepositoryAdmissionPhase::ReleasePending;
         }
         let request = match self.request(record.attempt_id, call) {
             Ok(request) => request,
@@ -1610,7 +1536,7 @@ impl RunStore {
             &request,
             record.attempt_id,
             &binding,
-            AdmissionPhase::ReleasePending,
+            RepositoryAdmissionPhase::ReleasePending,
             &provenant_core::CancelToken::new(),
         ) {
             let _ = writeln!(
@@ -1622,7 +1548,7 @@ impl RunStore {
         if matches!(current.state, AttemptState::Terminal { .. }) {
             return self.admission_release_receipt_confirmed(record.attempt_id, &binding);
         }
-        match self.record_admission_phase(&current, AdmissionPhase::Released, call) {
+        match self.record_admission_phase(&current, RepositoryAdmissionPhase::Released, call) {
             Ok(_) => true,
             Err(_) => {
                 let latest = match self.record(record.attempt_id, call) {
@@ -1632,18 +1558,20 @@ impl RunStore {
                 if matches!(latest.state, AttemptState::Terminal { .. }) {
                     return self.admission_release_receipt_confirmed(record.attempt_id, &binding);
                 }
-                let Some(value) = latest.extra.get(ADMISSION_PORT_BINDING_FIELD) else {
+                let Some(latest_binding) = latest.repository_admission_binding.clone() else {
                     return false;
                 };
-                let latest_binding: AdmissionPortBinding =
-                    match serde_json::from_value::<AdmissionPortBinding>(value.clone()) {
-                        Ok(binding) if binding.valid() => binding,
-                        _ => return false,
-                    };
-                latest_binding.phase == AdmissionPhase::Released
-                    || (latest_binding.phase == AdmissionPhase::ReleasePending
+                if !latest_binding.valid() {
+                    return false;
+                }
+                latest_binding.phase == RepositoryAdmissionPhase::Released
+                    || (latest_binding.phase == RepositoryAdmissionPhase::ReleasePending
                         && self
-                            .record_admission_phase(&latest, AdmissionPhase::Released, call)
+                            .record_admission_phase(
+                                &latest,
+                                RepositoryAdmissionPhase::Released,
+                                call,
+                            )
                             .is_ok())
             }
         }
@@ -2685,12 +2613,7 @@ mod policy_reporting_tests {
                 prior: Option<&AttemptRecord>,
             ) -> std::result::Result<PreparedLaunch, Box<PrepareRefusal>> {
                 assert_eq!(prior.map(|record| record.attempt_id), self.prior);
-                assert_eq!(
-                    task.extra
-                        .get(provenant_records::run::PARENT_SANDBOXED_FIELD)
-                        .and_then(serde_json::Value::as_bool),
-                    Some(true)
-                );
+                assert_eq!(task.profile.parent_sandboxed, true);
                 let strength = task
                     .profile
                     .knobs
@@ -3176,7 +3099,8 @@ mod admission_port_lifecycle_tests {
         let mut prepared = input();
         let attempt = prepared.attempt_id;
         prepared.request.task.writer = Some(provenant_records::run::WriterRequest {
-            extra: crate::tests::writer_extra(),
+            extra: Default::default(),
+            custody_project: Some(crate::tests::writer_project()),
             project: project.clone(),
             worktree: project.join("lane"),
         });
@@ -3189,9 +3113,9 @@ mod admission_port_lifecycle_tests {
             .map_err(|error| std::io::Error::other(error.to_owned()))?;
         let binding = binding
             .ok_or_else(|| std::io::Error::other("project admission command was not bound"))?;
-        assert_eq!(binding.source, provenant_config::PortSource::Project);
-        assert_eq!(binding.phase, AdmissionPhase::AcquirePending);
-        assert!(record.extra.contains_key(ADMISSION_PORT_BINDING_FIELD));
+        assert_eq!(binding.source, provenant_records::PortSource::Project);
+        assert_eq!(binding.phase, RepositoryAdmissionPhase::AcquirePending);
+        assert!(record.repository_admission_binding.is_some());
 
         // Busy acquisition is followed by a failed release. Both remain durable
         // in the same attempt binding and the attempt stays queued for retry.
@@ -3208,9 +3132,11 @@ mod admission_port_lifecycle_tests {
         );
         assert!(skipped.is_some());
         assert!(matches!(record.state, AttemptState::Queued { .. }));
-        let stored: AdmissionPortBinding =
-            serde_json::from_value(record.extra[ADMISSION_PORT_BINDING_FIELD].clone())?;
-        assert_eq!(stored.phase, AdmissionPhase::ReleasePending);
+        let stored: RepositoryAdmissionBinding = record
+            .repository_admission_binding
+            .clone()
+            .ok_or("missing repository admission binding")?;
+        assert_eq!(stored.phase, RepositoryAdmissionPhase::ReleasePending);
 
         // The release retry and the next acquisition still use the bound project
         // command after the effective source rotates to the host declaration.
@@ -3223,7 +3149,7 @@ mod admission_port_lifecycle_tests {
             provenant_config::PortTable::read_for(Some(&project), context.state_root.as_path())?;
         assert_eq!(
             effective.admission.source,
-            provenant_config::PortSource::Host
+            provenant_records::PortSource::Host
         );
         let rotated_program = match effective.admission.backend {
             provenant_config::PortBackend::Command { command } => command.argv[0].clone(),
@@ -3256,11 +3182,19 @@ mod admission_port_lifecycle_tests {
         assert!(skipped.is_none());
         let mut terminal_intent = record.clone();
         mark_admission_release_pending(&mut terminal_intent)?;
-        let terminal_binding: AdmissionPortBinding =
-            serde_json::from_value(terminal_intent.extra[ADMISSION_PORT_BINDING_FIELD].clone())?;
-        assert_eq!(terminal_binding.phase, AdmissionPhase::ReleasePending);
-        let record =
-            store.record_admission_phase(&record, AdmissionPhase::ReleasePending, &call)?;
+        let terminal_binding: RepositoryAdmissionBinding = terminal_intent
+            .repository_admission_binding
+            .clone()
+            .ok_or("missing repository admission binding")?;
+        assert_eq!(
+            terminal_binding.phase,
+            RepositoryAdmissionPhase::ReleasePending
+        );
+        let record = store.record_admission_phase(
+            &record,
+            RepositoryAdmissionPhase::ReleasePending,
+            &call,
+        )?;
         assert!(store.release_admission_with_phase(
             &record,
             &call,
@@ -3271,9 +3205,11 @@ mod admission_port_lifecycle_tests {
             },
         ));
         let final_record = store.record(attempt, &call)?;
-        let binding: AdmissionPortBinding =
-            serde_json::from_value(final_record.extra[ADMISSION_PORT_BINDING_FIELD].clone())?;
-        assert_eq!(binding.phase, AdmissionPhase::Released);
+        let binding: RepositoryAdmissionBinding = final_record
+            .repository_admission_binding
+            .clone()
+            .ok_or("missing repository admission binding")?;
+        assert_eq!(binding.phase, RepositoryAdmissionPhase::Released);
         assert_eq!(binding.lease_epoch, 2);
         assert!(matches!(final_record.state, AttemptState::Queued { .. }));
         let calls = executor.calls.lock().expect("gate calls mutex");
@@ -3305,20 +3241,26 @@ mod admission_port_lifecycle_tests {
             &call,
             &mut |_, id, binding, phase, _| {
                 observed.push((phase, binding.lease_epoch));
-                if phase == AdmissionPhase::AcquirePending {
+                if phase == RepositoryAdmissionPhase::AcquirePending {
                     let current = store.record(id, &call).expect("acquiring record");
                     store
-                        .record_admission_phase(&current, AdmissionPhase::ReleasePending, &call)
+                        .record_admission_phase(
+                            &current,
+                            RepositoryAdmissionPhase::ReleasePending,
+                            &call,
+                        )
                         .expect("concurrent release fence");
                 }
                 true
             },
         );
         assert!(skipped.is_some());
-        let fenced: AdmissionPortBinding =
-            serde_json::from_value(record.extra[ADMISSION_PORT_BINDING_FIELD].clone())?;
-        assert_eq!(fenced.phase, AdmissionPhase::Released);
-        assert!(observed.contains(&(AdmissionPhase::ReleasePending, fenced.lease_epoch)));
+        let fenced: RepositoryAdmissionBinding = record
+            .repository_admission_binding
+            .clone()
+            .ok_or("missing repository admission binding")?;
+        assert_eq!(fenced.phase, RepositoryAdmissionPhase::Released);
+        assert!(observed.contains(&(RepositoryAdmissionPhase::ReleasePending, fenced.lease_epoch)));
         Ok(())
     }
     #[test]
@@ -3342,7 +3284,8 @@ mod admission_port_lifecycle_tests {
         let mut input = input();
         let attempt = input.attempt_id;
         input.request.task.writer = Some(provenant_records::run::WriterRequest {
-            extra: crate::tests::writer_extra(),
+            extra: Default::default(),
+            custody_project: Some(crate::tests::writer_project()),
             project: project.clone(),
             worktree: project.join("lane"),
         });
@@ -3397,14 +3340,16 @@ mod admission_port_lifecycle_tests {
             AttemptState::Starting { .. }
         ));
 
-        let binding: AdmissionPortBinding =
-            serde_json::from_value(pending.extra[ADMISSION_PORT_BINDING_FIELD].clone())?;
+        let binding: RepositoryAdmissionBinding = pending
+            .repository_admission_binding
+            .clone()
+            .ok_or("missing repository admission binding")?;
         let (released, skipped) = store.admission_skip_with_phase_bound(
             &request,
             &pending,
             Some(binding),
             &call,
-            &mut |_, _, _, phase, _| phase == AdmissionPhase::ReleasePending,
+            &mut |_, _, _, phase, _| phase == RepositoryAdmissionPhase::ReleasePending,
         );
         assert!(skipped.is_some());
         let queued = store
@@ -3501,21 +3446,22 @@ mod admission_port_lifecycle_tests {
         let attempt = input.attempt_id;
         store.create(&input, &call)?;
         let queued = store.record(attempt, &call)?;
-        let command = provenant_config::PortCommand {
+        let command = provenant_records::PortCommand {
             argv: vec![
                 temp.path()
                     .join("not-executed-admission-command")
                     .display()
                     .to_string(),
             ],
-            exit_codes: provenant_config::CommandExitCodes {
+            exit_codes: provenant_records::CommandExitCodes {
                 success: vec![0],
                 unknown: vec![75],
-                other: provenant_config::ExitDisposition::Refused,
+                other: provenant_records::ExitDisposition::Refused,
             },
         };
-        let binding = AdmissionPortBinding::new(provenant_config::PortSource::Project, &command);
-        store.record_admission_binding(&queued, serde_json::to_value(&binding)?, &call)?;
+        let binding =
+            RepositoryAdmissionBinding::new(provenant_records::PortSource::Project, &command);
+        store.record_admission_binding(&queued, binding, &call)?;
         let terminal = store
             .withdraw(
                 attempt,
@@ -3528,9 +3474,14 @@ mod admission_port_lifecycle_tests {
                 &call,
             )?
             .ok_or("attempt did not settle")?;
-        let terminal_binding: AdmissionPortBinding =
-            serde_json::from_value(terminal.extra[ADMISSION_PORT_BINDING_FIELD].clone())?;
-        assert_eq!(terminal_binding.phase, AdmissionPhase::ReleasePending);
+        let terminal_binding = terminal
+            .repository_admission_binding
+            .clone()
+            .ok_or("missing repository admission binding")?;
+        assert_eq!(
+            terminal_binding.phase,
+            RepositoryAdmissionPhase::ReleasePending
+        );
 
         // A matching sidecar receipt proves an idempotent release while the
         // immutable terminal AttemptRecord remains byte-for-byte unchanged.
@@ -3570,7 +3521,7 @@ mod admission_port_lifecycle_tests {
             ),)
         );
         assert!(matches!(
-            store.record_admission_phase(&terminal, AdmissionPhase::Released, &call),
+            store.record_admission_phase(&terminal, RepositoryAdmissionPhase::Released, &call),
             Err(RunError::Conflict)
         ));
         assert_eq!(store.record(attempt, &call)?, terminal);

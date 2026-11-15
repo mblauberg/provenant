@@ -195,6 +195,9 @@ fn resumed_lane_settlement_ignores_terminal_graph() -> Result<(), Box<dyn std::e
         &clock,
     )?;
     journal.bind(graph::GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+
         bases: None,
         directory: fixture.rig.project.clone(),
         document,
@@ -373,6 +376,9 @@ fn unsuccessful_lanes_retain_the_worktree_even_after_delivery()
     ] {
         let state = AttemptState::Terminal {
             extra: Default::default(),
+            terminal_cause: None,
+            terminal_note: None,
+            stop: None,
             outcome,
             exit_code: Some(1),
             finished_at: provenant_core::WallTime::from_micros(0)?,
@@ -383,6 +389,9 @@ fn unsuccessful_lanes_retain_the_worktree_even_after_delivery()
     }
     let succeeded = AttemptState::Terminal {
         extra: Default::default(),
+        terminal_cause: None,
+        terminal_note: None,
+        stop: None,
         outcome: Outcome::Succeeded,
         exit_code: Some(0),
         finished_at: provenant_core::WallTime::from_micros(0)?,
@@ -499,12 +508,13 @@ fn writer_repository_open_failure_hides_unanchored_project_path()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let root = std::fs::canonicalize(temp.path())?;
+    let project = provenant_core::ProjectId::from_bytes([1; 16]);
     let request = provenant_run::WriterRequest {
         extra: Default::default(),
+        custody_project: Some(project),
         project: root.clone(),
         worktree: root.join("writer"),
     };
-    let project = provenant_core::ProjectId::from_bytes([1; 16]);
     let error = match provenant_run::prepare_writer(&request, &root, project) {
         Ok(_) => return Err("non-repository unexpectedly opened".into()),
         Err(error) => super::run_error(error),
@@ -615,6 +625,7 @@ fn submit_lane_refusal_maps_to_dispatch_refused() -> Result<(), Box<dyn std::err
             network: None,
             capability: Vec::new(),
             no_capability: Vec::new(),
+            provenance: None,
         },
         Path::new("never-opened-state"),
         &provenant_core::CredentialRoots::for_home(Path::new("/fixture/host-home")),

@@ -1303,12 +1303,12 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
 
         let mut ports = provenant_config::PortTable::builtin();
         ports.ci_observation.backend = provenant_config::PortBackend::Command {
-            command: provenant_config::PortCommand {
+            command: provenant_records::PortCommand {
                 argv: vec![command.to_string_lossy().into_owned()],
-                exit_codes: provenant_config::CommandExitCodes {
+                exit_codes: provenant_records::CommandExitCodes {
                     success: vec![0],
                     unknown: Vec::new(),
-                    other: provenant_config::ExitDisposition::Refused,
+                    other: provenant_records::ExitDisposition::Refused,
                 },
             },
         };

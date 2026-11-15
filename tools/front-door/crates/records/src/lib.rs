@@ -23,6 +23,7 @@ mod jsonc;
 mod path_wire;
 pub mod policy;
 pub mod port_receipt;
+pub mod ports;
 mod source;
 pub mod telemetry_context;
 mod trace;
@@ -44,8 +45,9 @@ pub use jsonc::{JsoncDocument, JsoncToken, JsoncTokenKind, decode_jsonc};
 pub use path_wire::{PathWire, PathWireError, StructuredPathWire};
 pub use port_receipt::{
     DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, PORT_COMMAND_RECEIPT_SCHEMA_VERSION, PortCommandBackend,
-    PortCommandDisposition, PortCommandReceipt, PortReceiptLifetime, PortSource,
+    PortCommandDisposition, PortCommandReceipt, PortReceiptLifetime,
 };
+pub use ports::{CommandExitCodes, ExitDisposition, PortCommand, PortSource};
 pub use source::{SourceDigest, SourceDigestError, SourceInput, source_digest};
 pub use trace::Trace;
 pub use usage_identity::{
@@ -81,6 +83,7 @@ pub mod run;
 
 // Format-2 records (#3078). Callers adopt them in later slices.
 pub mod finding_decision;
+pub mod graph;
 pub mod limit;
 pub mod pause;
 pub mod stop;

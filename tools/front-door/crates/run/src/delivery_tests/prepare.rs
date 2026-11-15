@@ -189,7 +189,8 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
         &store_root.join("state"),
     )?;
     let writer = WriterRequest {
-        extra: writer_custody_extra(custody_project),
+        extra: Default::default(),
+        custody_project: Some(custody_project),
         project,
         worktree: lane.clone(),
     };
@@ -303,6 +304,7 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
     )?;
     let idle_writer = WriterRequest {
         extra: writer.extra.clone(),
+        custody_project: writer.custody_project,
         project: writer.project.clone(),
         worktree: idle_lane.clone(),
     };
@@ -353,6 +355,7 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
     let pending = WriterDeliveryReceipt {
         branch: "interrupted".into(),
         state: WriterDeliveryState::Failed {
+            reason: None,
             extra: Default::default(),
             stage: WriterDeliveryStage::Interrupted,
         },
@@ -647,7 +650,7 @@ fn publication_cleanup_never_removes_another_import_pin()
         execution.project_id,
     )?;
     let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
-    let scope = provenant_supervisor::custody::Scope {
+    let scope = provenant_records::custody::Scope {
         attempt: provenant_core::AttemptId::from_bytes([99; 16]),
         // A live lease never has generation 0; the record's own scope does.
         generation: 1,
@@ -753,7 +756,8 @@ fn host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch()
         &store_root.join("state"),
     )?;
     let writer = WriterRequest {
-        extra: writer_custody_extra(custody_project),
+        extra: Default::default(),
+        custody_project: Some(custody_project),
         project,
         worktree: lane.clone(),
     };

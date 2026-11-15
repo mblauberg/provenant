@@ -128,6 +128,70 @@ pub enum SpecConcernStatus {
     Stopped,
 }
 
+/// Typed scope evidence attached by the host after settlement.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WriteScopeReport {
+    Full {
+        #[serde(deserialize_with = "scope_report_schema")]
+        schema_version: u64,
+        code: String,
+        base: String,
+        head: String,
+        strength: crate::policy::Strength,
+        source: crate::policy::Source,
+        out_of_scope_paths: Vec<crate::PathWire>,
+    },
+    Compact {
+        code: String,
+        strength: crate::policy::Strength,
+        source: crate::policy::Source,
+        paths_artifact: String,
+        out_of_scope_count: usize,
+        paths_omitted_from_handoff: bool,
+    },
+}
+
+fn scope_report_schema<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    let version = u64::deserialize(deserializer)?;
+    crate::RecordHeader::new(version)
+        .map(|header| header.schema_version())
+        .map_err(serde::de::Error::custom)
+}
+
+impl WriteScopeReport {
+    pub fn compact(&self) -> Self {
+        match self {
+            Self::Full {
+                code,
+                strength,
+                source,
+                out_of_scope_paths,
+                ..
+            } => Self::Compact {
+                code: code.clone(),
+                strength: *strength,
+                source: *source,
+                paths_artifact: "policy-write-scope.json".into(),
+                out_of_scope_count: out_of_scope_paths.len(),
+                paths_omitted_from_handoff: true,
+            },
+            Self::Compact { .. } => self.clone(),
+        }
+    }
+
+    pub fn out_of_scope_count(&self) -> usize {
+        match self {
+            Self::Full {
+                out_of_scope_paths, ..
+            } => out_of_scope_paths.len(),
+            Self::Compact {
+                out_of_scope_count, ..
+            } => *out_of_scope_count,
+        }
+    }
+}
+
 fn strings<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
     // A visitor preserves the item path (e.g. verify[0]) on an invalid array.
     struct Strings;
@@ -231,6 +295,8 @@ handoff_fields! {
     verify: Vec<String> => |v: &Vec<String>| strings_valid(v);
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     spec_concerns: Vec<SpecConcern> => |v: &Vec<SpecConcern>| concerns_valid(v);
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    write_scope: Option<WriteScopeReport> => |_: &Option<WriteScopeReport>| true;
 }
 
 impl Handoff {
@@ -550,6 +616,14 @@ mod tests {
                 evidence: "Evidence".into(),
                 proposed_change: "Change".into(),
                 status,
+            });
+            handoff.write_scope = Some(WriteScopeReport::Compact {
+                code: "write_scope".into(),
+                strength: crate::policy::Strength::Warn,
+                source: crate::policy::Source::Host,
+                paths_artifact: "policy-write-scope.json".into(),
+                out_of_scope_count: 1,
+                paths_omitted_from_handoff: true,
             });
             handoff
                 .extra

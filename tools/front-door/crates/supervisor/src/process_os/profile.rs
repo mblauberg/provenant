@@ -2,7 +2,7 @@
 //! final spawn edge a verified snapshot feeds an inherited read pipe: Darwin's
 //! sandbox-exec rewrites regular-file /dev/fd names and cannot consume them.
 use provenant_os::fs::Directory;
-use provenant_os::sys::profile::{ProfilePipe, ProfileSource};
+use provenant_os::sys::profile::{LimitSource, ProfilePipe};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
@@ -137,7 +137,7 @@ impl ProfileFile {
     }
 }
 
-impl ProfileSource for ProfileFile {
+impl LimitSource for ProfileFile {
     fn prepare(&self, argv: &[OsString]) -> io::Result<ProfilePipe> {
         self.verify_command(argv)?;
         let mut bytes = Vec::new();

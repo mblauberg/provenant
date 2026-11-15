@@ -1,18 +1,11 @@
 //! Versioned evidence for repository command ports.
 use crate::FileDigest;
+pub use crate::ports::PortSource;
 use provenant_core::{ActorId, AttemptId, ProjectId};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 pub const PORT_COMMAND_RECEIPT_SCHEMA_VERSION: u16 = 2;
 pub const DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS: u32 = 30;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PortSource {
-    Builtin,
-    Host,
-    Project,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

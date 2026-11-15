@@ -383,7 +383,8 @@ fn origin_refresh_updates_tracking_refs_and_reports_fetch_failure()
     let custody_project =
         registered_writer_project_id(&project, &home, &root.join("checkout"), &root.join("state"))?;
     let writer = WriterRequest {
-        extra: writer_custody_extra(custody_project),
+        extra: Default::default(),
+        custody_project: Some(custody_project),
         project: project.clone(),
         worktree: project.clone(),
     };

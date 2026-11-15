@@ -16,6 +16,8 @@ pub struct LoopSpec {
     pub max_extension_rounds: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision_session: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub review_repair: bool,
 }
 
 fn default_extension_rounds() -> usize {
@@ -525,7 +527,7 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                         child.depends_on.push(input.node.clone());
                     }
                 }
-                if repair::spec_is_repair(spec) && child.extra.contains_key("repair_lens") {
+                if repair::spec_is_repair(spec) && child.repair_lens.is_some() {
                     // Select from the findings being repaired in this round.
                     let previous = ["synthesis", "check"]
                         .into_iter()
@@ -651,6 +653,7 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
             }
             let mut fresh = NodeProgress {
                 extra: Default::default(),
+                removed_requirements: n.removed_requirements.clone(),
                 children: n.composite_members.clone(),
                 min_successful: n.composite.as_ref().and_then(|spec| spec.min_successful),
                 source_binding: n.source.clone(),
@@ -661,8 +664,23 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 writer_binding: None,
                 writer_binding_pending: plans::writer(n),
                 review_base: None,
-                review_base_pending: n.access == AccessMode::ReadOnly
-                    && n.extra.contains_key("review_base"),
+                review_base_pending: n.access == AccessMode::ReadOnly && n.review_base.is_some(),
+                owner_notified: false,
+                children_cancelled: false,
+                detached_from_graph_cancel: false,
+                subtree_cancel: None,
+                yielded_slot: false,
+                stop_fence: false,
+                retry: None,
+                quota_redraw_spent: 0,
+                quota_redraw_archived: 0,
+                retry_generation: None,
+                container_retry: false,
+                concurrency_warning: None,
+                repair_growth: None,
+                review_verdict_correction_refused: None,
+                provisioned_source: None,
+                warnings: Vec::new(),
                 fragment: None,
                 handoff: None,
                 blocked: false,
@@ -681,6 +699,8 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 land: None,
                 title: Some(n.title.as_deref().unwrap_or(&n.id).into()),
                 worktree: n.worktree.clone(),
+                settled_dependency_snapshots: Default::default(),
+                new_worktree_base: None,
                 id: n.id.clone(),
                 // A node a patch adds is skipped by its own condition, as at
                 // submission.

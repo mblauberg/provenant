@@ -217,13 +217,13 @@ impl RunStore {
             };
             let mut ticket = self.ticket(tx, id)?;
             let mut next = old.clone();
-            let AttemptState::Running { extra } = &mut next.state else {
+            let AttemptState::Running { child_wait, .. } = &mut next.state else {
                 unreachable!();
             };
             let admitted = if waiting {
                 crate::ledger::yield_lease(&ledger, self.context.state_root.as_path(), id, call)?;
                 ticket.active = false;
-                extra.insert("child_wait".into(), "children".into());
+                *child_wait = Some(ChildWait::Children);
                 true
             } else {
                 // The ledger may have committed a yield before a failed store
@@ -241,11 +241,7 @@ impl RunStore {
                 warnings = lease_warnings;
                 let reclaimed = reclaimed.is_some();
                 ticket.active = reclaimed;
-                if reclaimed {
-                    extra.remove("child_wait");
-                } else {
-                    extra.insert("child_wait".into(), "admission".into());
-                }
+                *child_wait = (!reclaimed).then_some(ChildWait::Admission);
                 reclaimed
             };
             tx.execute(
@@ -394,17 +390,18 @@ impl RunStore {
                         .is_ok_and(|attempt| {
                             self.supervisor_stalled(&attempt, Self::scope(lane), call)
                         }) {
-                    "host_stalled: supervisor is in uninterruptible sleep".to_owned()
-                } else if let AttemptState::Running { extra } = &lane.state {
-                    if extra.get("child_wait").and_then(|v| v.as_str()) == Some("children") {
-                        "children: host and project admission yielded".to_owned()
-                    } else {
-                        let ms = lane.provider_silent_for_ms.0?;
-                        provenant_records::run::provider_silence_reason(ms)
+                    LaneWaitReason::HostStalled
+                } else if let AttemptState::Running { child_wait, .. } = &lane.state {
+                    match child_wait {
+                        Some(ChildWait::Children) => LaneWaitReason::Children,
+                        Some(ChildWait::Admission) => LaneWaitReason::Admission,
+                        None => LaneWaitReason::ProviderSilence {
+                            silent_for_ms: lane.provider_silent_for_ms.0?,
+                        },
                     }
                 } else {
                     self.recovery_process_wait(lane.attempt_id, call)
-                        .unwrap_or_else(|| "launch preparation".to_owned())
+                        .unwrap_or(LaneWaitReason::LaunchPreparation)
                 };
                 Some(LaneWait {
                     extra: Default::default(),
@@ -580,15 +577,9 @@ impl RunStore {
         {
             return Err(RunError::Conflict);
         }
-        let binding = current
-            .extra
-            .get(crate::launch::ADMISSION_PORT_BINDING_FIELD)
-            .cloned()
-            .map(serde_json::from_value::<crate::launch::AdmissionPortBinding>)
-            .transpose()
-            .map_err(|_| RunError::Validation("stored repository admission binding"))?;
+        let binding = current.repository_admission_binding.as_ref();
         if let Some(binding) = binding
-            && (!binding.valid() || binding.phase != crate::launch::AdmissionPhase::Released)
+            && (!binding.valid() || binding.phase != RepositoryAdmissionPhase::Released)
         {
             return Err(RunError::Conflict);
         }
@@ -968,6 +959,7 @@ impl RunStore {
             next.revision = next.revision.checked_add(1).ok_or(RunError::Conflict)?;
             next.state = AttemptState::Running {
                 extra: Default::default(),
+                child_wait: None,
             };
             next.started_at = Some(now);
             // The guardian enforces the same allowance on the wall clock; the
@@ -1231,7 +1223,7 @@ mod process_wait_tests {
         assert!(
             waits
                 .iter()
-                .any(|wait| wait.waiting_for.starts_with("launch preparation"))
+                .any(|wait| wait.waiting_for == LaneWaitReason::LaunchPreparation)
         );
         Ok(())
     }

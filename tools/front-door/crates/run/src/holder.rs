@@ -432,7 +432,7 @@ fn custody_error(error: RunError) -> CustodyError {
 #[derive(Serialize, Deserialize)]
 struct ObjectImportRefusal {
     schema_version: u64,
-    scope: custody::Scope,
+    scope: provenant_records::custody::Scope,
     kind: String,
     worktree: PathBuf,
     reason: String,
@@ -441,7 +441,7 @@ struct ObjectImportRefusal {
 /// Seal the refusal that keeps the private Git for host recovery.
 fn seal_import_refusal(
     attempt: &Directory,
-    scope: custody::Scope,
+    scope: provenant_records::custody::Scope,
     worktree: &std::path::Path,
     reason: &str,
 ) -> Result<()> {
@@ -461,7 +461,7 @@ fn seal_import_refusal(
 
 pub(crate) fn object_import_refused(
     attempt: &Directory,
-    scope: custody::Scope,
+    scope: provenant_records::custody::Scope,
 ) -> Result<Option<String>> {
     let Some(raw) = read_sealed(attempt, "object-import-refused.json", RECORD_LIMIT)? else {
         return Ok(None);
@@ -606,9 +606,11 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
         crate::artifacts::seal(
             &attempt,
             provenant_records::AttemptFile::BudgetOverrun.name(),
-            &crate::db::bytes(
-                &serde_json::json!({"schema_version":1,"tokens":tokens,"budget":budget}),
-            )
+            &crate::db::bytes(&provenant_records::limit::BudgetOverrun {
+                header: provenant_records::RecordHeader::V1,
+                tokens,
+                budget,
+            })
             .map_err(custody_error)?,
             RECORD_LIMIT,
         )
@@ -697,7 +699,7 @@ fn record_budget_warning(
 
 pub(crate) fn release_and_reclaim(
     attempt: &Directory,
-    scope: custody::Scope,
+    scope: provenant_records::custody::Scope,
     _recovery: &custody::Recovery,
 ) -> custody::Result<()> {
     custody::publish_release(attempt, scope)?;
@@ -778,7 +780,7 @@ impl RunStore {
     fn recover_writer_exit(
         &self,
         directory: Directory,
-        scope: custody::Scope,
+        scope: provenant_records::custody::Scope,
         call: &Request<'_>,
     ) -> Result<Option<custody::Recovery>> {
         match custody::acquire_recovery(
@@ -938,11 +940,7 @@ impl RunStore {
                 .as_ref()
                 .ok_or(RunError::Validation("pending import lacks writer"))?;
             let cancel = driver.cancellation();
-            let budget_stop = record
-                .extra
-                .get("terminal_cause")
-                .and_then(|value| serde_json::from_value::<TerminalCause>(value.clone()).ok())
-                == Some(TerminalCause::TokenBudget);
+            let budget_stop = record.state.terminal_cause() == Some(TerminalCause::TokenBudget);
             let imported = crate::prepare_writer_with_facts(
                 writer,
                 &self.writer_registry,
@@ -1027,14 +1025,20 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<Option<AttemptId>> {
         let record = self.record(id, call)?;
-        let is_budget = matches!(&record.state, AttemptState::Terminal { outcome: Outcome::ReviewRequired, extra, .. }
-            if extra.get("terminal_cause").and_then(serde_json::Value::as_str) == Some("token_budget"));
+        let is_budget = matches!(
+            &record.state,
+            AttemptState::Terminal {
+                outcome: Outcome::ReviewRequired,
+                terminal_cause: Some(TerminalCause::TokenBudget),
+                ..
+            }
+        );
         if !is_budget || !soft_budget_wrap_up(&record, &record.usage) {
             return Ok(None);
         }
         let request = self.request(record.attempt_id, call)?;
         let task = request.task;
-        if task.writer.is_none() || task.profile.extra.contains_key("budget_wrap_up") {
+        if task.writer.is_none() || task.profile.budget_wrap_up.is_some() {
             return Ok(None);
         }
         let budget = record
@@ -1071,7 +1075,10 @@ impl RunStore {
             crate::artifacts::seal(
                 &attempt,
                 provenant_records::AttemptFile::BudgetWrapUpRefused.name(),
-                &crate::db::bytes(&serde_json::json!({"schema_version":1,"reason":reason}))?,
+                &crate::db::bytes(&provenant_records::limit::BudgetWrapUpRefused {
+                    header: provenant_records::RecordHeader::V1,
+                    reason: reason.into(),
+                })?,
                 RECORD_LIMIT,
             )?;
             Ok(None)
@@ -1865,10 +1872,10 @@ impl RunStore {
             provenant_records::AttemptFile::BudgetOverrun.name(),
             RECORD_LIMIT,
         )? {
-            let overrun: serde_json::Value = crate::db::decode(&bytes)?;
+            let overrun: provenant_records::limit::BudgetOverrun = crate::db::decode(&bytes)?;
             let note = format!(
                 "token budget crossed: {} fresh tokens, target {}",
-                overrun["tokens"], overrun["budget"]
+                overrun.tokens, overrun.budget
             );
             decoded.reason = Some(match decoded.reason.take() {
                 Some(reason) => format!("{reason}; {note}"),
@@ -2119,7 +2126,7 @@ impl RunStore {
                     #[derive(Serialize)]
                     struct RemovedManifest {
                         schema_version: u64,
-                        scope: custody::Scope,
+                        scope: provenant_records::custody::Scope,
                         kind: &'static str,
                         disposition: &'static str,
                     }
@@ -2214,7 +2221,7 @@ impl RunStore {
             #[derive(Serialize)]
             struct ReadOnlyManifest {
                 schema_version: u64,
-                scope: custody::Scope,
+                scope: provenant_records::custody::Scope,
                 kind: &'static str,
                 disposition: &'static str,
             }
@@ -2769,6 +2776,7 @@ fn stopped_handoff(
                 decisions: Vec::new(),
                 verify: Vec::new(),
                 spec_concerns: Vec::new(),
+                write_scope: None,
                 extra: Default::default(),
             });
             handoff.status = HandoffStatus::StoppedEarly;
@@ -3841,25 +3849,26 @@ mod writer_recovery_tests {
             }
             if blocked {
                 // A blocked writer seals one typed stop.
-                let AttemptState::Terminal { extra, .. } = &finished.state else {
+                let AttemptState::Terminal {
+                    terminal_note,
+                    stop,
+                    ..
+                } = &finished.state
+                else {
                     panic!("not terminal")
                 };
-                assert_eq!(
-                    extra.get("terminal_cause"),
-                    Some(&serde_json::json!(TerminalCause::Blocked))
-                );
-                let stop: provenant_records::Stop =
-                    serde_json::from_value(extra.get("stop").cloned().ok_or("stop")?)?;
+                assert_eq!(*terminal_cause, Some(TerminalCause::Blocked));
+                let stop = stop.as_ref().ok_or("stop")?;
                 assert_eq!(stop.cause(), provenant_records::StopCause::Blocked);
                 assert_eq!(stop.note(), Some(note));
                 continue;
             }
             assert_eq!(finished.superseded_by, None);
             if budget {
-                let AttemptState::Terminal { extra, outcome, .. } = &finished.state else {
+                let AttemptState::Terminal { stop, outcome, .. } = &finished.state else {
                     unreachable!()
                 };
-                let stop: provenant_records::Stop = serde_json::from_value(extra["stop"].clone())?;
+                let stop = stop.as_ref().ok_or("stop")?;
                 assert_eq!(
                     stop.handoff().unwrap().status,
                     provenant_records::handoff::HandoffStatus::Done
@@ -3901,7 +3910,8 @@ mod writer_recovery_tests {
                 Some(provenant_records::run::SettlementReason::DeclaredStop)
             );
             let AttemptState::Terminal {
-                extra,
+                terminal_cause,
+                stop,
                 outcome,
                 reason,
                 ..
@@ -3911,10 +3921,8 @@ mod writer_recovery_tests {
             };
             assert_eq!(*outcome, Outcome::ReviewRequired);
             assert_eq!(
-                extra.get("terminal_cause"),
-                (!changed)
-                    .then(|| serde_json::json!(TerminalCause::StoppedNoWork))
-                    .as_ref()
+                *terminal_cause,
+                (!changed).then_some(TerminalCause::StoppedNoWork)
             );
             let row = LaneRow::project(&finished, LaneProjectionFacts::default());
             assert_eq!(
@@ -4084,11 +4092,10 @@ mod writer_recovery_tests {
                         finished.partial_signals,
                         [provenant_records::run::PartialSignal::HandoffMissing]
                     );
-                    let AttemptState::Terminal { extra, .. } = &finished.state else {
+                    let AttemptState::Terminal { stop, .. } = &finished.state else {
                         panic!("attempt must be terminal");
                     };
-                    let stop: provenant_records::Stop =
-                        serde_json::from_value(extra.get("stop").cloned().ok_or("stop")?)?;
+                    let stop = stop.as_ref().ok_or("stop")?;
                     assert_eq!(stop.cause(), provenant_records::StopCause::HandoffMissing);
                     assert_eq!(
                         stop.next_step(
@@ -4203,11 +4210,7 @@ mod writer_recovery_tests {
         let store = RunStore::open(&execution, &call)?;
         let mut run = input();
         run.request.task.writer = Some(fixture.writer.clone());
-        run.request
-            .task
-            .profile
-            .extra
-            .insert("write_scope".into(), serde_json::json!(["src"]));
+        run.request.task.profile.write_scope = vec!["src".into()];
         store.create(&run, &call)?;
         let id = run.attempt_id;
         store.mark_starting(
@@ -4287,7 +4290,7 @@ mod writer_recovery_tests {
         let fake = crate::dispatch_tests::Fake::with_observed(Some(route()), Some(Outcome::Failed));
         let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
         let AttemptState::Terminal {
-            extra,
+            terminal_cause,
             outcome,
             reason,
             ..
@@ -4296,10 +4299,7 @@ mod writer_recovery_tests {
             panic!("attempt must be terminal");
         };
         assert_eq!(*outcome, Outcome::ReviewRequired, "reason: {reason:?}");
-        assert_eq!(
-            extra.get("terminal_cause"),
-            Some(&serde_json::json!(TerminalCause::ContextHandoff))
-        );
+        assert_eq!(*terminal_cause, Some(TerminalCause::ContextHandoff));
         // Only a declared stop: the owner maps this to the graph's restart.
         assert_eq!(
             finished.partial_signals,
@@ -4312,10 +4312,17 @@ mod writer_recovery_tests {
         assert_eq!(handoff.note, "Parser done; renderer next");
         assert_eq!(handoff.remaining, vec!["Finish renderer".to_owned()]);
         assert!(handoff.unfinished());
-        assert_eq!(handoff.extra["write_scope"]["code"], "WRITE_SCOPE");
-        assert_eq!(handoff.extra["write_scope"]["strength"], "warn");
-        let paths: Vec<provenant_records::PathWire> =
-            serde_json::from_value(handoff.extra["write_scope"]["out_of_scope_paths"].clone())?;
+        let Some(provenant_records::handoff::WriteScopeReport::Full {
+            code,
+            strength,
+            out_of_scope_paths: paths,
+            ..
+        }) = handoff.write_scope.as_ref()
+        else {
+            return Err("typed full scope report".into());
+        };
+        assert_eq!(code, "WRITE_SCOPE");
+        assert_eq!(*strength, provenant_records::policy::Strength::Warn);
         assert!(
             paths
                 .iter()
@@ -4438,7 +4445,8 @@ mod writer_recovery_tests {
             fake.terminal_cause = Some(TerminalCause::LaneTokenLost);
             let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
             let AttemptState::Terminal {
-                extra,
+                terminal_cause,
+                stop,
                 outcome,
                 reason,
                 ..
@@ -4453,12 +4461,9 @@ mod writer_recovery_tests {
             };
             assert_eq!(*outcome, expected_outcome, "reason: {reason:?}");
             if host_outcome == Outcome::AuthRequired {
-                assert_eq!(
-                    extra.get("terminal_cause"),
-                    Some(&serde_json::json!(TerminalCause::LaneTokenLost))
-                );
+                assert_eq!(*terminal_cause, Some(TerminalCause::LaneTokenLost));
             }
-            let stop: provenant_records::Stop = serde_json::from_value(extra["stop"].clone())?;
+            let stop = stop.as_ref().ok_or("stop")?;
             let expected_stop = match host_outcome {
                 Outcome::Lost => provenant_records::StopCause::Lost,
                 Outcome::Unsettled => provenant_records::StopCause::Unsettled,
@@ -4543,18 +4548,10 @@ mod writer_recovery_tests {
         let mut run = input();
         run.request.task.writer = Some(fixture.writer.clone());
         if matches!(case, BudgetStopCase::HostileFilter) {
-            run.request
-                .task
-                .profile
-                .extra
-                .insert("write_scope".into(), serde_json::json!(["."]));
+            run.request.task.profile.write_scope = vec![".".into()];
         }
         if matches!(case, BudgetStopCase::StrictScope) {
-            run.request
-                .task
-                .profile
-                .extra
-                .insert("write_scope".into(), serde_json::json!(["src"]));
+            run.request.task.profile.write_scope = vec!["src".into()];
             run.request
                 .task
                 .profile
@@ -5050,16 +5047,18 @@ mod writer_recovery_tests {
             } else if matches!(case, BudgetStopCase::WrapUpBlocked) {
                 assert!(store.prepare_budget_wrap_up(id, &call)?.is_none());
                 assert!(finished.superseded_by.is_none());
-                let AttemptState::Terminal { extra, .. } = &finished.state else {
+                let AttemptState::Terminal {
+                    terminal_note,
+                    stop,
+                    ..
+                } = &finished.state
+                else {
                     panic!("not terminal")
                 };
-                let stop: provenant_records::Stop =
-                    serde_json::from_value(extra.get("stop").cloned().ok_or("stop")?)?;
+                let stop = stop.as_ref().ok_or("stop")?;
                 assert_eq!(stop.cause(), provenant_records::StopCause::Blocked);
                 assert_eq!(
-                    extra
-                        .get("terminal_note")
-                        .and_then(serde_json::Value::as_str),
+                    terminal_note.as_deref(),
                     Some("Owner decision required before continuing.")
                 );
                 assert_eq!(
@@ -5110,7 +5109,7 @@ mod writer_recovery_tests {
             return Ok(());
         }
         let AttemptState::Terminal {
-            extra,
+            terminal_cause,
             outcome,
             reason,
             ..
@@ -5119,10 +5118,7 @@ mod writer_recovery_tests {
             panic!("attempt must be terminal");
         };
         assert_eq!(outcome, Outcome::TimedOut, "reason: {reason:?}");
-        assert_eq!(
-            extra.get("terminal_cause"),
-            Some(&serde_json::json!(TerminalCause::TokenBudget))
-        );
+        assert_eq!(terminal_cause, Some(TerminalCause::TokenBudget));
         let reason_text = reason.expect("terminal attempt has reason");
         assert!(
             reason_text.contains("token budget reached: provider stopped after passing"),
@@ -5857,7 +5853,7 @@ mod writer_recovery_tests {
                 execution.project_id,
             )?;
             let (directory, binding) = competing.custody.take().ok_or("competing custody")?;
-            let other = custody::Scope {
+            let other = provenant_records::custody::Scope {
                 attempt: provenant_core::AttemptId::from_bytes([99; 16]),
                 ..scope
             };
@@ -6148,7 +6144,7 @@ mod writer_recovery_tests {
                     execution.project_id,
                 )?;
                 let (directory, binding) = competing.custody.take().ok_or("competing custody")?;
-                let other = custody::Scope {
+                let other = provenant_records::custody::Scope {
                     attempt: provenant_core::AttemptId::from_bytes([99; 16]),
                     ..scope
                 };

@@ -384,6 +384,7 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
     );
     record.state = run::AttemptState::Running {
         extra: Default::default(),
+        child_wait: None,
     };
     let refused = reviewer_receipt(&record, false).unwrap_err();
     assert_eq!(refused.status, Status::Refused);

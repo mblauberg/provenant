@@ -396,6 +396,7 @@ fn handoff(status: HandoffStatus, note: &str) -> Handoff {
         decisions: vec![],
         verify: vec![],
         spec_concerns: vec![],
+        write_scope: None,
         extra: Default::default(),
     }
 }
@@ -570,5 +571,64 @@ fn a_declared_stop_survives_uncommitted_edits_but_not_uncertain_custody() {
         (Outcome::Quarantined, StopCause::Quarantined),
     ] {
         assert_eq!(cause(outcome, Some(&stopped)), Some(host), "{outcome:?}");
+    }
+}
+
+#[test]
+fn handoff_write_scope_report_round_trips_full_and_compact_shapes() {
+    use crate::{
+        PathWire,
+        handoff::{Handoff, HandoffStatus, WriteScopeReport},
+        policy::{Source, Strength},
+    };
+    let path =
+        PathWire::from_relative(&provenant_core::RelativePath::parse("outside.txt").unwrap())
+            .unwrap();
+    let reports = [
+        WriteScopeReport::Full {
+            schema_version: 1,
+            code: "WRITE_SCOPE".into(),
+            base: "1".repeat(40),
+            head: "2".repeat(40),
+            strength: Strength::Warn,
+            source: Source::Project,
+            out_of_scope_paths: vec![path],
+        },
+        WriteScopeReport::Compact {
+            code: "WRITE_SCOPE".into(),
+            strength: Strength::Warn,
+            source: Source::Project,
+            paths_artifact: "policy-write-scope.json".into(),
+            out_of_scope_count: 1,
+            paths_omitted_from_handoff: true,
+        },
+    ];
+    for report in reports {
+        let mut handoff = Handoff {
+            schema_version: 2,
+            status: HandoffStatus::Done,
+            note: "finished".into(),
+            remaining: Vec::new(),
+            decisions: Vec::new(),
+            verify: Vec::new(),
+            spec_concerns: Vec::new(),
+            write_scope: Some(report),
+            extra: Default::default(),
+        };
+        let wire = serde_json::to_value(&handoff).unwrap();
+        let decoded: Handoff = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(decoded, handoff);
+        let mut malformed = wire;
+        malformed["write_scope"]["strength"] = json!("invalid");
+        let bytes = serde_json::to_vec(&malformed).unwrap();
+        assert!(matches!(
+            crate::json::decode::<Handoff, _>(bytes.as_slice(), Limits::default()),
+            Err(crate::json::DecodeError::Typed { .. })
+        ));
+        handoff.write_scope = None;
+        assert_eq!(
+            serde_json::from_value::<Handoff>(serde_json::to_value(&handoff).unwrap()).unwrap(),
+            handoff
+        );
     }
 }

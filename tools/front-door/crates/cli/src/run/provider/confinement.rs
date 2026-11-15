@@ -435,12 +435,7 @@ fn sandbox_mode_for_access(
         .get("lanes.sandbox_floor")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("warn");
-    let parent = [&task.extra, &task.profile.extra].into_iter().any(|extra| {
-        extra
-            .get(provenant_records::run::PARENT_SANDBOXED_FIELD)
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
-    });
+    let parent = task.profile.parent_sandboxed;
     let (floor, warn) = provenant_records::run::admission_floor(parent, sandbox, strength);
     let restrictions = SandboxRestriction::for_policy(network, policy);
     let mut mode = host.sandbox_for(SandboxInputs {
@@ -458,10 +453,10 @@ fn sandbox_mode_for_access(
     if warn {
         let source = task
             .profile
-            .extra
-            .get(provenant_config::KNOB_SOURCES)
-            .and_then(|sources| sources.get("lanes.sandbox_floor"))
-            .and_then(serde_json::Value::as_str)
+            .knob_sources
+            .get("lanes.sandbox_floor")
+            .copied()
+            .map(provenant_records::run::LimitSource::as_str)
             .unwrap_or("default");
         let warning = format!(
             "sandbox admission floor lowered; lanes.sandbox_floor=warn (source: {source}, boundary: none)"
@@ -486,10 +481,7 @@ fn admission_policy_is_independent_of_primary_or_fallback_adapter()
     )?;
     for strength in ["off", "warn", "strict"] {
         let mut task = prepared.request.task.clone();
-        task.profile.extra.insert(
-            provenant_records::run::PARENT_SANDBOXED_FIELD.into(),
-            true.into(),
-        );
+        task.profile.parent_sandboxed = true;
         task.profile
             .knobs
             .insert("lanes.sandbox".into(), "off".into());
@@ -538,30 +530,19 @@ pub(super) fn apply_sandbox_mode(
     route: &mut provenant_records::run::RouteRecord,
 ) {
     use provenant_core::consumer_env::SANDBOX;
-    if let Some(policy) = task
-        .profile
-        .extra
-        .get(provenant_records::run::LAUNCH_POLICY_FIELD)
-    {
-        route.extra.insert(
-            provenant_records::run::LAUNCH_POLICY_FIELD.into(),
-            policy.clone(),
-        );
-    }
-    let parent = [&task.extra, &task.profile.extra].into_iter().any(|extra| {
-        extra
-            .get(provenant_records::run::PARENT_SANDBOXED_FIELD)
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
-    });
+    let parent = task.profile.parent_sandboxed;
     route.extra.insert("sandbox_admission".into(), serde_json::json!({
         "parent_sandboxed": parent,
         "boundary": "none",
         "strength": task.profile.knobs.get("lanes.sandbox_floor").and_then(serde_json::Value::as_str).unwrap_or("warn"),
         "knob": "lanes.sandbox_floor",
-        "source": task.profile.extra.get(provenant_config::KNOB_SOURCES)
-            .and_then(|sources| sources.get("lanes.sandbox_floor"))
-            .and_then(serde_json::Value::as_str).unwrap_or("default"),
+        "source": task
+            .profile
+            .knob_sources
+            .get("lanes.sandbox_floor")
+            .copied()
+            .map(provenant_records::run::LimitSource::as_str)
+            .unwrap_or("default"),
     }));
     environment.retain(|(name, _)| name != SANDBOX);
     environment.push((SANDBOX.into(), mode.env_value().into()));

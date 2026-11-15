@@ -181,11 +181,8 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         account: None,
         authority_digest: Digest::from_bytes([4; 32]),
         writer: Some(run::WriterRequest {
-            extra: [(
-                "custody_project".into(),
-                serde_json::json!(binding.project_id()),
-            )]
-            .into(),
+            extra: Default::default(),
+            custody_project: Some(binding.project_id()),
             project: project.clone(),
             worktree: project.join(".worktrees/writer"),
         }),
@@ -353,10 +350,7 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
             ),
         )?;
         let mut protected = task.clone();
-        protected
-            .profile
-            .extra
-            .insert("confidential".into(), serde_json::json!(true));
+        protected.profile.confidential = true;
         protected.route = run::RequestedRoute::Named {
             extra: Default::default(),
             name: "protected-fixture".into(),

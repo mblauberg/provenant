@@ -894,6 +894,9 @@ fn loop_delivery_retry_reopens_failed_wrapper_and_dependants() {
             FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
         journal
             .bind(GraphExecution {
+                peer_origin_context: None,
+                peer_submission_digest: None,
+
                 extra: Default::default(),
                 bases: None,
                 directory: inputs.checkout.clone(),
@@ -1721,6 +1724,9 @@ fn loop_cancelled_ask_cleanup_replays_after_failure_and_crash() {
             FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
         journal
             .bind(GraphExecution {
+                peer_origin_context: None,
+                peer_submission_digest: None,
+
                 extra: Default::default(),
                 bases: None,
                 directory: inputs.checkout.clone(),
@@ -2424,9 +2430,7 @@ fn risk_or_scope_growth_cannot_pass_the_original_panel() {
 fn omitted_delta_risk_assessment_cannot_accept_repair() {
     let mut document = review_repair_document();
     document.nodes[1].loop_body.as_mut().unwrap().max_rounds = 1;
-    document.nodes[1].loop_body.as_mut().unwrap().body[1]
-        .extra
-        .insert("repair_risk_assessment".into(), true.into());
+    document.nodes[1].loop_body.as_mut().unwrap().body[1].repair_risk_assessment = true;
     let initial = repair_finding(false);
     let pass = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS";
     let mut owner = repair_reviews(&[&initial, "fix", pass, "principal options"]);
@@ -2638,9 +2642,8 @@ fn failed_replanned_panel_repairs_its_findings_within_cycle_limit() {
                 .unwrap()
                 .findings;
             assert!(
-                findings.iter().any(
-                    |finding| finding.id.ends_with("F2") && finding.extra["lens"] == "security"
-                )
+                findings.iter().any(|finding| finding.id.ends_with("F2")
+                    && finding.lens.as_deref() == Some("security"))
             );
         } else {
             let writer = owner
@@ -2738,9 +2741,9 @@ fn principal_recovery_completes_enclosing_composite_and_delivery_continues() {
         .find(|node| node.id == "assurance--repair")
         .unwrap();
     let findings = &escalation.outputs.as_ref().unwrap().findings;
-    assert_eq!(findings[0].extra["lens"], "correctness");
-    assert_eq!(findings[0].extra["evidence"], "counterexample");
-    assert_eq!(findings[0].extra["proposed_fix"], "repair");
+    assert_eq!(findings[0].lens.as_deref().unwrap(), "correctness");
+    assert_eq!(findings[0].evidence.as_deref().unwrap(), "counterexample");
+    assert_eq!(findings[0].proposed_fix.as_deref().unwrap(), "repair");
     assert_eq!(
         advance(&document, &mut FakeOwner::default(), &mut journal)
             .unwrap()
@@ -2779,7 +2782,7 @@ fn compiled_repair_design_continuation_keeps_the_original_writer() {
     let fragment = format!(
         "```fragment\n{}\n```",
         serde_json::json!({"schema_version":1,"nodes":[{
-            "id":"slice","use":"repair-slice","brief":"Meet principal acceptance evidence within approved scope"
+            "id":"slice","use":"repair-slice","prompt":"Meet principal acceptance evidence within approved scope"
         }]})
     );
     let writer = AttemptObservation::Terminal {
@@ -2843,7 +2846,7 @@ fn compiled_repair_design_continuation_keeps_the_original_writer() {
         .find(|node| node.id.ends_with("continue--slice"))
         .unwrap();
     assert_eq!(expanded.continues.as_deref(), Some("delivery--implement"));
-    assert_ne!(expanded.extra.get("repair_writer"), Some(&true.into()));
+    assert!(!expanded.repair_writer);
     assert_eq!(
         advance(&document, &mut FakeOwner::default(), &mut journal)
             .unwrap()
@@ -2980,11 +2983,9 @@ impl GraphJournal for CrashBeforeRepairGate {
             })
         } else {
             checkpoint.nodes.iter().any(|node| {
-                node.extra
-                    .get("repair_growth")
-                    .and_then(|cache| cache.get("grew"))
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(false)
+                node.repair_growth
+                    .as_ref()
+                    .is_some_and(|growth| !growth.grew)
             })
         };
         if !self.crashed && gate_pending && ready {
@@ -3083,8 +3084,16 @@ fn pending_repair_cache_and_panel_never_certify_a_redone_fix() {
             .find(|node| node.id == "repair--r1--accepted")
             .unwrap();
         assert_eq!(gate.state, NodeState::Failed);
-        assert_eq!(gate.extra["repair_growth"]["after"], "b".repeat(40));
-        assert_eq!(gate.extra["repair_growth"]["grew"], true);
+        assert_eq!(
+            gate.repair_growth
+                .as_ref()
+                .map(|growth| growth.after.clone()),
+            Some("b".repeat(40))
+        );
+        assert_eq!(
+            gate.repair_growth.as_ref().map(|growth| growth.grew),
+            Some(true)
+        );
         if after_panel {
             assert_eq!(next.repair_panel_calls, 0);
             assert!(
@@ -3106,7 +3115,7 @@ fn pending_repair_cache_and_panel_never_certify_a_redone_fix() {
             .find(|node| node.id == "repair--r1--check")
             .unwrap();
         assert_eq!(check.outputs, before_check);
-        assert!(check.extra.contains_key("settled_dependency_snapshots"));
+        assert!(!check.settled_dependency_snapshots.is_empty());
     }
 }
 

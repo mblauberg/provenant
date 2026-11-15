@@ -35,11 +35,32 @@ pub enum LimitStrength {
     Advisory,
 }
 
+/// Host evidence recorded when a lane crosses its token budget.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BudgetOverrun {
+    #[serde(flatten)]
+    pub header: crate::RecordHeader,
+    pub tokens: u64,
+    pub budget: u64,
+}
+
+/// A budget continuation was considered but could not be admitted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BudgetWrapUpRefused {
+    #[serde(flatten)]
+    pub header: crate::RecordHeader,
+    pub reason: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Limit {
     pub value: u64,
     pub source: LimitSource,
     pub strength: LimitStrength,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overrun: Option<BudgetOverrun>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrap_up_refused: Option<BudgetWrapUpRefused>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
 }
@@ -241,6 +262,8 @@ impl Limit {
             value,
             source,
             strength,
+            overrun: None,
+            wrap_up_refused: None,
             extra: Default::default(),
         }
     }
@@ -393,6 +416,37 @@ mod tests {
                 serde_json::from_value::<BudgetAction>(name.into()).unwrap(),
                 action
             );
+        }
+    }
+
+    #[test]
+    fn budget_evidence_fields_round_trip_and_reject_malformed_values() {
+        for (field, value, malformed) in [
+            (
+                "overrun",
+                serde_json::json!({"schema_version":1,"tokens":101,"budget":100}),
+                serde_json::json!({"schema_version":1,"tokens":"invalid","budget":100}),
+            ),
+            (
+                "wrap_up_refused",
+                serde_json::json!({"schema_version":1,"reason":"admission refused"}),
+                serde_json::json!({"schema_version":1,"reason":false}),
+            ),
+        ] {
+            let mut wire =
+                serde_json::to_value(Limit::new(100, LimitSource::Launch, LimitStrength::Default))
+                    .unwrap();
+            wire[field] = value;
+            let bytes = serde_json::to_vec(&wire).unwrap();
+            let decoded: Limit =
+                crate::json::decode(bytes.as_slice(), crate::json::Limits::default()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
+            wire[field] = malformed;
+            let bytes = serde_json::to_vec(&wire).unwrap();
+            assert!(matches!(
+                crate::json::decode::<Limit, _>(bytes.as_slice(), crate::json::Limits::default()),
+                Err(crate::json::DecodeError::Typed { .. })
+            ));
         }
     }
 
