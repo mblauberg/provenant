@@ -1398,6 +1398,12 @@ impl PlanCheckError {
         refusal.terminal_note = Some(skipped.detail.clone());
         refusal.resource = skipped.guard_resource;
         refusal.skipped_routes.push(skipped);
+        if let Self::ReadOnly(ReadOnlyPlanError::ProjectBindingDirectory(diagnostic)) = self {
+            refusal.message = diagnostic
+                .detail
+                .unwrap_or_else(|| "project binding state directory is unsafe".into());
+            refusal.terminal_note = diagnostic.next;
+        }
         refusal
     }
 
@@ -1484,7 +1490,9 @@ impl PlanCheckError {
                 ReadOnlyPlanError::BindingMismatch => G::ProjectBindingMismatch,
                 ReadOnlyPlanError::MissingBinding => G::ProjectBindingMissing,
                 ReadOnlyPlanError::PinnedSourceRequiresGit => G::PinnedSourceRequiresGit,
-                ReadOnlyPlanError::Other(_) => G::ReadOnlyPreparationFailed,
+                ReadOnlyPlanError::Other(_) | ReadOnlyPlanError::ProjectBindingDirectory(_) => {
+                    G::ReadOnlyPreparationFailed
+                }
             },
         }
     }
@@ -5606,4 +5614,42 @@ mod route_launch_boundary_regressions {
         assert_eq!(filtered.resolve("fixture-command")?, executable);
         Ok(())
     }
+}
+
+#[test]
+// Spec: docs/specs/state.md#roots-and-identities
+fn binding_refusal_preserves_local_repair_and_closed_route_guard() {
+    let error = ReadOnlyPlanError::from(
+        provenant_config::ConfigError::ProjectBindingDirectoryUnsafe {
+            path: std::path::PathBuf::from("/private/test-binding-state"),
+            mode: 0o755,
+            owner_matches: true,
+        },
+    );
+    let refusal = PlanCheckError::ReadOnly(error).into_refusal();
+    assert!(refusal.message.contains("/private/test-binding-state"));
+    assert!(
+        refusal
+            .terminal_note
+            .as_deref()
+            .is_some_and(|note| note.contains("chmod 700"))
+    );
+    assert_eq!(
+        refusal.boundary_class,
+        provenant_records::diagnostic::BoundaryClass::Authority
+    );
+    assert_eq!(
+        refusal.policy_code.as_deref(),
+        Some("CONFINEMENT_READ_ONLY_PLAN_AUTHORITY")
+    );
+    assert_eq!(refusal.skipped_routes.len(), 1);
+    assert!(
+        !refusal.skipped_routes[0]
+            .detail
+            .contains("/private/test-binding-state")
+    );
+    assert_eq!(
+        refusal.skipped_routes[0].confinement_guard,
+        Some(provenant_records::diagnostic::ConfinementGuard::ReadOnlyPreparationFailed)
+    );
 }
