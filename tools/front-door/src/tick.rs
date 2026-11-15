@@ -23,7 +23,7 @@ const MAX_SEED_DISCOVERY_ERRORS: usize = 16;
 const MAX_SEED_ERROR_BYTES: usize = 1024;
 const MAX_BUSY_SEED_PROJECTS: usize = 512;
 const MAX_SEED_RESULT_ERROR_BYTES: usize = 16 * 1024;
-const SEED_WORK_RETRY_MICROS: u64 = 60_000_000;
+const SEED_WORK_RETRY_MICROS: i64 = 60_000_000;
 
 #[derive(Default, Serialize, Deserialize)]
 struct Cadence {
@@ -138,7 +138,8 @@ fn queue_gc(
                     serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
                 if result.state == "running"
                     || result.state == "queued"
-                        && now.as_micros().saturating_sub(result.at.as_micros()) >= 60_000_000
+                        && now.as_micros().saturating_sub(result.at.as_micros())
+                            >= SEED_WORK_RETRY_MICROS
                 {
                     let _worker = match directory
                         .try_lock("gc-worker.lock".as_ref(), LockMode::Exclusive)
@@ -272,6 +273,7 @@ fn seed_queue_lock(directory: &Directory) -> Result<LockGuard, String> {
             &provenant_core::CancelToken::new(),
             &clock,
         )
+        .map(|_| ())
         .map_err(|error| error.to_string())
 }
 
