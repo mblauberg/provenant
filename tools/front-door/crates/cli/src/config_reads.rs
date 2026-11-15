@@ -199,6 +199,26 @@ mod tests {
             }
         }
     }
+    // Spec: docs/specs/cli.md#parsing
+    #[test]
+    fn run_reader_recognises_every_cli_domain() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp);
+        std::fs::create_dir_all(roots.state.as_path()).unwrap();
+        let mut config = String::from("schema_version = 1\n");
+        for section in crate::domains::SECTIONS.entries {
+            config.push_str(&format!("[domains.{}]\n", section.name));
+        }
+        std::fs::write(roots.state.as_path().join("config.toml"), config).unwrap();
+        let resolved = read_for(&roots, "run").unwrap();
+        assert!(
+            !resolved
+                .warnings
+                .iter()
+                .any(|warning| warning.rule == "unknown_key")
+        );
+    }
+
     #[test]
     fn optional_wait_settings_do_not_block_context_observation() {
         let temporary = tempfile::tempdir().unwrap();

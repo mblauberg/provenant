@@ -1880,13 +1880,12 @@ impl Factory {
                 &document,
                 &self.context.config.graph.limits,
             );
-            let config = provenant_config::read(&self.context.roots).map_err(|error| {
-                FacadeError::DispatchRefused {
+            let config = provenant_cli::config_reads::read_for(&self.context.roots, "run")
+                .map_err(|error| FacadeError::DispatchRefused {
                     fact: None,
                     disk: None,
                     reason: error.to_string(),
-                }
-            })?;
+                })?;
             let run_config = provenant_confinement::run_config::RunConfig::read(
                 self.context.roots.state.as_path(),
             )

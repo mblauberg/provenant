@@ -254,8 +254,25 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
     let page = match check {
         Inspectable::Writing { .. } => return Err(CheckError::Invalid("writing selector").into()),
         Inspectable::Config(page) => {
-            let inspection =
+            let mut inspection =
                 provenant_config::inspect_config(&roots, &provenant_cli::domains::SECTIONS)?;
+            if let Ok(config) = provenant_cli::config_reads::show_for(&roots, "check config") {
+                for message in
+                    provenant_cli::accounts::directory_findings(&config.domains.accounts, &home)
+                {
+                    inspection.check.findings.push(provenant_records::Finding {
+                        rule: "config.accounts.directory".into(),
+                        path: provenant_records::PathWire::from_relative(
+                            &provenant_core::RelativePath::parse("config.toml")
+                                .map_err(provenant_records::PathWireError::from)
+                                .map_err(CheckError::from)?,
+                        )
+                        .map_err(CheckError::from)?,
+                        line: 1,
+                        message,
+                    });
+                }
+            }
             Ok(provenant_cli::check::config_page(
                 inspection,
                 crate::pool_effort_warnings(&roots),

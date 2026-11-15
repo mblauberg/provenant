@@ -115,7 +115,9 @@ preserves its selected identity and controls.
 ## Accounts and credentials
 
 Account identity is detected, not guessed; a changed identity around a probe is
-refused. A pin does not switch accounts. Credential custody is owned by
+refused. Registered account directories must not contain HOME or overlap each
+other; `accounts register` refuses these and `check config` reports them. A
+login at HOME is the adapter's local account and needs no registration. A pin does not switch accounts. Credential custody is owned by
 [supervision](supervisor.md#native-environment-and-sandbox-tool-stores). A registered long-lived lane token is not rotated by the host.
 
 OpenCode models are partitioned by the registered plan, independently of account

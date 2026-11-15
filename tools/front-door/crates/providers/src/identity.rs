@@ -153,6 +153,11 @@ impl RegisteredAccount {
     }
 }
 
+/// Whether two account configuration trees overlap, including equality.
+pub fn account_directories_overlap(left: &std::path::Path, right: &std::path::Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
 /// Immutable registry of detected identities. A selected account cannot include
 /// another registered account's config tree in its state grants.
 pub struct Accounts(Vec<RegisteredAccount>);
@@ -164,8 +169,7 @@ impl Accounts {
         for (index, account) in accounts.iter().enumerate() {
             if accounts.iter().skip(index + 1).any(|other| {
                 (account.adapter == other.adapter && account.key == other.key)
-                    || account.directory.starts_with(&other.directory)
-                    || other.directory.starts_with(&account.directory)
+                    || account_directories_overlap(&account.directory, &other.directory)
             }) {
                 return Err(crate::ProviderError::IdentityMismatch);
             }

@@ -49,12 +49,9 @@ and rerun the check after repair.
 
 Agy has no account switch, so a second Google account gets its own `HOME`
 holding its own login keychain, and the registered `directory` is that home.
-Register the account signed in on your own login keychain with the home
-directory itself:
-
-```sh
-provenant accounts register --adapter agy --directory ~ LABEL
-```
+The login at your own HOME is the adapter's local account and needs no
+registration. Registered directories must not equal or contain HOME, or overlap
+another registered account directory.
 
 If the isolated keychain or identity is unavailable, repair the account and
 re-register it, then check `provenant quota` and `provenant hosts doctor`.

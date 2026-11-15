@@ -167,6 +167,35 @@ pub fn execute(
     execute_inner(command, roots, home, &mut kind).map_err(|message| (kind, message))
 }
 
+/// Diagnose registrations that would make credential roots overlap.
+pub fn directory_findings(settings: &Settings, home: &Path) -> Vec<String> {
+    let resolve = |path: &Path| {
+        provenant_core::PathResolver::resolve_existing_ancestor(
+            &provenant_os::fs::SystemPathResolver,
+            path,
+        )
+        .unwrap_or_else(|_| path.to_path_buf())
+    };
+    let home = resolve(home);
+    let entries: Vec<_> = settings.entries.iter().collect();
+    let mut findings = Vec::new();
+    for (index, (id, entry)) in entries.iter().enumerate() {
+        let directory = resolve(&entry.directory);
+        if home.starts_with(&directory) {
+            findings.push(format!("account {id}: directory is HOME or its ancestor; a login at HOME is the adapter's local account and needs no registration"));
+        }
+        for (other_id, other) in entries.iter().skip(index + 1) {
+            if provenant_providers::identity::account_directories_overlap(
+                &directory,
+                &resolve(&other.directory),
+            ) {
+                findings.push(format!("accounts {id} and {other_id}: registered directories overlap; a login at HOME is the adapter's local account and needs no registration"));
+            }
+        }
+    }
+    findings
+}
+
 fn execute_inner(
     command: &Accounts,
     roots: &Roots,
@@ -234,6 +263,14 @@ fn execute_inner(
             return Err("invalid account label".into());
         }
         let directory = provenant_os::fs::canonicalize(directory).map_err(|e| e.to_string())?;
+        let resolved_home = provenant_core::PathResolver::resolve_existing_ancestor(
+            &provenant_os::fs::SystemPathResolver,
+            home,
+        )
+        .map_err(|error| error.to_string())?;
+        if resolved_home.starts_with(&directory) {
+            return Err("a directory at or above HOME cannot be registered; a login at HOME is the adapter's local account and needs no registration".into());
+        }
         if provenant_records::AdapterSpec::get(adapter)
             .and_then(|spec| spec.account_directory_prefix)
             .is_some_and(|prefix| directory != home.join(format!("{prefix}{label}")))
@@ -324,6 +361,19 @@ fn execute_inner(
             settings
                 .entries
                 .retain(|_, a| a.adapter != *adapter || a.label != *label);
+            if settings.entries.values().any(|other| {
+                let other_directory = provenant_core::PathResolver::resolve_existing_ancestor(
+                    &provenant_os::fs::SystemPathResolver,
+                    &other.directory,
+                )
+                .unwrap_or_else(|_| other.directory.clone());
+                provenant_providers::identity::account_directories_overlap(
+                    &entry.directory,
+                    &other_directory,
+                )
+            }) {
+                return Err("registered account directories overlap; a login at HOME is the adapter's local account and needs no registration".into());
+            }
             settings.entries.insert(format!("{adapter}-{label}"), entry);
             if !provenant_config::DomainConfig::validate(&settings).is_empty() {
                 return Err("conflicting account registration".into());
@@ -334,8 +384,7 @@ fn execute_inner(
     Ok(settings)
 }
 
-/// An agy registration is either the user's own login (`home` itself, on the
-/// shared login keychain) or an isolated account whose directory is its own
+/// An agy registration is an isolated account whose directory is its own
 /// `HOME` and holds its own keychain as a regular file. Any other directory is
 /// refused up front, and detection derives the same mode from the directory, so
 /// a keychain that vanishes between this check and the probe is refused too
@@ -345,7 +394,7 @@ fn check_agy_directory(directory: &Path, home: &Path) -> Result<(), String> {
         .map(|_| ())
         .map_err(|error| {
             format!(
-                "{error}; or register the default login with --directory {}",
+                "{error}; a login at {} is the adapter's local account and needs no registration",
                 home.display()
             )
         })
@@ -613,6 +662,31 @@ mod tests {
             headline: None,
             settings: Default::default(),
         }
+    }
+
+    // Spec: docs/specs/routing.md#accounts-and-credentials
+    #[test]
+    fn directory_findings_cover_home_ancestors_and_nested_accounts() {
+        let home = Path::new("/fixture/home");
+        for directory in ["/fixture", "/fixture/home"] {
+            let mut settings = Settings::default();
+            settings
+                .entries
+                .insert("one".into(), registration("codex", "one", directory));
+            assert!(directory_findings(&settings, home)[0].contains("local account"));
+        }
+        let mut settings = Settings::default();
+        settings.entries.insert(
+            "one".into(),
+            registration("codex", "one", "/fixture/home/a"),
+        );
+        settings.entries.insert(
+            "two".into(),
+            registration("codex", "two", "/fixture/home/a/child"),
+        );
+        assert_eq!(directory_findings(&settings, home).len(), 1);
+        settings.entries.get_mut("two").unwrap().directory = "/fixture/home/b".into();
+        assert!(directory_findings(&settings, home).is_empty());
     }
 
     #[test]
