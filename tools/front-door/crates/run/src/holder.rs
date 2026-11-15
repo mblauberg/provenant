@@ -689,7 +689,9 @@ fn record_budget_warning(
         support,
         transport: None,
         state: ControlState::Unsupported,
-        reason: support.reason().into(),
+        reason:
+            "token-budget warning is recorded locally and is not delivered to the live provider"
+                .into(),
         message_id: None,
     };
     crate::artifacts::seal(
@@ -1152,7 +1154,11 @@ impl RunStore {
         let natural_settlement = terminal_cause.is_none()
             && matches!(outcome, Outcome::Succeeded | Outcome::ReviewRequired);
         if terminal_cause != Some(TerminalCause::Steered) && !natural_settlement {
-            self.resolve_steer_intents(id, call)?;
+            self.record_steer_not_continued(
+                id,
+                provenant_records::run::SteeringCause::TerminalStop,
+                call,
+            )?;
             return Ok(None);
         }
         let Some(session) = record.session.as_deref() else {
@@ -3851,6 +3857,10 @@ mod writer_recovery_tests {
                 });
             assert_eq!(receipt.support, support);
             assert!(!receipt.support.delivers());
+            assert_eq!(
+                receipt.reason,
+                "token-budget warning is recorded locally and is not delivered to the live provider"
+            );
             assert_eq!(receipt.transport, None);
             assert_eq!(receipt.message_id, None);
         }
