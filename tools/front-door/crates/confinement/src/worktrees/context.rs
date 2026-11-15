@@ -5,7 +5,6 @@ use provenant_core::{CancelToken, Roots};
 use provenant_os::exec::SystemExecutor;
 use provenant_os::fs::Directory;
 use std::ffi::OsStr;
-use std::path::PathBuf;
 use std::time::Duration;
 
 /// A verified Git command anchor paired with the stable layout owner.
