@@ -173,26 +173,27 @@ compare-and-swap.
 
 ### Native environment and sandbox tool stores
 
-Unsandboxed lanes inherit host environment, tool caches and credentials.
-`FilteredLanePath` selects retained requester PATH, captured host search path
-for older handoffs, or process PATH only without a host handoff. It filters
-canonical directories and executable symlink targets under the enclosing
-primary project and selected worktree, including both roots for a linked
-checkout and requesters starting in a subdirectory. Lane model/account identity
-and version probes, bare commands and native provider launches share that PATH.
-Sandboxed provider launches prepend
-their fixed tool directories and private wrappers to the filtered requester
-PATH; PATH entries do not add filesystem or executable grants. Host delivery
-filters its captured host PATH through the same owner for tool lookup. Explicit
+Unsandboxed lanes inherit the host environment. `FilteredLanePath` selects
+retained requester PATH, otherwise captured host search path, or process PATH
+only without a host handoff. It filters canonical directories and executable
+symlink targets under the primary project and selected worktree, including both
+roots for linked checkouts and requesters starting in a subdirectory. Lane
+model/account identity and version probes, bare commands and native provider
+launches share that PATH. Sandboxed launches prepend their fixed tool directories
+and private wrappers; PATH entries do not add filesystem or executable grants.
+Host delivery filters its captured host PATH through the same owner for tool
+lookup. Explicit
 program paths stay explicit. Graph retry saves PATH with its checkpoint under
 one journal lock. Remote peers record their own PATH at ingress because origin
 directories may not exist there.
-Provider account selectors still choose the registered
-account and its required credentials. Credential
-values stay in the live launch, never in prompts or receipts. Native launches
-skip skill copies, tool dependency discovery, credential symlink inventory and
-the build-slot shim. Every lane still binds the host Cargo home and private
-target/build directories before seed validation.
+
+Provider preparation may select an account-specific home or redirect state and
+cache paths in either confinement mode; account selectors choose the registered
+account and its required credentials. Credential values stay in the live launch,
+never in prompts or receipts. Native launches skip skill copies, tool dependency
+discovery, credential symlink inventory and the build-slot shim. Every lane still
+binds the host Cargo home and private target/build directories before seed
+validation.
 
 Sandboxed lanes use the minimal environment and staged skills, discover tool
 dependencies and credential aliases, and report inventory omissions in one
