@@ -115,8 +115,10 @@ fn checkout_commit(project: &Path, checkout: &Path, commit: &str) -> Result<()> 
     Ok(())
 }
 
-/// The pinned remote-tracking commit every seed build starts from.
-fn origin_main(host_state: &Path, project: &Path) -> Result<String> {
+/// The pinned remote-tracking commit every seed build starts from: the
+/// project's declared verify base (`verify.base` in the port table), so a
+/// repository with another remote or default branch needs no `origin/main`.
+fn verify_base(host_state: &Path, project: &Path) -> Result<String> {
     use provenant_confinement::{
         repo::GitRefName,
         utility::{UtilityBudget, UtilityRuntime},
@@ -130,7 +132,10 @@ fn origin_main(host_state: &Path, project: &Path) -> Result<String> {
     let cancel = provenant_core::CancelToken::new();
     let repo = utility.open_read_repo(&executor, project, budget, &cancel)?;
     let facts = RepoFacts::default();
-    let reference = GitRefName::remote_tracking("origin/main")?;
+    let base = provenant_config::PortTable::read_for(Some(project), host_state)?
+        .verify
+        .base;
+    let reference = GitRefName::remote_tracking(&base)?;
     Ok(facts
         .resolve_read_commit(&repo, &executor, &utility, budget, reference, &cancel)?
         .to_string())
@@ -141,22 +146,22 @@ fn origin_main(host_state: &Path, project: &Path) -> Result<String> {
 pub enum Refresh {
     /// This project has no selected Cargo workspace; nothing to seed.
     NotCargo,
-    /// The newest complete generation already builds this `origin/main`.
+    /// The newest complete generation already builds this verify base commit.
     Current,
     /// Another host seed build holds the build lock; nothing was started.
     Busy,
     /// A new generation was published.
     Built(String),
     /// The last build of this commit (named here) failed for this project; it
-    /// is not retried until `origin/main` moves.
+    /// is not retried until the verify base moves.
     BackedOff(String),
 }
 
-/// Rebuild the seed when `origin/main` has moved past the newest complete
+/// Rebuild the seed when the verify base has moved past the newest complete
 /// generation, at most one build at a time. Call after a fetch that may have
-/// advanced `origin/main`; it does nothing when the seed is current or a build
+/// advanced the base; it does nothing when the seed is current or a build
 /// is running, and never builds from a lane checkout (the build uses a scratch
-/// clone of the pinned `origin/main`).
+/// clone of the pinned base commit).
 // The detached seed worker (`internal tick-seed`) calls this once per project
 // after the daily collection's fetch. The harness-free worktree driver
 // includes this module without that caller.
@@ -166,7 +171,7 @@ pub fn refresh(state: &Path, project: &Path) -> Result<Refresh> {
     if target_seed::cargo_build_directory(project, state)?.is_none() {
         return Ok(Refresh::NotCargo);
     }
-    let commit = origin_main(state, project)?;
+    let commit = verify_base(state, project)?;
     refresh_with(state, &marker_name(project), &commit, |stage| {
         build_into(stage, project, state, &commit)
     })
@@ -194,7 +199,7 @@ fn marker_name(project: &Path) -> String {
 }
 
 /// The commit whose build last failed for this project, so a broken
-/// `origin/main` is not rebuilt every tick. A new commit differs and so clears
+/// verify base is not rebuilt every tick. A new commit differs and so clears
 /// the back-off.
 fn failed_commit(state: &Path, marker: &str) -> Option<String> {
     fs::read_to_string(target_seed::store_path(state).join(marker))
@@ -287,7 +292,7 @@ fn refuse_in_lane() -> Result<()> {
 
 pub fn build(state: &Path, project: &Path) -> Result<String> {
     refuse_in_lane()?;
-    let commit = origin_main(state, project)?;
+    let commit = verify_base(state, project)?;
     publish(state, |stage| build_into(stage, project, state, &commit))
 }
 
@@ -459,7 +464,7 @@ mod checkout_tests {
         assert_ne!(pinned, local.trim());
         let state = temp.path().join("state");
         fs::create_dir(&state).unwrap();
-        assert_eq!(origin_main(&state, &project).unwrap(), pinned);
+        assert_eq!(verify_base(&state, &project).unwrap(), pinned);
         checkout_commit(&project, &checkout, pinned).unwrap();
         assert_eq!(fs::read_to_string(checkout.join("file")).unwrap(), "second");
         let actual =
