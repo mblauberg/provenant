@@ -8,7 +8,7 @@ fn value(env: &[(std::ffi::OsString, std::ffi::OsString)], name: &str) -> Option
 #[test]
 fn lane_defaults_disable_incremental_and_trim_debug_info() {
     let mut env = Vec::new();
-    set_cargo_profile(&mut env, &LaneBuildSettings::default());
+    set_cargo_profile(&mut env, &LaneBuildSettings::default(), false);
     assert_eq!(value(&env, "CARGO_INCREMENTAL").as_deref(), Some("0"));
     assert_eq!(
         value(&env, "CARGO_PROFILE_DEV_DEBUG").as_deref(),
@@ -25,6 +25,7 @@ fn configuration_overrides_the_defaults() {
             cargo_debug: Some("full".into()),
             ..LaneBuildSettings::default()
         },
+        false,
     );
     assert_eq!(value(&env, "CARGO_INCREMENTAL").as_deref(), Some("1"));
     assert_eq!(
@@ -35,7 +36,10 @@ fn configuration_overrides_the_defaults() {
 #[test]
 fn supplied_environment_takes_precedence() {
     let mut env = vec![("CARGO_INCREMENTAL".into(), "1".into())];
-    set_cargo_profile(&mut env, &LaneBuildSettings::default());
+    let explicit = env.clone();
+    LaneBuildSettings::default()
+        .apply_cargo_build_profile(&mut env, &explicit)
+        .unwrap();
     assert_eq!(value(&env, "CARGO_INCREMENTAL").as_deref(), Some("1"));
     assert_eq!(env.len(), 2);
 }

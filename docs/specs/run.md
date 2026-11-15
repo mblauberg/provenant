@@ -45,11 +45,16 @@ seed generations.
 
 A target seed store is shared across registered repositories on the host. Each
 generation records a hash of the verified canonical shared Git directory and
-verify-base commit, so linked checkouts share identity and another repository's
-newer generation does not force a rebuild. A writer lane prefers the newest
-compatible generation for its verified project identity, then uses a compatible
-generation from another project if no own generation exists. Cargo still checks
-build fingerprints before reusing artifacts. Published generations are
+verify-base commit plus its Rust compiler identity and effective
+`CARGO_INCREMENTAL` and `CARGO_PROFILE_DEV_DEBUG` values, so a toolchain or
+profile change rebuilds the seed even when the commit is unchanged. Linked
+checkouts share identity and another repository's newer generation does not
+force a rebuild. A writer lane prefers the newest compatible generation for its
+verified project identity, then uses a compatible generation from another
+project if no own generation exists. The seed builder and writer preparation
+use the same lane profile defaults and preserve explicit environment values;
+incompatible profile generations are skipped. Cargo still checks build
+fingerprints before reusing artifacts. Published generations are
 immutable, and collection cannot race an active clone. `max_generations` keeps
 history per project; `max_bytes` remains a host-wide allocated-byte limit and
 can evict a project's only generation under byte pressure. Failed refreshes

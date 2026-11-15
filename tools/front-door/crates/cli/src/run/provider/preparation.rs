@@ -3999,9 +3999,7 @@ pub(super) fn prepare_candidates(
                     .push((provenant_core::consumer_env::LANE_BASE.into(), base.into()));
             }
         }
-        if sandbox.effective {
-            set_cargo_profile(&mut spec.env, &build_settings);
-        }
+        set_cargo_profile(&mut spec.env, &build_settings, !sandbox.effective);
         spec.env.extend(
             model_policy
                 .launch_env(adapter.id())

@@ -1,4 +1,5 @@
 //! Build from a pinned remote-tracking commit in a disposable host checkout.
+use provenant_config::{CargoBuildProfile, LaneBuildSettings};
 use provenant_core::Clock;
 use provenant_os::exec::{ExecError, ExecOptions, Executor, SystemExecutor, Termination};
 use provenant_run::target_seed::{self, Manifest};
@@ -177,12 +178,29 @@ fn verify_base(host_state: &Path, project: &Path) -> Result<(String, String)> {
 pub enum Refresh {
     /// This project has no selected Cargo workspace; nothing to seed.
     NotCargo,
-    /// A complete generation for this repository already builds this verify base commit.
+    /// A complete generation for this repository matches the commit, compiler and Cargo profile.
     Current,
     /// Another host seed build holds the build lock; nothing was started.
     Busy,
     /// A new generation was published.
     Built(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GenerationIdentity {
+    project_key: String,
+    commit: String,
+    rustc_vv: String,
+    host_triple: String,
+    cargo_profile: CargoBuildProfile,
+}
+
+fn cargo_build_profile(state: &Path) -> Result<CargoBuildProfile> {
+    let settings = LaneBuildSettings::read(state)?;
+    let environment = std::env::vars_os().collect::<Vec<_>>();
+    settings
+        .cargo_build_profile(&environment)
+        .ok_or_else(|| io::Error::other("Cargo profile environment is not UTF-8").into())
 }
 
 /// Rebuild this repository's seed when its verify base has no complete
@@ -196,12 +214,28 @@ pub enum Refresh {
 #[allow(dead_code)]
 pub fn refresh(state: &Path, project: &Path) -> Result<Refresh> {
     refuse_in_lane()?;
-    if target_seed::cargo_build_directory(project, state)?.is_none() {
+    let Some(workspace) = target_seed::cargo_build_directory(project, state)? else {
         return Ok(Refresh::NotCargo);
-    }
+    };
     let (commit, project_key) = verify_base(state, project)?;
-    refresh_with(state, &project_key, &commit, |stage| {
-        build_into(stage, project, state, &commit, &project_key)
+    let (rustc_vv, host_triple) = target_seed::rustc_metadata(&workspace)?;
+    let cargo_profile = cargo_build_profile(state)?;
+    let identity = GenerationIdentity {
+        project_key,
+        commit,
+        rustc_vv,
+        host_triple,
+        cargo_profile,
+    };
+    refresh_with(state, &identity, |stage| {
+        build_into(
+            stage,
+            project,
+            state,
+            &identity.commit,
+            &identity.project_key,
+            &identity.cargo_profile,
+        )
     })
 }
 
@@ -218,30 +252,28 @@ impl Error for AlreadyCurrent {}
 
 fn refresh_with(
     state: &Path,
-    project_key: &str,
-    head: &str,
+    identity: &GenerationIdentity,
     build: impl FnOnce(&Path) -> Result<Manifest>,
 ) -> Result<Refresh> {
-    refresh_racing(state, project_key, head, || {}, build)
+    refresh_racing(state, identity, || {}, build)
 }
 
 /// `between` runs after the unlocked staleness check and before the build
 /// lock: the window another refresher can publish in.
 fn refresh_racing(
     state: &Path,
-    project_key: &str,
-    head: &str,
+    identity: &GenerationIdentity,
     between: impl FnOnce(),
     build: impl FnOnce(&Path) -> Result<Manifest>,
 ) -> Result<Refresh> {
-    if has_generation(state, project_key, head) {
+    if has_generation(state, identity) {
         return Ok(Refresh::Current);
     }
     // Another refresher may publish this commit between the check above and
     // our taking the build lock, so look again once we hold it.
     between();
     let result = publish(state, |stage| {
-        if has_generation(state, project_key, head) {
+        if has_generation(state, identity) {
             return Err(AlreadyCurrent.into());
         }
         build(stage)
@@ -262,8 +294,9 @@ fn refresh_racing(
 }
 
 /// Check every complete generation because a newer generation may belong to
-/// another repository in the shared seed store.
-fn has_generation(state: &Path, project_key: &str, commit: &str) -> bool {
+/// another repository in the shared seed store. A match includes the compiler
+/// and effective Cargo profile, not just the commit.
+fn has_generation(state: &Path, identity: &GenerationIdentity) -> bool {
     let generations = target_seed::store_path(state).join("generations");
     let Ok(entries) = fs::read_dir(generations) else {
         return false;
@@ -283,7 +316,11 @@ fn has_generation(state: &Path, project_key: &str, commit: &str) -> bool {
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok())
             .is_some_and(|manifest| {
-                manifest.project_key == project_key && manifest.commit == commit
+                manifest.project_key == identity.project_key
+                    && manifest.commit == identity.commit
+                    && manifest.rustc_vv == identity.rustc_vv
+                    && manifest.host_triple == identity.host_triple
+                    && manifest.cargo_profile == identity.cargo_profile
             })
     })
 }
@@ -298,8 +335,9 @@ fn refuse_in_lane() -> Result<()> {
 pub fn build(state: &Path, project: &Path) -> Result<String> {
     refuse_in_lane()?;
     let (commit, project_key) = verify_base(state, project)?;
+    let cargo_profile = cargo_build_profile(state)?;
     publish(state, |stage| {
-        build_into(stage, project, state, &commit, &project_key)
+        build_into(stage, project, state, &commit, &project_key, &cargo_profile)
     })
 }
 
@@ -309,6 +347,7 @@ fn build_into(
     host_state: &Path,
     commit: &str,
     project_key: &str,
+    cargo_profile: &CargoBuildProfile,
 ) -> Result<Manifest> {
     let checkout = stage.join("checkout");
     checkout_commit(project, &checkout, commit)?;
@@ -338,14 +377,12 @@ fn build_into(
         let argv: Vec<OsString> = std::iter::once(OsString::from("cargo"))
             .chain(args.iter().map(OsString::from))
             .collect();
-        run(
-            &worktree,
-            &argv,
-            &[
-                ("CARGO_TARGET_DIR".into(), target.as_os_str().into()),
-                ("CARGO_BUILD_BUILD_DIR".into(), target.as_os_str().into()),
-            ],
-        )?;
+        let mut overrides = cargo_profile.environment().to_vec();
+        overrides.extend([
+            ("CARGO_TARGET_DIR".into(), target.as_os_str().into()),
+            ("CARGO_BUILD_BUILD_DIR".into(), target.as_os_str().into()),
+        ]);
+        run(&worktree, &argv, &overrides)?;
     }
     fs::remove_dir_all(checkout)?;
     Ok(Manifest {
@@ -354,6 +391,7 @@ fn build_into(
         host_triple,
         commit: commit.to_owned(),
         profile: "dev".into(),
+        cargo_profile: cargo_profile.clone(),
         features: vec!["default".into()],
         flags,
     })
@@ -526,21 +564,34 @@ mod tests {
         );
     }
     #[allow(dead_code)] // The harness-free target includes this module without its tests.
-    fn manifest(project_key: &str, commit: &str) -> Manifest {
-        Manifest {
+    fn identity(project_key: &str, commit: &str) -> GenerationIdentity {
+        GenerationIdentity {
             project_key: project_key.into(),
+            commit: commit.into(),
             rustc_vv: "version".into(),
             host_triple: "host".into(),
-            commit: commit.into(),
+            cargo_profile: LaneBuildSettings::default()
+                .cargo_build_profile(&[])
+                .expect("default Cargo profile is UTF-8"),
+        }
+    }
+    #[allow(dead_code)] // The harness-free target includes this module without its tests.
+    fn manifest(identity: &GenerationIdentity) -> Manifest {
+        Manifest {
+            project_key: identity.project_key.clone(),
+            rustc_vv: identity.rustc_vv.clone(),
+            host_triple: identity.host_triple.clone(),
+            commit: identity.commit.clone(),
             profile: "dev".into(),
+            cargo_profile: identity.cargo_profile.clone(),
             features: vec![],
             flags: vec![],
         }
     }
     #[allow(dead_code)] // The harness-free target includes this module without its tests.
-    fn built(stage: &Path, project_key: &str, commit: &str) -> Result<Manifest> {
+    fn built(stage: &Path, identity: &GenerationIdentity) -> Result<Manifest> {
         fs::create_dir(stage.join("target"))?;
-        Ok(manifest(project_key, commit))
+        Ok(manifest(identity))
     }
     #[allow(dead_code)] // The harness-free target includes this module without its tests.
     fn freeze(state: &Path) {
@@ -550,15 +601,149 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)] // This source module is also included by a test target that does not run seed-builder tests.
+    fn copy_tree(source: &Path, destination: &Path) -> io::Result<()> {
+        fs::create_dir_all(destination)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            let target = destination.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                copy_tree(&entry.path(), &target)?;
+            } else if entry.file_type()?.is_file() {
+                fs::copy(entry.path(), target)?;
+            } else {
+                return Err(io::Error::other("unexpected entry in Cargo target fixture"));
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)] // This source module is also included by a test target that does not run seed-builder tests.
+    fn run_cargo_output(
+        cwd: &Path,
+        argv: &[OsString],
+        overrides: &[(OsString, OsString)],
+    ) -> Result<String> {
+        let mut env: Vec<_> = std::env::vars_os()
+            .filter(|(key, _)| {
+                !key.to_string_lossy().starts_with("GIT_")
+                    && !overrides.iter().any(|(name, _)| name == key)
+            })
+            .collect();
+        env.extend_from_slice(overrides);
+        let mut options = ExecOptions::new(argv, cwd, Duration::from_secs(4 * 60 * 60));
+        options.env = Some(&env);
+        options.process_group = true;
+        let result = SystemExecutor::new(1)?.execute(options)?;
+        if result.termination != Termination::Exit(0)
+            || result.timed_out
+            || result.stdout.truncated
+            || result.stdout.read_failed
+            || result.stderr.truncated
+            || result.stderr.read_failed
+        {
+            return Err(io::Error::other("Cargo fixture command failed").into());
+        }
+        let mut output = result.stdout.bytes;
+        output.extend(result.stderr.bytes);
+        String::from_utf8(output).map_err(Into::into)
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn matching_seed_profile_reuses_a_dependency_as_fresh() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        let dependency = temp.path().join("dependency");
+        fs::create_dir_all(app.join("src")).unwrap();
+        fs::create_dir_all(dependency.join("src")).unwrap();
+        fs::write(
+            dependency.join("Cargo.toml"),
+            "[package]\nname = 'seeded-dependency'\nversion = '0.1.0'\nedition = '2021'\n",
+        )
+        .unwrap();
+        fs::write(
+            dependency.join("src/lib.rs"),
+            "pub fn value() -> u8 { 42 }\n",
+        )
+        .unwrap();
+        fs::write(
+            app.join("Cargo.toml"),
+            "[package]\nname = 'seed-probe-app'\nversion = '0.1.0'\nedition = '2021'\n\n[dependencies]\nseeded-dependency = { path = '../dependency' }\n",
+        )
+        .unwrap();
+        fs::write(
+            app.join("src/main.rs"),
+            "fn main() { println!(\"{}\", seeded_dependency::value()); }\n",
+        )
+        .unwrap();
+
+        let profile = LaneBuildSettings::default()
+            .cargo_build_profile(&[])
+            .expect("default Cargo profile is UTF-8");
+        let mut profile_env = profile.environment().to_vec();
+        profile_env.push(("CARGO_NET_OFFLINE".into(), "true".into()));
+        let generate_lock = [
+            OsString::from("cargo"),
+            "generate-lockfile".into(),
+            "--offline".into(),
+        ];
+        run(&app, &generate_lock, &profile_env).unwrap();
+
+        let seed_target = temp.path().join("seed-target");
+        let mut seed_env = profile_env.clone();
+        seed_env.extend([
+            ("CARGO_TARGET_DIR".into(), seed_target.as_os_str().into()),
+            (
+                "CARGO_BUILD_BUILD_DIR".into(),
+                seed_target.as_os_str().into(),
+            ),
+        ]);
+        let build_seed = [
+            OsString::from("cargo"),
+            "build".into(),
+            "--locked".into(),
+            "--all-targets".into(),
+            "--offline".into(),
+        ];
+        run(&app, &build_seed, &seed_env).unwrap();
+
+        let writer_target = temp.path().join("writer-target");
+        copy_tree(&seed_target, &writer_target).unwrap();
+        let mut writer_env = profile_env;
+        writer_env.extend([
+            ("CARGO_TARGET_DIR".into(), writer_target.as_os_str().into()),
+            (
+                "CARGO_BUILD_BUILD_DIR".into(),
+                writer_target.as_os_str().into(),
+            ),
+        ]);
+        let build_writer = [
+            OsString::from("cargo"),
+            "build".into(),
+            "--locked".into(),
+            "--verbose".into(),
+            "--offline".into(),
+        ];
+        let output = run_cargo_output(&app, &build_writer, &writer_env).unwrap();
+        assert!(
+            output
+                .lines()
+                .any(|line| line.contains("Fresh seeded-dependency")),
+            "expected the writer target to reuse the seeded dependency, got:\n{output}"
+        );
+    }
+
     /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
     fn refresh_checks_all_generations_for_this_repository() {
         let state = tempfile::tempdir().unwrap();
         let builds = std::cell::Cell::new(0);
         let run = |head: &str| {
-            refresh_with(state.path(), "repo-a", head, |stage| {
+            let identity = identity("repo-a", head);
+            refresh_with(state.path(), &identity, |stage| {
                 builds.set(builds.get() + 1);
-                built(stage, "repo-a", head)
+                built(stage, &identity)
             })
             .unwrap()
         };
@@ -568,7 +753,7 @@ mod tests {
         // An incomplete generation cannot establish currentness.
         let generations = target_seed::store_path(state.path()).join("generations");
         fs::create_dir(generations.join("99999999999999999999-partial")).unwrap();
-        assert!(has_generation(state.path(), "repo-a", "aaa"));
+        assert!(has_generation(state.path(), &identity("repo-a", "aaa")));
         assert!(matches!(run("bbb"), Refresh::Built(_)));
         assert_eq!(run("bbb"), Refresh::Current);
         assert_eq!(builds.get(), 2);
@@ -577,7 +762,40 @@ mod tests {
 
     /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
-    fn another_repositorys_newer_generation_does_not_rebuild_this_repository() {
+    fn refresh_rebuilds_the_same_commit_when_profile_or_toolchain_changes() {
+        let state = tempfile::tempdir().unwrap();
+        let builds = std::cell::Cell::new(0);
+        let run = |identity: &GenerationIdentity| {
+            refresh_with(state.path(), identity, |stage| {
+                builds.set(builds.get() + 1);
+                built(stage, identity)
+            })
+            .unwrap()
+        };
+        let baseline = identity("repo", "same-commit");
+        assert!(matches!(run(&baseline), Refresh::Built(_)));
+        assert_eq!(run(&baseline), Refresh::Current);
+
+        let mut profile_changed = baseline.clone();
+        profile_changed.cargo_profile.debug = "full".into();
+        assert!(matches!(run(&profile_changed), Refresh::Built(_)));
+        assert_eq!(run(&profile_changed), Refresh::Current);
+
+        let mut compiler_changed = profile_changed.clone();
+        compiler_changed.rustc_vv = "new version".into();
+        assert!(matches!(run(&compiler_changed), Refresh::Built(_)));
+        assert_eq!(run(&compiler_changed), Refresh::Current);
+
+        let mut triple_changed = compiler_changed.clone();
+        triple_changed.host_triple = "new host".into();
+        assert!(matches!(run(&triple_changed), Refresh::Built(_)));
+        assert_eq!(builds.get(), 4);
+        freeze(state.path());
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn a_newer_generation_from_another_repository_does_not_rebuild_this_repository() {
         let state = tempfile::tempdir().unwrap();
         let common_a = state.path().join("repo-a/.git");
         let common_b = state.path().join("repo-b/.git");
@@ -593,23 +811,23 @@ mod tests {
             key_a
         );
         for (project_key, commit) in [(&key_a, "aaa"), (&key_b, "bbb")] {
+            let identity = identity(project_key, commit);
             assert!(matches!(
-                refresh_with(state.path(), project_key, commit, |stage| {
-                    built(stage, project_key, commit)
-                })
-                .unwrap(),
+                refresh_with(state.path(), &identity, |stage| built(stage, &identity)).unwrap(),
                 Refresh::Built(_)
             ));
         }
+        let identity_a = identity(&key_a, "aaa");
         assert_eq!(
-            refresh_with(state.path(), &key_a, "aaa", |_| {
+            refresh_with(state.path(), &identity_a, |_| {
                 panic!("repo A already has a complete matching generation")
             })
             .unwrap(),
             Refresh::Current
         );
+        let identity_b = identity(&key_b, "bbb");
         assert_eq!(
-            refresh_with(state.path(), &key_b, "bbb", |_| {
+            refresh_with(state.path(), &identity_b, |_| {
                 panic!("repo B already has a complete matching generation")
             })
             .unwrap(),
@@ -621,20 +839,22 @@ mod tests {
     /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
     #[allow(clippy::disallowed_methods)] // A real deadline bounds the fork-race retry.
-    fn refresh_retries_failed_commits_and_serializes_builds() {
+    fn refresh_retries_failed_commits_and_serialises_builds() {
         let state = tempfile::tempdir().unwrap();
         {
             // Another host build holds the build lock: no second build starts.
             target_seed::lock_store(state.path()).map(drop).unwrap();
             let _running = target_seed::lock_build(state.path()).unwrap();
-            let outcome = refresh_with(state.path(), "repo", "aaa", |_| panic!("must not build"));
+            let identity = identity("repo", "aaa");
+            let outcome = refresh_with(state.path(), &identity, |_| panic!("must not build"));
             assert_eq!(outcome.unwrap(), Refresh::Busy);
         }
+        let identity = identity("repo", "aaa");
         // A sibling test thread can fork while the lock above is released and
         // briefly hold a copy of its descriptor, so retry for at most 2 s.
         let retry_deadline = std::time::Instant::now() + Duration::from_secs(2);
         let failed = loop {
-            let attempt = refresh_with(state.path(), "repo", "aaa", |_| {
+            let attempt = refresh_with(state.path(), &identity, |_| {
                 Err(io::Error::other("build failed").into())
             });
             if !matches!(attempt, Ok(Refresh::Busy)) || std::time::Instant::now() >= retry_deadline
@@ -644,14 +864,11 @@ mod tests {
             std::thread::yield_now();
         };
         assert!(failed.is_err(), "{failed:?}");
-        assert!(!has_generation(state.path(), "repo", "aaa"));
+        assert!(!has_generation(state.path(), &identity));
         // The next scheduled refresh retries the same commit after an
         // infrastructure failure has been repaired.
         assert!(matches!(
-            refresh_with(state.path(), "repo", "aaa", |stage| built(
-                stage, "repo", "aaa"
-            ))
-            .unwrap(),
+            refresh_with(state.path(), &identity, |stage| built(stage, &identity)).unwrap(),
             Refresh::Built(_)
         ));
         freeze(state.path());
@@ -660,12 +877,12 @@ mod tests {
     #[test]
     fn refresh_rechecks_staleness_after_taking_the_build_lock() {
         let state = tempfile::tempdir().unwrap();
+        let identity = identity("repo", "aaa");
         let outcome = refresh_racing(
             state.path(),
-            "repo",
-            "aaa",
+            &identity,
             || {
-                publish(state.path(), |stage| built(stage, "repo", "aaa")).unwrap();
+                publish(state.path(), |stage| built(stage, &identity)).unwrap();
             },
             |_| panic!("the racing publisher already built this commit"),
         )
@@ -686,6 +903,9 @@ mod tests {
                 host_triple: "host".into(),
                 commit: "commit".into(),
                 profile: "dev".into(),
+                cargo_profile: LaneBuildSettings::default()
+                    .cargo_build_profile(&[])
+                    .expect("default Cargo profile is UTF-8"),
                 features: vec![],
                 flags: vec![],
             })

@@ -111,6 +111,8 @@ fallback_reasons! {
     MANIFEST_INVALID = "manifest_invalid",
     TOOLCHAIN_MISMATCH = "toolchain_mismatch",
     TRIPLE_MISMATCH = "triple_mismatch",
+    CARGO_PROFILE_MISMATCH = "cargo_profile_mismatch",
+    CARGO_PROFILE_UNREPRESENTABLE = "cargo_profile_unrepresentable",
     STAGING_UNAVAILABLE = "staging_unavailable",
     STAGING_SYNC_FAILED = "staging_sync_failed",
     PUBLISH_FAILED = "publish_failed",
@@ -215,6 +217,10 @@ pub(crate) fn seed_target(
 ) -> Outcome {
     #[cfg(unix)]
     {
+        let settings = provenant_config::LaneBuildSettings::default();
+        let Some(cargo_profile) = settings.cargo_build_profile(environment) else {
+            return Outcome::fallback(fallback_reasons::CARGO_PROFILE_UNREPRESENTABLE);
+        };
         let (version, triple) = match crate::target_seed::lane_rustc_metadata_cancellable(
             worktree,
             home,
@@ -230,9 +236,12 @@ pub(crate) fn seed_target(
         seed_target_cancellable(
             state,
             cache,
-            &version,
-            &triple,
-            project_key,
+            SeedCompatibility {
+                version: &version,
+                triple: &triple,
+                cargo_profile: &cargo_profile,
+                project_key,
+            },
             Some(cancel),
             |source, dest, deadline| clone_target_until(source, dest, cancel, deadline),
         )
@@ -260,24 +269,36 @@ fn seed_target_with(
     triple: &str,
     clone: impl FnOnce(&Path, &provenant_os::fs::Directory) -> Result<(), &'static str>,
 ) -> Outcome {
+    let cargo_profile = provenant_config::LaneBuildSettings::default()
+        .cargo_build_profile(&[])
+        .expect("default Cargo profile is UTF-8");
     seed_target_cancellable(
         state,
         cache,
-        version,
-        triple,
-        "",
+        SeedCompatibility {
+            version,
+            triple,
+            cargo_profile: &cargo_profile,
+            project_key: "",
+        },
         None,
         |source, dest, _| clone(source, dest),
     )
 }
 
 #[cfg(any(unix, test))]
+struct SeedCompatibility<'a> {
+    version: &'a str,
+    triple: &'a str,
+    cargo_profile: &'a provenant_config::CargoBuildProfile,
+    project_key: &'a str,
+}
+
+#[cfg(any(unix, test))]
 fn seed_target_cancellable(
     state: &Path,
     cache: &Path,
-    version: &str,
-    triple: &str,
-    project_key: &str,
+    compatibility: SeedCompatibility<'_>,
     cancel: Option<&provenant_core::CancelToken>,
     clone: impl FnOnce(&Path, &provenant_os::fs::Directory, &SeedBudget) -> Result<(), &'static str>,
 ) -> Outcome {
@@ -335,6 +356,8 @@ fn seed_target_cancellable(
     let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
     entries.sort_by_key(|entry| std::cmp::Reverse(entry.file_name()));
     let mut saw_version = false;
+    let mut saw_triple = false;
+    let mut saw_cargo_profile = false;
     let mut saw_manifest = false;
     let mut saw_entry = false;
     let mut selected_project = None;
@@ -369,14 +392,20 @@ fn seed_target_cancellable(
             continue;
         };
         saw_manifest = true;
-        if manifest.rustc_vv != version {
+        if manifest.rustc_vv != compatibility.version {
             continue;
         }
         saw_version = true;
-        if manifest.host_triple != triple {
+        if manifest.host_triple != compatibility.triple {
             continue;
         }
-        let project_match = !project_key.is_empty() && manifest.project_key == project_key;
+        saw_triple = true;
+        if &manifest.cargo_profile != compatibility.cargo_profile {
+            continue;
+        }
+        saw_cargo_profile = true;
+        let project_match = !compatibility.project_key.is_empty()
+            && manifest.project_key == compatibility.project_key;
         let candidate = SeedCandidate {
             target: entry.path().join("target"),
             generation_id: safe_generation_id(&entry.file_name()),
@@ -397,8 +426,12 @@ fn seed_target_cancellable(
             fallback_reasons::MANIFEST_INVALID
         } else if !saw_version {
             fallback_reasons::TOOLCHAIN_MISMATCH
-        } else {
+        } else if !saw_triple {
             fallback_reasons::TRIPLE_MISMATCH
+        } else if !saw_cargo_profile {
+            fallback_reasons::CARGO_PROFILE_MISMATCH
+        } else {
+            fallback_reasons::MANIFEST_INVALID
         });
     };
     let source = selected.target;
@@ -639,6 +672,26 @@ mod tests {
         triple: &str,
         project_key: &str,
     ) {
+        generation_for_profile(
+            state,
+            name,
+            version,
+            triple,
+            project_key,
+            provenant_config::LaneBuildSettings::default()
+                .cargo_build_profile(&[])
+                .expect("default Cargo profile is UTF-8"),
+        );
+    }
+
+    fn generation_for_profile(
+        state: &Path,
+        name: &str,
+        version: &str,
+        triple: &str,
+        project_key: &str,
+        cargo_profile: provenant_config::CargoBuildProfile,
+    ) {
         let dir = crate::target_seed::store_path(state)
             .join("generations")
             .join(name);
@@ -650,6 +703,7 @@ mod tests {
             host_triple: triple.into(),
             commit: "abc".into(),
             profile: "dev".into(),
+            cargo_profile,
             features: vec![],
             flags: vec![],
         };
@@ -805,12 +859,18 @@ mod tests {
         std::fs::create_dir(&cache).unwrap();
         generation_for_project(&state, "001", "v1", "host", "project-a");
         generation_for_project(&state, "002", "v1", "host", "project-b");
+        let profile = provenant_config::LaneBuildSettings::default()
+            .cargo_build_profile(&[])
+            .expect("default Cargo profile is UTF-8");
         let outcome = seed_target_cancellable(
             &state,
             &cache,
-            "v1",
-            "host",
-            "project-a",
+            SeedCompatibility {
+                version: "v1",
+                triple: "host",
+                cargo_profile: &profile,
+                project_key: "project-a",
+            },
             None,
             |source, _, _| {
                 assert!(source.ends_with("001/target"));
@@ -838,18 +898,56 @@ mod tests {
 
     /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
+    fn seed_with_a_different_cargo_profile_is_not_selected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        let profile = provenant_config::LaneBuildSettings::default()
+            .cargo_build_profile(&[])
+            .expect("default Cargo profile is UTF-8");
+        let mut different = profile.clone();
+        different.debug = "full".into();
+        generation_for_profile(&state, "001", "v1", "host", "project-a", different);
+
+        let outcome = seed_target_cancellable(
+            &state,
+            &cache,
+            SeedCompatibility {
+                version: "v1",
+                triple: "host",
+                cargo_profile: &profile,
+                project_key: "project-a",
+            },
+            None,
+            |_, _, _| panic!("profile-incompatible artifacts are never cloned"),
+        );
+        assert_eq!(
+            outcome,
+            Outcome::fallback(fallback_reasons::CARGO_PROFILE_MISMATCH)
+        );
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
     fn compatible_foreign_generation_is_used_only_when_project_seed_is_absent() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let cache = tmp.path().join("cache");
         std::fs::create_dir(&cache).unwrap();
         generation_for_project(&state, "001", "v1", "host", "project-b");
+        let profile = provenant_config::LaneBuildSettings::default()
+            .cargo_build_profile(&[])
+            .expect("default Cargo profile is UTF-8");
         let outcome = seed_target_cancellable(
             &state,
             &cache,
-            "v1",
-            "host",
-            "project-a",
+            SeedCompatibility {
+                version: "v1",
+                triple: "host",
+                cargo_profile: &profile,
+                project_key: "project-a",
+            },
             None,
             |source, _, _| {
                 assert!(source.ends_with("001/target"));
