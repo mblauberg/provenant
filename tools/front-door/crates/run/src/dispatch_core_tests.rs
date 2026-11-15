@@ -5,7 +5,8 @@ fn cancellation_keeps_a_genuine_launch_preparation_failure() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
     let run = input();
     let id = run.attempt_id;
     store.create(&run, &call)?;
@@ -18,7 +19,11 @@ fn cancellation_keeps_a_genuine_launch_preparation_failure() -> TestResult {
                 &attempt,
                 "cancel.json",
                 &crate::db::bytes(&serde_json::json!({
-                    "scope": RunStore::scope(record)
+                    "schema_version": 1,
+                    "scope": RunStore::scope(record),
+                    "requester": context.actor_id,
+                    "request_id": "fixture-cancel",
+                    "reason": provenant_supervisor::machine::StopReason::ExplicitCancellation
                 }))?,
                 RECORD_LIMIT,
             )?;
