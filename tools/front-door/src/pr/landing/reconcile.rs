@@ -689,6 +689,10 @@ pub(crate) fn recover_pending_with(
 
 #[cfg(test)]
 mod tests {
+    #[allow(
+        unused_imports,
+        reason = "used only by #[test] functions, which the worktrees driver compiles out"
+    )]
     use super::*;
 
     #[test]

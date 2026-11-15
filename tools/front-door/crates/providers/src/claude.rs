@@ -417,6 +417,10 @@ pub(super) fn refresh_with_policy(
 /// Exercise the public refresh path with a controlled clock and lock-boundary
 /// observer. The observer runs immediately before the real lock acquisition.
 #[cfg(test)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each refresh input is passed through unchanged"
+)]
 pub(crate) fn refresh_with_policy_using_clock(
     executor: &dyn Executor,
     login: &Login<'_>,
@@ -441,6 +445,10 @@ pub(crate) fn refresh_with_policy_using_clock(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each refresh input is passed through unchanged"
+)]
 fn refresh_with_clock_and_lock_observer(
     executor: &dyn Executor,
     login: &Login<'_>,
@@ -682,6 +690,10 @@ pub fn refresh_for_account_authorised(
 /// Test seam for the same account/status path with deterministic lock time and
 /// a state observer at the real refresh-lock boundary.
 #[cfg(test)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each refresh input is passed through unchanged"
+)]
 pub(crate) fn refresh_for_account_authorised_using_clock(
     executor: &dyn Executor,
     login: &Login<'_>,
@@ -730,6 +742,10 @@ fn refresh_account(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each refresh input is passed through unchanged"
+)]
 fn refresh_account_with_clock_and_lock_observer(
     executor: &dyn Executor,
     login: &Login<'_>,

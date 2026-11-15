@@ -2525,7 +2525,7 @@ mod tests {
             .filter(|field| !field.is_empty())
             .map(str::to_owned)
             .collect();
-        assert_eq!(fields.get(0).map(String::as_str), Some("internal"));
+        assert_eq!(fields.first().map(String::as_str), Some("internal"));
         assert_eq!(fields.get(1).map(String::as_str), Some("build-slot"));
         assert_eq!(fields.get(2).map(String::as_str), Some("--"));
         assert_eq!(

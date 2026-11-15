@@ -448,7 +448,7 @@ mod tests {
             let dir = Directory::open_anchor(temp.path())?;
             checkpoint(&dir, b"old")?;
             let mut replaced = false;
-            let mut observe = || {
+            let observe = || {
                 if !replaced {
                     // Replace the checkpoint between open and the final name check.
                     checkpoint(&dir, b"new").expect("replace checkpoint");

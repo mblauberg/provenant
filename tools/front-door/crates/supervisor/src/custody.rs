@@ -2198,9 +2198,9 @@ impl Recovery {
         if self.scope() != scope || self.reservation.attempt_inode != Some(metadata.inode) {
             return Ok(None);
         }
-        let boot = observer.boot_identity().map_err(|error| {
-            CustodyError::Io(io::Error::other(BootIdentityUnavailable(error)))
-        })?;
+        let boot = observer
+            .boot_identity()
+            .map_err(|error| CustodyError::Io(io::Error::other(BootIdentityUnavailable(error))))?;
         if boot == self.reservation.boot {
             return Ok(None);
         }

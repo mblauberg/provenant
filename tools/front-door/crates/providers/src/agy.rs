@@ -42,6 +42,7 @@ const IDENTITY_RECORD_BYTES: usize = 64 * 1024;
 /// The bounded authentication evidence that may appear in a provider
 /// diagnostic. Permission names remain data on `AgyFailure`, not part of the
 /// cause enum.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum AgyFailureCause {
     AuthenticationTimedOut,
@@ -52,8 +53,8 @@ pub(crate) enum AgyFailureCause {
     HeadlessPermissionDenied,
 }
 
+#[cfg(test)]
 impl AgyFailureCause {
-    #[cfg(test)]
     pub(crate) const ALL: &'static [Self] = &[
         Self::AuthenticationTimedOut,
         Self::SignedOut,
@@ -74,6 +75,7 @@ pub(crate) enum AgyFailure {
     HeadlessPermissionDenied(String),
 }
 
+#[cfg(test)]
 impl AgyFailure {
     pub(crate) fn cause(&self) -> AgyFailureCause {
         match self {
@@ -656,29 +658,22 @@ pub(crate) fn classify_failure(stderr: &[u8]) -> Option<AgyFailure> {
         let message = line.trim().strip_prefix("error: ").unwrap_or(line.trim());
         let cause = match message {
             "authentication timed out" | "authentication timeout" => {
-                Some(AgyFailureCause::AuthenticationTimedOut)
+                Some(AgyFailure::AuthenticationTimedOut)
             }
             "Authentication required. Please login to continue." | "not signed in" => {
-                Some(AgyFailureCause::SignedOut)
+                Some(AgyFailure::SignedOut)
             }
             "security: SecKeychainSearchCopyNext: User interaction is not allowed."
             | "security: SecKeychainItemCopyContent: User interaction is not allowed." => {
-                Some(AgyFailureCause::KeychainInteractionDenied)
+                Some(AgyFailure::KeychainInteractionDenied)
             }
             "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain." => {
-                Some(AgyFailureCause::KeychainHasNoSignin)
+                Some(AgyFailure::KeychainHasNoSignin)
             }
             _ => None,
         };
-        if let Some(cause) = cause {
-            return Some(match cause {
-                AgyFailureCause::AuthenticationTimedOut => AgyFailure::AuthenticationTimedOut,
-                AgyFailureCause::SignedOut => AgyFailure::SignedOut,
-                AgyFailureCause::KeychainInteractionDenied => AgyFailure::KeychainInteractionDenied,
-                AgyFailureCause::KeychainHasNoSignin => AgyFailure::KeychainHasNoSignin,
-                AgyFailureCause::AuthenticationFailedWithoutCause
-                | AgyFailureCause::HeadlessPermissionDenied => unreachable!("not parsed here"),
-            });
+        if cause.is_some() {
+            return cause;
         }
     }
     if stderr.lines().any(|line| {

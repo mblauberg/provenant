@@ -1476,6 +1476,7 @@ fn remove_contents(tree: &PayloadTree, depth: usize) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 impl RunStore {
     pub(crate) fn temporary_retained(&self, id: AttemptId, call: &Request<'_>) -> Result<bool> {
         call.check()?;
@@ -1842,7 +1843,7 @@ mod tests {
         withdraw(&store, &input, &call)?;
         let directory = Directory::open_anchor(&attempt)?;
         let capture = vec![b'x'; usize::try_from(LOG_TAIL)? * 3];
-        crate::artifacts::seal(&directory, "stderr.log", &capture, (LOG_TAIL * 4) as u64)?;
+        crate::artifacts::seal(&directory, "stderr.log", &capture, LOG_TAIL * 4)?;
         crate::artifacts::seal(&directory, "stderr.log.tail", b"older tail", LOG_TAIL)?;
         let read = || {
             store.read_output(

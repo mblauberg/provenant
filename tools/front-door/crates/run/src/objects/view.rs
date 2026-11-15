@@ -450,67 +450,6 @@ impl ViewIdentities {
     }
 }
 
-#[cfg(test)]
-mod stored_shape_tests {
-    use super::*;
-
-    #[test]
-    fn object_binding_preserves_additive_fields_and_declared_identity() {
-        let payload = br#"{
-            "schema_version":2,
-            "candidate":"candidate-1",
-            "future_binding":{"enabled":true},
-            "identities":{
-                "future_identities":7,
-                "scratch":{"device":1,"inode":2,"future_identity":"scratch"},
-                "refs":{"device":3,"inode":4,"future_identity":"refs"},
-                "objects":{"device":5,"inode":6,"future_identity":"objects"}
-            }
-        }"#;
-        let limits = provenant_records::Limits {
-            max_bytes: crate::RECORD_LIMIT,
-            ..Default::default()
-        };
-        let binding: ObjectBinding = provenant_records::decode(payload.as_slice(), limits)
-            .expect("bounded decoder accepts additive fields");
-
-        let encoded = provenant_records::encode(&binding).expect("record encodes");
-        let value: serde_json::Value = serde_json::from_slice(&encoded).expect("valid JSON");
-        assert_eq!(value["future_binding"]["enabled"], true);
-        assert_eq!(value["identities"]["future_identities"], 7);
-        for name in ["scratch", "refs", "objects"] {
-            assert!(value["identities"][name]["future_identity"].is_string());
-        }
-
-        assert_eq!(
-            binding.identities.as_ref().expect("schema 2 identities"),
-            &ViewIdentities {
-                scratch: DirectoryIdentity {
-                    device: 1,
-                    inode: 2,
-                    extra: Default::default(),
-                },
-                refs: DirectoryIdentity {
-                    device: 3,
-                    inode: 4,
-                    extra: Default::default(),
-                },
-                objects: DirectoryIdentity {
-                    device: 5,
-                    inode: 6,
-                    extra: Default::default(),
-                },
-                extra: Default::default(),
-            }
-        );
-
-        let redecoded: ObjectBinding = provenant_records::decode(encoded.as_slice(), limits)
-            .expect("bounded decoder reads its encoded record");
-        assert_eq!(binding.candidate, redecoded.candidate);
-        assert_eq!(binding.identities, redecoded.identities);
-    }
-}
-
 fn valid_candidate(name: &str) -> bool {
     name.strip_prefix("candidate-")
         .is_some_and(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
@@ -742,4 +681,65 @@ pub(crate) fn restore_index(source: &ObjectSource, repo: &VerifiedRepo) -> Resul
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod stored_shape_tests {
+    use super::*;
+
+    #[test]
+    fn object_binding_preserves_additive_fields_and_declared_identity() {
+        let payload = br#"{
+            "schema_version":2,
+            "candidate":"candidate-1",
+            "future_binding":{"enabled":true},
+            "identities":{
+                "future_identities":7,
+                "scratch":{"device":1,"inode":2,"future_identity":"scratch"},
+                "refs":{"device":3,"inode":4,"future_identity":"refs"},
+                "objects":{"device":5,"inode":6,"future_identity":"objects"}
+            }
+        }"#;
+        let limits = provenant_records::Limits {
+            max_bytes: crate::RECORD_LIMIT,
+            ..Default::default()
+        };
+        let binding: ObjectBinding = provenant_records::decode(payload.as_slice(), limits)
+            .expect("bounded decoder accepts additive fields");
+
+        let encoded = provenant_records::encode(&binding).expect("record encodes");
+        let value: serde_json::Value = serde_json::from_slice(&encoded).expect("valid JSON");
+        assert_eq!(value["future_binding"]["enabled"], true);
+        assert_eq!(value["identities"]["future_identities"], 7);
+        for name in ["scratch", "refs", "objects"] {
+            assert!(value["identities"][name]["future_identity"].is_string());
+        }
+
+        assert_eq!(
+            binding.identities.as_ref().expect("schema 2 identities"),
+            &ViewIdentities {
+                scratch: DirectoryIdentity {
+                    device: 1,
+                    inode: 2,
+                    extra: Default::default(),
+                },
+                refs: DirectoryIdentity {
+                    device: 3,
+                    inode: 4,
+                    extra: Default::default(),
+                },
+                objects: DirectoryIdentity {
+                    device: 5,
+                    inode: 6,
+                    extra: Default::default(),
+                },
+                extra: Default::default(),
+            }
+        );
+
+        let redecoded: ObjectBinding = provenant_records::decode(encoded.as_slice(), limits)
+            .expect("bounded decoder reads its encoded record");
+        assert_eq!(binding.candidate, redecoded.candidate);
+        assert_eq!(binding.identities, redecoded.identities);
+    }
 }

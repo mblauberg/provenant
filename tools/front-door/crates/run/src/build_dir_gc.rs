@@ -712,7 +712,7 @@ mod tests {
                 &mut free,
             );
             let recovered = free().unwrap();
-            assert!(report.cache_bytes <= total - 1);
+            assert!(report.cache_bytes < total);
             assert!(recovered >= 200);
             assert!(recovered - 200 < 100);
             assert!(oldest.exists() || middle.exists() || newest.exists());

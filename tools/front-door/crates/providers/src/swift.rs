@@ -393,6 +393,10 @@ mod tests {
             )
             .unwrap();
             std::fs::set_permissions(&shim_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "the test runs the generated shim"
+            )]
             let output = std::process::Command::new(&shim_path)
                 .args(["build", "--custom"])
                 .current_dir(&root)

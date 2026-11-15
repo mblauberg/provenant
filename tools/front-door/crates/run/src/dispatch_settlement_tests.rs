@@ -294,7 +294,7 @@ fn path_denial_case(
         answer: Some(answer.into()),
         ..Fake::default()
     };
-    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    let _record = store.finish(id, &dir, &observed, &fake, &call)?;
     assert_eq!(terminal(&store, id, &call)?, expected);
     let reason = terminal_reason(&store, id, &call)?;
     assert!(!reason.contains("/fixture/missing-grant"));

@@ -97,6 +97,7 @@ pub fn receipt_path(state: &Path, commit: &str, shadow: bool) -> Result<PathBuf,
 
 /// Read a receipt through the bounded record decoder, preserving fields from newer minor
 /// releases when the receipt is written again.
+#[cfg(test)]
 pub fn read_receipt(
     state: &Path,
     commit: &str,
@@ -229,6 +230,10 @@ pub fn clear_pending(
 pub(crate) mod tests {
     use super::*;
     use crate::pr::landing::test_support::LandingFixture;
+    #[allow(
+        unused_imports,
+        reason = "used only by #[test] functions, which the worktrees driver compiles out"
+    )]
     use std::collections::BTreeMap;
 
     pub(crate) fn candidate(commit: &str) -> Candidate {

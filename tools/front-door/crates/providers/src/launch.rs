@@ -521,30 +521,6 @@ pub enum Session {
     Resume,
 }
 
-/// Native approval controls used by provider launch builders. The outer
-/// confinement profile remains the authority for filesystem and network access.
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum NativeLaunchControl {
-    Arguments {
-        adapter: &'static str,
-        arguments: &'static [&'static str],
-    },
-    OpenCodePermissions {
-        adapter: &'static str,
-        permissions: OpenCodeNativePermissions,
-    },
-}
-
-#[cfg(test)]
-impl NativeLaunchControl {
-    pub(crate) const fn adapter(self) -> &'static str {
-        match self {
-            Self::Arguments { adapter, .. } | Self::OpenCodePermissions { adapter, .. } => adapter,
-        }
-    }
-}
-
 /// OpenCode's own prompt defaults. Path-specific entries still come from the
 /// launch plan and stay subject to the outer confinement profile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -573,31 +549,6 @@ pub(crate) const OPENCODE_NATIVE_PERMISSIONS: OpenCodeNativePermissions =
         read_key: "read",
         path_value: "allow",
     };
-
-/// One source for provider-native approval controls and their launch tests.
-#[cfg(test)]
-pub(crate) const NATIVE_LAUNCH_CONTROLS: &[NativeLaunchControl] = &[
-    NativeLaunchControl::Arguments {
-        adapter: "claude",
-        arguments: CLAUDE_NATIVE_ARGUMENTS,
-    },
-    NativeLaunchControl::Arguments {
-        adapter: "codex",
-        arguments: CODEX_NATIVE_ARGUMENTS,
-    },
-    NativeLaunchControl::Arguments {
-        adapter: "agy",
-        arguments: AGY_NATIVE_ARGUMENTS,
-    },
-    NativeLaunchControl::Arguments {
-        adapter: "cursor",
-        arguments: CURSOR_NATIVE_ARGUMENTS,
-    },
-    NativeLaunchControl::OpenCodePermissions {
-        adapter: "opencode",
-        permissions: OPENCODE_NATIVE_PERMISSIONS,
-    },
-];
 
 /// Checks shared by every adapter, returning its access and session mode.
 pub(crate) fn admit(

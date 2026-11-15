@@ -1122,7 +1122,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn command_failures_classify_missing_tools_and_transient_errors() {
         let spawn = |kind| ExecError::Io {
             operation: "spawn",
@@ -1308,7 +1307,7 @@ mod tests {
         fs::create_dir_all(&state).unwrap();
         let mut live = quota(&home, state);
         let credential_reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let refreshes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let _refreshes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let expires_ms = (live.now() + 3600) * 1000;
         fs::write(

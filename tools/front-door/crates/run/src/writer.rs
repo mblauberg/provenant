@@ -1837,6 +1837,10 @@ mod cargo_setup_tests {
         let temp = tempfile::tempdir()?;
         let home = temp.path().join("home");
         std::fs::create_dir(&home)?;
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "the test re-runs itself in a clean home"
+        )]
         let status = std::process::Command::new(std::env::current_exe()?)
             .args([test_filter, "--nocapture"])
             .current_dir(temp.path())
@@ -3210,6 +3214,7 @@ impl WriterLaunch {
 const UNCOMMITTED_LISTED: usize = 12;
 const WRITER_PROJECTS_DIRECTORY: &str = "writer-projects";
 
+#[cfg(test)]
 fn writer_projects_path(registry: &Path) -> PathBuf {
     registry.join(WRITER_PROJECTS_DIRECTORY)
 }

@@ -94,6 +94,7 @@ macro_rules! fallback_reasons {
     ($($name:ident = $text:literal),* $(,)?) => {
         mod fallback_reasons {
             $(pub(super) const $name: &str = $text;)*
+            #[cfg(test)]
             pub(super) const ALL: &[&str] = &[$($name),*];
         }
     };
@@ -643,7 +644,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(
                 cargo_home.join("registry"),
-                std::fs::Permissions::from_mode(0),
+                std::fs::Permissions::from_mode(0o0),
             )
             .unwrap();
         }

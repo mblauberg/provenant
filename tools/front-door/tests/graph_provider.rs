@@ -4338,7 +4338,7 @@ fn graph_settlement_records_a_failed_advance_for_status() -> Result {
         .ok_or("advance error")?;
     let human = rig.command(&["status", "broken"])?;
     assert!(
-        String::from_utf8_lossy(&human.stdout.bytes).contains(&error),
+        String::from_utf8_lossy(&human.stdout.bytes).contains(error),
         "{}",
         String::from_utf8_lossy(&human.stdout.bytes)
     );

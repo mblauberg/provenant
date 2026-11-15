@@ -1116,12 +1116,12 @@ mod tests {
                 bytes
             } else if options.argv.contains(&"--absolute-git-dir".into()) {
                 b"/fixture/repo/.git\n".to_vec()
-            } else if git_subcommand(&options.argv) == Some("rev-parse") {
+            } else if git_subcommand(options.argv) == Some("rev-parse") {
                 format!("{OID}\n").into_bytes()
             } else {
                 assert!(options.argv.contains(&"--no-ext-diff".into()));
                 assert!(options.argv.contains(&"--no-textconv".into()));
-                if git_subcommand(&options.argv) == Some("log") {
+                if git_subcommand(options.argv) == Some("log") {
                     assert!(options.argv.contains(&"--no-mailmap".into()));
                 } else {
                     assert!(options.argv.contains(&"--text".into()));

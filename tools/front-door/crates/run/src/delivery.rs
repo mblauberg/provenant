@@ -2610,7 +2610,8 @@ pub(super) fn host_output_limit(class: HostOutputClass) -> usize {
     HOST_COMMAND_OUTPUT_LIMITS
         .iter()
         .find_map(|(declared, limit)| (*declared == class).then_some(*limit))
-        .expect("every host output class has one declared limit")
+        // Every class is declared (tested); an undeclared one gets the ordinary limit.
+        .unwrap_or(16 * 1024)
 }
 
 pub(super) fn host_output_class(commit_log: bool, args: &[&str]) -> HostOutputClass {

@@ -591,6 +591,10 @@ fn index_descendants(
     candidates
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one merge's evidence inputs, passed through from the scan loop"
+)]
 fn measure_merge(
     runner: &dyn GitRunner,
     repo: &Path,

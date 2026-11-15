@@ -742,7 +742,7 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
             ] {
                 let expected = state_root.join(suffix);
                 assert_eq!(
-                    env(key).map(|value| Path::new(value)),
+                    env(key).map(Path::new),
                     Some(expected.as_path()),
                     "{key}"
                 );
