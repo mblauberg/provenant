@@ -339,16 +339,20 @@ impl Handoff {
     /// only at the end of the turn it was written in, so a handoff quoted or
     /// drafted mid-turn is never final. A later turn that neither declares
     /// nor runs a tool, such as an acknowledgement of a late notification,
-    /// leaves the earlier declaration standing; a later declaration, a later
-    /// malformed one or later tool work replaces it. Without usable turn
-    /// boundaries this is exactly [`Handoff::from_result`].
+    /// leaves the earlier declaration standing when no verdict follows it; a
+    /// later declaration, a later malformed one or later tool work replaces
+    /// it. Once a verdict follows a handoff, the complete suffix from that
+    /// handoff must be exactly the tolerated standalone verdict. Without
+    /// usable turn boundaries this is exactly [`Handoff::from_result`].
     pub fn from_turns(result: &str, turns: &[TurnEnd]) -> HandoffResult {
         Self::from_turns_report(result, turns).handoff
     }
 
     /// Turn-aware form of [`Handoff::from_result_report`]. It preserves the
     /// provider-turn authority boundary while propagating the order diagnostic
-    /// when the final result consists of one handoff and one verdict.
+    /// only when the complete suffix from a handoff is one verdict and no
+    /// other content. A later text-only acknowledgement remains allowed when
+    /// no verdict follows the handoff.
     pub fn from_turns_report(result: &str, turns: &[TurnEnd]) -> HandoffParse {
         let whole = Self::from_result_report(result);
         let mut start = 0;
@@ -357,7 +361,7 @@ impl Handoff {
             if turn.at < start || !result.is_char_boundary(turn.at) {
                 return whole;
             }
-            segments.push((&result[start..turn.at], turn.tool_activity));
+            segments.push((start, turn.at, &result[start..turn.at], turn.tool_activity));
             start = turn.at;
         }
         // Text no turn ended, such as an appended diagnostic or an interrupted
@@ -365,15 +369,47 @@ impl Handoff {
         if segments.len() < 2 || !result[start..].trim().is_empty() {
             return whole;
         }
-        for (text, tool_activity) in segments.into_iter().rev() {
+        for (segment_start, segment_end, text, tool_activity) in segments.into_iter().rev() {
             let parsed = Self::from_result_report(text);
             match parsed.handoff {
                 Ok(Some(handoff)) => {
-                    let trailing_verdict_tolerated = whole.trailing_verdict_tolerated
-                        && whole.handoff == Ok(Some(handoff.clone()));
+                    let verdict_follows = parsed.trailing_verdict_tolerated
+                        || verdict_declarations(&result[segment_end..]) > 0;
+                    if verdict_follows {
+                        let suffix = Self::from_result_report(&result[segment_start..]);
+                        if verdict_declarations(result) != 1 {
+                            return HandoffParse {
+                                handoff: Err(HandoffError::new(
+                                    "$",
+                                    "verdict after handoff is not unique",
+                                )),
+                                trailing_verdict_tolerated: false,
+                            };
+                        }
+                        return match suffix {
+                            HandoffParse {
+                                handoff: Ok(Some(suffix_handoff)),
+                                trailing_verdict_tolerated: true,
+                            } if suffix_handoff == handoff => HandoffParse {
+                                handoff: Ok(Some(handoff)),
+                                trailing_verdict_tolerated: true,
+                            },
+                            HandoffParse {
+                                handoff: Err(error),
+                                ..
+                            } => HandoffParse {
+                                handoff: Err(error),
+                                trailing_verdict_tolerated: false,
+                            },
+                            _ => HandoffParse {
+                                handoff: Err(HandoffError::new("$", "handoff must end the answer")),
+                                trailing_verdict_tolerated: false,
+                            },
+                        };
+                    }
                     return HandoffParse {
                         handoff: Ok(Some(handoff)),
-                        trailing_verdict_tolerated,
+                        trailing_verdict_tolerated: false,
                     };
                 }
                 Err(error) => {
@@ -404,6 +440,12 @@ impl Handoff {
     pub fn fenced(&self) -> String {
         format!("```handoff\n{}\n```", serde_json::json!(self))
     }
+}
+
+fn verdict_declarations(result: &str) -> u8 {
+    let mut capture = crate::result_capture::VerdictCapture::default();
+    capture.push(result.as_bytes());
+    capture.finish().2
 }
 
 /// Where one completed provider turn ends in the decoded result text, and
@@ -637,6 +679,9 @@ mod tests {
         ]);
         assert!(Handoff::from_result(&result).is_err());
         assert_eq!(Handoff::from_turns(&result, &ends), Ok(stop.clone()));
+        let parsed = Handoff::from_turns_report(&result, &ends);
+        assert_eq!(parsed.handoff, Ok(Some(stop.clone())));
+        assert!(!parsed.trailing_verdict_tolerated);
         // Acceptance 4: a later valid declaration wins.
         let (result, ends) = turns(&[(&report, true), ("Ack.", false), (&done, false)]);
         assert_eq!(
@@ -700,6 +745,31 @@ mod tests {
             ("Additional output", false),
         ]);
         let parsed = Handoff::from_turns_report(&extra_turn, &ends);
+        assert!(parsed.handoff.is_err());
+        assert!(!parsed.trailing_verdict_tolerated);
+
+        let (prose_before_verdict, ends) = turns(&[
+            (STOP, false),
+            ("Additional output", false),
+            ("VERDICT: PASS", false),
+        ]);
+        let parsed = Handoff::from_turns_report(&prose_before_verdict, &ends);
+        assert!(parsed.handoff.is_err());
+        assert!(!parsed.trailing_verdict_tolerated);
+
+        let (same_turn_extra, ends) =
+            turns(&[(STOP, false), ("VERDICT: PASS\nAdditional output", false)]);
+        let parsed = Handoff::from_turns_report(&same_turn_extra, &ends);
+        assert!(parsed.handoff.is_err());
+        assert!(!parsed.trailing_verdict_tolerated);
+
+        let (duplicate_verdicts, ends) = turns(&[
+            ("VERDICT: FAIL", false),
+            (STOP, false),
+            ("VERDICT: PASS", false),
+        ]);
+        let parsed = Handoff::from_turns_report(&duplicate_verdicts, &ends);
+        assert!(parsed.handoff.is_err());
         assert!(!parsed.trailing_verdict_tolerated);
 
         let (tool_turn, ends) = turns(&[(STOP, false), ("VERDICT: PASS", true)]);
