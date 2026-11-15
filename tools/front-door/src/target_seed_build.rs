@@ -384,6 +384,24 @@ fn is_lock_timeout(error: &(dyn Error + 'static)) -> bool {
     false
 }
 
+/// Protect temporary seed-store staging from GC without holding the store lock
+/// across repository or compiler work. All callers take Store before Build,
+/// and Build acquisition is nonblocking while Store is held.
+fn lock_for_identity_probe(state: &Path) -> Result<Option<provenant_os::fs::LockGuard>> {
+    let store_lock = match target_seed::lock_store(state) {
+        Ok(lock) => lock,
+        Err(error) if is_lock_timeout(error.as_ref()) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let build_lock = match target_seed::lock_build(state) {
+        Ok(lock) => lock,
+        Err(error) if is_lock_timeout(error.as_ref()) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    drop(store_lock);
+    Ok(Some(build_lock))
+}
+
 fn refresh_identity(state: &Path, project: &Path) -> Result<IdentityRefresh> {
     refresh_identity_with_probe(state, project, |workspace| {
         target_seed::rustc_metadata(workspace)
@@ -396,12 +414,10 @@ fn refresh_identity_with_probe(
     project: &Path,
     probe: impl FnOnce(&Path) -> Result<(String, String)>,
 ) -> Result<IdentityRefresh> {
-    // A refresh that cannot inspect/publish the shared store should retry on
-    // the normal busy cadence without spawning Git or rustc.
-    let _store_lock = match target_seed::lock_store(state) {
-        Ok(lock) => lock,
-        Err(error) if is_lock_timeout(error.as_ref()) => return Ok(IdentityRefresh::Busy),
-        Err(error) => return Err(error),
+    // The Build lock protects our temporary staging tree from GC. Release
+    // Store before doing slow work so a producer can publish its finished seed.
+    let Some(_build_lock) = lock_for_identity_probe(state)? else {
+        return Ok(IdentityRefresh::Busy);
     };
     let Some(workspace) = workspace_relative(state, project)? else {
         return Ok(IdentityRefresh::NotCargo);
@@ -678,7 +694,7 @@ fn publish(state: &Path, build: impl FnOnce(&Path) -> Result<Manifest>) -> Resul
         provenant_os::clock::SystemClock.wall_now()?.as_micros(),
         random.to_string_lossy()
     );
-    let _lock = target_seed::lock_store(state)
+    let _lock = target_seed::lock_store_for_publication(state)
         .map_err(|error| io::Error::other(format!("lock publication: {error}")))?;
     fs::rename(&stage.0, store.join("generations").join(&id))
         .map_err(|error| io::Error::new(error.kind(), format!("publish generation: {error}")))?;
@@ -1265,6 +1281,86 @@ mod tests {
             Refresh::Built(_)
         ));
         freeze(state.path());
+    }
+
+    #[test]
+    fn active_seed_producer_wins_over_refresh_probe_and_publishes() {
+        let state = tempfile::tempdir().unwrap();
+        let state_path = state.path().to_path_buf();
+        let identity = identity("repo", "aaa");
+        let producer_identity = identity.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let producer = std::thread::spawn(move || {
+            publish(&state_path, |stage| {
+                fs::create_dir(stage.join("target"))?;
+                started_tx.send(()).map_err(io::Error::other)?;
+                release_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(io::Error::other)?;
+                Ok(manifest(&producer_identity))
+            })
+            .map_err(|error| error.to_string())
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("producer should hold the build lock in its stage");
+
+        let invalid_project = state.path().join("not-a-repository");
+        let mut probed = false;
+        let outcome = refresh_identity_with_probe(state.path(), &invalid_project, |_| {
+            probed = true;
+            Ok(("unexpected probe".into(), "host".into()))
+        })
+        .unwrap();
+        assert!(matches!(outcome, IdentityRefresh::Busy));
+        assert!(
+            !probed,
+            "a refresh must not probe under the producer's build lock"
+        );
+
+        release_tx.send(()).unwrap();
+        let generation_id = producer
+            .join()
+            .expect("producer thread should not panic")
+            .expect("finished producer should publish its completed target");
+        let generation = target_seed::store_path(state.path())
+            .join("generations")
+            .join(generation_id);
+        assert_eq!(
+            fs::read(generation.join("complete")).unwrap(),
+            b"complete\n"
+        );
+        make_directories_writable(&generation).unwrap();
+    }
+
+    #[test]
+    fn publication_waits_for_a_reader_store_lock_to_release() {
+        let state = tempfile::tempdir().unwrap();
+        let state_path = state.path().to_path_buf();
+        let reader = target_seed::lock_store(state.path()).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let publisher = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = target_seed::lock_store_for_publication(&state_path)
+                .map(drop)
+                .map_err(|error| error.to_string());
+            finished_tx.send(result).unwrap();
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("publisher should attempt the bounded store acquisition");
+        assert!(matches!(
+            finished_rx.recv_timeout(Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(reader);
+        finished_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("publisher should continue after the reader releases Store")
+            .expect("bounded publication lock should succeed");
+        publisher.join().unwrap();
     }
 
     #[test]

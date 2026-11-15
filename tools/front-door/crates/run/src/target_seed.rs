@@ -66,8 +66,7 @@ pub fn store_path(state: &Path) -> PathBuf {
     state.join("cargo-target-seeds")
 }
 
-/// The exclusive lock also protects readers for the duration of their clone.
-pub fn lock_store(state: &Path) -> Result<LockGuard, Box<dyn std::error::Error>> {
+fn open_store_directory(state: &Path) -> Result<Directory, Box<dyn std::error::Error>> {
     std::fs::create_dir_all(state)?;
     let root = Directory::open_anchor(state)?;
     let name = OsStr::new("cargo-target-seeds");
@@ -87,7 +86,34 @@ pub fn lock_store(state: &Path) -> Result<LockGuard, Box<dyn std::error::Error>>
     directory
         .open_verified_directory(generations)?
         .make_private()?;
+    Ok(directory)
+}
+
+/// The exclusive lock also protects readers for the duration of their clone.
+pub fn lock_store(state: &Path) -> Result<LockGuard, Box<dyn std::error::Error>> {
+    let directory = open_store_directory(state)?;
     Ok(directory.try_lock(OsStr::new("store.lock"), LockMode::Exclusive)?)
+}
+
+/// Reacquire the store for publication after a build without dropping its
+/// completed stage on a short reader or collector lock. The bounded wait is
+/// safe while holding the build lock: collectors and refresh probes take the
+/// store lock first and only try the build lock without waiting.
+pub fn lock_store_for_publication(state: &Path) -> Result<LockGuard, Box<dyn std::error::Error>> {
+    use provenant_core::{CancelToken, Clock, WaitBudget};
+    use std::{ffi::OsStr, time::Duration};
+
+    const PUBLICATION_WAIT: Duration = Duration::from_secs(10);
+    let directory = open_store_directory(state)?;
+    let clock = provenant_os::clock::SystemClock::new();
+    let budget = WaitBudget::cli(clock.mono_now(), PUBLICATION_WAIT.as_secs())?;
+    Ok(directory.lock(
+        OsStr::new("store.lock"),
+        LockMode::Exclusive,
+        budget,
+        &CancelToken::new(),
+        &clock,
+    )?)
 }
 
 /// Serialises host builds and protects their staging trees from GC.
