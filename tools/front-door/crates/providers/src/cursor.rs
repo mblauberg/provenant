@@ -145,7 +145,7 @@ const MODEL_ON_WIRE: bool = false;
 
 fn prepare(
     input: &PrepareInput<'_>,
-    _access: Access,
+    access: Access,
     session: Session,
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {

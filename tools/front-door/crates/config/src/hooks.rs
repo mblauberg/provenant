@@ -160,6 +160,7 @@ pub(crate) fn selector(spec: &HookRegistration, command: &str) -> Result<String,
             .map_err(|_| InstallError::InvalidConfig("hook selector"))?
     ))
 }
+#[cfg(test)]
 pub(crate) fn selector_with_command(selector: &str, command: &str) -> Result<String, InstallError> {
     let mut identity = read_identity(selector)?;
     identity.command = command.into();

@@ -41,7 +41,7 @@ fn decode(_: &[u8]) -> Result<Vec<ProviderEvent>, ProviderError> {
 
 fn prepare(
     input: &PrepareInput<'_>,
-    _access: Access,
+    access: Access,
     session: Session,
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
@@ -123,7 +123,7 @@ fn prepare(
     profile
         .tool_exec_roots
         .extend(command.runtimes.iter().map(exact));
-    let mut setup = Vec::new();
+    let setup = Vec::new();
     let omitted_discovery = Vec::new();
     Ok(LaunchSpec {
         argv,
