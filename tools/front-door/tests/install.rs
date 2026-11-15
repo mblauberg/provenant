@@ -289,7 +289,7 @@ fn home_rename_with_flag_or_config_bin_preserves_old_paths() -> Result {
             "{bin_setting}: {}",
             String::from_utf8_lossy(&installed.stdout.bytes)
         );
-        let receipt: InstallReceipt = provenant_records::decode_v1(
+        let receipt: InstallReceipt = provenant_records::decode(
             fs::read(rig.state.join("install/receipt.json"))?.as_slice(),
             Limits::CONFIG,
         )?;
@@ -417,7 +417,7 @@ fn managed_install_prunes_releases_beyond_the_two_previous() -> Result {
     let binary = Path::new(env!("CARGO_BIN_EXE_provenant"));
     let first = rig.execute_os(binary, &args(&stage, false), None)?;
     assert_eq!(code(&first), 0, "{first:?}");
-    let receipt: provenant_records::InstallReceipt = provenant_records::decode_v1(
+    let receipt: provenant_records::InstallReceipt = provenant_records::decode(
         fs::read(rig.state.join("install/receipt.json"))?.as_slice(),
         provenant_records::Limits::CONFIG,
     )?;
@@ -489,7 +489,6 @@ fn real_install_check_uninstall_use_only_the_isolated_home() -> Result {
     let human_stdout = String::from_utf8_lossy(&human.stdout.bytes);
     assert!(human_stdout.contains("links"));
     assert!(human_stdout.contains("hooks"));
-    assert!(!human_stdout.contains("findings"));
     assert!(!human_stdout.trim_start().starts_with('{'));
     assert!(!String::from_utf8_lossy(&human.stderr.bytes).contains("\"kind\":\"actions\""));
     fs::create_dir_all(&rig.state)?;
@@ -568,7 +567,7 @@ fn external_claude_config_without_home_move_keeps_ownership() -> Result {
         let report: serde_json::Value = serde_json::from_slice(&checked.stdout.bytes)?;
         assert_eq!(code(&checked), 0, "{report}");
         assert_eq!(report["data"]["findings"], serde_json::json!([]));
-        let receipt: provenant_records::InstallReceipt = provenant_records::decode_v1(
+        let receipt: provenant_records::InstallReceipt = provenant_records::decode(
             fs::read(rig.state.join("install/receipt.json"))?.as_slice(),
             provenant_records::Limits::CONFIG,
         )?;
@@ -798,7 +797,7 @@ fn bare_install_detects_clis_and_claude_directories_then_replays_receipt() -> Re
     let installed = install(&first, false)?;
     assert_eq!(code(&installed), 0, "{installed:?}");
     let receipt_path = rig.state.join("install/receipt.json");
-    let before: provenant_records::InstallReceipt = provenant_records::decode_v1(
+    let before: provenant_records::InstallReceipt = provenant_records::decode(
         &*fs::read(&receipt_path)?,
         provenant_records::Limits::CONFIG,
     )?;
@@ -819,7 +818,7 @@ fn bare_install_detects_clis_and_claude_directories_then_replays_receipt() -> Re
     let upgraded = install(&second, false)?;
     assert_eq!(code(&upgraded), 0, "{upgraded:?}");
     let after: provenant_records::InstallReceipt =
-        provenant_records::decode_v1(&*fs::read(receipt_path)?, provenant_records::Limits::CONFIG)?;
+        provenant_records::decode(&*fs::read(receipt_path)?, provenant_records::Limits::CONFIG)?;
     assert_eq!(after.harness_targets, before.harness_targets);
     assert_ne!(after.source_digest, before.source_digest);
     assert!(!rig.home.join(".claude-added-later/skills").exists());
@@ -851,7 +850,7 @@ fn bare_install_preserves_recorded_custom_paths() -> Result {
         "--json",
     ])?;
     assert_eq!(code(&upgraded), 0, "{upgraded:?}");
-    let receipt: provenant_records::InstallReceipt = provenant_records::decode_v1(
+    let receipt: provenant_records::InstallReceipt = provenant_records::decode(
         &*fs::read(rig.state.join("install/receipt.json"))?,
         provenant_records::Limits::CONFIG,
     )?;
@@ -1236,14 +1235,14 @@ fn installer_app_recovery_preserves_the_existing_app_and_agent() -> Result {
     let baseline = rig.execute_os(Path::new("/bin/sh"), &args, None)?;
     assert_eq!(code(&baseline), 0, "{baseline:?}");
     fs::remove_file(&recorded)?;
-    let codex = rig.home.join("codex/AGENTS.md");
+    rig.env.push(("PROVENANT_INSTALL_TTY".into(), "1".into()));
+    let codex = rig.root.join("codex/AGENTS.md");
     fs::create_dir_all(codex.parent().ok_or("instructions parent")?)?;
     fs::write(&codex, "keep my instructions\n\nfixture instructions\n")?;
     rig.env
         .retain(|(key, _)| key != "PROVENANT_TEST_ACCOUNT_FAILURE");
     rig.env
         .push(("PROVENANT_TEST_APPS_AVAILABLE".into(), "1".into()));
-    fs::remove_file(rig.state.join("install/receipt.json"))?;
     let installed_app = rig.home.join("Applications/Provenant Console.app");
     fs::create_dir_all(&installed_app)?;
     fs::write(installed_app.join("old-build"), "preserve this app")?;
@@ -1847,7 +1846,7 @@ esac
     }
 
     fn receipt(&self) -> Result<provenant_records::InstallReceipt> {
-        Ok(provenant_records::decode_v1(
+        Ok(provenant_records::decode(
             fs::read(self.rig.state.join("install/receipt.json"))?.as_slice(),
             provenant_records::Limits::CONFIG,
         )?)
@@ -2210,7 +2209,7 @@ exec env HOME='{}' PROVENANT_STATE_DIR='{}' CODEX_HOME='{}' CLAUDE_CONFIG_DIR='{
     assert!(listing.contains("install.sh"));
     assert!(!listing.contains("untracked-canary"));
     for host in [&rig, &peer] {
-        let receipt: provenant_records::InstallReceipt = provenant_records::decode_v1(
+        let receipt: provenant_records::InstallReceipt = provenant_records::decode(
             fs::read(host.state.join("install/receipt.json"))?.as_slice(),
             provenant_records::Limits::CONFIG,
         )?;

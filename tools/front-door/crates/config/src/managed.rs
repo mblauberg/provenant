@@ -2100,8 +2100,9 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
                 "receipt entry outside resolved targets",
             ));
         }
-        // A shared path under a former home is stale, never a schema error.
-        if !(permitted || permitted_moved)
+        // An entry owned under a former state root or home is stale, never a
+        // schema error: the old paths are left for manual cleanup.
+        if !permitted
             || old_home.is_some_and(|old| path.starts_with(old) && !path.starts_with(&home))
         {
             stale.push(entry.clone());

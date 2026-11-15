@@ -1119,6 +1119,14 @@ fn preflight_install(
     batches.retain(|batch| !batch.harnesses.is_empty());
     for batch in &mut batches {
         batch.force_settings = options.force_settings;
+        // Batches clone one base and then take their own harness, so hook
+        // registrations follow the harness each batch actually installs.
+        let harnesses: Vec<_> = batch
+            .harnesses
+            .iter()
+            .map(|target| target.harness)
+            .collect();
+        batch.hook_specs = provenant_config::hook_registrations(&harnesses);
     }
     let summaries: Vec<_> = batches
         .iter()
