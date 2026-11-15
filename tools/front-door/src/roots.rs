@@ -260,10 +260,10 @@ pub fn resolve(
     inputs.environment_state_dir =
         std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).map(PathBuf::from);
     inputs.workspaces.push(project.clone());
-    if let Some(metadata) = git_metadata {
-        if !inputs.git_metadata.contains(&metadata) {
-            inputs.git_metadata.push(metadata);
-        }
+    if let Some(metadata) = git_metadata
+        && !inputs.git_metadata.contains(&metadata)
+    {
+        inputs.git_metadata.push(metadata);
     }
     let roots = provenant_os::fs::bind_roots(&inputs)?;
     report_warnings(&roots);
