@@ -49,4 +49,4 @@ shape of the codebase.
 
 ## Tests
 
-See [test-design](../../test-design/SKILL.md) for test invariants and failure triage.
+See the `test-design` skill for test invariants and failure triage.
