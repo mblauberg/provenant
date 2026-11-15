@@ -16,7 +16,7 @@ fn submitted_implementation_preserves_its_compiled_topology_across_replays() {
     ] {
         for depth in 0..=2 {
             let mut raw = json!({"id":"work", "use":template,
-                "brief":"Meet the acceptance criteria", "worktree":"/fixture/writer",
+                "prompt":"Meet the acceptance criteria", "worktree":"/fixture/writer",
                 "write_scope":["src"]});
             if bounded {
                 raw["with"] = json!({"bounded":true});
@@ -50,8 +50,7 @@ fn submitted_implementation_preserves_its_compiled_topology_across_replays() {
                     provenant_config::PortTable::builtin().worktree_layout,
                 )
                 .unwrap();
-                let submitted: patch::Patch =
-                    serde_json::from_value(document.extra["submission_patch"].clone()).unwrap();
+                let submitted = document.submission_patch.as_ref().unwrap();
                 let resolvers = Default::default();
                 let context = patch::PatchContext {
                     library: &library,

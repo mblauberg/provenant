@@ -285,21 +285,15 @@ fn accepted_target(
     }
     let expected_graph =
         super::peer::peer_graph_name(binding.launch_actor, &binding.launch_operation).ok()?;
-    let extra = [
-        (
-            "graph_launch_actor".into(),
-            serde_json::json!(binding.launch_actor.to_string()),
-        ),
-        (
-            "graph_origin_work_key".into(),
-            serde_json::to_value(binding.work_key.clone()).ok()?,
-        ),
-    ]
-    .into();
+    let graph_context = Some(provenant_fabric_runtime::hosts::GraphReceiptContext {
+        launch_actor: binding.launch_actor,
+        origin_work_key: binding.work_key.clone(),
+    });
     match owner.peer(
         binding.host,
         PeerAction::Receipt {
-            extra,
+            extra: Default::default(),
+            graph_context,
             operation_id: binding.launch_operation.clone(),
         },
         budget,
@@ -310,9 +304,8 @@ fn accepted_target(
         {
             let target = data.targets.into_iter().next()?;
             (target.host == Some(binding.host)
-                && data.extra.get("peer_graph").is_some_and(|graph| {
-                    graph["host"] == serde_json::json!(binding.host)
-                        && graph["graph_id"] == serde_json::json!(expected_graph)
+                && data.peer_graph.as_ref().is_some_and(|graph| {
+                    graph.host == binding.host && graph.graph_id == expected_graph
                 }))
             .then_some(target)
         }
@@ -434,10 +427,9 @@ fn record_matches(
                     predecessor.is_some(),
                 )
         })
-        && super::peer::peer_origin_matches(&record.extra, &binding.work_key)
-        && record.extra.get("peer_graph").is_some_and(|graph| {
-            graph["host"] == serde_json::json!(binding.host)
-                && graph["graph_id"].as_str() == expected_graph.as_deref()
+        && super::peer::peer_origin_matches(&record.peer, &binding.work_key)
+        && record.peer.peer_graph.as_ref().is_some_and(|graph| {
+            graph.host == binding.host && Some(graph.graph_id.as_str()) == expected_graph.as_deref()
         })
 }
 

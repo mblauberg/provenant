@@ -941,10 +941,9 @@ impl FileJournal {
         if let Some(origin) = self
             .execution
             .as_ref()
-            .and_then(|execution| execution.document.extra.get("peer_origin_work_key"))
+            .and_then(|execution| execution.document.peer_origin_work_key.as_ref())
         {
-            let origin: provenant_records::WorkKey =
-                serde_json::from_value(origin.clone()).map_err(|_| JournalError::BadEnvelope)?;
+            let origin = origin.clone();
             let name = format!("peer-origin-{}.json", self.graph_id);
             match self.directory.read_stable(OsStr::new(&name), 4096) {
                 Ok(bytes) => {

@@ -774,13 +774,13 @@ fn verify_fixture_port(backend: serde_json::Value) -> Result<serde_json::Value> 
     Ok(ports)
 }
 
-fn fixture_verify_command() -> provenant_config::PortCommand {
-    provenant_config::PortCommand {
+fn fixture_verify_command() -> provenant_records::PortCommand {
+    provenant_records::PortCommand {
         argv: vec!["/bin/sh".into(), "verify-port.sh".into(), "{tier}".into()],
-        exit_codes: provenant_config::CommandExitCodes {
+        exit_codes: provenant_records::CommandExitCodes {
             success: vec![0],
             unknown: vec![75],
-            other: provenant_config::ExitDisposition::Refused,
+            other: provenant_records::ExitDisposition::Refused,
         },
     }
 }

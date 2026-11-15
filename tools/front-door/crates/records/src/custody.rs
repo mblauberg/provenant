@@ -3,6 +3,13 @@ use crate::ExtraFields;
 use provenant_core::{ActorId, AttemptId, HostId, ProjectId, WallTime};
 use serde::{Deserialize, Serialize};
 
+/// The durable attempt generation bound to supervisor custody and diagnostics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Scope {
+    pub attempt: AttemptId,
+    pub generation: u64,
+}
+
 /// Identity of the submitting chair, shared by dispatch and custody.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Chair {

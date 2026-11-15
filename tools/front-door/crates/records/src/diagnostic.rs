@@ -542,12 +542,24 @@ impl DeliveryLimit {
     }
 }
 
+/// Safe retained-writer recovery facts projected by the run owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetainedCustody {
+    pub scope: crate::custody::Scope,
+    pub fence: Option<String>,
+    pub lane: crate::WorkKey,
+    pub reconcile: String,
+    pub abandon: String,
+}
+
 /// Only explicitly selected safe facts belong in these fields; source errors,
 /// captured output, prompts and credentials are not safe facts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Diagnostic {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custody: Option<RetainedCustody>,
     pub code: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
@@ -583,6 +595,7 @@ impl Diagnostic {
     pub fn new(code: impl AsRef<str>) -> Self {
         Self {
             extra: Default::default(),
+            custody: None,
             code: safe_text(code.as_ref()),
             category: None,
             detail: None,

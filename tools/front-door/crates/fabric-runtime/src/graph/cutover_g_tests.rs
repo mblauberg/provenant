@@ -16,15 +16,11 @@ fn skipped_required_inputs_are_recorded_in_the_plan() {
         {"id":"b","access":"read_only","prompt":"b","route":{"adapter":"a","model":"a/m"},"depends_on":["a"],"inputs":[{"node":"a","outputs":["result"],"required_outputs":["result"]}]}
     ]})).unwrap();
     let pruned = when::prune(&document).unwrap().unwrap();
-    assert!(pruned.nodes[0].extra.contains_key("removed_requirements"));
+    assert!(!pruned.nodes[0].removed_requirements.is_empty());
     let (plan, _) = validate_flat_plan(&document, &crate::config::GraphLimits::default()).unwrap();
     let checkpoint =
         transitions::initial_checkpoint(&document, &plan, "digest".into(), None, None, None);
-    assert!(
-        checkpoint.nodes[0]
-            .extra
-            .contains_key("removed_requirements")
-    );
+    assert!(!checkpoint.nodes[0].removed_requirements.is_empty());
 }
 
 #[test]
@@ -41,10 +37,13 @@ fn chair_bound_depletion_reads_facts_once_across_passes() {
     checkpoint.nodes[0].state = NodeState::Failed;
     checkpoint.nodes[0].attempts.push(GraphAttempt {
         extra: Default::default(),
+        host_refused_before_acceptance: false,
         launched: true,
         review_substitution: false,
         key: AttemptKey {
             extra: Default::default(),
+            retry_generation: None,
+            previous_attempt_ref: None,
             graph_id: "g".into(),
             node_id: "n".into(),
             route_index: 0,

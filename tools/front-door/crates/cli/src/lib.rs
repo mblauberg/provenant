@@ -2192,10 +2192,11 @@ mod tests {
 
     #[test]
     fn each_removed_spelling_exits_2_with_one_line_naming_its_replacement() {
-        for removed in REMOVED
-            .iter()
-            .filter(|removed| removed.config_key.is_none() && removed.diagnostic_code.is_none())
-        {
+        for removed in REMOVED.iter().filter(|removed| {
+            removed.config_key.is_none()
+                && removed.diagnostic_code.is_none()
+                && removed.graph_field.is_none()
+        }) {
             let words = removed_words(removed);
             let ParseOutcome::Invalid { error, .. } = parse(words.iter().map(OsString::from))
             else {

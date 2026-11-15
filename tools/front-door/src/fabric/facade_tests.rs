@@ -343,16 +343,42 @@ fn peer_output_binding_is_consumed_before_the_cli_projection() {
         "part":"result", "state":"succeeded", "reason":null, "offset":0,
         "next_offset":2, "eof":true, "digest":provenant_core::Digest::from_bytes([2; 32]),
         "bytes":{"encoding":"utf8","data":"ok"}, "length":2,
-        "peer_origin_work_key":origin, "peer_graph":{}, "peer_origin_context":{},
-        "peer_graph_collected":true, "peer_subtree":{}
+        "peer_origin_work_key":origin,
+        "peer_graph":{"host":provenant_core::HostId::from_bytes([3;16]),"graph_id":"peer-graph"},
+        "peer_origin_context":{"graph_id":"origin","node_id":"worker","attempt":1},
+        "peer_graph_collected":true,
+        "peer_subtree":{"status":"complete","outcome":"succeeded","next_node":null,
+            "checkpoint":{"schema_version":1,"graph_id":"peer-graph","plan_digest":"digest","cancelled":false,"nodes":[]}}
     }))
     .unwrap();
     let checked = peer::checked_output_origin(output, &origin).unwrap();
-    let OutputResult::Chunk { extra, .. } = checked else {
+    let OutputResult::Chunk { extra, peer, .. } = checked else {
         panic!("chunk expected")
     };
-    assert_eq!(extra.get("length"), Some(&serde_json::json!(2)));
-    assert!(extra.keys().all(|key| !key.starts_with("peer_")));
+    assert!(extra.is_empty());
+    assert_eq!(peer.length, Some(2));
+    assert_eq!(peer.graph, Default::default());
+    assert!(
+        extra
+            .keys()
+            .all(|key| !key.starts_with("peer_") && !key.starts_with("graph_"))
+    );
+}
+
+#[test]
+fn peer_output_length_round_trips_and_rejects_malformed_values() {
+    for length in [0_u64, 17_u64] {
+        let fields: provenant_records::run::PeerOutputFields =
+            serde_json::from_value(serde_json::json!({"length":length})).unwrap();
+        assert_eq!(fields.length, Some(length));
+        assert_eq!(serde_json::to_value(fields).unwrap()["length"], length);
+    }
+    assert!(
+        serde_json::from_value::<provenant_records::run::PeerOutputFields>(
+            serde_json::json!({"length":"unknown"})
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -653,8 +679,9 @@ pub(crate) mod peer_tests {
             .join("attempts")
             .join(record.attempt_id.to_string());
         let directory = provenant_os::fs::Directory::open_anchor(&attempt)?;
+        use provenant_records::custody::Scope;
         use provenant_supervisor::custody::{
-            ExitObservation, PublicationState, Scope, SettlementEvidence,
+            ExitObservation, PublicationState, SettlementEvidence,
         };
         let exit = ExitObservation {
             publication: PublicationState::Durable,
@@ -1224,11 +1251,8 @@ pub(crate) mod peer_tests {
         // writer attempt rather than the unrelated resume fixture lineage.
         let writer = provenant_run::prepare_writer(
             &provenant_run::WriterRequest {
-                extra: [(
-                    "custody_project".into(),
-                    serde_json::json!(fixture.settled.project_id),
-                )]
-                .into(),
+                extra: Default::default(),
+                custody_project: Some(fixture.settled.project_id),
                 project: fixture.rig.project.clone(),
                 worktree: fixture.worktree.clone(),
             },
@@ -1318,6 +1342,9 @@ pub(crate) mod peer_tests {
             &factory.clock,
         )?;
         journal.bind(graph::GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+
             extra: Default::default(),
             bases: None,
             directory: fixture.rig.project.clone(),

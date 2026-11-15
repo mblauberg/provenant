@@ -41,7 +41,7 @@ pub enum Source {
     Dispatch,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rule {
     pub code: String,
     pub boundary: Boundary,
@@ -90,14 +90,14 @@ impl Rule {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffectiveRule {
     #[serde(flatten)]
     pub rule: Rule,
     pub source: Source,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Policy {
     pub rules: Vec<EffectiveRule>,
 }

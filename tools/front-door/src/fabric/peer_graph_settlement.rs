@@ -546,11 +546,19 @@ fn implicit_writer_binding_uses_verified_worktree_head() -> Result<(), Box<dyn s
     assert_eq!(binding.head, initial);
     let metadata = provenant_os::fs::Directory::open_anchor(&lane)?.metadata()?;
     assert_eq!(
-        binding.extra["source_directory_identity"]["device"],
+        binding
+            .source_directory_identity
+            .as_ref()
+            .ok_or("source identity")?
+            .device,
         metadata.device
     );
     assert_eq!(
-        binding.extra["source_directory_identity"]["inode"],
+        binding
+            .source_directory_identity
+            .as_ref()
+            .ok_or("source identity")?
+            .inode,
         metadata.inode
     );
     git(&[
@@ -767,11 +775,17 @@ fn run_list_is_compact_and_pages_newest_first() -> Result<(), Box<dyn std::error
         budget,
         &cancel,
     )?;
-    let RunResult::Status { mut attempt, .. } = status else {
+    let RunResult::Status {
+        mut attempt,
+        lane_waits,
+        extra,
+    } = status
+    else {
         return Err("status result".into());
     };
     let status = serde_json::to_value(RunResult::Status {
-        extra: Default::default(),
+        extra,
+        lane_waits,
         attempt: attempt.clone(),
     })?;
     assert!(status["attempt"].get("usage").is_some());
@@ -835,6 +849,8 @@ fn graph_hint_requires_a_matching_attempt() -> Result<(), Box<dyn std::error::Er
         &clock,
     )?;
     journal.bind(provenant_fabric_runtime::graph::GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
         extra: Default::default(),
         bases: None,
         directory: fixture.rig.project.clone(),
@@ -953,6 +969,9 @@ fn settlement_advances_only_matching_graph_and_retains_writer()
             &clock,
         )?;
         journal.bind(graph::GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+
             extra: Default::default(),
             bases: None,
             directory: fixture.rig.project.clone(),
@@ -1098,6 +1117,9 @@ fn settlement_and_tick_read_no_terminal_graphs_at_scale() -> Result<(), Box<dyn 
             &clock,
         )?;
         journal.bind(graph::GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+
             extra: Default::default(),
             bases: None,
             directory: fixture.rig.project.clone(),
@@ -1258,6 +1280,9 @@ fn an_attempt_keyed_to_another_graph_is_refused_not_adopted()
         &clock,
     )?;
     journal.bind(graph::GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+
         extra: Default::default(),
         bases: None,
         directory: fixture.rig.project.clone(),

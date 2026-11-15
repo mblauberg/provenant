@@ -4,13 +4,11 @@ use provenant_cli::{
     Check, Globals,
     check::{CheckError, CheckPage, GitContext},
 };
-use provenant_config::{
-    PortBackend, PortCommandDisposition, PortSource, PortTable, Release, Targets,
-};
+use provenant_config::{PortBackend, PortCommandDisposition, PortTable, Release, Targets};
 use provenant_core::CancelToken;
 use provenant_os::exec::SystemExecutor;
 use provenant_os::fs;
-use provenant_records::{CanonicalV1, CommandResult, Finding, Outcome, PathWire};
+use provenant_records::{CanonicalV1, CommandResult, Finding, Outcome, PathWire, PortSource};
 use std::{
     io::{self, Write},
     path::{Path, PathBuf},
@@ -347,7 +345,7 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
 fn command_release_page(
     project: &Path,
     state: &Path,
-    command: provenant_config::PortCommand,
+    command: provenant_records::PortCommand,
     source: PortSource,
     range: Option<(provenant_core::GitOid, provenant_core::GitOid)>,
     selector: impl serde::Serialize,

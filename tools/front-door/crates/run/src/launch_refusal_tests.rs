@@ -89,7 +89,8 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
             std::fs::create_dir(&project)?;
             std::fs::create_dir(&worktree)?;
             run.request.task.writer = Some(WriterRequest {
-                extra: crate::tests::writer_extra(),
+                extra: Default::default(),
+                custody_project: Some(crate::tests::writer_project()),
                 project,
                 worktree,
             });
@@ -117,13 +118,10 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
         } else {
             TerminalCause::RouteResolutionRefused
         };
-        let AttemptState::Terminal { extra, .. } = &record.state else {
+        let AttemptState::Terminal { terminal_cause, .. } = &record.state else {
             return Err("not terminal".into());
         };
-        assert_eq!(
-            extra.get("terminal_cause"),
-            Some(&serde_json::to_value(cause)?)
-        );
+        assert_eq!(*terminal_cause, Some(cause));
         let (_, label) = LaneRow::state_and_label(&record.state);
         let label = label.ok_or("missing human label")?;
         assert_eq!(label, cause.reason());
@@ -171,11 +169,16 @@ fn queued_proposal_refusal_does_not_invent_a_launch_preparation_cause()
     store.create(&run, &call)?;
     store.refuse_queued(run.attempt_id, "child proposal is invalid", &call)?;
     let record = store.record(run.attempt_id, &call)?;
-    let AttemptState::Terminal { extra, outcome, .. } = &record.state else {
+    let AttemptState::Terminal {
+        terminal_cause,
+        outcome,
+        ..
+    } = &record.state
+    else {
         return Err("not terminal".into());
     };
     assert_eq!(*outcome, Outcome::Rejected);
-    assert!(!extra.contains_key("terminal_cause"));
+    assert_eq!(*terminal_cause, None);
     let (_, reason) = LaneRow::state_and_reason(&record.state);
     assert_eq!(
         reason.as_deref(),

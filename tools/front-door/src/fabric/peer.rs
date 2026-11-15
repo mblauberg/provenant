@@ -49,11 +49,14 @@ fn peer_read_only(action: &PeerAction) -> bool {
         | PeerAction::Doctor { .. }
         | PeerAction::Receipt { .. } => true,
         PeerAction::CancelSubmission { stop, .. } => !stop,
-        PeerAction::Inbox { extra, .. }
-            if extra.get("graph_steer") == Some(&serde_json::Value::Bool(true)) =>
-        {
-            false
-        }
+        PeerAction::Inbox {
+            input:
+                provenant_fabric_runtime::inbox::InboxInput::Steer {
+                    graph_context: Some(_),
+                    ..
+                },
+            ..
+        } => false,
         PeerAction::Inbox { input, .. } => !matches!(
             input,
             InboxInput::Answer {
@@ -70,7 +73,6 @@ fn validate_graph_steer(
     owner: &BinaryRunOwner<'_>,
     request: &PeerRequest,
     input: &provenant_fabric_runtime::inbox::InboxInput,
-    extra: &provenant_records::ExtraFields,
     budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<(), FacadeError> {
@@ -78,42 +80,30 @@ fn validate_graph_steer(
     let InboxInput::Steer {
         attempt: requested_attempt,
         operation_id: Some(_),
+        graph_context: Some(graph_context),
         ..
     } = input
     else {
         return Err(FacadeError::InvalidInput { detail: None });
     };
-    let actor = extra
-        .get("graph_launch_actor")
-        .and_then(serde_json::Value::as_str)
-        .and_then(|value| value.parse::<provenant_core::ActorId>().ok())
-        .ok_or(FacadeError::ConfinementRefused { resource: None })?;
+    let actor = graph_context.launch_actor;
     if request.agent != format!("graph-{actor}")
         || request.actor().ok() != Some(factory.context.identity.inbox.actor)
     {
         return Err(FacadeError::ConfinementRefused { resource: None });
     }
-    let launch_operation = extra
-        .get("graph_launch_operation")
-        .cloned()
-        .and_then(|value| serde_json::from_value::<provenant_core::OperationId>(value).ok())
-        .ok_or(FacadeError::ConfinementRefused { resource: None })?;
-    let origin = extra
-        .get("graph_origin_work_key")
-        .cloned()
-        .and_then(|value| serde_json::from_value::<provenant_records::WorkKey>(value).ok())
-        .ok_or(FacadeError::ConfinementRefused { resource: None })?;
-    let receipt = peer_retained_receipt(factory, &launch_operation, actor)?.ok_or(
+    let launch_operation = &graph_context.launch_operation;
+    let origin = &graph_context.origin_work_key;
+    let receipt = peer_retained_receipt(factory, launch_operation, actor)?.ok_or(
         FacadeError::LaunchUnknown {
-            operation_id: launch_operation.clone(),
+            operation_id: (*launch_operation).clone(),
         },
     )?;
-    let expected_graph = peer_graph_name(actor, &launch_operation)?;
-    if receipt.operation_id != launch_operation
+    let expected_graph = peer_graph_name(actor, launch_operation)?;
+    if receipt.operation_id != *launch_operation
         || receipt.targets.len() != 1
-        || !receipt.extra.get("peer_graph").is_some_and(|graph| {
-            graph["host"] == serde_json::json!(factory.context.identity.host)
-                && graph["graph_id"] == serde_json::json!(expected_graph)
+        || !receipt.peer_graph.as_ref().is_some_and(|graph| {
+            graph.host == factory.context.identity.host && graph.graph_id == expected_graph
         })
     {
         return Err(FacadeError::StateCorrupt);
@@ -135,18 +125,16 @@ fn validate_graph_steer(
         }
         let record = owner.snapshot(target.clone(), budget, cancel)?;
         let fields = peer_graph_fields(factory, record.attempt_id)?;
-        let peer_graph = fields.get("peer_graph");
+        let peer_graph = fields.peer_graph.as_ref();
         if record.attempt_id != target.attempt
             || record.verified_owner != Some(factory.context.identity.inbox.actor)
             || record.project_id != factory.context.identity.project
             || record.key.project() != factory.context.identity.project
             || record.key.graph() != expected_graph
             || record.key.node() != origin.node()
-            || !peer_origin_matches(&fields, &origin)
-            || !peer_graph.is_some_and(|graph| {
-                graph["host"] == serde_json::json!(local)
-                    && graph["graph_id"] == serde_json::json!(expected_graph)
-            })
+            || !peer_origin_matches(&fields, origin)
+            || !peer_graph
+                .is_some_and(|graph| graph.host == local && graph.graph_id == expected_graph)
             || !record.context.as_ref().is_some_and(|context| {
                 context.graph_id.as_deref() == Some(expected_graph.as_str())
                     && context.node_id.as_deref() == Some(record.key.node())
@@ -364,20 +352,18 @@ pub fn peer(
             chair: None,
         };
         let result = match &request.action {
-            PeerAction::Inbox { input, extra } => {
+            PeerAction::Inbox { input, .. } => {
                 use provenant_fabric_runtime::inbox::{InboxInput, InboxReply};
-                let graph_steer = extra.get("graph_steer") == Some(&serde_json::Value::Bool(true));
+                let graph_steer = matches!(
+                    input,
+                    InboxInput::Steer {
+                        graph_context: Some(_),
+                        ..
+                    }
+                );
                 let validation = if graph_steer {
-                    validate_graph_steer(
-                        &peer_factory,
-                        &owner,
-                        &request,
-                        input,
-                        extra,
-                        budget,
-                        &cancel,
-                    )
-                    .err()
+                    validate_graph_steer(&peer_factory, &owner, &request, input, budget, &cancel)
+                        .err()
                 } else {
                     None
                 };
@@ -605,16 +591,11 @@ pub fn peer(
                             let call = owner.call(&cancel);
                             let released =
                                 store.custody_released(attempt, &call).map_err(run_error)?;
-                            attempt.extra.insert(
-                                "graph_custody_released".into(),
-                                serde_json::json!(released),
-                            );
+                            attempt.peer.graph_custody_released = Some(released);
                             // The sealed settlement handoff, so the chair never
                             // re-derives it from the result text.
-                            attempt.extra.insert(
-                                "graph_handoff".into(),
-                                serde_json::json!(store.handoff(attempt).map_err(run_error)?),
-                            );
+                            attempt.peer.graph_handoff =
+                                store.handoff(attempt).map_err(run_error)?;
                         }
                         if let provenant_fabric_runtime::runs::RunResult::Status {
                             attempt, ..
@@ -630,7 +611,7 @@ pub fn peer(
                                 })
                                 .transpose()?
                                 .unwrap_or(0);
-                            attempt.extra.extend(peer_graph_fields_page(
+                            attempt.peer.merge(peer_graph_fields_page(
                                 &peer_factory,
                                 attempt.attempt_id,
                                 after,
@@ -643,22 +624,17 @@ pub fn peer(
                     extra: Default::default(),
                 })
             }
-            PeerAction::Submit { input, extra } => peer_result(
+            PeerAction::Submit {
+                input,
+                graph_context,
+                ..
+            } => peer_result(
                 (|| {
-                    let actor = extra
-                        .get("graph_launch_actor")
-                        .and_then(serde_json::Value::as_str)
-                        .and_then(|value| value.parse::<provenant_core::ActorId>().ok())
-                        .ok_or(FacadeError::StateCorrupt)?;
+                    let actor = graph_context.launch_actor;
                     if request.agent != format!("graph-{actor}") {
                         return Err(FacadeError::ConfinementRefused { resource: None });
                     }
-                    let attempt = extra.get("graph_attempt").cloned().ok_or_else(|| {
-                        FacadeError::invalid(InvalidInputDetail::Field("graph context".into()))
-                    })?;
-                    let attempt: provenant_fabric_runtime::graph::AttemptSpec =
-                        serde_json::from_value(attempt)
-                            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+                    let attempt = graph_context.attempt.clone();
                     if attempt.host.is_some()
                         || attempt.new_worktree.is_some()
                         || !attempt.write_roots.is_empty()
@@ -678,20 +654,8 @@ pub fn peer(
                     {
                         return Err(FacadeError::ConfinementRefused { resource: None });
                     }
-                    let retry = extra
-                        .get("graph_retry_limit")
-                        .cloned()
-                        .map(serde_json::from_value)
-                        .transpose()
-                        .map_err(|_| FacadeError::InvalidInput { detail: None })?
-                        .flatten();
-                    let network = extra
-                        .get("graph_network")
-                        .cloned()
-                        .map(serde_json::from_value)
-                        .transpose()
-                        .map_err(|_| FacadeError::InvalidInput { detail: None })?
-                        .flatten();
+                    let retry = graph_context.retry_limit;
+                    let network = graph_context.network;
                     let source = provenant_run::resolve_reader_source(
                         context.roots.state.as_path(),
                         &cwd,
@@ -751,11 +715,11 @@ pub fn peer(
                 owner
                     .output(input.clone(), budget, &cancel)
                     .and_then(|mut data| {
-                        let (OutputResult::Chunk { extra, target, .. }
-                        | OutputResult::Artifact { extra, target, .. }) = &mut data;
+                        let (OutputResult::Chunk { peer, target, .. }
+                        | OutputResult::Artifact { peer, target, .. }) = &mut data;
                         let mut fields = peer_graph_fields(&peer_factory, target.attempt)?;
-                        fields.remove("peer_subtree");
-                        extra.extend(fields);
+                        fields.peer_subtree = None;
+                        peer.merge_graph(fields);
                         Ok(data)
                     }),
                 |data| PeerResult::Output {
@@ -847,7 +811,8 @@ pub fn peer(
             }
             PeerAction::Receipt {
                 operation_id,
-                extra,
+                graph_context,
+                ..
             } => peer_result(
                 (|| {
                     let store_request = provenant_fabric_store::Request {
@@ -887,37 +852,24 @@ pub fn peer(
                             },
                         ),
                         None => {
-                            let graph_actor = request
-                                .agent
-                                .strip_prefix("graph-")
-                                .and_then(|actor| actor.parse::<provenant_core::ActorId>().ok());
-                            let receipt = if let Some(actor) = graph_actor {
-                                if extra
-                                    .get("graph_launch_actor")
-                                    .and_then(serde_json::Value::as_str)
-                                    .is_some_and(|value| value != actor.to_string())
-                                {
+                            if request.agent.starts_with("graph-") != graph_context.is_some() {
+                                return Err(FacadeError::ConfinementRefused { resource: None });
+                            }
+                            let receipt = if let Some(graph_context) = graph_context {
+                                let actor = graph_context.launch_actor;
+                                if request.agent != format!("graph-{actor}") {
                                     return Err(FacadeError::ConfinementRefused { resource: None });
                                 }
-                                let origin = extra
-                                    .get("graph_origin_work_key")
-                                    .cloned()
-                                    .map(|value| {
-                                        serde_json::from_value::<provenant_records::WorkKey>(value)
-                                            .map_err(|_| FacadeError::InvalidInput { detail: None })
-                                    })
-                                    .transpose()?;
+                                let origin = &graph_context.origin_work_key;
                                 let expected_graph = peer_graph_name(actor, operation_id)?;
                                 let receipt =
                                     peer_retained_receipt(&peer_factory, operation_id, actor)?;
-                                if let (Some(receipt), Some(origin)) = (&receipt, origin) {
+                                if let Some(receipt) = &receipt {
                                     if receipt.operation_id != *operation_id
                                         || receipt.targets.len() != 1
-                                        || !receipt.extra.get("peer_graph").is_some_and(|graph| {
-                                            graph["host"]
-                                                == serde_json::json!(context.identity.host)
-                                                && graph["graph_id"]
-                                                    == serde_json::json!(expected_graph)
+                                        || !receipt.peer_graph.as_ref().is_some_and(|graph| {
+                                            graph.host == context.identity.host
+                                                && graph.graph_id == expected_graph
                                         })
                                     {
                                         return Err(FacadeError::StateCorrupt);
@@ -932,7 +884,7 @@ pub fn peer(
                                         || record.key.node() != origin.node()
                                         || record.verified_owner
                                             != Some(context.identity.inbox.actor)
-                                        || !peer_origin_matches(&fields, &origin)
+                                        || !peer_origin_matches(&fields, origin)
                                         || !record.context.as_ref().is_some_and(|context| {
                                             context.graph_id.as_deref()
                                                 == Some(expected_graph.as_str())
@@ -1105,8 +1057,7 @@ pub(crate) fn peer_submit_graph(
         1,
         &(&input, actor, &attempt, network, retry),
     )
-    .map_err(|_| FacadeError::StateCorrupt)?
-    .to_string();
+    .map_err(|_| FacadeError::StateCorrupt)?;
     let SubmitInput::Submit {
         operation_id,
         origin_work_key,
@@ -1185,10 +1136,7 @@ pub(crate) fn peer_submit_graph(
     // comparison-base path as local graph nodes, including exact model routes.
     document.nodes[0].role = origin.role.clone();
     document.review_base = task.base.clone();
-    document.extra.insert(
-        "peer_origin_work_key".into(),
-        serde_json::json!(origin_work_key),
-    );
+    document.peer_origin_work_key = Some(origin_work_key.clone());
     document.nodes[0].source =
         task.head.as_ref().map(
             |head| provenant_fabric_runtime::graph::SourceBinding::Commit {
@@ -1200,16 +1148,10 @@ pub(crate) fn peer_submit_graph(
         .as_deref()
         .map(|base| factory.resolve_base(&factory.cwd, base, &facts, cancel))
         .transpose()?;
-    if let Some(network) = network {
-        document.extra.insert(
-            "network".into(),
-            serde_json::json!(if matches!(network, provenant_cli::Switch::On) {
-                "on"
-            } else {
-                "off"
-            }),
-        );
-    }
+    document.network = network.map(|network| match network {
+        provenant_cli::Switch::On => provenant_fabric_runtime::graph::GraphNetwork::On,
+        provenant_cli::Switch::Off => provenant_fabric_runtime::graph::GraphNetwork::Off,
+    });
     provenant_fabric_runtime::graph::patch::submission(
         &mut document,
         &operation_id.to_string(),
@@ -1232,11 +1174,7 @@ pub(crate) fn peer_submit_graph(
         &graph,
     )
     .map_err(graph_journal_error)?
-        && bound
-            .extra
-            .get("peer_submission_digest")
-            .and_then(serde_json::Value::as_str)
-            != Some(submission_digest.as_str())
+        && bound.peer_submission_digest.as_ref() != Some(&submission_digest)
     {
         return Err(FacadeError::Conflict);
     }
@@ -1244,18 +1182,9 @@ pub(crate) fn peer_submit_graph(
         .bind(GraphExecution {
             bases: GraphBaseBinding::new(review_base, None),
             directory: factory.cwd.clone(),
-            extra: [
-                (
-                    "peer_origin_context".into(),
-                    serde_json::to_value(&origin).map_err(|_| FacadeError::StateCorrupt)?,
-                ),
-                ("peer_operation_id".into(), serde_json::json!(operation_id)),
-                (
-                    "peer_submission_digest".into(),
-                    serde_json::json!(submission_digest),
-                ),
-            ]
-            .into(),
+            peer_origin_context: Some(origin.clone()),
+            peer_submission_digest: Some(submission_digest),
+            extra: Default::default(),
             document: document.clone(),
         })
         .map_err(|_| FacadeError::Conflict)?;
@@ -1433,18 +1362,16 @@ pub(super) fn peer_graph_receipt(
             &cancel,
         )?;
         let fields = peer_graph_fields(factory, target.attempt)?;
-        let origin: provenant_records::WorkKey = fields
-            .get("peer_origin_work_key")
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok())
+        let origin = fields
+            .peer_origin_work_key
+            .as_ref()
             .ok_or(FacadeError::StateCorrupt)?;
         if current.project_id != factory.context.identity.project
             || current.key.project() != current.project_id
             || current.verified_owner != Some(actor)
-            || !peer_origin_matches(&fields, &origin)
-            || !fields.get("peer_graph").is_some_and(|peer_graph| {
-                peer_graph["host"] == serde_json::json!(factory.context.identity.host)
-                    && peer_graph["graph_id"] == serde_json::json!(graph)
+            || !peer_origin_matches(&fields, origin)
+            || !fields.peer_graph.as_ref().is_some_and(|peer_graph| {
+                peer_graph.host == factory.context.identity.host && peer_graph.graph_id == graph
             })
             || !current.context.as_ref().is_some_and(|context| {
                 context.graph_id.as_deref() == Some(graph)
@@ -1495,21 +1422,21 @@ pub(super) fn peer_graph_receipt(
         return Err(FacadeError::StateCorrupt);
     }
     Ok(SubmissionReceipt {
+        extra: Default::default(),
         operation_id,
         targets: accepted.targets,
         worktree: None,
-        extra: [(
-            "peer_graph".into(),
-            serde_json::json!({"host":factory.context.identity.host,"graph_id":graph}),
-        )]
-        .into(),
+        peer_graph: Some(provenant_records::run::PeerGraph {
+            host: factory.context.identity.host,
+            graph_id: graph.to_owned(),
+        }),
     })
 }
 
 pub(crate) fn peer_graph_fields(
     factory: &Factory,
     attempt: provenant_core::AttemptId,
-) -> Result<provenant_records::ExtraFields, FacadeError> {
+) -> Result<provenant_records::run::PeerGraphFields, FacadeError> {
     peer_graph_fields_page(factory, attempt, 0)
 }
 
@@ -1517,8 +1444,12 @@ pub(crate) fn peer_graph_fields_page(
     factory: &Factory,
     attempt: provenant_core::AttemptId,
     after: usize,
-) -> Result<provenant_records::ExtraFields, FacadeError> {
+) -> Result<provenant_records::run::PeerGraphFields, FacadeError> {
     use provenant_fabric_runtime::graph::{FileJournal, relay};
+    use provenant_records::run::{
+        PeerGraph, PeerGraphAttempt, PeerGraphCheckpoint, PeerGraphFields, PeerGraphNode,
+        PeerGraphRoute, PeerGraphSubtree,
+    };
     let cancel = CancelToken::new();
     let owner = BinaryRunOwner {
         factory,
@@ -1541,9 +1472,9 @@ pub(crate) fn peer_graph_fields_page(
         .and_then(|context| context.graph_id.as_deref())
         .filter(|id| id.starts_with("peer-"))
     else {
-        return Ok(Default::default());
+        return Ok(PeerGraphFields::default());
     };
-    let collected = || -> Result<provenant_records::ExtraFields, FacadeError> {
+    let collected = || -> Result<PeerGraphFields, FacadeError> {
         // Terminal checkpoints can be collected before their RunStore attempts.
         // Retain an explicit pointer so the origin can keep its own durable row.
         if !matches!(
@@ -1552,26 +1483,22 @@ pub(crate) fn peer_graph_fields_page(
         ) {
             return Err(FacadeError::StateCorrupt);
         }
-        Ok([
-            (
-                "peer_graph".into(),
-                serde_json::json!({"host":factory.context.identity.host,"graph_id":graph}),
-            ),
-            ("peer_graph_collected".into(), serde_json::json!(true)),
-            (
-                "peer_origin_work_key".into(),
-                serde_json::json!(
-                    FileJournal::peer_origin(
-                        &factory.context.roots.state,
-                        factory.context.identity.project,
-                        graph,
-                    )
-                    .map_err(graph_journal_error)?
-                    .ok_or(FacadeError::StateCorrupt)?
-                ),
-            ),
-        ]
-        .into())
+        let origin = FileJournal::peer_origin(
+            &factory.context.roots.state,
+            factory.context.identity.project,
+            graph,
+        )
+        .map_err(graph_journal_error)?
+        .ok_or(FacadeError::StateCorrupt)?;
+        Ok(PeerGraphFields {
+            peer_graph: Some(PeerGraph {
+                host: factory.context.identity.host,
+                graph_id: graph.to_owned(),
+            }),
+            peer_graph_collected: Some(true),
+            peer_origin_work_key: Some(origin),
+            ..Default::default()
+        })
     };
     let Some(checkpoint) = FileJournal::read_checkpoint(
         &factory.context.roots.state,
@@ -1584,7 +1511,7 @@ pub(crate) fn peer_graph_fields_page(
     };
     let reference = format!("{}/{}", factory.context.identity.host, attempt);
     if relay::historical_parent_of_attempt(&checkpoint, &reference).is_none() {
-        return Ok(Default::default());
+        return Ok(PeerGraphFields::default());
     }
     let Some(execution) = FileJournal::execution(
         &factory.context.roots.state,
@@ -1595,8 +1522,8 @@ pub(crate) fn peer_graph_fields_page(
     else {
         return collected();
     };
-    let Some(origin) = execution.extra.get("peer_origin_context") else {
-        return Ok(Default::default());
+    let Some(origin) = execution.peer_origin_context.as_ref() else {
+        return Ok(PeerGraphFields::default());
     };
     // Peer frames are bounded. This metadata projection omits captured results,
     // prompts, local paths and expansion fragments; output travels separately.
@@ -1617,11 +1544,30 @@ pub(crate) fn peer_graph_fields_page(
         {
             selected.push(terminal);
         }
-        let row = serde_json::json!({"id":node.id,"state":node.state,"worktree":null,
-            "attempts":selected.into_iter().map(|attempt|serde_json::json!({
-                "launched":attempt.launched,"key":attempt.key,"route":{"adapter":attempt.route.adapter,"model":attempt.route.model,"alias":attempt.route.alias,"name":attempt.route.name,"effort":attempt.route.effort,"account":attempt.route.account},
-                "state":attempt.state,"attempt_ref":attempt.attempt_ref,"outcome":attempt.outcome,
-                "launch_actor":attempt.launch_actor})).collect::<Vec<_>>()});
+        let row = PeerGraphNode {
+            id: node.id.clone(),
+            state: node.state,
+            worktree: None,
+            attempts: selected
+                .into_iter()
+                .map(|attempt| PeerGraphAttempt {
+                    launched: attempt.launched,
+                    key: attempt.key.clone(),
+                    route: PeerGraphRoute {
+                        adapter: attempt.route.adapter.clone(),
+                        model: attempt.route.model.clone(),
+                        alias: attempt.route.alias.clone(),
+                        name: attempt.route.name.clone(),
+                        effort: attempt.route.effort.clone(),
+                        account: attempt.route.account.clone(),
+                    },
+                    state: attempt.state,
+                    attempt_ref: attempt.attempt_ref.clone(),
+                    outcome: attempt.outcome,
+                    launch_actor: attempt.launch_actor.clone(),
+                })
+                .collect(),
+        };
         let size = serde_json::to_vec(&row)
             .map_err(|_| FacadeError::StateCorrupt)?
             .len();
@@ -1636,59 +1582,58 @@ pub(crate) fn peer_graph_fields_page(
         rows.push(row);
     }
     let snapshot = graph_snapshot(checkpoint);
-    let subtree = serde_json::json!({"status":snapshot.status,"outcome":snapshot.outcome,
-        "next_node":next_node,"checkpoint":{"schema_version":1,"graph_id":graph,
-        "plan_digest":snapshot.checkpoint.plan_digest,"cancelled":snapshot.checkpoint.cancelled,"nodes":rows}});
-    Ok([
-        (
-            "peer_graph".into(),
-            serde_json::json!({"host":factory.context.identity.host,"graph_id":graph}),
-        ),
-        ("peer_origin_context".into(), origin.clone()),
-        (
-            "peer_origin_work_key".into(),
+    let subtree = PeerGraphSubtree {
+        status: snapshot.status,
+        outcome: snapshot.outcome,
+        next_node,
+        checkpoint: PeerGraphCheckpoint {
+            schema_version: 1,
+            graph_id: graph.to_owned(),
+            plan_digest: snapshot.checkpoint.plan_digest.clone(),
+            cancelled: snapshot.checkpoint.cancelled,
+            nodes: rows,
+        },
+    };
+    Ok(PeerGraphFields {
+        peer_graph: Some(PeerGraph {
+            host: factory.context.identity.host,
+            graph_id: graph.to_owned(),
+        }),
+        peer_origin_context: Some(origin.clone()),
+        peer_origin_work_key: Some(
             execution
                 .document
-                .extra
-                .get("peer_origin_work_key")
-                .cloned()
+                .peer_origin_work_key
+                .clone()
                 .ok_or(FacadeError::StateCorrupt)?,
         ),
-        ("peer_subtree".into(), subtree),
-    ]
-    .into())
+        peer_subtree: Some(subtree),
+        ..Default::default()
+    })
 }
 
 pub(super) fn peer_origin_matches(
-    extra: &provenant_records::ExtraFields,
+    fields: &provenant_records::run::PeerGraphFields,
     expected: &provenant_records::WorkKey,
 ) -> bool {
-    extra
-        .get("peer_origin_work_key")
-        .and_then(|value| serde_json::from_value::<provenant_records::WorkKey>(value.clone()).ok())
-        .as_ref()
-        == Some(expected)
+    fields.peer_origin_work_key.as_ref() == Some(expected)
 }
 
 pub(super) fn checked_output_origin(
     mut output: OutputResult,
     expected: &provenant_records::WorkKey,
 ) -> Result<OutputResult, FacadeError> {
-    let (OutputResult::Chunk { extra, .. } | OutputResult::Artifact { extra, .. }) = &mut output;
-    if !peer_origin_matches(extra, expected) {
+    let (OutputResult::Chunk { peer, .. } | OutputResult::Artifact { peer, .. }) = &mut output;
+    if !peer_origin_matches(&peer.graph, expected) {
         return Err(FacadeError::StateCorrupt);
     }
     // These authenticate the peer read; the CLI output schema contains lane
     // fields only. Consume transport metadata before rendering the payload.
-    for field in [
-        "peer_graph",
-        "peer_origin_context",
-        "peer_origin_work_key",
-        "peer_graph_collected",
-        "peer_subtree",
-    ] {
-        extra.remove(field);
-    }
+    let length = peer.length;
+    *peer = provenant_records::run::PeerOutputFields {
+        length,
+        ..Default::default()
+    };
     Ok(output)
 }
 
@@ -1710,6 +1655,7 @@ pub(crate) fn peer_cancel_submission_request(
     cancel: &CancelToken,
 ) -> Result<bool, FacadeError> {
     let PeerAction::CancelSubmission {
+        graph_context,
         submission,
         operation_id,
         stop,
@@ -1720,11 +1666,10 @@ pub(crate) fn peer_cancel_submission_request(
     };
     // Use the same authenticated launch namespace as Submit. request.actor()
     // names the transport agent, rather than the retained graph launch actor.
-    let actor = request
-        .agent
-        .strip_prefix("graph-")
-        .and_then(|actor| actor.parse().ok())
-        .ok_or(FacadeError::ConfinementRefused { resource: None })?;
+    let actor = graph_context.launch_actor;
+    if request.agent != format!("graph-{actor}") {
+        return Err(FacadeError::ConfinementRefused { resource: None });
+    }
     // Bind the cancellation to its submission rather than allowing callers to
     // reuse a cancellation identity for a different receiver graph.
     if *operation_id != peer_cancel_operation(submission)? {
@@ -1769,10 +1714,10 @@ pub(crate) fn peer_cancel_submission(
     };
     // Settled attached nodes prove that their attempts and custody have drained,
     // including children of a terminal parent. Receiver cancellation deliberately
-    // preserves nodes marked by graph::relay::DETACHED_FROM_GRAPH_CANCEL.
+    // preserves nodes marked detached from graph cancellation.
     Ok(checkpoint.cancelled
         && checkpoint.nodes.iter().all(|node| {
-            node.extra.get("detached_from_graph_cancel") == Some(&serde_json::Value::Bool(true))
+            node.detached_from_graph_cancel
                 || !matches!(
                     node.state,
                     provenant_fabric_runtime::graph::NodeState::Pending
@@ -1788,16 +1733,13 @@ pub(crate) fn peer_cancel_subtree(
     cancel: &CancelToken,
 ) -> Result<(), FacadeError> {
     let fields = peer_graph_fields(factory, attempt)?;
-    if fields
-        .get("peer_graph_collected")
-        .and_then(serde_json::Value::as_bool)
-        == Some(true)
-    {
+    if fields.peer_graph_collected == Some(true) {
         return Ok(());
     }
     let Some(graph) = fields
-        .get("peer_graph")
-        .and_then(|v| v["graph_id"].as_str())
+        .peer_graph
+        .as_ref()
+        .map(|graph| graph.graph_id.as_str())
     else {
         return Ok(());
     };

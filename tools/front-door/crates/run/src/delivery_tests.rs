@@ -64,8 +64,8 @@ pub(super) fn registered_writer_project_id(
     )
 }
 
-pub(super) fn writer_custody_extra(project_id: ProjectId) -> provenant_records::ExtraFields {
-    [("custody_project".into(), serde_json::json!(project_id))].into()
+pub(super) fn writer_custody_project(project_id: ProjectId) -> ProjectId {
+    project_id
 }
 
 // Medium: real filesystem locking with the remote process edge supplied as a callback.
@@ -187,7 +187,8 @@ impl OriginFixture {
         )
         .map_err(|error| crate::RunError::Io(std::io::Error::other(error.to_string())))?;
         let writer = WriterRequest {
-            extra: writer_custody_extra(custody_project),
+            extra: Default::default(),
+            custody_project: Some(custody_project),
             project: self.project.clone(),
             worktree: self.project.clone(),
         };
@@ -217,6 +218,7 @@ impl PrepareFixture {
             .collect(),
             writer: WriterRequest {
                 extra: Default::default(),
+                custody_project: None,
                 project,
                 worktree: root.join("lane"),
             },
@@ -247,7 +249,7 @@ impl PrepareFixture {
             &root.join("checkout"),
             &root.join("state"),
         )?;
-        fixture.writer.extra = writer_custody_extra(custody_project);
+        fixture.writer.custody_project = Some(custody_project);
         Ok(fixture)
     }
     pub(super) fn git(&self, args: &[&str]) -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -368,7 +370,7 @@ impl PrepareFixture {
             custody: None,
             facts: Default::default(),
         };
-        let scope = provenant_supervisor::custody::Scope {
+        let scope = provenant_records::custody::Scope {
             generation: 1,
             ..tests::exit().scope
         };
@@ -1044,10 +1046,7 @@ pub(super) fn registered_landed_writer_fixture(
             Ok(context.binding.project_id())
         },
     )?;
-    assert_eq!(
-        fixture.writer.extra.get("custody_project"),
-        Some(&serde_json::json!(execution.project_id))
-    );
+    assert_eq!(fixture.writer.custody_project, Some(execution.project_id));
     Ok(execution)
 }
 

@@ -61,6 +61,9 @@ fn tick_advances_expired_asks_and_cancelled_graphs_and_skips_future_and_busy_gra
         let mut journal =
             graph::FileJournal::open(&roots.state, project, id, budget, &cancel, &clock)?;
         journal.bind(graph::GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+
             extra: Default::default(),
             bases: None,
             directory: rig.project.clone(),

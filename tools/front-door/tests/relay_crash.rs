@@ -86,6 +86,9 @@ fn advance(
         json!({"schema_version":1,"graph_id":"relay-crash","template_library":{},"nodes":[{"id":"parent","access":"read_only","prompt":"Parent","route":{"alias":"senior"}}]}),
     )?;
     journal.bind(GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+
         extra: Default::default(),
         bases: None,
         directory: directory.to_path_buf(),

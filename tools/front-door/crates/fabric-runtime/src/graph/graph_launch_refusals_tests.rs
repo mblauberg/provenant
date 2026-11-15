@@ -76,7 +76,8 @@ fn admitted_launch_projects_typed_prompt_field_and_limit() {
     let mut input: SubmitInput = serde_json::from_value(serde_json::json!({
         "op":"submit", "operation_id":"field-limit",
         "task":{"prompt":"valid", "route":{"kind":"named", "name":"utility"}, "timeout_seconds":1}
-    })).unwrap();
+    }))
+    .unwrap();
     let SubmitInput::Submit { task, .. } = &mut input;
     task.prompt = format!("TOKEN_SENTINEL{}", "é".repeat(524_289));
     let cause = input
@@ -387,15 +388,18 @@ fn graph_plan_refusal_preserves_node_reason_and_writer_remedy() {
         "node implement: writer worktree".into(),
     ));
     let diagnostic = error.diagnostic();
-    assert!(error.to_string().contains("node implement: writer worktree"));
+    assert!(
+        error
+            .to_string()
+            .contains("node implement: writer worktree")
+    );
     assert_eq!(
         diagnostic.detail.as_deref(),
         Some("node implement: writer worktree")
     );
-    assert!(diagnostic
-        .next
-        .as_deref()
-        .is_some_and(|next| next.contains("--worktree PATH") && next.contains("--branch B --base REF")));
+    assert!(diagnostic.next.as_deref().is_some_and(
+        |next| next.contains("--worktree PATH") && next.contains("--branch B --base REF")
+    ));
     assert!(!matches!(
         error,
         FacadeError::InvalidInput {
@@ -566,6 +570,9 @@ fn launched_reader_stop_restart_replays_file_checkpoint_without_new_work() {
         FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
     journal
         .bind(GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+
             extra: Default::default(),
             bases: None,
             directory: base,
@@ -600,20 +607,31 @@ fn untyped_launch_refusal_persists_reason_without_an_attempt() {
     let document = graph(vec![node("one", route("first"))]);
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
-        errors: [(1, FacadeError::DispatchRefused {
-            reason: format!("worktree setup failed: missing dependency {secret}"),
-            disk: None,
-            fact: None,
-        })].into(),
+        errors: [(
+            1,
+            FacadeError::DispatchRefused {
+                reason: format!("worktree setup failed: missing dependency {secret}"),
+                disk: None,
+                fact: None,
+            },
+        )]
+        .into(),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     let node = &run.checkpoint.nodes[0];
     assert_eq!(node.state, NodeState::Blocked);
-    assert!(node.attempts.iter().all(|attempt| attempt.attempt_ref.is_none()));
-    assert!(node.attempts.iter().all(|attempt|
-        attempt.extra.get(PRELAUNCH_REFUSAL_PROOF).and_then(serde_json::Value::as_bool) == Some(true)));
+    assert!(
+        node.attempts
+            .iter()
+            .all(|attempt| attempt.attempt_ref.is_none())
+    );
+    assert!(
+        node.attempts
+            .iter()
+            .all(|attempt| attempt.host_refused_before_acceptance)
+    );
     let reason = node.advance_error.as_deref().unwrap();
     assert!(reason.contains("worktree setup failed: missing dependency"));
     assert!(!reason.contains(secret));

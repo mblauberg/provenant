@@ -80,8 +80,14 @@ fn quota_alias_redraw_uses_graph_retry_keeps_spent_models_and_is_bounded() {
             let checkpoint = journal.0.unwrap();
             assert_eq!(checkpoint.nodes[0].previous_attempts.len(), 2);
             assert_eq!(checkpoint.nodes[0].attempts.len(), 1);
-            assert_eq!(checkpoint.nodes[0].extra["retry"]["retries"], 2);
-            assert_eq!(checkpoint.nodes[0].extra["quota_redraw_spent"], 2);
+            assert_eq!(
+                checkpoint.nodes[0]
+                    .retry
+                    .as_ref()
+                    .map(|retry| retry.retries),
+                Some(2)
+            );
+            assert_eq!(checkpoint.nodes[0].quota_redraw_spent, 2);
             // The bound and the retained alias prove no extra route launch;
             // the denial's wording depends on launch eligibility, not budget.
             assert!(
@@ -147,8 +153,8 @@ fn quota_alias_redraw_retains_partial_writer_work_and_predecessor() {
         Some("host/partial")
     );
     assert_eq!(
-        owner.calls[1].0.extra["previous_attempt_ref"],
-        "host/partial"
+        owner.calls[1].0.previous_attempt_ref.as_deref(),
+        Some("host/partial")
     );
     assert_eq!(owner.prior_attempts[1], vec!["codex/one"]);
     assert_ne!(owner.calls[0].0, owner.calls[1].0);
@@ -167,7 +173,7 @@ fn independent_template_review_bases_are_pinned_and_replayed() {
             compiler
                 .compile(&serde_json::json!({
                     "id": format!("review-{index}"), "use": "review",
-                    "source": {"type":"commit", "commit":subject}, "extensions":{"review_base":base}
+                    "source": {"type":"commit", "commit":subject}, "review_base":base
                 }))
                 .unwrap()
         })
@@ -281,7 +287,10 @@ fn writer_provision_recovery_keeps_the_checkpointed_base() {
         Err(GraphError::Journal(_))
     ));
     let checkpoint = journal.checkpoint.as_ref().unwrap();
-    assert_eq!(checkpoint.nodes[0].extra["new_worktree_base"], pinned);
+    assert_eq!(
+        checkpoint.nodes[0].new_worktree_base.as_deref(),
+        Some(pinned.as_str())
+    );
     assert!(checkpoint.nodes[0].writer_binding.is_none());
     assert_eq!(owner.provisions.len(), 1);
     owner.resolved_review_base = Some("b".repeat(40));
@@ -393,8 +402,14 @@ fn typed_delta_verifier_can_falsify_a_previously_upheld_finding() {
         "{:?}",
         run.checkpoint.nodes[1].advance_error
     );
-    assert_eq!(output.findings[0].extra["verification"], "falsified");
-    assert_eq!(output.findings[0].extra["propagates"], "prior:F1");
+    assert_eq!(
+        output.findings[0].verification.as_deref().unwrap(),
+        "falsified"
+    );
+    assert_eq!(
+        output.findings[0].propagates.as_deref().unwrap(),
+        "prior:F1"
+    );
     assert_eq!(output.verdict.as_deref(), Some("VERDICT: PASS"));
     let (plan, _) = validate_plan(&document).unwrap();
     assert!(
@@ -434,6 +449,7 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
         fn binding(&self, path: &str) -> Option<WriterWorktreeBinding> {
             Some(WriterWorktreeBinding {
                 extra: Default::default(),
+                source_directory_identity: None,
                 worktree: format!("/fixture/{path}"),
                 head: "a".repeat(40),
             })
@@ -508,9 +524,7 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
                 .unwrap(),
             );
         } else if phase == 2 {
-            writer
-                .extra
-                .insert("provision_worktree".into(), true.into());
+            writer.provision_worktree = true;
             writer.source = Some(SourceBinding::Commit {
                 commit: "a".repeat(40),
             });

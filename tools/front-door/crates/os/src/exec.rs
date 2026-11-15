@@ -152,7 +152,7 @@ pub struct ExecOptions<'a> {
     /// Pass a lane or updater lease through exec, including to descendants.
     pub inherited_lease: Option<&'a crate::fs::LockGuard>,
     /// Verified profile custody; prepare a read pipe at the final exec edge.
-    pub inherited_profile: Option<&'a dyn crate::sys::profile::ProfileSource>,
+    pub inherited_profile: Option<&'a dyn crate::sys::profile::LimitSource>,
     /// Run in a private session and kill the whole group immediately on timeout.
     pub process_group: bool,
     /// Run in a private session and kill remaining group members on every exit,

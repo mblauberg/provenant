@@ -210,8 +210,7 @@ pub(super) fn append_changes(
                 let template = expanded
                     .as_ref()
                     .and_then(|graph| graph.nodes.iter().find(|candidate| candidate.id == node.id))
-                    .and_then(|node| node.extra.get("template"))
-                    .and_then(Value::as_str)
+                    .and_then(|node| node.template.as_deref())
                     .unwrap_or("raw");
                 observation.attempt = identity.map(|identity| AttemptEvent {
                     identity,
@@ -247,15 +246,15 @@ pub(super) fn append_changes(
                 }
             }
         }
-        if old.and_then(|node| node.extra.get("concurrency_warning"))
-            != node.extra.get("concurrency_warning")
-            && node.extra.contains_key("concurrency_warning")
+        if old.and_then(|node| node.concurrency_warning.as_ref())
+            != node.concurrency_warning.as_ref()
+            && let Some(warning) = &node.concurrency_warning
         {
             events.push(event(
                 GraphEventKind::Warning,
                 &node.id,
                 "concurrency_cap",
-                &node.extra["concurrency_warning"],
+                &serde_json::json!(warning),
             )?);
         }
         if super::relay::yields_slot(node) != old.is_some_and(super::relay::yields_slot) {
@@ -509,9 +508,7 @@ mod tests {
         .unwrap();
         append_changes(&directory, "g", None, &before, None).unwrap();
         let mut after = before.clone();
-        after.nodes[0]
-            .extra
-            .insert("concurrency_warning".into(), "cap occupied".into());
+        after.nodes[0].concurrency_warning = Some("cap occupied".into());
         after.nodes[0].state = NodeState::Failed;
         after.nodes[0].advance_error_code = Some("required_input_unavailable".into());
         after.nodes[0].advance_error = Some("private brief or secret text".into());
@@ -619,11 +616,17 @@ mod tests {
         let mut after = before.clone();
         after.expansions.push(Expansion {
             extra: Default::default(),
+            retired: None,
+            retry_generation: None,
+            final_result: false,
+            final_fragment: false,
+            floor_warnings: Vec::new(),
             source: "planner".into(),
             nodes: Vec::new(),
             uses: Vec::new(),
             patch: Some(super::super::patch::PatchRecord {
                 extra: Default::default(),
+                child_receipt: None,
                 revision: 2,
                 digest: "sha256:abc".into(),
                 key: Some("secret-key".into()),
@@ -653,6 +656,7 @@ mod tests {
         let directory = Directory::open_anchor(temp.path()).unwrap();
         let record = super::super::patch::PatchRecord {
             extra: Default::default(),
+            child_receipt: None,
             revision: 1,
             digest: "sha256:abc".into(),
             key: None,
@@ -671,6 +675,11 @@ mod tests {
         let mut after = before.clone();
         after.expansions.push(Expansion {
             extra: Default::default(),
+            retired: None,
+            retry_generation: None,
+            final_result: false,
+            final_fragment: false,
+            floor_warnings: Vec::new(),
             source: "host".into(),
             nodes: Vec::new(),
             uses: Vec::new(),

@@ -106,18 +106,15 @@ impl LaneRow {
             AttemptState::Terminal {
                 outcome,
                 reason,
-                extra,
+                terminal_cause,
+                terminal_note,
                 ..
             } => (
                 serde_json::to_value(outcome)
                     .ok()
                     .and_then(|value| value.as_str().map(str::to_owned))
                     .unwrap_or_default(),
-                extra
-                    .get("terminal_cause")
-                    .and_then(|value| {
-                        serde_json::from_value::<crate::run::TerminalCause>(value.clone()).ok()
-                    })
+                terminal_cause
                     .map(|cause| {
                         if detail {
                             cause.detail()
@@ -132,14 +129,12 @@ impl LaneRow {
                     })
                     // The note is Provenant's own fixed-form text (a retry
                     // decision or a configured executable), never provider output.
-                    .map(
-                        |safe| match extra.get("terminal_note").and_then(Value::as_str) {
-                            Some(note) if detail && !note.is_empty() => {
-                                format!("{safe}; {}", crate::diagnostic::safe_text(note))
-                            }
-                            _ => safe,
-                        },
-                    ),
+                    .map(|safe| match terminal_note.as_deref() {
+                        Some(note) if detail && !note.is_empty() => {
+                            format!("{safe}; {}", crate::diagnostic::safe_text(note))
+                        }
+                        _ => safe,
+                    }),
             ),
             other => (
                 serde_json::to_value(other)
@@ -237,12 +232,10 @@ impl LaneRow {
                     Some(crate::run::TerminalCause::EmptyWriterResult.detail())
                 }
                 SettlementReason::DeclaredStop => match &lane.state {
-                    AttemptState::Terminal { extra, .. }
-                        if extra.get("terminal_cause")
-                            == Some(&json!(crate::run::TerminalCause::StoppedNoWork)) =>
-                    {
-                        Some(crate::run::TerminalCause::StoppedNoWork.detail())
-                    }
+                    AttemptState::Terminal {
+                        terminal_cause: Some(crate::run::TerminalCause::StoppedNoWork),
+                        ..
+                    } => Some(crate::run::TerminalCause::StoppedNoWork.detail()),
                     _ => Some("the lane stopped with work remaining; inspect its result"),
                 },
                 SettlementReason::ProviderStop => {
@@ -388,9 +381,7 @@ impl LaneRow {
                 Some(crate::run::TerminalCause::SettlementFailure)
             } else {
                 match &lane.state {
-                    AttemptState::Terminal { extra, .. } => extra
-                        .get("terminal_cause")
-                        .and_then(|value| serde_json::from_value(value.clone()).ok()),
+                    AttemptState::Terminal { terminal_cause, .. } => *terminal_cause,
                     _ => None,
                 }
             },
@@ -565,17 +556,11 @@ mod terminal_cause_tests {
             TerminalCause::Blocked,
             TerminalCause::LaneTokenLost,
         ] {
-            let mut extra = crate::ExtraFields::default();
-            extra.insert(
-                "terminal_cause".into(),
-                serde_json::to_value(cause).unwrap(),
-            );
-            extra.insert(
-                "terminal_note".into(),
-                Value::String("fixture scoped note".into()),
-            );
             let state = AttemptState::Terminal {
-                extra,
+                extra: Default::default(),
+                terminal_cause: Some(cause),
+                terminal_note: Some("fixture scoped note".into()),
+                stop: None,
                 outcome: Outcome::Failed,
                 exit_code: Some(1),
                 finished_at: provenant_core::WallTime::from_micros(1).unwrap(),

@@ -94,6 +94,9 @@ fn tick_reports_unreadable_once_and_advances_another_graph()
     let mut journal =
         graph::FileJournal::open(&roots.state, project, "b-good", budget, &cancel, &clock)?;
     journal.bind(graph::GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+
         extra: Default::default(),
         bases: None,
         directory: rig.project.clone(),
@@ -182,6 +185,9 @@ fn tick_dispatches_waiting_node_without_a_deadline() -> Result<(), Box<dyn std::
     let mut journal =
         graph::FileJournal::open(&roots.state, project, "waiter", budget, &cancel, &clock)?;
     journal.bind(graph::GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+
         extra: Default::default(),
         bases: None,
         directory: rig.project.clone(),
@@ -284,6 +290,9 @@ fn tick_dispatches_capacity_waiter_with_future_decision() -> Result<(), Box<dyn 
     let mut journal =
         graph::FileJournal::open(&roots.state, project, "waiter", budget, &cancel, &clock)?;
     journal.bind(graph::GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+
         extra: Default::default(),
         bases: None,
         directory: rig.project.clone(),
@@ -447,6 +456,9 @@ fn tick_warns_once_for_missing_worktree_and_advances_another_graph()
         let mut journal =
             graph::FileJournal::open(&roots.state, project, id, budget, &cancel, &clock)?;
         journal.bind(graph::GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+
             extra: Default::default(),
             bases: None,
             directory: if id == "a-missing" {
@@ -563,6 +575,9 @@ fn graph_wait_observes_settlement_and_budget() -> Result<(), Box<dyn std::error:
         &factory.clock,
     )?;
     journal.bind(GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+
         extra: Default::default(),
         bases: None,
         directory: rig.project.clone(),
@@ -689,6 +704,9 @@ fn graph_cancel_persists_reason_and_skips_pending_node() -> Result<(), Box<dyn s
         &factory.clock,
     )?;
     journal.bind(GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+
         extra: Default::default(),
         bases: None,
         directory: rig.project.clone(),
@@ -1235,10 +1253,7 @@ fn graph_run_controls_reach_the_sealed_attempt() -> Result<(), Box<dyn std::erro
         assert_eq!(task.account.as_deref(), Some("fixture-account"));
         assert!(task.build_heavy);
         assert_eq!(task.provider_timeout_seconds, 42);
-        assert_eq!(
-            task.profile.extra.get("confidential"),
-            Some(&serde_json::json!(true))
-        );
+        assert!(task.profile.confidential);
         assert!(
             task.access.database_ipc,
             "the explicit postgres capability reaches admission"

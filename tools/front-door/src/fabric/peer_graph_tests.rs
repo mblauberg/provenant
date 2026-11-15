@@ -140,14 +140,17 @@ fn peer_hosted_lane_launches_a_local_child_and_collects_its_result() -> TestResu
     let (rig, factory) = receiver()?;
     let cancel = CancelToken::new();
     let receipt = submit_parent(&factory, "peer-parent-result", &cancel)?;
-    let graph = receipt.extra["peer_graph"]["graph_id"]
-        .as_str()
-        .ok_or("graph pointer")?;
+    let graph = receipt
+        .peer_graph
+        .as_ref()
+        .ok_or("graph pointer")?
+        .graph_id
+        .as_str();
     let parent = receipt.targets[0].attempt;
     assert_eq!(receipt.targets[0].host, Some(factory.context.identity.host));
     let replay = submit_parent(&factory, "peer-parent-result", &cancel)?;
     assert_eq!(replay.targets, receipt.targets);
-    assert_eq!(replay.extra["peer_graph"], receipt.extra["peer_graph"]);
+    assert_eq!(replay.peer_graph, receipt.peer_graph);
     let changed: SubmitInput = serde_json::from_value(json!({
         "op":"submit", "operation_id":"peer-parent-result",
         "origin_work_key":origin_key(),
@@ -272,8 +275,20 @@ fn peer_hosted_lane_launches_a_local_child_and_collects_its_result() -> TestResu
     )?;
     assert_eq!(children["children"][0]["settled"], true);
     let pointer = super::super::peer::peer_graph_fields(&factory, parent)?;
-    assert_eq!(pointer["peer_graph"]["graph_id"], graph);
-    assert_eq!(pointer["peer_origin_context"]["graph_id"], "origin-graph");
+    assert_eq!(
+        pointer
+            .peer_graph
+            .as_ref()
+            .map(|graph| graph.graph_id.as_str()),
+        Some(graph)
+    );
+    assert_eq!(
+        pointer
+            .peer_origin_context
+            .as_ref()
+            .and_then(|context| context.graph_id.as_deref()),
+        Some("origin-graph")
+    );
     assert!(super::super::peer::peer_origin_matches(
         &pointer,
         &origin_key()
@@ -285,8 +300,8 @@ fn peer_hosted_lane_launches_a_local_child_and_collects_its_result() -> TestResu
     )?
     .ok_or("receiver graph document")?;
     assert_eq!(
-        execution.document.extra["peer_origin_work_key"],
-        json!(origin_key())
+        execution.document.peer_origin_work_key.as_ref(),
+        Some(&origin_key())
     );
     for wrong in [
         provenant_records::WorkKey::new(
@@ -303,25 +318,44 @@ fn peer_hosted_lane_launches_a_local_child_and_collects_its_result() -> TestResu
     }
     let page = super::super::peer::peer_graph_fields_page(&factory, parent, 1)?;
     assert_eq!(
-        page["peer_subtree"]["checkpoint"]["nodes"]
-            .as_array()
-            .ok_or("node page")?
+        page.peer_subtree
+            .as_ref()
+            .ok_or("subtree")?
+            .checkpoint
+            .nodes
             .len(),
         1
     );
     assert_eq!(
-        page["peer_subtree"]["checkpoint"]["nodes"][0]["id"],
+        page.peer_subtree
+            .as_ref()
+            .ok_or("subtree")?
+            .checkpoint
+            .nodes[0]
+            .id,
         "parent--child"
     );
-    assert!(page["peer_subtree"]["next_node"].is_null());
+    assert!(
+        page.peer_subtree
+            .as_ref()
+            .ok_or("subtree")?
+            .next_node
+            .is_none()
+    );
     assert!(matches!(
         super::super::peer::peer_graph_fields_page(&factory, parent, 3),
         Err(FacadeError::InvalidInput { .. })
     ));
 
     assert_eq!(
-        pointer["peer_subtree"]["checkpoint"]["nodes"][1]["state"],
-        "succeeded"
+        pointer
+            .peer_subtree
+            .as_ref()
+            .ok_or("subtree")?
+            .checkpoint
+            .nodes[1]
+            .state,
+        graph::NodeState::Succeeded
     );
     let result = owner.output(
         OutputInput::Read {
@@ -358,9 +392,12 @@ fn peer_hosted_lane_cancellation_stops_parent_and_child() -> TestResult {
     let (_rig, factory) = receiver()?;
     let cancel = CancelToken::new();
     let receipt = submit_parent(&factory, "peer-parent-cancel", &cancel)?;
-    let graph = receipt.extra["peer_graph"]["graph_id"]
-        .as_str()
-        .ok_or("graph pointer")?;
+    let graph = receipt
+        .peer_graph
+        .as_ref()
+        .ok_or("graph pointer")?
+        .graph_id
+        .as_str();
     let parent = receipt.targets[0].attempt;
     add_child(&factory, parent, "add-child", &cancel)?;
     let running = advance_receiver(&factory, graph, &cancel)?;
@@ -423,9 +460,12 @@ fn peer_hosted_lane_cancellation_reaches_child_after_parent_settles() -> TestRes
     let (rig, factory) = receiver()?;
     let cancel = CancelToken::new();
     let receipt = submit_parent(&factory, "peer-settled-parent-cancel", &cancel)?;
-    let graph = receipt.extra["peer_graph"]["graph_id"]
-        .as_str()
-        .ok_or("graph pointer")?;
+    let graph = receipt
+        .peer_graph
+        .as_ref()
+        .ok_or("graph pointer")?
+        .graph_id
+        .as_str();
     let parent = receipt.targets[0].attempt;
     add_child(&factory, parent, "add-child", &cancel)?;
     let running = advance_receiver(&factory, graph, &cancel)?;
@@ -496,9 +536,12 @@ fn peer_hosted_lane_subtree_pages_are_bounded_complete_and_private() -> TestResu
     let (rig, factory) = receiver()?;
     let cancel = CancelToken::new();
     let receipt = submit_parent(&factory, "peer-subtree-pages", &cancel)?;
-    let graph = receipt.extra["peer_graph"]["graph_id"]
-        .as_str()
-        .ok_or("graph pointer")?;
+    let graph = receipt
+        .peer_graph
+        .as_ref()
+        .ok_or("graph pointer")?
+        .graph_id
+        .as_str();
     let parent = receipt.targets[0].attempt;
     let expected = {
         let mut journal = FileJournal::open(
@@ -571,23 +614,21 @@ fn peer_hosted_lane_subtree_pages_are_bounded_complete_and_private() -> TestResu
         assert!(size < MAX_FRAME / 2);
         bytes += size;
         pages += 1;
-        let subtree = &fields["peer_subtree"];
-        for row in subtree["checkpoint"]["nodes"]
-            .as_array()
-            .ok_or("node page")?
-        {
-            let id = row["id"].as_str().ok_or("node id")?.to_owned();
-            assert!(unique.insert(id.clone()));
-            observed.push(id);
-            assert!(row["worktree"].is_null());
-            assert!(row.get("prompt").is_none());
-            assert!(row.get("source_path").is_none());
-            for attempt in row["attempts"].as_array().ok_or("attempt metadata")? {
-                assert!(attempt.get("prompt").is_none());
-                assert!(attempt.get("source_path").is_none());
+        let subtree = fields.peer_subtree.as_ref().ok_or("subtree")?;
+        for row in &subtree.checkpoint.nodes {
+            assert!(unique.insert(row.id.clone()));
+            observed.push(row.id.clone());
+            assert!(row.worktree.is_none());
+            let projected = serde_json::to_value(row)?;
+            assert!(projected.get("prompt").is_none());
+            assert!(projected.get("source_path").is_none());
+            for attempt in &row.attempts {
+                let projected = serde_json::to_value(attempt)?;
+                assert!(projected.get("prompt").is_none());
+                assert!(projected.get("source_path").is_none());
             }
         }
-        let Some(next) = subtree["next_node"].as_u64() else {
+        let Some(next) = subtree.next_node else {
             break;
         };
         let next = usize::try_from(next)?;
@@ -610,9 +651,12 @@ fn peer_hosted_lane_collection_preserves_origin_status() -> TestResult {
     let (rig, factory) = receiver()?;
     let cancel = CancelToken::new();
     let receipt = submit_parent(&factory, "peer-collected-status", &cancel)?;
-    let graph = receipt.extra["peer_graph"]["graph_id"]
-        .as_str()
-        .ok_or("graph pointer")?;
+    let graph = receipt
+        .peer_graph
+        .as_ref()
+        .ok_or("graph pointer")?
+        .graph_id
+        .as_str();
     let parent = receipt.targets[0].attempt;
     let owner = BinaryRunOwner {
         factory: &factory,
@@ -658,14 +702,14 @@ fn peer_hosted_lane_collection_preserves_origin_status() -> TestResult {
         .is_none()
     );
     let fields = super::super::peer::peer_graph_fields(&factory, parent)?;
-    assert_eq!(fields["peer_graph_collected"], true);
+    assert_eq!(fields.peer_graph_collected, Some(true));
     assert!(super::super::peer::peer_origin_matches(
         &fields,
         &origin_key()
     ));
-    assert_eq!(fields["peer_graph"], receipt.extra["peer_graph"]);
+    assert_eq!(fields.peer_graph, receipt.peer_graph);
     let mut record = store.record(parent, &call)?;
-    record.extra.extend(fields);
+    record.peer.merge(fields);
     let peer = factory.context.identity.host;
     let mut local = provenant_core::HostId::from_bytes([0; 16]);
     if local == peer {
@@ -741,9 +785,12 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
     let cancel = CancelToken::new();
     let operation: provenant_core::OperationId = "peer-paced-parent".parse()?;
     let receipt = submit_parent(&factory, operation.as_str(), &cancel)?;
-    let graph = receipt.extra["peer_graph"]["graph_id"]
-        .as_str()
-        .ok_or("graph pointer")?;
+    let graph = receipt
+        .peer_graph
+        .as_ref()
+        .ok_or("graph pointer")?
+        .graph_id
+        .as_str();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
     let mut journal = FileJournal::open(
         &factory.context.roots.state,
@@ -874,9 +921,12 @@ fn retry_output_names_the_recorded_refusal_route_and_reason() -> TestResult {
     let (_rig, factory) = receiver()?;
     let cancel = CancelToken::new();
     let receipt = submit_parent(&factory, "refused-allowance-parent", &cancel)?;
-    let graph = receipt.extra["peer_graph"]["graph_id"]
-        .as_str()
-        .ok_or("graph pointer")?;
+    let graph = receipt
+        .peer_graph
+        .as_ref()
+        .ok_or("graph pointer")?
+        .graph_id
+        .as_str();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
     let mut journal = FileJournal::open(
         &factory.context.roots.state,

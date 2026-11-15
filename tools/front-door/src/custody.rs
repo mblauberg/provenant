@@ -454,7 +454,7 @@ pub(crate) fn presence(
                         Ok(directory)
                             if provenant_supervisor::custody::holder_gone(
                                 &directory,
-                                provenant_supervisor::custody::Scope {
+                                provenant_records::custody::Scope {
                                     attempt: attempt.attempt_id,
                                     generation: attempt.generation,
                                 },

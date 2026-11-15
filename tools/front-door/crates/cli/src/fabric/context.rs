@@ -620,38 +620,25 @@ impl Context {
         // the attempt, even when another agent later resumes its graph.
         // Keep that namespace under the authenticated sending host rather
         // than adopting a caller-supplied actor ID on the receiving host.
-        let graph_extra = match &action {
-            PeerAction::Submit { extra, .. }
-            | PeerAction::Receipt { extra, .. }
-            | PeerAction::CancelSubmission { extra, .. } => Some(extra),
-            PeerAction::Inbox { extra, .. }
-                if extra.get("graph_steer") == Some(&serde_json::Value::Bool(true)) =>
-            {
-                Some(extra)
+        let graph_actor = match &action {
+            PeerAction::Submit { graph_context, .. } => Some(&graph_context.launch_actor),
+            PeerAction::Receipt { graph_context, .. } => {
+                graph_context.as_ref().map(|context| &context.launch_actor)
             }
+            PeerAction::CancelSubmission { graph_context, .. } => Some(&graph_context.launch_actor),
+            PeerAction::Inbox {
+                input:
+                    provenant_fabric_runtime::inbox::InboxInput::Steer {
+                        graph_context: Some(context),
+                        ..
+                    },
+                ..
+            } => Some(&context.launch_actor),
             _ => None,
         };
-        let agent = if let Some(extra) = graph_extra {
-            match extra.get("graph_launch_actor") {
-                Some(value) => {
-                    let actor = value
-                        .as_str()
-                        .and_then(|value| value.parse::<provenant_core::ActorId>().ok())
-                        .ok_or_else(|| {
-                            PeerFailure::from(FacadeError::InvalidInput { detail: None })
-                        })?;
-                    format!("graph-{actor}")
-                }
-                None if extra.get("graph_steer").is_some() => {
-                    return Err(PeerFailure::from(FacadeError::InvalidInput {
-                        detail: None,
-                    }));
-                }
-                None => self.identity.inbox.agent.clone(),
-            }
-        } else {
-            self.identity.inbox.agent.clone()
-        };
+        let agent = graph_actor
+            .map(|actor| format!("graph-{actor}"))
+            .unwrap_or_else(|| self.identity.inbox.agent.clone());
         let request = PeerRequest::new(host, self.identity.host, agent, project, action);
         let executable =
             discover_ssh_executable(self.config.ssh_executable.as_deref()).map_err(|_| {

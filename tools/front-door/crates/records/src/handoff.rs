@@ -32,6 +32,70 @@ pub enum SpecConcernStatus {
     Stopped,
 }
 
+/// Typed scope evidence attached by the host after settlement.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WriteScopeReport {
+    Full {
+        #[serde(deserialize_with = "scope_report_schema")]
+        schema_version: u64,
+        code: String,
+        base: String,
+        head: String,
+        strength: crate::policy::Strength,
+        source: crate::policy::Source,
+        out_of_scope_paths: Vec<crate::PathWire>,
+    },
+    Compact {
+        code: String,
+        strength: crate::policy::Strength,
+        source: crate::policy::Source,
+        paths_artifact: String,
+        out_of_scope_count: usize,
+        paths_omitted_from_handoff: bool,
+    },
+}
+
+fn scope_report_schema<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    let version = u64::deserialize(deserializer)?;
+    crate::RecordHeader::new(version)
+        .map(|header| header.schema_version())
+        .map_err(serde::de::Error::custom)
+}
+
+impl WriteScopeReport {
+    pub fn compact(&self) -> Self {
+        match self {
+            Self::Full {
+                code,
+                strength,
+                source,
+                out_of_scope_paths,
+                ..
+            } => Self::Compact {
+                code: code.clone(),
+                strength: *strength,
+                source: *source,
+                paths_artifact: "policy-write-scope.json".into(),
+                out_of_scope_count: out_of_scope_paths.len(),
+                paths_omitted_from_handoff: true,
+            },
+            Self::Compact { .. } => self.clone(),
+        }
+    }
+
+    pub fn out_of_scope_count(&self) -> usize {
+        match self {
+            Self::Full {
+                out_of_scope_paths, ..
+            } => out_of_scope_paths.len(),
+            Self::Compact {
+                out_of_scope_count, ..
+            } => *out_of_scope_count,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Handoff {
     pub schema_version: u64,
@@ -42,6 +106,8 @@ pub struct Handoff {
     pub verify: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spec_concerns: Vec<SpecConcern>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_scope: Option<WriteScopeReport>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
 }

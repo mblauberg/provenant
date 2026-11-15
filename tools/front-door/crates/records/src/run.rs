@@ -1,5 +1,5 @@
 //! Strict run-store records. Facts are constructed only after store validation.
-use crate::{CanonicalError, CanonicalV1, FileDigest, PathWire};
+use crate::{CanonicalError, CanonicalV1, FileDigest, LimitSource, PathWire};
 use provenant_core::{
     ActorId, AttemptId, DeliveryId, Digest, GitOid, OperationId, ProjectId, WallTime,
 };
@@ -33,10 +33,6 @@ pub const RESULT_LIMIT: u64 = 4 * 1024 * 1024;
 pub const CAPTURE_LIMIT: u64 = 64 * 1024 * 1024;
 pub const OUTPUT_LIMIT: u64 = 65536;
 
-/// Attempt metadata needed by its owner but omitted from public projections.
-pub const REPOSITORY_ADMISSION_BINDING_FIELD: &str = "repository_admission_binding";
-pub const PRIVATE_ATTEMPT_EXTRA_FIELDS: &[&str] = &[REPOSITORY_ADMISSION_BINDING_FIELD];
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanonicalRequest {
     #[serde(flatten)]
@@ -64,6 +60,12 @@ impl CanonicalRequest {
         CanonicalV1::record_digest("run-request", 1, self)
     }
 }
+/// A one-shot budget continuation allowance carried by its successor request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BudgetWrapUp {
+    pub remaining: u64,
+}
+
 /// Effective dispatch policy, sealed with the request and copied to each attempt.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessProfile {
@@ -72,6 +74,31 @@ pub struct HarnessProfile {
     pub name: String,
     pub knobs: std::collections::BTreeMap<String, serde_json::Value>,
     pub overrides: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub confidential: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub parent_sandboxed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admitted_by: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub knob_sources: std::collections::BTreeMap<String, LimitSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_wrap_up: Option<BudgetWrapUp>,
+    /// Resolved policy strengths for this run, sealed by the dispatch owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_policy: Option<crate::policy::Policy>,
+    /// Dispatch-level policy overrides after typed validation.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub policy_overrides: std::collections::BTreeMap<String, crate::policy::Strength>,
+    /// Project key used to resolve project-scoped policy at launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_project: Option<ProjectId>,
+    /// Repository classification sealed before the provider is selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_policy: Option<LaunchPolicy>,
+    /// Declared project-relative write scope for writer lanes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub write_scope: Vec<String>,
     /// Require the adapter to expose its own skill location.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub require_skill_location: bool,
@@ -178,6 +205,9 @@ pub struct TaskRequest {
     pub context: Option<WorkContext>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
+    /// Named limit increases requested by `retry --extend`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub limit_extensions: std::collections::BTreeMap<String, u64>,
     /// Select the build-heavy scheduling priority for this task.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub build_heavy: bool,
@@ -229,12 +259,17 @@ pub enum NetworkAccess {
     Open,
 }
 
+/// Capability name to the source that enabled it, shared by graph and access records.
+pub type CapabilitySources = std::collections::BTreeMap<String, String>;
+
 /// Access a dispatch adds to its mode's defaults, sealed in the authority
 /// digest. Paths are canonical directories checked at the submission edge.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaneAccess {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub capability_sources: CapabilitySources,
     /// Explicit network reach; absent defaults to open network.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<NetworkAccess>,
@@ -299,6 +334,8 @@ impl UserSkillsMode {
 pub struct WriterRequest {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custody_project: Option<ProjectId>,
     pub project: std::path::PathBuf,
     pub worktree: std::path::PathBuf,
 }
@@ -421,6 +458,8 @@ pub enum WriterDeliveryState {
         #[serde(flatten)]
         extra: crate::ExtraFields,
         stage: WriterDeliveryStage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
 }
 
@@ -637,16 +676,36 @@ pub enum OperationKind {
     Resume,
     Cancel,
 }
+/// The persisted notification policy resolved at refusal time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalNotice {
+    Inbox,
+    Off,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationRecord {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preflight_digest_version: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal_notice: Option<RefusalNotice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal_code: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub refusal_notice_done: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_intent_digest: Option<Digest>,
     pub schema_version: u64,
     pub project_id: ProjectId,
     pub actor_id: ActorId,
     pub operation_id: OperationId,
     pub kind: OperationKind,
     pub request_digest: Digest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_attempt: Option<AttemptId>,
     pub state: OperationState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<String>,
@@ -924,6 +983,14 @@ impl TerminalCause {
     }
 }
 
+/// Why a running lane yielded while its graph children were active.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildWait {
+    Children,
+    Admission,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum AttemptState {
@@ -938,6 +1005,8 @@ pub enum AttemptState {
     Running {
         #[serde(flatten)]
         extra: crate::ExtraFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_wait: Option<ChildWait>,
     },
     Settling {
         #[serde(flatten)]
@@ -947,6 +1016,12 @@ pub enum AttemptState {
     Terminal {
         #[serde(flatten)]
         extra: crate::ExtraFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal_cause: Option<TerminalCause>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal_note: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop: Option<crate::Stop>,
         outcome: Outcome,
         exit_code: Option<i64>,
         finished_at: WallTime,
@@ -954,15 +1029,26 @@ pub enum AttemptState {
     },
 }
 impl AttemptState {
-    /// Read the sealed terminal decision without treating malformed evidence as
-    /// an absent stop. Record validation and every projection share this path.
-    pub fn stop(&self) -> Result<Option<crate::Stop>, serde_json::Error> {
+    /// Read the sealed typed stop. Malformed wire values fail while the record
+    /// is decoded, before they can be observed as an absent stop.
+    pub fn stop(&self) -> Option<crate::Stop> {
         match self {
-            Self::Terminal { extra, .. } => extra
-                .get("stop")
-                .map(|value| serde_json::from_value(value.clone()))
-                .transpose(),
-            _ => Ok(None),
+            Self::Terminal { stop, .. } => stop.clone(),
+            _ => None,
+        }
+    }
+
+    pub fn terminal_cause(&self) -> Option<TerminalCause> {
+        match self {
+            Self::Terminal { terminal_cause, .. } => *terminal_cause,
+            _ => None,
+        }
+    }
+
+    pub fn terminal_note(&self) -> Option<&str> {
+        match self {
+            Self::Terminal { terminal_note, .. } => terminal_note.as_deref(),
+            _ => None,
         }
     }
 }
@@ -1471,6 +1557,162 @@ fn decode_continuation<'de, D: serde::Deserializer<'de>>(
     Ok(value)
 }
 
+/// Stable identity of a graph hosted by a peer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerGraph {
+    pub host: provenant_core::HostId,
+    pub graph_id: String,
+}
+
+/// Typed peer graph metadata carried beside an attempt or an output page.
+/// Its serde flattening keeps the established wire keys at the owning record.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PeerGraphFields {
+    #[serde(rename = "peer_graph", skip_serializing_if = "Option::is_none")]
+    pub peer_graph: Option<PeerGraph>,
+    #[serde(
+        rename = "peer_graph_collected",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub peer_graph_collected: Option<bool>,
+    #[serde(
+        rename = "peer_origin_work_key",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub peer_origin_work_key: Option<crate::WorkKey>,
+    #[serde(
+        rename = "peer_origin_context",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub peer_origin_context: Option<WorkContext>,
+    #[serde(rename = "peer_subtree", skip_serializing_if = "Option::is_none")]
+    pub peer_subtree: Option<PeerGraphSubtree>,
+    #[serde(
+        rename = "graph_custody_released",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub graph_custody_released: Option<bool>,
+    #[serde(
+        rename = "graph_handoff",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "decode_peer_handoff"
+    )]
+    pub graph_handoff: Option<crate::handoff::Handoff>,
+}
+
+impl PeerGraphFields {
+    /// Apply a projection while preserving peer metadata already attached to the record.
+    pub fn merge(&mut self, newer: Self) {
+        if newer.peer_graph.is_some() {
+            self.peer_graph = newer.peer_graph;
+        }
+        if newer.peer_graph_collected.is_some() {
+            self.peer_graph_collected = newer.peer_graph_collected;
+        }
+        if newer.peer_origin_work_key.is_some() {
+            self.peer_origin_work_key = newer.peer_origin_work_key;
+        }
+        if newer.peer_origin_context.is_some() {
+            self.peer_origin_context = newer.peer_origin_context;
+        }
+        if newer.peer_subtree.is_some() {
+            self.peer_subtree = newer.peer_subtree;
+        }
+        if newer.graph_custody_released.is_some() {
+            self.graph_custody_released = newer.graph_custody_released;
+        }
+        if newer.graph_handoff.is_some() {
+            self.graph_handoff = newer.graph_handoff;
+        }
+    }
+}
+
+/// Output-only peer metadata, with the byte length owned by the output boundary.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PeerOutputFields {
+    #[serde(flatten)]
+    pub graph: PeerGraphFields,
+    #[serde(rename = "length", skip_serializing_if = "Option::is_none")]
+    pub length: Option<u64>,
+}
+
+impl PeerOutputFields {
+    pub fn merge_graph(&mut self, newer: PeerGraphFields) {
+        self.graph.merge(newer);
+    }
+}
+
+impl From<PeerGraphFields> for PeerOutputFields {
+    fn from(graph: PeerGraphFields) -> Self {
+        Self {
+            graph,
+            length: None,
+        }
+    }
+}
+
+fn decode_peer_handoff<'de, D>(deserializer: D) -> Result<Option<crate::handoff::Handoff>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(value) = Option::<serde_json::Value>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    let bytes = serde_json::to_vec(&value).map_err(serde::de::Error::custom)?;
+    crate::handoff::Handoff::from_json(&bytes)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerGraphSubtree {
+    pub status: crate::graph::GraphStatus,
+    pub outcome: Option<crate::graph::GraphOutcome>,
+    pub next_node: Option<usize>,
+    pub checkpoint: PeerGraphCheckpoint,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerGraphCheckpoint {
+    pub schema_version: u64,
+    pub graph_id: String,
+    pub plan_digest: String,
+    pub cancelled: bool,
+    pub nodes: Vec<PeerGraphNode>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerGraphNode {
+    pub id: String,
+    pub state: crate::graph::NodeState,
+    pub worktree: Option<String>,
+    pub attempts: Vec<PeerGraphAttempt>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerGraphAttempt {
+    pub launched: bool,
+    pub key: crate::graph::AttemptKey,
+    pub route: PeerGraphRoute,
+    pub state: crate::graph::AttemptState,
+    pub attempt_ref: Option<String>,
+    pub outcome: Option<crate::graph::AttemptOutcome>,
+    pub launch_actor: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerGraphRoute {
+    pub adapter: Option<String>,
+    pub model: Option<String>,
+    pub alias: Option<String>,
+    pub name: Option<String>,
+    pub effort: Option<String>,
+    pub account: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1478,7 +1720,16 @@ pub struct AttemptRecord {
     /// The attempt's work identity: graph, node and attempt number.
     pub key: crate::WorkKey,
     #[serde(flatten)]
+    pub peer: PeerGraphFields,
+    #[serde(flatten)]
     pub extra: crate::ExtraFields,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_overrun: Option<crate::limit::BudgetOverrun>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_wrap_up_refused: Option<crate::limit::BudgetWrapUpRefused>,
+    /// Frozen repository command and lease phase used for admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_admission_binding: Option<RepositoryAdmissionBinding>,
     /// Human-supplied task title, when provided at submission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -1595,9 +1846,7 @@ pub fn public_attempt_value(
     let object = value.as_object_mut().ok_or_else(|| {
         <serde_json::Error as serde::ser::Error>::custom("attempt record must be an object")
     })?;
-    for field in PRIVATE_ATTEMPT_EXTRA_FIELDS {
-        object.remove(*field);
-    }
+    object.remove("repository_admission_binding");
     Ok(value)
 }
 
@@ -1663,7 +1912,6 @@ fn sandbox_floors_children(sandbox: Option<&serde_json::Value>) -> bool {
 /// The applied-route field that records an attempt's sandbox mode.
 pub const SANDBOX_ROUTE_FIELD: &str = "sandbox";
 /// The task field the host sets when the submitting lane was sandboxed.
-pub const PARENT_SANDBOXED_FIELD: &str = "parent_sandboxed";
 
 /// Sealed launch classification, shared by local, peer and recovered attempts.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1673,10 +1921,6 @@ pub struct LaunchPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository_config: Option<String>,
 }
-
-/// Profile key of the sealed repository classification; `launch_policy`
-/// holds the resolved policy-table strengths.
-pub const LAUNCH_POLICY_FIELD: &str = "repository_policy";
 
 /// The one sandbox admission floor. The parent fact comes from a host-sealed
 /// attempt, never from prompt text. This is advisory policy (boundary None),
@@ -1766,6 +2010,135 @@ impl LaneClass {
         }
     }
 }
+/// Why a lane is waiting, including the facts needed to render a useful label.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LaneWaitReason {
+    HostStalled,
+    Children,
+    Admission,
+    ProviderSilence { silent_for_ms: u64 },
+    LaunchPreparation,
+    RecoveryWorkerRefused { used: u64, limit: u64 },
+}
+
+impl LaneWaitReason {
+    pub fn description(&self) -> String {
+        match self {
+            Self::HostStalled => "host_stalled: supervisor is in uninterruptible sleep".into(),
+            Self::Children => "children: host and project admission yielded".into(),
+            Self::Admission => "admission: waiting for host or project capacity".into(),
+            Self::ProviderSilence { silent_for_ms } => provider_silence_reason(*silent_for_ms),
+            Self::LaunchPreparation => "launch preparation".into(),
+            Self::RecoveryWorkerRefused { used, limit } => format!(
+                "launch: last recovery worker refused: user process count {used} of {limit}"
+            ),
+        }
+    }
+}
+
+/// Lifecycle phase for a frozen repository admission command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryAdmissionPhase {
+    AcquirePending,
+    Acquired,
+    ReleasePending,
+    Released,
+}
+
+impl RepositoryAdmissionPhase {
+    pub fn command(self) -> Option<&'static str> {
+        match self {
+            Self::AcquirePending => Some("acquire"),
+            Self::ReleasePending => Some("release"),
+            Self::Acquired | Self::Released => None,
+        }
+    }
+}
+
+/// The command, source and lifecycle phase frozen with an admitted attempt.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RepositoryAdmissionBinding {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+    pub source: crate::PortSource,
+    pub command: crate::PortCommand,
+    pub command_digest: FileDigest,
+    pub lease_epoch: u64,
+    pub phase: RepositoryAdmissionPhase,
+}
+
+impl<'de> Deserialize<'de> for RepositoryAdmissionBinding {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            #[serde(flatten)]
+            extra: crate::ExtraFields,
+            source: crate::PortSource,
+            command: crate::PortCommand,
+            command_digest: FileDigest,
+            lease_epoch: u64,
+            phase: RepositoryAdmissionPhase,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        let binding = Self {
+            extra: wire.extra,
+            source: wire.source,
+            command: wire.command,
+            command_digest: wire.command_digest,
+            lease_epoch: wire.lease_epoch,
+            phase: wire.phase,
+        };
+        if !binding.valid() {
+            return Err(serde::de::Error::custom(
+                "invalid repository admission binding",
+            ));
+        }
+        Ok(binding)
+    }
+}
+
+impl RepositoryAdmissionBinding {
+    pub fn new(source: crate::PortSource, command: &crate::PortCommand) -> Self {
+        Self {
+            extra: Default::default(),
+            source,
+            command: command.clone(),
+            command_digest: command.digest(),
+            lease_epoch: 1,
+            phase: RepositoryAdmissionPhase::AcquirePending,
+        }
+    }
+
+    pub fn valid(&self) -> bool {
+        self.lease_epoch != 0
+            && self.command.is_valid()
+            && self.command_digest == self.command.digest()
+    }
+
+    pub fn can_transition_to(&self, next: RepositoryAdmissionPhase, active_owner: bool) -> bool {
+        matches!(
+            (self.phase, next),
+            (
+                RepositoryAdmissionPhase::AcquirePending,
+                RepositoryAdmissionPhase::Acquired
+            ) | (
+                RepositoryAdmissionPhase::AcquirePending,
+                RepositoryAdmissionPhase::ReleasePending
+            ) | (
+                RepositoryAdmissionPhase::Acquired,
+                RepositoryAdmissionPhase::ReleasePending
+            ) | (
+                RepositoryAdmissionPhase::ReleasePending,
+                RepositoryAdmissionPhase::Released
+            )
+        ) || (active_owner
+            && self.phase == RepositoryAdmissionPhase::Released
+            && next == RepositoryAdmissionPhase::AcquirePending)
+    }
+}
+
 /// What a lane that has not started is waiting for, shown by `lanes` and carried
 /// over the peer channel so a peer's lanes read like local ones.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1774,7 +2147,7 @@ pub struct LaneWait {
     pub extra: crate::ExtraFields,
     pub attempt_id: AttemptId,
     pub lane_class: LaneClass,
-    pub waiting_for: String,
+    pub waiting_for: LaneWaitReason,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdmissionTicket {
@@ -1812,6 +2185,65 @@ pub struct RunEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attempt_state_fields_round_trip_and_reject_malformed_values() {
+        let base = serde_json::json!({
+            "state":"terminal",
+            "outcome":"failed",
+            "exit_code":1,
+            "finished_at":serde_json::to_value(WallTime::from_micros(1).unwrap()).unwrap(),
+            "reason":"fixture"
+        });
+        for (base, field, value, malformed) in [
+            (
+                base.clone(),
+                "terminal_cause",
+                serde_json::json!("token_budget"),
+                serde_json::json!("unknown"),
+            ),
+            (
+                base.clone(),
+                "terminal_note",
+                serde_json::json!("bounded reason"),
+                serde_json::json!(17),
+            ),
+            (
+                base.clone(),
+                "stop",
+                serde_json::json!({"cause":"lost"}),
+                serde_json::json!({"cause":false}),
+            ),
+            (
+                serde_json::json!({"state":"running"}),
+                "child_wait",
+                serde_json::json!("children"),
+                serde_json::json!("unknown"),
+            ),
+            (
+                serde_json::json!({"state":"running"}),
+                "child_wait",
+                serde_json::json!("admission"),
+                serde_json::json!({"kind":"children"}),
+            ),
+        ] {
+            let mut wire = base;
+            wire[field] = value;
+            let bytes = serde_json::to_vec(&wire).unwrap();
+            let decoded: AttemptState =
+                crate::json::decode(bytes.as_slice(), crate::json::Limits::default()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
+            wire[field] = malformed;
+            let bytes = serde_json::to_vec(&wire).unwrap();
+            assert!(matches!(
+                crate::json::decode::<AttemptState, _>(
+                    bytes.as_slice(),
+                    crate::json::Limits::default()
+                ),
+                Err(crate::json::DecodeError::Typed { .. })
+            ));
+        }
+    }
 
     #[test]
     fn only_a_user_enabled_sandbox_floors_children() -> Result<(), Box<dyn std::error::Error>> {
@@ -1939,6 +2371,117 @@ mod tests {
     }
 
     #[test]
+    fn typed_profile_fields_round_trip_and_reject_malformed_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let profile = HarnessProfile {
+            name: "typed".into(),
+            confidential: true,
+            parent_sandboxed: true,
+            admitted_by: Some("parent".into()),
+            knob_sources: [("lanes.ci_scope".into(), LimitSource::Launch)].into(),
+            budget_wrap_up: Some(BudgetWrapUp { remaining: 17 }),
+            launch_policy: Some(crate::policy::Policy::default()),
+            policy_overrides: [("WRITE_SCOPE".into(), crate::policy::Strength::Warn)].into(),
+            policy_project: Some(ProjectId::from_bytes([7; 16])),
+            repository_policy: Some(LaunchPolicy {
+                confidential: true,
+                sources: vec!["git".into()],
+                repository_config: Some(".provenant.toml".into()),
+            }),
+            write_scope: vec!["src".into()],
+            ..HarnessProfile::default()
+        };
+        let mut wire = serde_json::to_value(&profile)?;
+        assert_eq!(
+            serde_json::from_value::<HarnessProfile>(wire.clone())?,
+            profile
+        );
+        for (field, malformed) in [
+            ("confidential", serde_json::json!("true")),
+            ("parent_sandboxed", serde_json::json!(1)),
+            ("admitted_by", serde_json::json!(false)),
+            (
+                "knob_sources",
+                serde_json::json!({"lanes.ci_scope":"unowned"}),
+            ),
+            ("budget_wrap_up", serde_json::json!({"remaining":"17"})),
+            ("launch_policy", serde_json::json!({"rules":"not-a-list"})),
+            (
+                "policy_overrides",
+                serde_json::json!({"WRITE_SCOPE":"refuse-me"}),
+            ),
+            ("policy_project", serde_json::json!([])),
+            ("repository_policy", serde_json::json!("host")),
+            ("write_scope", serde_json::json!([1])),
+        ] {
+            let mut malformed_value = wire.clone();
+            malformed_value[field] = malformed;
+            assert!(
+                serde_json::from_value::<HarnessProfile>(malformed_value).is_err(),
+                "{field}"
+            );
+        }
+        wire["unknown_future_profile_field"] = serde_json::json!(true);
+        let decoded: HarnessProfile = serde_json::from_value(wire)?;
+        assert!(decoded.extra.contains_key("unknown_future_profile_field"));
+        Ok(())
+    }
+
+    #[test]
+    fn task_limit_extensions_round_trip_and_reject_malformed_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let task = TaskRequest {
+            context: None,
+            extra: Default::default(),
+            limit_extensions: [("token_budget".into(), 5000)].into(),
+            build_heavy: false,
+            title: None,
+            profile: HarnessProfile::default(),
+            prompt_digest: CanonicalV1::file_digest(b"typed request"),
+            head: None,
+            source_head: None,
+            base: None,
+            base_ref: None,
+            route: RequestedRoute::Named {
+                extra: Default::default(),
+                name: "junior".into(),
+                effort: None,
+            },
+            account: None,
+            authority_digest: Digest::from_bytes([3; 32]),
+            writer: None,
+            deliver: None,
+            provider_timeout_seconds: 60,
+            delivery_id: None,
+            access: LaneAccess::default(),
+        };
+        let mut wire = serde_json::to_value(&task)?;
+        assert_eq!(serde_json::from_value::<TaskRequest>(wire.clone())?, task);
+        wire["limit_extensions"] = serde_json::json!({"token_budget":"5000"});
+        assert!(serde_json::from_value::<TaskRequest>(wire).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn writer_custody_project_round_trips_and_rejects_malformed_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request = WriterRequest {
+            extra: Default::default(),
+            custody_project: Some(ProjectId::from_bytes([9; 16])),
+            project: "/project".into(),
+            worktree: "/project/.worktrees/lane".into(),
+        };
+        let mut wire = serde_json::to_value(&request)?;
+        assert_eq!(
+            serde_json::from_value::<WriterRequest>(wire.clone())?,
+            request
+        );
+        wire["custody_project"] = serde_json::json!({"id": "invalid"});
+        assert!(serde_json::from_value::<WriterRequest>(wire).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn a_lost_or_unsettled_outcome_names_its_reason_with_any_evidence() {
         // The process ran, but custody or reporting was not proven.
         for evidence in [
@@ -1982,5 +2525,223 @@ mod tests {
             access
         );
         assert!(!access.is_default());
+    }
+    #[test]
+    fn lane_wait_fields_round_trip_and_reject_malformed_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for reason in [
+            LaneWaitReason::HostStalled,
+            LaneWaitReason::Children,
+            LaneWaitReason::Admission,
+            LaneWaitReason::ProviderSilence {
+                silent_for_ms: 5_000,
+            },
+            LaneWaitReason::LaunchPreparation,
+            LaneWaitReason::RecoveryWorkerRefused { used: 5, limit: 10 },
+        ] {
+            let wait = LaneWait {
+                extra: Default::default(),
+                attempt_id: AttemptId::from_bytes([1; 16]),
+                lane_class: LaneClass::Writer,
+                waiting_for: reason,
+            };
+            let encoded = serde_json::to_vec(&wait)?;
+            let decoded: LaneWait =
+                crate::json::decode(encoded.as_slice(), crate::json::Limits::default())?;
+            assert_eq!(decoded, wait);
+        }
+        let malformed = serde_json::to_vec(&serde_json::json!({
+            "attempt_id":AttemptId::from_bytes([1; 16]), "lane_class":"writer",
+            "waiting_for":{"kind":"provider_silence", "silent_for_ms":"many"}
+        }))?;
+        assert!(matches!(
+            crate::json::decode::<LaneWait, _>(
+                malformed.as_slice(),
+                crate::json::Limits::default()
+            ),
+            Err(crate::json::DecodeError::Typed { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn admission_binding_fields_round_trip_and_reject_malformed_values() {
+        let command = crate::PortCommand {
+            argv: vec!["admission-check".into()],
+            exit_codes: crate::CommandExitCodes {
+                success: vec![0],
+                unknown: vec![],
+                other: crate::ExitDisposition::Refused,
+            },
+        };
+        let binding = RepositoryAdmissionBinding::new(crate::PortSource::Project, &command);
+        let wire = serde_json::to_value(&binding).unwrap();
+        let bytes = serde_json::to_vec(&wire).unwrap();
+        let decoded: RepositoryAdmissionBinding =
+            crate::json::decode(bytes.as_slice(), crate::json::Limits::default()).unwrap();
+        assert_eq!(decoded, binding);
+        for (field, invalid) in [
+            ("source", serde_json::json!("unknown")),
+            (
+                "command",
+                serde_json::json!({"argv":[],"exit_codes":{"success":[0],"unknown":[],"other":"refused"}}),
+            ),
+            (
+                "command_digest",
+                serde_json::json!(CanonicalV1::file_digest(b"wrong command")),
+            ),
+            ("lease_epoch", serde_json::json!(0)),
+            ("phase", serde_json::json!("unknown")),
+        ] {
+            let mut malformed = wire.clone();
+            malformed[field] = invalid;
+            let bytes = serde_json::to_vec(&malformed).unwrap();
+            assert!(
+                matches!(
+                    crate::json::decode::<RepositoryAdmissionBinding, _>(
+                        bytes.as_slice(),
+                        crate::json::Limits::default()
+                    ),
+                    Err(crate::json::DecodeError::Typed { .. })
+                ),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn attempt_host_fields_round_trip_and_reject_malformed_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let project = ProjectId::from_bytes([1; 16]);
+        let base = serde_json::json!({
+            "schema_version":1, "key":crate::WorkKey::new(project, "typed-run-fields", "lane", 1)?,
+            "attempt_id":AttemptId::from_bytes([2; 16]), "project_id":project,
+            "attempt_number":1, "revision":1, "generation":1,
+            "requested_route":{"kind":"named","name":"fixture"},
+            "authority_digest":Digest::from_bytes([3; 32]), "queued_at":WallTime::from_micros(1)?,
+            "state":{"state":"queued"}, "usage":{}, "trace":{},
+            "read_only_writable":[], "protected_paths":[],
+            "prompt":{"path":{"encoding":"utf8","path":"prompt"},
+                "digest":CanonicalV1::file_digest(b"fixture"),"bytes":7,"complete":true,"redacted":false}
+        });
+        let command: crate::PortCommand = serde_json::from_value(serde_json::json!({
+            "argv":["admission-check"],
+            "exit_codes":{"success":[0],"unknown":[],"other":"refused"}
+        }))?;
+        let binding = RepositoryAdmissionBinding::new(crate::PortSource::Project, &command);
+        let field_values = [
+            (
+                "budget_overrun",
+                serde_json::json!({"schema_version":1,"tokens":101,"budget":100}),
+                serde_json::json!(false),
+            ),
+            (
+                "budget_wrap_up_refused",
+                serde_json::json!({"schema_version":1,"reason":"admission refused"}),
+                serde_json::json!(false),
+            ),
+            (
+                "repository_admission_binding",
+                serde_json::to_value(binding)?,
+                serde_json::json!(false),
+            ),
+            (
+                "peer_graph",
+                serde_json::json!({"host":provenant_core::HostId::from_bytes([4;16]),"graph_id":"peer-graph"}),
+                serde_json::json!(false),
+            ),
+            (
+                "peer_graph_collected",
+                serde_json::json!(true),
+                serde_json::json!("yes"),
+            ),
+            (
+                "peer_origin_work_key",
+                serde_json::to_value(crate::WorkKey::new(project, "origin", "parent", 1)?)?,
+                serde_json::json!(false),
+            ),
+            (
+                "peer_origin_context",
+                serde_json::json!({"graph_id":"origin","node_id":"parent","attempt":1}),
+                serde_json::json!(false),
+            ),
+            (
+                "peer_subtree",
+                serde_json::json!({
+                    "status":"complete","outcome":"succeeded","next_node":null,
+                    "checkpoint":{"schema_version":1,"graph_id":"peer-graph","plan_digest":"digest","cancelled":false,"nodes":[
+                        {"id":"node","state":"succeeded","worktree":null,"attempts":[{
+                            "launched":true,"key":{"graph_id":"peer-graph","node_id":"node","attempt":1,"route_index":0},
+                            "route":{"adapter":"fixture","model":"fixture/model","alias":null,"name":null,"effort":null,"account":null},
+                            "state":"terminal","attempt_ref":"host/attempt","outcome":"succeeded","launch_actor":"actor"
+                        }]}
+                    ]}
+                }),
+                serde_json::json!({"status":"complete","checkpoint":{"nodes":[{"state":"unknown"}]}}),
+            ),
+            (
+                "graph_custody_released",
+                serde_json::json!(true),
+                serde_json::json!("yes"),
+            ),
+            (
+                "graph_handoff",
+                serde_json::json!({"schema_version":2,"status":"done","note":"finished","remaining":[],"decisions":[],"verify":[]}),
+                serde_json::json!({"schema_version":1,"status":"done","note":"finished","remaining":[],"decisions":[],"verify":[]}),
+            ),
+        ];
+        for (field, value, malformed_value) in field_values {
+            let mut input = base.clone();
+            input[field] = value.clone();
+            let decoded: AttemptRecord = serde_json::from_value(input)?;
+            let round_trip = serde_json::to_value(&decoded)?;
+            assert_eq!(round_trip[field], value, "{field}");
+            assert!(
+                !decoded.extra.contains_key(field),
+                "typed host field leaked into ExtraFields: {field}"
+            );
+            if field == "repository_admission_binding" {
+                assert!(
+                    decoded
+                        .repository_admission_binding
+                        .as_ref()
+                        .is_some_and(RepositoryAdmissionBinding::valid)
+                );
+            }
+            let mut malformed = base.clone();
+            malformed[field] = malformed_value;
+            let bytes = serde_json::to_vec(&malformed)?;
+            assert!(
+                matches!(
+                    crate::json::decode::<AttemptRecord, _>(
+                        bytes.as_slice(),
+                        crate::json::Limits::default()
+                    ),
+                    Err(crate::json::DecodeError::Typed { .. })
+                ),
+                "{field}"
+            );
+        }
+        let mut oversized = base.clone();
+        oversized["graph_handoff"] = serde_json::json!({
+            "schema_version":2,"status":"done","note":"finished","remaining":[],"decisions":[],"verify":[],
+            "future_payload":"x".repeat(13_000)
+        });
+        let oversized_bytes = serde_json::to_vec(&oversized)?;
+        assert!(matches!(
+            crate::json::decode::<AttemptRecord, _>(
+                oversized_bytes.as_slice(),
+                crate::json::Limits::default()
+            ),
+            Err(crate::json::DecodeError::Typed { .. })
+        ));
+        let mut future = base;
+        future["future_user_field"] = serde_json::json!({"kept":true});
+        let decoded: AttemptRecord = serde_json::from_value(future)?;
+        assert_eq!(
+            decoded.extra.get("future_user_field"),
+            Some(&serde_json::json!({"kept":true}))
+        );
+        Ok(())
     }
 }

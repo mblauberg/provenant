@@ -501,6 +501,15 @@ fn outputs(
 ) -> Result<(NodeOutputs, Option<NodeDecisionCause>), String> {
     let mut selected = NodeOutputs {
         extra: Default::default(),
+        repair_design: None,
+        partial: false,
+        risk_tier: None,
+        repair_items: None,
+        spec_concerns: None,
+        spec_concern_count: None,
+        spec_defect_count: None,
+        artifact_findings: None,
+        compact_disposition_findings: None,
         schema_version: 2,
         decide_outcome: None,
         result: None,
@@ -557,7 +566,7 @@ fn outputs(
             continue;
         }
         if member.outputs.as_ref().is_some_and(review::partial) {
-            selected.extra.insert(review::PARTIAL.into(), true.into());
+            selected.partial = true;
         }
         let Some(source) = member.outputs.as_ref() else {
             continue;

@@ -858,7 +858,7 @@ fn ci_failure_findings_reach_repair_input_and_survive_resume() {
     let run = advance(&doc, &mut owner, &mut journal).unwrap();
     let outputs = run.checkpoint.nodes[0].outputs.as_ref().unwrap();
     assert_eq!(outputs.findings[0].summary, "test: assertion failed");
-    assert_eq!(outputs.findings[0].extra["url"], "https://checks/1");
+    assert_eq!(outputs.findings[0].url.as_deref(), Some("https://checks/1"));
     assert!(owner.prompts[0].contains("assertion failed"));
     assert!(owner.prompts[0].contains("https://checks/1"));
     assert_eq!(

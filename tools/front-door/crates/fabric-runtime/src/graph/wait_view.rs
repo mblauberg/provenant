@@ -151,15 +151,13 @@ pub fn graph_waits(checkpoint: &GraphCheckpoint) -> Vec<GraphNodeWait> {
                 spec_concerns: node
                     .outputs
                     .as_ref()
-                    .and_then(|output| output.extra.get("spec_concerns"))
-                    .and_then(|value| serde_json::from_value(value.clone()).ok())
+                    .and_then(|output| output.spec_concerns.clone())
                     .unwrap_or_default(),
                 spec_concern_count: node
                     .outputs
                     .as_ref()
-                    .and_then(|output| output.extra.get("spec_concern_count"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0) as usize,
+                    .and_then(|output| output.spec_concern_count)
+                    .unwrap_or(0),
                 rejected_boundaries: node
                     .outputs
                     .as_ref()
@@ -194,9 +192,8 @@ pub fn graph_waits(checkpoint: &GraphCheckpoint) -> Vec<GraphNodeWait> {
                 spec_defect_count: node
                     .outputs
                     .as_ref()
-                    .and_then(|output| output.extra.get("spec_defect_count"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0) as usize,
+                    .and_then(|output| output.spec_defect_count)
+                    .unwrap_or(0),
                 output_path: node
                     .outputs
                     .as_ref()

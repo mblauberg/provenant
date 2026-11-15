@@ -4,10 +4,10 @@ use provenant_cli::{
     Globals, Tracker,
     tracker::{self, Config, Finding},
 };
-use provenant_config::{Port, PortBackend, PortCommandDisposition, PortSource, PortTable};
+use provenant_config::{Port, PortBackend, PortCommandDisposition, PortTable};
 use provenant_core::CancelToken;
 use provenant_os::exec::SystemExecutor;
-use provenant_records::{CanonicalV1, CommandResult, Outcome};
+use provenant_records::{CanonicalV1, CommandResult, Outcome, PortSource};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -59,7 +59,7 @@ fn builtin_issue(root: &Path, number: u64, timeout: Duration) -> Result<Issue, S
 enum TrackerPort {
     Builtin,
     Command {
-        command: provenant_config::PortCommand,
+        command: provenant_records::PortCommand,
         source: PortSource,
         state: PathBuf,
         executor: SystemExecutor,

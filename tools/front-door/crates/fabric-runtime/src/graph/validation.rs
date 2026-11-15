@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) fn nodes_have_v2(nodes: &[GraphNode]) -> bool {
     nodes.iter().any(|node| {
-        node.extra.contains_key("review_base")
+        node.review_base.is_some()
             || node.family_group.is_some()
             || node
                 .inputs
@@ -347,10 +347,8 @@ pub(super) fn validate_flat_plan(
     let mut prompt_bytes = 0usize;
     let mut nodes = Vec::with_capacity(document.nodes.len());
     for node in &document.nodes {
-        if node.extra.get("review_base").is_some_and(|value| {
-            value.as_str().is_none_or(|reference| {
-                reference.is_empty() || reference.len() > 4096 || reference.contains('\0')
-            })
+        if node.review_base.as_deref().is_some_and(|reference| {
+            reference.is_empty() || reference.len() > 4096 || reference.contains('\0')
         }) {
             return Err(node_plan_error(
                 node,
@@ -1020,11 +1018,7 @@ pub(super) fn review_verification_error(
         && outputs.findings.iter().any(|finding| {
             !upstream.iter().any(|source| source.id == finding.id)
                 && !overflow.iter().any(|(id, _)| id == &finding.id)
-                && (finding
-                    .extra
-                    .get("verification")
-                    .and_then(serde_json::Value::as_str)
-                    != Some("new")
+                && (finding.verification.as_deref() != Some("new")
                     || finding
                         .reason
                         .as_ref()
@@ -1049,9 +1043,8 @@ pub(super) fn review_verification_error(
                 .count()
             || matches.iter().any(|output| {
                 !output
-                    .extra
-                    .get("verification")
-                    .and_then(serde_json::Value::as_str)
+                    .verification
+                    .as_deref()
                     .is_some_and(|value| matches!(value, "upheld" | "falsified" | "unverifiable"))
                     || output
                         .reason
@@ -1262,10 +1255,8 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
     for (index, (progress, node)) in checkpoint.nodes.iter().zip(&plan.nodes).enumerate() {
         let mut historical;
         let checkpoint = if progress.state.settled() {
-            if let Some(snapshots) = progress
-                .extra
-                .get("settled_dependency_snapshots")
-                .and_then(serde_json::Value::as_object)
+            if let Some(snapshots) = (!progress.settled_dependency_snapshots.is_empty())
+                .then_some(&progress.settled_dependency_snapshots)
             {
                 historical = checkpoint.clone();
                 for (id, snapshot) in snapshots {
@@ -1273,11 +1264,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                         node: node.id.clone(),
                         invariant: "dependency snapshot must name a graph node",
                     })?;
-                    let mut prior: NodeProgress = serde_json::from_value(snapshot.clone())
-                        .map_err(|_| GraphError::BadCheckpoint {
-                            node: node.id.clone(),
-                            invariant: "dependency snapshot must be valid progress",
-                        })?;
+                    let mut prior = snapshot.clone();
                     if prior.id != *id || !prior.state.settled() {
                         return Err(GraphError::BadCheckpoint {
                             node: node.id.clone(),
@@ -1389,13 +1376,11 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 "source selection must match the expanded plan",
             ),
             (
-                progress.extra.get("new_worktree_base").is_some_and(|base| {
+                progress.new_worktree_base.as_deref().is_some_and(|base| {
                     node.attempt
                         .as_ref()
                         .is_none_or(|spec| spec.new_worktree.is_none())
-                        || base
-                            .as_str()
-                            .is_none_or(|base| base.parse::<provenant_core::GitOid>().is_err())
+                        || base.parse::<provenant_core::GitOid>().is_err()
                 }),
                 "writer provisioning must retain a full commit base",
             ),
@@ -1544,7 +1529,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             return Err(bad("land record requires a land node"));
         }
         let requests_review_base =
-            node.access == AccessMode::ReadOnly && node.extra.contains_key("review_base");
+            node.access == AccessMode::ReadOnly && node.review_base.is_some();
         if progress.review_base_pending
             && (!requests_review_base
                 || progress.review_base.is_some()
@@ -1796,7 +1781,7 @@ fn fallback_settled(
             spec,
             document,
             node.require_skill_location,
-            progress.extra.get("retry_generation"),
+            progress.retry_generation,
         )
         .is_ok_and(|derived| {
             checkpoint

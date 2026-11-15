@@ -217,6 +217,9 @@ fn redo_container_after_checkpoint_crash(
     let mut journal = open();
     journal
         .bind(GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+
             extra: Default::default(),
             bases: None,
             directory: base,
@@ -662,9 +665,7 @@ fn container_redo_accepts_only_host_proven_prelaunch_refusal_of_a_descendant() {
     // Dispatch sets this flag before the host can refuse acceptance.
     attempt.launched = true;
     attempt.attempt_ref = None;
-    attempt
-        .extra
-        .insert(PRELAUNCH_REFUSAL_PROOF.into(), json!(true));
+    attempt.host_refused_before_acceptance = true;
     let prior = attempt.clone();
     for unsafe_case in 0..4 {
         let mut candidate = checkpoint.clone();
@@ -675,7 +676,7 @@ fn container_redo_accepts_only_host_proven_prelaunch_refusal_of_a_descendant() {
             .unwrap();
         match unsafe_case {
             0 => {
-                leaf.attempts[0].extra.remove(PRELAUNCH_REFUSAL_PROOF);
+                leaf.attempts[0].host_refused_before_acceptance = false;
             }
             1 => leaf.attempts[0].state = AttemptState::Running,
             2 => leaf.attempts[0].attempt_ref = Some("host/uncertain".into()),
@@ -869,7 +870,7 @@ fn subtree_stop_clears_a_launch_retry_wake_when_no_process_was_accepted() {
 #[test]
 fn subtree_stop_fences_live_parent_and_children_across_replay_and_preserves_detached_work() {
     let mut detached = node("work--keep", route("first"));
-    detached.extra.insert(relay::DETACHED.into(), true.into());
+    detached.detached = true;
     let document = graph(vec![
         node("work", route("first")),
         node("work--child", route("first")),
@@ -1259,10 +1260,8 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
     assert_eq!(wait.code, "invalid_input");
     assert_eq!(wait.cause.as_deref(), Some("invalid_input"));
     assert_eq!(
-        checkpoint.nodes[work_index].attempts[0]
-            .extra
-            .get(PRELAUNCH_REFUSAL_PROOF),
-        Some(&json!(true))
+        checkpoint.nodes[work_index].attempts[0].host_refused_before_acceptance,
+        true
     );
     // Accepted operations may still have stale Starting/false/None graph rows.
     // Neither a blocked replay nor corrupt accepted state proves non-acceptance.
@@ -1292,11 +1291,7 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
             &mut MemoryJournal::default(),
         )
         .unwrap();
-        assert!(
-            !candidate.nodes[work_index].attempts[0]
-                .extra
-                .contains_key(PRELAUNCH_REFUSAL_PROOF)
-        );
+        assert!(!candidate.nodes[work_index].attempts[0].host_refused_before_acceptance);
         let before = candidate.clone();
         assert!(retry(&document, &mut candidate, None, &|_| Ok(()), None).is_err());
         assert_eq!(candidate, before);
@@ -1319,11 +1314,7 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
         &mut MemoryJournal::default(),
     )
     .unwrap();
-    assert!(
-        !lookup_failed.nodes[work_index].attempts[0]
-            .extra
-            .contains_key(PRELAUNCH_REFUSAL_PROOF)
-    );
+    assert!(!lookup_failed.nodes[work_index].attempts[0].host_refused_before_acceptance);
     let before = lookup_failed.clone();
     assert!(retry(&document, &mut lookup_failed, None, &|_| Ok(()), None).is_err());
     assert_eq!(lookup_failed, before);
@@ -1346,11 +1337,7 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
         &mut MemoryJournal::default(),
     )
     .unwrap();
-    assert!(
-        !unknown.nodes[work_index].attempts[0]
-            .extra
-            .contains_key(PRELAUNCH_REFUSAL_PROOF)
-    );
+    assert!(!unknown.nodes[work_index].attempts[0].host_refused_before_acceptance);
     let before = unknown.clone();
     assert!(retry(&document, &mut unknown, None, &|_| Ok(()), None).is_err());
     assert_eq!(unknown, before);
@@ -1373,9 +1360,7 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
             3 => candidate.nodes[work_index].state = NodeState::Running,
             4 => candidate.nodes[work_index].attempts[0].state = AttemptState::Running,
             _ => {
-                candidate.nodes[work_index].attempts[0]
-                    .extra
-                    .remove(PRELAUNCH_REFUSAL_PROOF);
+                candidate.nodes[work_index].attempts[0].host_refused_before_acceptance = false;
             }
         }
         let before = candidate.clone();
@@ -1447,6 +1432,9 @@ fn retry_node_and_dependants_resets_consumers_and_preserves_unrelated_work() {
     let mut journal = open();
     journal
         .bind(GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+
             extra: Default::default(),
             bases: None,
             directory: base,
@@ -1837,7 +1825,7 @@ fn public_retry_preserves_live_spawn_only_children() {
         Some("work"),
         &patch::Patch {
             schema_version: patch::PATCH_SCHEMA_VERSION,
-            nodes: vec![json!({"id":"spawned", "use":"task", "brief":"Independent child"})],
+            nodes: vec![json!({"id":"spawned", "use":"task", "prompt":"Independent child"})],
             ..Default::default()
         },
         &context,
@@ -2070,6 +2058,9 @@ fn no_work_continuation_recovers_after_checkpoint_failure_before_launch() {
     let mut saved = open();
     saved
         .bind(GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+
             extra: Default::default(),
             bases: None,
             directory: base,
@@ -2167,6 +2158,9 @@ fn stopping_settled_no_work_fences_failed_checkpoint_recovery() {
     let mut saved = open();
     saved
         .bind(GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+
             extra: Default::default(),
             bases: None,
             directory: base,
@@ -2313,7 +2307,13 @@ fn no_work_continuation_retains_sealed_quota_retry_spending_and_models() {
     // restart the writer again.
     assert_eq!(owner.calls.len(), 3);
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
-    assert_eq!(run.checkpoint.nodes[0].extra["retry"]["retries"], 1);
+    assert_eq!(
+        run.checkpoint.nodes[0]
+            .retry
+            .as_ref()
+            .map(|retry| retry.retries),
+        Some(1)
+    );
     assert_eq!(owner.prior_attempts[2], ["codex/limited", "claude/stopped"]);
 }
 
@@ -2565,6 +2565,7 @@ fn container_retry_brief_names_the_field_and_template_the_container_came_from() 
     // A container built from a template that declares no `brief` parameter.
     checkpoint.expansions.push(plans::Expansion {
         extra: Default::default(),
+        retired: None,
         source: String::new(),
         nodes: Vec::new(),
         uses: vec![patch::TemplateUse {

@@ -5,8 +5,9 @@ use provenant_core::{
 };
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use provenant_records::CanonicalV1;
+use provenant_records::custody::Scope;
 use provenant_supervisor::custody::{
-    CaptureTotals, ExitObservation, PublicationState, Scope, SettlementEvidence,
+    CaptureTotals, ExitObservation, PublicationState, SettlementEvidence,
 };
 use std::{ffi::OsString, path::Path, time::Duration};
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
@@ -385,12 +386,8 @@ fn mutation_record_reads_sync_the_checkpoint_while_views_do_not() -> TestResult 
 }
 
 /// Explicit custody for requests in the standard execution-context fixture.
-pub(super) fn writer_extra() -> provenant_records::ExtraFields {
-    [(
-        "custody_project".into(),
-        serde_json::json!(ProjectId::from_bytes([1; 16])),
-    )]
-    .into()
+pub(super) fn writer_project() -> ProjectId {
+    ProjectId::from_bytes([1; 16])
 }
 
 pub(super) fn context(
@@ -461,6 +458,7 @@ fn raw_input() -> PreparedRun {
             task: TaskRequest {
                 context: None,
                 extra: Default::default(),
+                limit_extensions: Default::default(),
                 build_heavy: false,
                 title: None,
                 base: None,
@@ -609,7 +607,7 @@ fn refusal_notice_obligation_survives_restart_and_completes_only_for_same_facts(
         store
             .operation(&input.operation_id, &call)?
             .ok_or("missing")?
-            .extra["refusal_notice_done"],
+            .refusal_notice_done,
         true
     );
     for n in 10_u8..91 {
@@ -748,7 +746,10 @@ fn recorded_refusal_freezes_the_notice_setting() -> TestResult {
         None,
         &call,
     )?;
-    assert_eq!(record.extra["refusal_notice"], "off");
+    assert_eq!(
+        record.refusal_notice,
+        Some(provenant_records::run::RefusalNotice::Off)
+    );
     assert_eq!(store.recent_refusals(1, &call)?, vec![record]);
     Ok(())
 }
@@ -923,7 +924,8 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
     let store = RunStore::open(&context, &call)?;
     let mut input = input();
     input.request.task.writer = Some(WriterRequest {
-        extra: crate::tests::writer_extra(),
+        extra: Default::default(),
+        custody_project: Some(crate::tests::writer_project()),
         project: temp.path().to_path_buf(),
         worktree: temp.path().join("lane"),
     });
@@ -1033,7 +1035,8 @@ fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let mut input = input();
     input.request.task.writer = Some(WriterRequest {
-        extra: crate::tests::writer_extra(),
+        extra: Default::default(),
+        custody_project: Some(crate::tests::writer_project()),
         project: temp.path().to_path_buf(),
         worktree: temp.path().join("lane"),
     });
@@ -2504,7 +2507,8 @@ fn publication_postcommit_effect_failure_still_cleans_temporary() -> TestResult 
     let store = RunStore::open(&context, &call)?;
     let mut input = input();
     input.request.task.writer = Some(WriterRequest {
-        extra: crate::tests::writer_extra(),
+        extra: Default::default(),
+        custody_project: Some(crate::tests::writer_project()),
         project: temp.path().into(),
         worktree: temp.path().into(),
     });

@@ -37,11 +37,10 @@ pub use providers::{ProviderSettings, ProviderUpdate};
 mod ports;
 mod project_binding;
 pub use ports::{
-    CommandExitCodes, ExitDisposition, Integration, LandBackend, LandPort, PORTS_CONFIG,
-    PORTS_SCHEMA_VERSION, PackagePath, Port, PortBackend, PortBackendKind, PortCommand,
-    PortCommandDisposition, PortCommandExecution, PortCommandReceiptProof, PortEvidenceError,
-    PortSource, PortTable, VerifyPort, VerifySelection, VerifyTier, WorktreeLayoutPort,
-    execute_port_command, port_command_receipt_proof, record_port_command,
+    Integration, LandBackend, LandPort, PORTS_CONFIG, PORTS_SCHEMA_VERSION, PackagePath, Port,
+    PortBackend, PortBackendKind, PortCommandDisposition, PortCommandExecution,
+    PortCommandReceiptProof, PortEvidenceError, PortTable, VerifyPort, VerifySelection, VerifyTier,
+    WorktreeLayoutPort, execute_port_command, port_command_receipt_proof, record_port_command,
 };
 mod release;
 mod repository_policy;
@@ -69,7 +68,7 @@ pub use domains::{
 };
 pub use edit::{EditOptions, Edited, edit_config, revision_of, show};
 pub use history::{FieldChange, HistoryEntry, HistoryLimits, history};
-pub use knobs::{KNOB_SOURCES, KnobEdit, KnobSource, KnobValue};
+pub use knobs::{KnobEdit, KnobSource, KnobValue};
 pub use loader::{
     config_show, inspect_config, load, load_with_domains, read, read_knobs, read_with_domains,
 };

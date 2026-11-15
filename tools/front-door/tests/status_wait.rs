@@ -125,6 +125,9 @@ fn seed_graph(rig: &TestRig, graph: &str) -> Result<()> {
     let cancel = provenant_core::CancelToken::new();
     let mut journal = graph_journal(graph, &state, project, &clock, &cancel)?;
     journal.bind(GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+
         extra: Default::default(),
         bases: None,
         directory: rig.project.clone(),

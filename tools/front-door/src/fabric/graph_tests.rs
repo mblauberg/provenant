@@ -823,6 +823,9 @@ mod graph_writer_admission_tests {
             &factory.clock,
         )?;
         journal.bind(graph::GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+
             extra: Default::default(),
             bases: None,
             directory: rig.project.clone(),
@@ -918,9 +921,10 @@ mod graph_writer_admission_tests {
             provenant_records::run::TerminalCause::RetainedWriterImport,
         ] {
             let mut refused = lanes[0].clone();
-            if let provenant_records::run::AttemptState::Terminal { extra, .. } = &mut refused.state
+            if let provenant_records::run::AttemptState::Terminal { terminal_cause, .. } =
+                &mut refused.state
             {
-                extra.insert("terminal_cause".into(), serde_json::to_value(cause)?);
+                *terminal_cause = Some(cause);
             }
             assert!(durable_launch_refusal(&[refused.clone()]).is_some());
             assert!(durable_launch_refusal(&[refused, lanes[0].clone()]).is_none());
@@ -940,13 +944,10 @@ mod graph_writer_admission_tests {
         // child_reason is a Preparation refusal even though its cause names
         // access policy. Persist that exact producer shape and replay it.
         let mut child_preparation = lanes[0].clone();
-        if let provenant_records::run::AttemptState::Terminal { extra, .. } =
+        if let provenant_records::run::AttemptState::Terminal { terminal_cause, .. } =
             &mut child_preparation.state
         {
-            extra.insert(
-                "terminal_cause".into(),
-                serde_json::to_value(provenant_records::run::TerminalCause::AccessPolicyRefused)?,
-            );
+            *terminal_cause = Some(provenant_records::run::TerminalCause::AccessPolicyRefused);
         }
         assert!(durable_launch_refusal(&[child_preparation.clone()]).is_none());
         let mut launched_failure = lanes[0].clone();
@@ -962,8 +963,8 @@ mod graph_writer_admission_tests {
         let attempt = lanes[0].attempt_id;
         let sealed = |cause: provenant_records::run::TerminalCause| -> Result<provenant_run::AttemptRecord, Box<dyn std::error::Error>> {
             let mut lane = lanes[0].clone();
-            if let provenant_records::run::AttemptState::Terminal { extra, .. } = &mut lane.state {
-                extra.insert("terminal_cause".into(), serde_json::to_value(cause)?);
+            if let provenant_records::run::AttemptState::Terminal { terminal_cause, .. } = &mut lane.state {
+                *terminal_cause = Some(cause);
             }
             Ok(lane)
         };
@@ -975,7 +976,7 @@ mod graph_writer_admission_tests {
             provenant_run::RefusalKind::PacingReserve,
             provenant_run::RefusalKind::RetainedImport {
                 fence: provenant_supervisor::custody::PendingImport {
-                    scope: provenant_supervisor::custody::Scope {
+                    scope: provenant_records::custody::Scope {
                         attempt,
                         generation: lanes[0].generation,
                     },
@@ -2171,11 +2172,8 @@ mod result_tests {
         let path = std::path::Path::new("/fixture/writer");
         run.checkpoint.nodes[0].writer_binding =
             Some(provenant_fabric_runtime::graph::WriterWorktreeBinding {
-                extra: [(
-                    "source_directory_identity".into(),
-                    serde_json::json!({"device":7,"inode":9}),
-                )]
-                .into(),
+                extra: Default::default(),
+                source_directory_identity: Some(identity.clone()),
                 worktree: path.display().to_string(),
                 head: "1".repeat(40),
             });
@@ -2212,6 +2210,7 @@ mod result_tests {
         run.checkpoint.nodes[0].writer_binding =
             Some(provenant_fabric_runtime::graph::WriterWorktreeBinding {
                 extra: Default::default(),
+                source_directory_identity: None,
                 worktree: "/private/host/writer".into(),
                 head: "1".repeat(40),
             });
@@ -2478,6 +2477,9 @@ mod result_tests {
             &factory.clock,
         )?;
         journal.bind(GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+
             extra: Default::default(),
             bases: None,
             directory: rig.project.clone(),
@@ -2619,7 +2621,14 @@ mod result_tests {
             result: PeerResult::Output {
                 extra: Default::default(),
                 data: OutputResult::Chunk {
-                    extra: [("peer_origin_work_key".into(), serde_json::json!(origin))].into(),
+                    peer: provenant_records::run::PeerOutputFields {
+                        graph: provenant_records::run::PeerGraphFields {
+                            peer_origin_work_key: Some(origin.clone()),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    extra: Default::default(),
                     target,
                     part: OutputPart::Result,
                     state: "succeeded".into(),
@@ -2782,19 +2791,16 @@ mod result_tests {
                 remote_host
             };
             if let PeerResult::Output {
-                data: OutputResult::Chunk { extra, .. },
+                data: OutputResult::Chunk { peer, .. },
                 ..
             } = &mut reply.result
             {
-                extra.insert(
-                    "peer_origin_work_key".into(),
-                    serde_json::json!(provenant_records::WorkKey::new(
-                        factory.context.identity.project,
-                        document.graph_id.clone(),
-                        "producer",
-                        1
-                    )?),
-                );
+                peer.graph.peer_origin_work_key = Some(provenant_records::WorkKey::new(
+                    factory.context.identity.project,
+                    document.graph_id.clone(),
+                    "producer",
+                    1,
+                )?);
             }
             std::fs::write(&response, serde_json::to_vec(&reply)?)?;
             let mut owner = FixtureOwner {
@@ -2817,7 +2823,7 @@ mod result_tests {
         if let PeerResult::Output {
             data:
                 OutputResult::Chunk {
-                    extra,
+                    peer,
                     next_offset,
                     eof,
                     bytes,
@@ -2826,8 +2832,8 @@ mod result_tests {
             ..
         } = &mut reply.result
         {
-            extra.insert("length".into(), serde_json::json!(text.len()));
-            extra.insert("peer_origin_work_key".into(), serde_json::json!(origin));
+            peer.length = Some(text.len() as u64);
+            peer.graph.peer_origin_work_key = Some(origin.clone());
             *next_offset = 5;
             *eof = false;
             *bytes = OutputBytes::Utf8(text[..5].into());
@@ -2903,14 +2909,11 @@ mod result_tests {
         assert_eq!(std::fs::read_to_string(path)?, text);
         assert!(second_seen.exists());
         if let PeerResult::Output {
-            data: OutputResult::Chunk { extra, .. },
+            data: OutputResult::Chunk { peer, .. },
             ..
         } = &mut second.result
         {
-            extra.insert(
-                "peer_origin_work_key".into(),
-                serde_json::json!(origin.next_attempt().unwrap()),
-            );
+            peer.graph.peer_origin_work_key = Some(origin.next_attempt().unwrap());
         }
         std::fs::write(&second_response, serde_json::to_vec(&second)?)?;
         let refused = graph_inputs::materialise(
@@ -3850,8 +3853,9 @@ mod provisioned_writer_submission_tests {
         let started =
             provenant_core::WallTime::from_micros(record.queued_at.as_micros() + 1_500_000)?;
         let finished = provenant_core::WallTime::from_micros(started.as_micros() + 3_000_000)?;
+        use provenant_records::custody::Scope;
         use provenant_supervisor::custody::{
-            ExitObservation, PublicationState, Scope, SettlementEvidence,
+            ExitObservation, PublicationState, SettlementEvidence,
         };
         let exit = ExitObservation {
             launch_refusal: None,

@@ -1,11 +1,7 @@
 use super::*;
 
 fn full_wait_reason(reason: &str) -> String {
-    if reason.starts_with("host capacity: disk space:") {
-        format!("{reason}; free disk space or run `provenant gc --apply`")
-    } else {
-        reason.to_owned()
-    }
+    reason.to_owned()
 }
 
 pub(super) fn lane_reason(lane: &run::AttemptRecord, waits: &[run::LaneWait]) -> Option<String> {
@@ -13,7 +9,7 @@ pub(super) fn lane_reason(lane: &run::AttemptRecord, waits: &[run::LaneWait]) ->
         waits
             .iter()
             .find(|wait| wait.attempt_id == lane.attempt_id)
-            .map(|wait| full_wait_reason(&wait.waiting_for))
+            .map(|wait| full_wait_reason(&wait.waiting_for.description()))
     })
 }
 
@@ -100,7 +96,7 @@ pub fn project_lane(
 ) -> provenant_records::wire::LaneRow {
     let usage = lane.effective_usage();
     let wait = waits.iter().find(|wait| wait.attempt_id == lane.attempt_id);
-    let waiting_for = wait.map(|wait| wait.waiting_for.clone()).or_else(|| {
+    let waiting_for = wait.map(|wait| wait.waiting_for.description()).or_else(|| {
         lane.provider_silent_for_ms
             .0
             .map(run::provider_silence_reason)
@@ -246,7 +242,7 @@ fn session_inventory_page(
                 let reason = reason.or_else(|| {
                     (!all)
                         .then(|| session.store.lane_waits(std::slice::from_ref(lane), &call))
-                        .and_then(|waits| waits.first().map(|wait| wait.waiting_for.clone()))
+                        .and_then(|waits| waits.first().map(|wait| wait.waiting_for.description()))
                 });
                 let finished = match &lane.state {
                     run::AttemptState::Terminal { finished_at, .. } => Some(*finished_at),

@@ -152,15 +152,17 @@ impl<D> crate::ResolvedConfig<D> {
             .filter_map(|name| {
                 let knob = knobs.get(name)?;
                 let source = match knob.source {
-                    KnobSource::Override if launch_overrides.contains(name) => "launch",
-                    KnobSource::Override => "host",
-                    KnobSource::Default | KnobSource::Profile => "default",
+                    KnobSource::Override if launch_overrides.contains(name) => {
+                        provenant_records::run::LimitSource::Launch
+                    }
+                    KnobSource::Override => provenant_records::run::LimitSource::Host,
+                    KnobSource::Default | KnobSource::Profile => {
+                        provenant_records::run::LimitSource::Default
+                    }
                 };
-                Some((name.to_owned(), Value::String(source.into())))
+                Some((name.to_owned(), source))
             })
-            .collect::<serde_json::Map<_, _>>();
-        let mut extra = provenant_records::ExtraFields::default();
-        extra.insert(KNOB_SOURCES.into(), Value::Object(knob_sources));
+            .collect();
         Ok(provenant_records::run::HarnessProfile {
             name: profile_name(self.profile).into(),
             // Sealed records carry no floats, so a fraction travels as its
@@ -183,15 +185,11 @@ impl<D> crate::ResolvedConfig<D> {
                 })
                 .collect(),
             overrides: overrides.to_vec(),
-            extra,
+            knob_sources,
             ..Default::default()
         })
     }
 }
-
-/// Profile field naming the layer (`launch`, `host` or `default`) that set
-/// each of [`SOURCED_KNOBS`].
-pub const KNOB_SOURCES: &str = "knob_sources";
 
 /// Knobs whose effective source a lane's receipt, status and preamble show.
 const SOURCED_KNOBS: [&str; 7] = [

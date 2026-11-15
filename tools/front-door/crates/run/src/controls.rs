@@ -2,9 +2,10 @@
 //! process state; uncertain custody stays fenced and is reported as such.
 use crate::{artifacts::read_sealed, launch::Providers, *};
 use provenant_core::{AttemptId, OperationId, WallTime};
+use provenant_records::custody::Scope;
 use provenant_supervisor::{
     census::{ProcessObserver, SystemProcessObserver},
-    custody::{self, CustodyError, Observation, RecoveryState, Scope, StopReceipt},
+    custody::{self, CustodyError, Observation, RecoveryState, StopReceipt},
     machine::StopReason,
 };
 use rusqlite::params;
@@ -30,23 +31,14 @@ pub enum CancelReceipt {
         reason: String,
     },
 }
-/// The task's extra fields with this retry's limit raises on top of the
-/// prior ones, for the next launch to resolve.
-fn extensions(task: &TaskRequest, raises: &[(String, u64)]) -> provenant_records::ExtraFields {
-    let mut all = task
-        .extra
-        .get(crate::LIMIT_EXTENSIONS)
-        .and_then(|v| v.as_object().cloned())
-        .unwrap_or_default();
-    all.extend(
-        raises
-            .iter()
-            .map(|(name, value)| (name.clone(), (*value).into())),
-    );
-    if all.is_empty() {
-        return Default::default();
-    }
-    [(crate::LIMIT_EXTENSIONS.to_string(), all.into())].into()
+/// Merge this retry's limit raises over the task's typed extensions.
+fn extensions(
+    task: &TaskRequest,
+    raises: &[(String, u64)],
+) -> std::collections::BTreeMap<String, u64> {
+    let mut all = task.limit_extensions.clone();
+    all.extend(raises.iter().cloned());
+    all
 }
 
 /// A continuation of one terminal attempt with new input, as a new run.
@@ -1002,7 +994,8 @@ mod reboot_tests {
         assert_eq!(
             store.record(id, &call)?.state,
             AttemptState::Running {
-                extra: Default::default()
+                extra: Default::default(),
+                child_wait: None,
             }
         );
         Ok(())
@@ -1100,7 +1093,8 @@ mod lineage_tests {
             };
             let store = RunStore::open(&execution, &call)?;
             let writer = WriterRequest {
-                extra: [("custody_project".into(), serde_json::json!(project_id))].into(),
+                extra: Default::default(),
+                custody_project: Some(project_id),
                 project: project.clone(),
                 worktree: info.path.clone(),
             };
@@ -1406,7 +1400,8 @@ mod lineage_tests {
         };
         let store = RunStore::open(&execution, &call)?;
         original.request.task.writer = Some(WriterRequest {
-            extra: [("custody_project".into(), serde_json::json!(project_id))].into(),
+            extra: Default::default(),
+            custody_project: Some(project_id),
             project: project.clone(),
             worktree: info.path.clone(),
         });
@@ -1437,6 +1432,7 @@ mod lineage_tests {
         let mut running = queued.clone();
         running.state = AttemptState::Running {
             extra: Default::default(),
+            child_wait: None,
         };
         store.db.execute(
             "UPDATE attempts SET record=?1 WHERE id=?2",
@@ -1610,7 +1606,8 @@ mod lineage_tests {
                 Ok(replacement)
             })?;
         let writer = WriterRequest {
-            extra: [("custody_project".into(), serde_json::json!(project_id))].into(),
+            extra: Default::default(),
+            custody_project: Some(project_id),
             project: project.clone(),
             worktree: replacement.path,
         };
@@ -2572,7 +2569,8 @@ impl RunStore {
                             context.attempt = None;
                             context
                         }),
-                    extra: extensions(task, &input.extend),
+                    extra: Default::default(),
+                    limit_extensions: extensions(task, &input.extend),
                     build_heavy: task.build_heavy,
                     title: None,
                     base: task.base.clone(),
@@ -2582,10 +2580,8 @@ impl RunStore {
                     profile: {
                         let mut profile = task.profile.clone();
                         if let Some(remaining) = budget_remaining {
-                            profile.extra.insert(
-                                "budget_wrap_up".into(),
-                                serde_json::json!({"remaining":remaining}),
-                            );
+                            profile.budget_wrap_up =
+                                Some(provenant_records::run::BudgetWrapUp { remaining });
                         }
                         profile
                     },
@@ -3675,7 +3671,8 @@ mod tests {
         let store = RunStore::open(&context, &call)?;
         let mut run = crate::tests::input();
         run.request.task.writer = Some(WriterRequest {
-            extra: crate::tests::writer_extra(),
+            extra: Default::default(),
+            custody_project: Some(crate::tests::writer_project()),
             project: temp.path().join("checkout"),
             worktree: temp.path().join("checkout/.worktrees/interrupted"),
         });
@@ -3715,7 +3712,8 @@ mod tests {
         assert!(store.writer_fences()?.is_empty());
         let terminal = store.record(id, &call)?;
         let AttemptState::Terminal {
-            extra,
+            terminal_cause,
+            terminal_note,
             outcome,
             reason,
             ..
@@ -3728,8 +3726,8 @@ mod tests {
             reason.as_deref(),
             Some("launch interrupted: writer preparation never reached a guardian")
         );
-        assert!(!extra.contains_key("terminal_cause"));
-        assert!(!extra.contains_key("terminal_note"));
+        assert_eq!(*terminal_cause, None);
+        assert_eq!(*terminal_note, None);
         let projected =
             provenant_records::wire::lane::LaneRow::project(&terminal, Default::default());
         assert_eq!(

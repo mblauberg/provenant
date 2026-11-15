@@ -1,6 +1,8 @@
 // Integration tests use real time to bound process and filesystem coordination.
 #![allow(clippy::disallowed_methods)]
 
+use provenant_records::custody::Scope;
+
 use provenant_core::{AttemptId, CancelToken, WaitBudget};
 use provenant_os::{clock::SystemClock, fs::Directory};
 use provenant_supervisor::{ExitPublisher, GuardianHooks, custody::*, fixture};

@@ -31,13 +31,10 @@ fn cancellation_keeps_a_genuine_launch_preparation_failure() -> TestResult {
     assert!(matches!(record.state, AttemptState::Terminal {
         outcome: Outcome::Cancelled, ref reason, ..
     } if reason.as_deref().is_some_and(|reason| reason.contains("fixture preparation broke"))));
-    let AttemptState::Terminal { extra, .. } = &record.state else {
+    let AttemptState::Terminal { terminal_cause, .. } = &record.state else {
         return Err("cancelled attempt is not terminal".into());
     };
-    assert_eq!(
-        extra.get("terminal_cause"),
-        Some(&serde_json::to_value(TerminalCause::HandoffRefused)?)
-    );
+    assert_eq!(*terminal_cause, Some(TerminalCause::HandoffRefused));
     assert_eq!(record.provider_launched, Some(false));
     Ok(())
 }
@@ -104,6 +101,9 @@ fn terminal_dependency_waits_for_custody_release() -> TestResult {
     record.generation = 1;
     record.state = AttemptState::Terminal {
         extra: Default::default(),
+        terminal_cause: None,
+        terminal_note: None,
+        stop: None,
         outcome: Outcome::Succeeded,
         exit_code: Some(0),
         finished_at: record.queued_at,
@@ -157,6 +157,7 @@ fn terminal_dependency_waits_for_custody_release() -> TestResult {
     );
     record.state = AttemptState::Running {
         extra: Default::default(),
+        child_wait: None,
     };
     assert!(!store.custody_released(&record, &call)?);
     Ok(())
@@ -164,7 +165,8 @@ fn terminal_dependency_waits_for_custody_release() -> TestResult {
 // Medium: filesystem/SQLite boundary, no provider process or timer.
 #[test]
 fn work_key_restart_uses_the_retained_attempts_settlement() -> TestResult {
-    use provenant_supervisor::custody::{self, ImportFence, Scope};
+    use provenant_records::custody::Scope;
+    use provenant_supervisor::custody::{self, ImportFence};
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -172,7 +174,8 @@ fn work_key_restart_uses_the_retained_attempts_settlement() -> TestResult {
     let mut input = input();
     let worktree = temp.path().join("lane");
     input.request.task.writer = Some(WriterRequest {
-        extra: crate::tests::writer_extra(),
+        extra: Default::default(),
+        custody_project: Some(crate::tests::writer_project()),
         project: temp.path().to_path_buf(),
         worktree: worktree.clone(),
     });
@@ -268,7 +271,8 @@ fn unreadable_reservation_in_the_writers_directory_holds_custody() -> TestResult
     let mut input = input();
     let worktree = temp.path().join("lane");
     input.request.task.writer = Some(WriterRequest {
-        extra: crate::tests::writer_extra(),
+        extra: Default::default(),
+        custody_project: Some(crate::tests::writer_project()),
         project: temp.path().to_path_buf(),
         worktree: worktree.clone(),
     });
@@ -277,6 +281,9 @@ fn unreadable_reservation_in_the_writers_directory_holds_custody() -> TestResult
     record.generation = 1;
     record.state = AttemptState::Terminal {
         extra: Default::default(),
+        terminal_cause: None,
+        terminal_note: None,
+        stop: None,
         outcome: Outcome::Succeeded,
         exit_code: Some(0),
         finished_at: record.queued_at,
@@ -740,7 +747,8 @@ fn out_of_range_build_settings_do_not_block_admission() -> TestResult {
             assert_eq!(
                 result?.state,
                 AttemptState::Running {
-                    extra: Default::default()
+                    extra: Default::default(),
+                    child_wait: None,
                 }
             );
         } else {
@@ -800,7 +808,8 @@ fn guardian_identity_unknown_refuses_without_waiting() -> TestResult {
             assert_eq!(
                 result?.state,
                 AttemptState::Running {
-                    extra: Default::default()
+                    extra: Default::default(),
+                    child_wait: None,
                 }
             );
         } else {
@@ -837,7 +846,8 @@ fn idle_writers_are_admitted_beyond_the_build_limit() -> TestResult {
                     .admit(id, &dir, &HostFacts::new(100), &clock, &cancel)?
                     .state,
                 AttemptState::Running {
-                    extra: Default::default()
+                    extra: Default::default(),
+                    child_wait: None,
                 },
                 "writer {seed} with limit {limit:?}"
             );
@@ -921,7 +931,8 @@ fn the_writer_cap_refuses_at_its_limit_and_names_it() -> TestResult {
                 assert_eq!(
                     last.take().ok_or("admitted")??.state,
                     AttemptState::Running {
-                        extra: Default::default()
+                        extra: Default::default(),
+                        child_wait: None,
                     },
                     "writer {seed} is inside the cap"
                 );
@@ -1029,7 +1040,7 @@ fn a_stop_at_the_runtime_deadline_settles_as_a_typed_timeout() -> TestResult {
     let AttemptState::Terminal {
         outcome,
         reason,
-        extra,
+        terminal_cause,
         ..
     } = record.state
     else {
@@ -1041,7 +1052,7 @@ fn a_stop_at_the_runtime_deadline_settles_as_a_typed_timeout() -> TestResult {
         Some("runtime deadline exceeded: provider stopped after 3600s")
     );
     // The host's kill signal is the deadline, not a provider crash.
-    assert_eq!(extra.get("terminal_cause"), None);
+    assert_eq!(terminal_cause, None);
     Ok(())
 }
 
@@ -1205,6 +1216,9 @@ fn listing_scans_are_bounded_by_the_page_not_by_retained_history() -> TestResult
         let mut record = store.record(input.attempt_id, &call)?;
         record.state = AttemptState::Terminal {
             extra: Default::default(),
+            terminal_cause: None,
+            terminal_note: None,
+            stop: None,
             outcome: Outcome::Succeeded,
             exit_code: Some(0),
             finished_at: record.queued_at,

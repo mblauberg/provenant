@@ -239,9 +239,7 @@ fn launch_retry_backoff_starts_after_a_slow_failed_submission() {
 #[test]
 fn node_review_base_is_pinned_before_launch_and_reused_on_replay() {
     let mut reviewer = node("review", route("first"));
-    reviewer
-        .extra
-        .insert("review_base".into(), serde_json::json!("moving-ref"));
+    reviewer.review_base = Some("moving-ref".into());
     let mut document = graph(vec![reviewer]);
     document.schema_version = 2;
     let pinned = "1".repeat(40);
@@ -297,9 +295,7 @@ fn review_base_save_failure_prevents_attempt_creation() {
         }
     }
     let mut reviewer = node("review", route("first"));
-    reviewer
-        .extra
-        .insert("review_base".into(), serde_json::json!("moving-ref"));
+    reviewer.review_base = Some("moving-ref".into());
     let mut document = graph(vec![reviewer]);
     document.schema_version = 2;
     let mut owner = FakeOwner {
@@ -624,6 +620,8 @@ fn nonterminal_observation_transitions_need_no_owner_or_journal() {
         review_substitution: false,
         key: AttemptKey {
             extra: Default::default(),
+            retry_generation: None,
+            previous_attempt_ref: None,
             graph_id: "g".into(),
             node_id: "n".into(),
             route_index: 0,
@@ -634,6 +632,7 @@ fn nonterminal_observation_transitions_need_no_owner_or_journal() {
         stop: None,
         attempt_ref: None,
         outcome: None,
+        host_refused_before_acceptance: false,
         launched: true,
         launch_actor: "actor".into(),
         settled: 0,

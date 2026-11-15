@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 
-pub const PROTOCOL: u64 = 13;
+pub const PROTOCOL: u64 = 14;
 pub const MAX_FRAME: usize = 1_048_576;
 
 macro_rules! peer_feature_protocols {
@@ -318,6 +318,33 @@ impl From<MutationResult> for CoordinationResult {
         }
     }
 }
+/// Typed launch facts for a graph node submitted to a peer host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphSubmitContext {
+    pub launch_actor: ActorId,
+    pub attempt: crate::graph::AttemptSpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_limit: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<provenant_records::run::NetworkAccess>,
+}
+
+/// Graph identity for a read of its accepted peer receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphReceiptContext {
+    pub launch_actor: ActorId,
+    pub origin_work_key: provenant_records::WorkKey,
+}
+
+/// Graph identity for a receiver-owned cancellation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphCancelContext {
+    pub launch_actor: ActorId,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum PeerAction {
@@ -376,6 +403,7 @@ pub enum PeerAction {
     Submit {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
+        graph_context: GraphSubmitContext,
         input: Box<crate::coordination::facade::SubmitInput>,
     },
     Output {
@@ -392,12 +420,15 @@ pub enum PeerAction {
     Receipt {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        graph_context: Option<GraphReceiptContext>,
         operation_id: OperationId,
     },
     /// Cancel or inspect cancellation of a receiver-owned graph by its stable submission.
     CancelSubmission {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
+        graph_context: GraphCancelContext,
         submission: OperationId,
         operation_id: OperationId,
         stop: bool,
@@ -441,7 +472,7 @@ peer_feature_protocols! {
             extra: Default::default(), max_depth: 8, max_nodes: 100, detail: false, selected: false,
         }),
     ],
-    INBOX_PROTOCOL = 8 => [
+    INBOX_PROTOCOL = 14 => [
         (Inbox, "inbox", PeerAction::Inbox {
             extra: Default::default(),
             input: crate::inbox::InboxInput::List {
@@ -1075,6 +1106,62 @@ mod tests {
     }
 
     #[test]
+    fn graph_peer_contexts_round_trip_and_reject_malformed_values() {
+        let submit = GraphSubmitContext {
+            launch_actor: ActorId::from_bytes([1; 16]),
+            attempt: crate::graph::AttemptSpec::default(),
+            retry_limit: Some(2),
+            network: Some(provenant_records::run::NetworkAccess::Local),
+        };
+        let encoded = serde_json::to_value(&submit).unwrap();
+        assert_eq!(
+            serde_json::from_value::<GraphSubmitContext>(encoded.clone()).unwrap(),
+            submit
+        );
+        for (field, bad) in [
+            ("launch_actor", serde_json::json!(false)),
+            ("attempt", serde_json::json!(false)),
+            ("retry_limit", serde_json::json!("many")),
+            ("network", serde_json::json!("unlisted")),
+        ] {
+            let mut malformed = encoded.clone();
+            malformed[field] = bad;
+            assert!(serde_json::from_value::<GraphSubmitContext>(malformed).is_err());
+        }
+
+        let receipt = GraphReceiptContext {
+            launch_actor: ActorId::from_bytes([2; 16]),
+            origin_work_key: provenant_records::WorkKey::new(
+                provenant_core::ProjectId::from_bytes([5; 16]),
+                "G",
+                "N",
+                1,
+            )
+            .unwrap(),
+        };
+        let encoded = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(
+            serde_json::from_value::<GraphReceiptContext>(encoded.clone()).unwrap(),
+            receipt
+        );
+        let mut malformed = encoded;
+        malformed["origin_work_key"] = serde_json::json!(false);
+        assert!(serde_json::from_value::<GraphReceiptContext>(malformed).is_err());
+
+        let cancel = GraphCancelContext {
+            launch_actor: ActorId::from_bytes([3; 16]),
+        };
+        let encoded = serde_json::to_value(&cancel).unwrap();
+        assert_eq!(
+            serde_json::from_value::<GraphCancelContext>(encoded.clone()).unwrap(),
+            cancel
+        );
+        let mut malformed = encoded;
+        malformed["launch_actor"] = serde_json::json!(false);
+        assert!(serde_json::from_value::<GraphCancelContext>(malformed).is_err());
+    }
+
+    #[test]
     fn peer_refusals_preserve_typed_errors_and_reject_unknown_codes() {
         let error = facade::FacadeError::LaunchUnknown {
             operation_id: OperationId::parse("typed-error-operation").unwrap(),
@@ -1508,6 +1595,12 @@ mod tests {
         .unwrap();
         submit.action = PeerAction::Submit {
             extra: Default::default(),
+            graph_context: GraphSubmitContext {
+                launch_actor: ActorId::from_bytes([9; 16]),
+                attempt: crate::graph::AttemptSpec::default(),
+                retry_limit: None,
+                network: None,
+            },
             input: Box::new(facade::SubmitInput::Submit {
                 extra: Default::default(),
                 origin_work_key: None,

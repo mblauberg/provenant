@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 /// idempotency key; targets identify the attempts accepted by the owner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubmissionReceipt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_graph: Option<provenant_records::run::PeerGraph>,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     pub operation_id: OperationId,
@@ -110,6 +112,7 @@ pub enum RunResult {
     Status {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
+        lane_waits: Vec<provenant_records::run::LaneWait>,
         #[serde(with = "attempt_wire")]
         attempt: AttemptRecord,
     },
@@ -367,11 +370,16 @@ mod tests {
     #[test]
     fn public_detail_and_summary_hide_only_private_attempt_metadata() {
         let mut record = attempt();
-        let binding = serde_json::json!({"command":{"argv":["admission-check"]}});
-        record.extra.insert(
-            provenant_records::run::REPOSITORY_ADMISSION_BINDING_FIELD.into(),
-            binding.clone(),
+        let command: provenant_records::PortCommand = serde_json::from_value(serde_json::json!({
+            "argv":["admission-check"],
+            "exit_codes":{"success":[0],"unknown":[],"other":"refused"}
+        }))
+        .unwrap();
+        let binding = provenant_records::run::RepositoryAdmissionBinding::new(
+            provenant_records::PortSource::Project,
+            &command,
         );
+        record.repository_admission_binding = Some(binding.clone());
         record.extra.insert(
             "visible_extension".into(),
             serde_json::json!({"kept": true}),
@@ -379,17 +387,12 @@ mod tests {
 
         // The stored record keeps the private lifecycle binding.
         assert_eq!(
-            serde_json::to_value(&record).unwrap()
-                [provenant_records::run::REPOSITORY_ADMISSION_BINDING_FIELD],
-            binding
+            serde_json::to_value(&record).unwrap()["repository_admission_binding"],
+            serde_json::to_value(&binding).unwrap()
         );
 
         let detail = encode_attempt(&record).unwrap();
-        assert!(
-            detail
-                .get(provenant_records::run::REPOSITORY_ADMISSION_BINDING_FIELD)
-                .is_none()
-        );
+        assert!(detail.get("repository_admission_binding").is_none());
         assert_eq!(
             detail["visible_extension"],
             serde_json::json!({"kept": true})
@@ -397,11 +400,7 @@ mod tests {
 
         let summary =
             serde_json::to_value(AttemptSummary::from(record)).expect("summary projection");
-        assert!(
-            summary
-                .get(provenant_records::run::REPOSITORY_ADMISSION_BINDING_FIELD)
-                .is_none()
-        );
+        assert!(summary.get("repository_admission_binding").is_none());
         assert_eq!(
             summary["visible_extension"],
             serde_json::json!({"kept": true})
@@ -420,6 +419,9 @@ mod tests {
                 |records| {
                     records[0].state = AttemptState::Terminal {
                         extra: Default::default(),
+                        terminal_cause: None,
+                        terminal_note: None,
+                        stop: None,
                         outcome: Outcome::Succeeded,
                         exit_code: Some(0),
                         finished_at: WallTime::from_micros(2).unwrap(),
@@ -444,6 +446,9 @@ mod tests {
     fn input_required_wakes_all_without_waiting_for_a_sibling() {
         let input = AttemptState::Terminal {
             extra: Default::default(),
+            terminal_cause: None,
+            terminal_note: None,
+            stop: None,
             outcome: Outcome::InputRequired,
             exit_code: None,
             finished_at: provenant_core::WallTime::from_micros(1).unwrap(),
@@ -452,6 +457,7 @@ mod tests {
         let states = [
             AttemptState::Running {
                 extra: Default::default(),
+                child_wait: None,
             },
             input,
         ];
@@ -460,7 +466,8 @@ mod tests {
             WaitCondition::All,
             [
                 AttemptState::Running {
-                    extra: Default::default()
+                    extra: Default::default(),
+                    child_wait: None
                 },
                 AttemptState::Queued {
                     extra: Default::default()
@@ -468,5 +475,32 @@ mod tests {
             ]
             .iter()
         ));
+    }
+    #[test]
+    fn status_waits_round_trip_and_reject_malformed_reason_facts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let result = RunResult::Status {
+            extra: Default::default(),
+            lane_waits: vec![provenant_records::run::LaneWait {
+                extra: Default::default(),
+                attempt_id: AttemptId::from_bytes([1; 16]),
+                lane_class: provenant_records::run::LaneClass::Writer,
+                waiting_for: provenant_records::run::LaneWaitReason::ProviderSilence {
+                    silent_for_ms: 3_000,
+                },
+            }],
+            attempt: attempt(),
+        };
+        let encoded = serde_json::to_value(&result)?;
+        assert_eq!(
+            serde_json::from_value::<RunResult>(encoded.clone())?,
+            result
+        );
+        let mut malformed = encoded;
+        malformed["lane_waits"][0]["waiting_for"] = serde_json::json!({
+            "kind":"provider_silence", "silent_for_ms":"long"
+        });
+        assert!(serde_json::from_value::<RunResult>(malformed).is_err());
+        Ok(())
     }
 }

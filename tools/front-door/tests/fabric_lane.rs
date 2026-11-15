@@ -329,6 +329,9 @@ fn lane_edit_admits_revision_through_host_relay() -> Result {
         &clock,
     )?;
     journal.bind(GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+
         extra: Default::default(),
         bases: None,
         directory: rig.project.clone(),

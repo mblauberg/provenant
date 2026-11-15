@@ -97,9 +97,7 @@ fn reader_review_base_resolves_in_its_bound_source_writer_and_replays() {
     reader.source = Some(SourceBinding::Node {
         node: "writer".into(),
     });
-    reader
-        .extra
-        .insert("review_base".into(), serde_json::json!("moving-ref"));
+    reader.review_base = Some("moving-ref".into());
     let mut document = graph(vec![reader, writer]);
     document.schema_version = 2;
     let mut written = terminal(AttemptOutcome::Succeeded);
@@ -285,9 +283,11 @@ fn schema_two_refuses_a_host_that_cannot_bind_a_writer() {
         Err(GraphError::Refused(_))
     ));
     assert!(owner.calls.is_empty());
-    assert!(journal.0.as_ref().is_none_or(|checkpoint| {
-        checkpoint.nodes.iter().all(|node| node.attempts.is_empty())
-    }));
+    assert!(
+        journal.0.as_ref().is_none_or(|checkpoint| {
+            checkpoint.nodes.iter().all(|node| node.attempts.is_empty())
+        })
+    );
 }
 
 #[test]
@@ -868,10 +868,7 @@ fn composite_depth_uses_the_same_bound_in_preflight_and_runtime() {
         &Default::default(),
     )
     .unwrap();
-    assert_eq!(
-        run.checkpoint.pause_reason(),
-        Some(reason.as_str())
-    );
+    assert_eq!(run.checkpoint.pause_reason(), Some(reason.as_str()));
     assert!(owner.calls.is_empty());
 }
 

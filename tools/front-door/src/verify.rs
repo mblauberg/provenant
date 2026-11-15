@@ -1,13 +1,13 @@
 //! Run the effective repository verification port.
 use crate::{emit, fail, roots};
 use provenant_cli::Globals;
-use provenant_config::{
-    CommandExitCodes, ExitDisposition, PortBackend, PortCommand, PortCommandDisposition,
-    PortCommandExecution, PortSource, PortTable,
-};
+use provenant_config::{PortBackend, PortCommandDisposition, PortCommandExecution, PortTable};
 use provenant_core::CancelToken;
 use provenant_os::exec::{SystemExecutor, Termination};
-use provenant_records::{CanonicalV1, CommandError, CommandResult, Outcome};
+use provenant_records::{
+    CanonicalV1, CommandError, CommandExitCodes, CommandResult, ExitDisposition, Outcome,
+    PortCommand, PortSource,
+};
 use serde::Serialize;
 use std::{ffi::OsString, io::Write, path::Path, time::Duration};
 

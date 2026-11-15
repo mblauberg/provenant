@@ -237,6 +237,7 @@ pub(super) fn lane_access_checked(
     }
     Ok(run::LaneAccess {
         extra: Default::default(),
+        capability_sources: Default::default(),
         network,
         database_ipc: postgres,
         read_roots: resolve(&access.read_root, "--read-root")?,
@@ -621,10 +622,7 @@ fn submit_with_launcher(
         let task = submission.task;
         {
             let mut task_profile = profile.clone();
-            task_profile.extra.insert(
-                "policy_project".into(),
-                serde_json::json!(session.context.project_id.to_string()),
-            );
+            task_profile.policy_project = Some(session.context.project_id);
             task_profile.require_skill_location = task.require_skill_location;
             task_profile.settlement_retry_limit = task
                 .settlement_retry_limit
@@ -644,51 +642,20 @@ fn submit_with_launcher(
                 task.base.as_deref(),
                 task.head.as_deref(),
             )?;
-            if let Some(policy) = &attempt.launch_policy {
-                task_profile.extra.insert(
-                    provenant_records::run::LAUNCH_POLICY_FIELD.into(),
-                    serde_json::to_value(policy).map_err(|error| {
-                        Fail::new(Status::Invalid, ErrorKind::Config, error.to_string())
-                    })?,
-                );
-            }
-            if let Some(admitted_by) = &attempt.admitted_by {
-                task_profile
-                    .extra
-                    .insert("admitted_by".into(), serde_json::json!(admitted_by));
-            }
-            for key in ["write_scope", "policy_overrides"] {
-                if let Some(value) = attempt.extra.get(key) {
-                    task_profile.extra.insert(key.into(), value.clone());
-                }
-            }
-            let mut dispatch_policy = provenant_config::policy::dispatch(&task_profile);
-            if let Some(value) = attempt.extra.get("policy_overrides")
-                && let Ok(values) = serde_json::from_value::<
-                    std::collections::BTreeMap<String, provenant_records::policy::Strength>,
-                >(value.clone())
-            {
-                dispatch_policy.extend(values);
-            }
+            task_profile.write_scope = attempt.write_scope.clone();
+            task_profile.policy_overrides = attempt.policy_overrides.clone();
+            task_profile.repository_policy = attempt.launch_policy.clone();
+            task_profile.confidential = attempt.confidential;
+            task_profile.parent_sandboxed = attempt.parent_sandboxed;
+            task_profile.admitted_by = attempt.admitted_by.clone();
+
+            let dispatch_policy = provenant_config::policy::dispatch(&task_profile);
             let policy = config.domains.policy.resolve_with_knobs(
                 &session.context.project_id.to_string(),
                 &config.knobs,
                 &dispatch_policy,
             );
-            task_profile
-                .extra
-                .insert("launch_policy".into(), serde_json::json!(policy));
-            if attempt.confidential {
-                task_profile
-                    .extra
-                    .insert("confidential".into(), serde_json::json!(true));
-            }
-            if attempt.parent_sandboxed {
-                task_profile.extra.insert(
-                    provenant_records::run::PARENT_SANDBOXED_FIELD.into(),
-                    serde_json::json!(true),
-                );
-            }
+            task_profile.launch_policy = Some(policy);
             if attempt.new_worktree.is_some()
                 || !attempt.capabilities.is_empty()
                 || !attempt.write_roots.is_empty()

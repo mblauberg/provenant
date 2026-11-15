@@ -207,17 +207,15 @@ fn resolve_writer_with(
         .ok_or(RunError::Validation(
             "writer custody project is not registered",
         ))?;
-    let mut extra = provenant_records::ExtraFields::default();
-    extra.insert(
-        "custody_project".into(),
-        serde_json::json!(binding.project_id()),
-    );
+    let custody_project = binding.project_id();
+    let extra = provenant_records::ExtraFields::default();
     if !verify {
         if !path.starts_with(project) {
             return Err(RunError::unsafe_path(path, PathCheck::Containment));
         }
         return Ok(WriterRequest {
             extra,
+            custody_project: Some(custody_project),
             project: project.to_path_buf(),
             worktree: path,
         });
@@ -226,6 +224,7 @@ fn resolve_writer_with(
         .map_err(worktrees::WorktreeError::from)?;
     Ok(WriterRequest {
         extra,
+        custody_project: Some(custody_project),
         project: project.to_path_buf(),
         worktree: worktree.path().to_path_buf(),
     })
@@ -675,14 +674,14 @@ use provenant_supervisor::custody::ImportFence;
 #[serde(deny_unknown_fields)]
 pub(crate) struct MergeRestored {
     pub schema_version: u64,
-    pub scope: provenant_supervisor::custody::Scope,
+    pub scope: provenant_records::custody::Scope,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GitPins {
     schema_version: u64,
-    scope: provenant_supervisor::custody::Scope,
+    scope: provenant_records::custody::Scope,
     base: GitOid,
 }
 
@@ -693,7 +692,7 @@ pub(crate) fn cleanup_git_pins(
     state: &Path,
     writer: &WriterRequest,
     attempt: &Directory,
-    scope: provenant_supervisor::custody::Scope,
+    scope: provenant_records::custody::Scope,
     head: Option<GitOid>,
     remove_import_pin: bool,
 ) -> Result<()> {
@@ -761,12 +760,9 @@ fn writer_branch(worktree: &VerifiedWorktree) -> Result<GitRefName> {
 
 /// Read the required source-project custody binding from a current writer request.
 pub(crate) fn writer_project_id(request: &WriterRequest) -> Result<ProjectId> {
-    let value = request
-        .extra
-        .get("custody_project")
-        .ok_or(RunError::Validation("writer custody project missing"))?;
-    serde_json::from_value(value.clone())
-        .map_err(|_| RunError::Validation("invalid writer custody project"))
+    request
+        .custody_project
+        .ok_or(RunError::Validation("writer custody project is not sealed"))
 }
 
 /// Compare the complete persisted writer identity.
@@ -1297,6 +1293,7 @@ fn prepare_writer_git(
     crate::HostDeliveryContext::refresh_origin(
         &WriterRequest {
             extra: Default::default(),
+            custody_project: None,
             project: project.clone(),
             worktree: path.clone(),
         },
@@ -1933,8 +1930,8 @@ mod cargo_setup_tests {
                         start.wait();
                         entered.send(()).map_err(|error| error.to_string())?;
                         let request = WriterRequest {
-                            extra: [("custody_project".into(), serde_json::json!(custody_project))]
-                                .into(),
+                            extra: Default::default(),
+                            custody_project: Some(custody_project),
                             project: project.clone(),
                             worktree: writer.worktree.path().to_path_buf(),
                         };
@@ -1985,7 +1982,8 @@ mod cargo_setup_tests {
             .chain(siblings.iter_mut())
         {
             let request = WriterRequest {
-                extra: [("custody_project".into(), serde_json::json!(custody_project))].into(),
+                extra: Default::default(),
+                custody_project: Some(custody_project),
                 project: project.clone(),
                 worktree: writer.worktree.path().to_path_buf(),
             };
@@ -2354,7 +2352,7 @@ pub use provenant_supervisor::custody::WriterReservation as WriterFence;
 impl crate::RunStore {
     pub(crate) fn retained_import_fence(
         &self,
-        scope: provenant_supervisor::custody::Scope,
+        scope: provenant_records::custody::Scope,
     ) -> Result<bool> {
         let Some(fence) = self
             .writer_fences()?
@@ -2405,11 +2403,11 @@ impl crate::RunStore {
     pub(crate) fn acquire_writer_fenced(
         &self,
         directory: Directory,
-        scope: provenant_supervisor::custody::Scope,
+        scope: provenant_records::custody::Scope,
         binding: WriterBinding,
         acquire: &dyn Fn(
             Directory,
-            provenant_supervisor::custody::Scope,
+            provenant_records::custody::Scope,
             WriterBinding,
         ) -> provenant_supervisor::custody::Result<
             provenant_supervisor::custody::CustodyLease,
@@ -2603,7 +2601,7 @@ impl WriterLaunch {
         &self,
         state: &Path,
         attempt: &Directory,
-        scope: provenant_supervisor::custody::Scope,
+        scope: provenant_records::custody::Scope,
     ) -> Result<()> {
         let policy = writer_policy_for_attempt(state, attempt);
         seal_writer_ownership(attempt, &self.worktree)?;
@@ -2695,34 +2693,21 @@ impl WriterLaunch {
             return Ok(());
         };
         let request: crate::CanonicalRequest = crate::db::decode(&raw)?;
-        let Some(scope) = request
-            .task
-            .profile
-            .extra
-            .get("write_scope")
-            .and_then(serde_json::Value::as_array)
-        else {
-            return Ok(());
-        };
-        let scope: Vec<_> = scope
-            .iter()
-            .filter_map(serde_json::Value::as_str)
-            .map(Path::new)
-            .collect();
+        let scope = &request.task.profile.write_scope;
         if scope.is_empty() {
             return Ok(());
         }
-        let policy = crate::launch_policy(
-            state,
-            request
-                .task
-                .profile
-                .extra
-                .get("policy_project")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or(""),
-            &request.task,
-        );
+        let scope: Vec<_> = scope.iter().map(Path::new).collect();
+        if scope.is_empty() {
+            return Ok(());
+        }
+        let project = request
+            .task
+            .profile
+            .policy_project
+            .map(|project| project.to_string())
+            .unwrap_or_default();
+        let policy = crate::launch_policy(state, &project, &request.task);
         let saved = crate::artifacts::read_sealed(
             attempt,
             "policy-write-scope.json",
@@ -2730,22 +2715,32 @@ impl WriterLaunch {
         )
         .map_err(|_| invalid_write_scope_snapshot(&policy))?;
         if let Some(raw) = saved {
-            let report: WriteScopeSnapshot =
-                serde_json::from_slice(&raw).map_err(|_| invalid_write_scope_snapshot(&policy))?;
-            if report.schema_version != 1
-                || report.code != "WRITE_SCOPE"
-                || report.base != base.to_string()
-                || report.head != head.to_string()
+            let report: provenant_records::handoff::WriteScopeReport = crate::db::decode(&raw)?;
+            let provenant_records::handoff::WriteScopeReport::Full {
+                schema_version,
+                code,
+                base: saved_base,
+                head: saved_head,
+                out_of_scope_paths,
+                ..
+            } = report
+            else {
+                return Err(invalid_write_scope_snapshot(&policy));
+            };
+            if schema_version != 1
+                || code != "WRITE_SCOPE"
+                || saved_base != base.to_string()
+                || saved_head != head.to_string()
             {
                 return Err(invalid_write_scope_snapshot(&policy));
             }
             let effect = policy.check(
                 "WRITE_SCOPE",
                 provenant_records::policy::Facts {
-                    violated: !report.out_of_scope_paths.is_empty(),
+                    violated: !out_of_scope_paths.is_empty(),
                     detail: format!(
                         "{} paths outside declared write scope; see policy-write-scope.json",
-                        report.out_of_scope_paths.len()
+                        out_of_scope_paths.len()
                     ),
                 },
             );
@@ -2876,12 +2871,15 @@ impl WriterLaunch {
         crate::artifacts::seal(
             attempt,
             "policy-write-scope.json",
-            &crate::db::bytes(&serde_json::json!({
-                "schema_version": 1, "code": "WRITE_SCOPE",
-                "base": base.to_string(), "head": head.to_string(),
-                "strength": policy.rule("WRITE_SCOPE").rule.strength,
-                "source": policy.rule("WRITE_SCOPE").source, "out_of_scope_paths": paths,
-            }))?,
+            &crate::db::bytes(&provenant_records::handoff::WriteScopeReport::Full {
+                schema_version: 1,
+                code: "WRITE_SCOPE".into(),
+                base: base.to_string(),
+                head: head.to_string(),
+                strength: policy.rule("WRITE_SCOPE").rule.strength,
+                source: policy.rule("WRITE_SCOPE").source,
+                out_of_scope_paths: paths,
+            })?,
             provenant_records::run::TERMINAL_RECORD_LIMIT,
         )?;
         if let Some(message) = effect.message() {
@@ -2978,17 +2976,13 @@ impl WriterLaunch {
                 &crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)?
                     .ok_or(RunError::NotFound)?,
             )?;
-            let policy = crate::launch_policy(
-                state,
-                request
-                    .task
-                    .profile
-                    .extra
-                    .get("policy_project")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or(""),
-                &request.task,
-            );
+            let project = request
+                .task
+                .profile
+                .policy_project
+                .map(|project| project.to_string())
+                .unwrap_or_default();
+            let policy = crate::launch_policy(state, &project, &request.task);
             let effect = policy.check(
                 "WRITE_SCOPE",
                 provenant_records::policy::Facts::violation(format!(
@@ -3226,14 +3220,6 @@ impl WriterLaunch {
 }
 /// How many dirty paths a reason names before it counts the rest.
 const UNCOMMITTED_LISTED: usize = 12;
-#[derive(serde::Deserialize)]
-struct WriteScopeSnapshot {
-    schema_version: u64,
-    code: String,
-    base: String,
-    head: String,
-    out_of_scope_paths: Vec<provenant_records::PathWire>,
-}
 
 fn invalid_write_scope_snapshot(policy: &provenant_records::policy::Policy) -> RunError {
     policy.boundary_error(
@@ -3264,11 +3250,10 @@ fn writer_policy_for_attempt(
     let project = request
         .task
         .profile
-        .extra
-        .get("policy_project")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    crate::launch_policy(state, project, &request.task)
+        .policy_project
+        .map(|project| project.to_string())
+        .unwrap_or_default();
+    crate::launch_policy(state, &project, &request.task)
 }
 
 impl WriterLaunch {
@@ -3365,7 +3350,7 @@ pub(crate) struct WriterTerminal {
 #[derive(serde::Serialize)]
 struct WriterManifest {
     schema_version: u64,
-    scope: provenant_supervisor::custody::Scope,
+    scope: provenant_records::custody::Scope,
     kind: &'static str,
     disposition: &'static str,
 }
@@ -3455,7 +3440,8 @@ mod custody_admission_tests {
     use super::*;
     use crate::tests::{call, clock, context};
     use provenant_core::AttemptId;
-    use provenant_supervisor::custody::{self, Scope};
+    use provenant_records::custody::Scope;
+    use provenant_supervisor::custody::{self};
 
     #[test]
     fn foreign_writer_recovery_is_scoped_but_admission_keeps_predecessor_fences()
@@ -3549,7 +3535,8 @@ mod custody_admission_tests {
             next
         )?);
         let writer = WriterRequest {
-            extra: [("custody_project".into(), serde_json::json!(source_project))].into(),
+            extra: Default::default(),
+            custody_project: Some(source_project),
             project: temp.path().join("source"),
             worktree: temp.path().join("checkout"),
         };

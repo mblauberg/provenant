@@ -247,10 +247,13 @@ fn depletion_keeps_the_pinned_account_and_refuses_a_higher_tier_candidate() {
     checkpoint.nodes[0].state = NodeState::Failed;
     checkpoint.nodes[0].attempts.push(GraphAttempt {
         extra: Default::default(),
+        host_refused_before_acceptance: false,
         launched: true,
         review_substitution: false,
         key: AttemptKey {
             extra: Default::default(),
+            retry_generation: None,
+            previous_attempt_ref: None,
             graph_id: document.graph_id.clone(),
             node_id: "writer".into(),
             route_index: 0,
@@ -364,10 +367,7 @@ fn depletion_keeps_the_pinned_account_and_refuses_a_higher_tier_candidate() {
     .expect("depletion stop must settle");
     assert_eq!(reads, 1);
     assert_eq!(settled.nodes[0].state, NodeState::Failed);
-    assert_eq!(
-        settled.nodes[0].extra.get("stop_fence"),
-        Some(&Value::Bool(true))
-    );
+    assert!(settled.nodes[0].stop_fence);
     assert!(settled.expansions.iter().all(|e| {
         e.patch
             .as_ref()
@@ -460,6 +460,9 @@ fn a_cancel_after_checkpoint_reload_closes_every_linked_inbox_request() {
             FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
         journal
             .bind(GraphExecution {
+                peer_origin_context: None,
+                peer_submission_digest: None,
+
                 extra: Default::default(),
                 bases: None,
                 directory: base.clone(),

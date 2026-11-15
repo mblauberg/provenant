@@ -7,12 +7,12 @@ use crate::{
     identity::{Identity, chair_session_mailbox},
 };
 use provenant_core::{
-    AttemptId, CancelToken, Clock, HumanAnswerId, HumanRequestId, MessageId, OperationId,
-    StateRoot, WaitTransport,
+    ActorId, AttemptId, CancelToken, Clock, HostId, HumanAnswerId, HumanRequestId, MessageId,
+    OperationId, StateRoot, WaitTransport,
 };
 use provenant_fabric_store::{Request, Store};
 use provenant_records::{
-    CanonicalV1, Harness, RecordHeader,
+    CanonicalV1, Harness, RecordHeader, WorkKey,
     control::{
         CONTROL_TEXT_BYTES, ControlKind, ControlReceipt, ControlState, ControlSupport, LaunchKind,
     },
@@ -194,6 +194,15 @@ pub fn locate_request(
     Ok(None)
 }
 
+/// Verified provenance for a graph attempt that is steered across hosts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphSteerContext {
+    pub launch_actor: ActorId,
+    pub launch_operation: OperationId,
+    pub origin_work_key: WorkKey,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum InboxInput {
@@ -247,6 +256,8 @@ pub enum InboxInput {
     Steer {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        graph_context: Option<GraphSteerContext>,
         attempt: AttemptId,
         text: String,
         operation_id: Option<OperationId>,
@@ -327,6 +338,81 @@ pub struct InboxReceipt {
     pub work_coverage: Option<WorkCoverage>,
 }
 
+/// Project metadata attached to a host-wide inbox listing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboxProject {
+    /// Display-only project name; absent or invalid names serialize as null.
+    pub label: Option<String>,
+    /// Local paths are included for this host. Peer rows omit the field.
+    #[serde(default, skip_serializing_if = "InboxProjectPath::is_omitted")]
+    pub path: InboxProjectPath,
+    /// Set when the project belongs to a peer; local rows omit the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostId>,
+}
+
+/// A path can be omitted for a peer, null for an unbound local project, or set.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum InboxProjectPath {
+    #[default]
+    Omitted,
+    Unavailable,
+    Local(String),
+}
+
+impl InboxProjectPath {
+    fn is_omitted(value: &Self) -> bool {
+        matches!(value, Self::Omitted)
+    }
+}
+
+impl Serialize for InboxProjectPath {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Omitted | Self::Unavailable => serializer.serialize_none(),
+            Self::Local(path) => serializer.serialize_str(path),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for InboxProjectPath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match Option::<String>::deserialize(deserializer)? {
+            Some(path) => Self::Local(path),
+            None => Self::Unavailable,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboxPeerState {
+    Complete,
+    Partial,
+    Unreachable,
+    Unsupported,
+}
+
+/// Typed accounting for one peer's first-page contribution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboxPeerCoverage {
+    pub host: HostId,
+    pub label: String,
+    pub state: InboxPeerState,
+    pub included: usize,
+    pub invalid_rows: usize,
+    pub duplicate_rows: usize,
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum InboxResult {
@@ -350,6 +436,10 @@ pub enum InboxResult {
         next_cursor: Option<InboxCursor>,
         truncated: bool,
         coverage: String,
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        projects: std::collections::BTreeMap<String, InboxProject>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        peers: Vec<InboxPeerCoverage>,
     },
 }
 
@@ -1099,6 +1189,8 @@ impl<'a> InboxService<'a> {
             next_cursor,
             truncated: page.truncated,
             coverage: "local_only; peer inboxes and unregistered sessions are unknown".into(),
+            projects: Default::default(),
+            peers: Default::default(),
         })
     }
 

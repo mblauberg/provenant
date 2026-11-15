@@ -2376,6 +2376,9 @@ fn seed_graph_checkpoint(
     }))?;
     let mut journal = FileJournal::open(state, project, PERSISTED_GRAPH, budget, &cancel, &clock)?;
     journal.bind(GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+
         extra: Default::default(),
         bases: None,
         directory: directory.to_owned(),
@@ -2414,6 +2417,7 @@ fn persisted_attempt_with(
     use provenant_os::clock::SystemClock;
     use provenant_os::exec::Termination;
     use provenant_os::fs::Directory;
+    use provenant_records::custody::Scope;
     use provenant_records::{
         CanonicalV1,
         run::{CanonicalRequest, HarnessProfile, RequestedRoute, RouteRecord, TaskRequest},
@@ -2422,7 +2426,6 @@ fn persisted_attempt_with(
     use provenant_supervisor::custody::CaptureTotals;
     use provenant_supervisor::custody::ExitObservation;
     use provenant_supervisor::custody::PublicationState;
-    use provenant_supervisor::custody::Scope;
     use provenant_supervisor::custody::SettlementEvidence;
 
     let rig = TestRig::new()?;
@@ -2529,6 +2532,7 @@ fn persisted_attempt_with(
     if options.writer {
         prepared.request.task.writer = Some(provenant_records::run::WriterRequest {
             extra: Default::default(),
+            custody_project: Some(project_id),
             project: rig.project.clone(),
             worktree: rig.project.join(".worktrees/receipt-writer"),
         });
@@ -2557,6 +2561,7 @@ fn persisted_attempt_with(
     running.provider_launched = Some(true);
     running.state = provenant_run::AttemptState::Running {
         extra: Default::default(),
+        child_wait: None,
     };
     let running_bytes = CanonicalV1::bytes(&running)?.as_bytes().to_vec();
     let database = rusqlite::Connection::open(roots.state.as_path().join("run.sqlite3"))?;
@@ -2574,6 +2579,9 @@ fn persisted_attempt_with(
         running.resolved_route = None;
         running.state = provenant_run::AttemptState::Terminal {
             extra: Default::default(),
+            terminal_cause: None,
+            terminal_note: None,
+            stop: None,
             outcome: provenant_run::Outcome::Lost,
             exit_code: None,
             finished_at: clock.wall_now()?,

@@ -86,7 +86,8 @@ fn child_stores_admit_beyond_advisory_caps_and_preserve_live_work() -> TestResul
     assert_eq!(
         admitted.state,
         AttemptState::Running {
-            extra: Default::default()
+            extra: Default::default(),
+            child_wait: None,
         }
     );
     Ok(())
@@ -172,10 +173,14 @@ fn stored_cloud_request_is_refused_and_never_launched_locally() -> TestResult {
     ));
     assert_eq!(fake.prepared.get(), 0);
     assert_eq!(terminal(&store, id, &call)?, Outcome::Rejected);
-    let AttemptState::Terminal { extra, .. } = store.record(id, &call)?.state else {
+    let state = store.record(id, &call)?.state;
+    let AttemptState::Terminal { .. } = &state else {
         return Err("attempt is not terminal".into());
     };
-    assert_eq!(extra["terminal_cause"], "cloud_placement_removed");
+    assert_eq!(
+        state.terminal_cause(),
+        Some(TerminalCause::CloudPlacementRemoved)
+    );
     assert!(
         store
             .start(run.attempt_id, &fake, &|_, _| unreachable!(), &call)?
@@ -272,7 +277,7 @@ fn publication_holder_accepts_exit_zero_or_completed_host_budget() -> TestResult
                 Some(provenant_records::run::SettlementReason::CompletedBeforeBudget)
             );
             let stop: provenant_records::Stop = serde_json::from_value(match &reopened.state {
-                AttemptState::Terminal { extra, .. } => extra["stop"].clone(),
+                AttemptState::Terminal { stop, .. } => stop.clone().ok_or("stop")?,
                 _ => unreachable!(),
             })?;
             assert_eq!(stop.cause(), provenant_records::StopCause::TokenBudget);
@@ -422,7 +427,8 @@ fn writer_private_temporary_directories_are_removed_after_terminal_and_withdrawa
         let store = RunStore::open(&context, &call)?;
         let mut run = input();
         run.request.task.writer = Some(WriterRequest {
-            extra: crate::tests::writer_extra(),
+            extra: Default::default(),
+            custody_project: Some(crate::tests::writer_project()),
             project: temp.path().join("checkout"),
             worktree: temp.path().join("checkout/.worktrees/lane"),
         });
@@ -504,7 +510,7 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
         cancel: &cancel,
     };
     // A held custody lock is a live handoff: cancel leaves it untouched.
-    let scope = provenant_supervisor::custody::Scope {
+    let scope = provenant_records::custody::Scope {
         attempt: starting,
         generation: 1,
     };

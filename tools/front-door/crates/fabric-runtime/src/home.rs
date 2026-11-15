@@ -138,6 +138,7 @@ impl RemoteCoordination<'_> {
                     let mut recovery = request.clone();
                     recovery.action = PeerAction::Receipt {
                         extra: Default::default(),
+                        graph_context: None,
                         operation_id: id.clone(),
                     };
                     let response = self

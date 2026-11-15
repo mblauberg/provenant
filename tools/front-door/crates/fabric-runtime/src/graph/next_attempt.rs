@@ -2,8 +2,6 @@
 use super::*;
 use std::error::Error;
 
-pub(crate) const PRELAUNCH_REFUSAL_PROOF: &str = "host_refused_before_acceptance";
-
 /// Kernel next-attempt disposition for a graph node.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum NextAttempt {
@@ -203,13 +201,8 @@ pub(crate) fn apply_launch_disposition(
             .attempts
             .iter()
             .filter(|attempt| attempt.state != AttemptState::Terminal)
-            .all(|attempt| {
-                attempt
-                    .extra
-                    .get(PRELAUNCH_REFUSAL_PROOF)
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true)
-            }) {
+            .all(|attempt| attempt.host_refused_before_acceptance)
+    {
         String::new()
     } else if [graph_id.as_str(), id.as_str()].iter().all(|value| {
         value
@@ -268,12 +261,7 @@ pub(crate) fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
                 matches!(owner.launch_refused_before_acceptance(attempt), Ok(true))
             });
     if let Some(attempt) = checkpoint.nodes[index].attempts.last_mut() {
-        attempt.extra.remove(PRELAUNCH_REFUSAL_PROOF);
-        if proof {
-            attempt
-                .extra
-                .insert(PRELAUNCH_REFUSAL_PROOF.into(), true.into());
-        }
+        attempt.host_refused_before_acceptance = proof;
     }
     apply_launch_disposition(
         checkpoint,
@@ -430,29 +418,21 @@ pub(crate) fn fallback_denial(
 
 /// The sealed allowance bounds all launched attempts across automatic redos.
 pub(super) fn quota_redraw_budget(progress: &NodeProgress) -> bool {
-    progress
-        .extra
-        .get("retry")
-        .and_then(|value| value["retries"].as_u64())
-        .is_some_and(|limit| {
-            let archived = progress
-                .extra
-                .get("quota_redraw_spent")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            let current = progress
-                .attempts
-                .iter()
-                .filter(|attempt| attempt.launched)
-                .count() as u64
-                + u64::from(
-                    progress
-                        .attempts
-                        .last()
-                        .is_some_and(|attempt| !attempt.launched),
-                );
-            archived.saturating_add(current) <= limit
-        })
+    progress.retry.as_ref().is_some_and(|allowance| {
+        let archived = progress.quota_redraw_spent;
+        let current = progress
+            .attempts
+            .iter()
+            .filter(|attempt| attempt.launched)
+            .count() as u64
+            + u64::from(
+                progress
+                    .attempts
+                    .last()
+                    .is_some_and(|attempt| !attempt.launched),
+            );
+        archived.saturating_add(current) <= limit
+    })
 }
 
 /// Facts are requested lazily: waiting nodes never probe a host or consume a
@@ -590,12 +570,7 @@ pub(super) fn next_attempt_transition(
             attempt.state == AttemptState::Terminal
                 && (attempt.launched
                     || (attempt.outcome == Some(AttemptOutcome::UsageLimited)
-                        && progress
-                            .extra
-                            .get("quota_redraw_spent")
-                            .and_then(serde_json::Value::as_u64)
-                            .unwrap_or(0)
-                            > 0))
+                        && progress.quota_redraw_spent > 0))
         });
     if switching
         && node
@@ -614,14 +589,10 @@ pub(super) fn next_attempt_transition(
         });
     }
     let allowance = progress
-        .extra
-        .get("retry")
-        .and_then(|value| value["retries"].as_u64());
-    let automatic = progress
-        .extra
-        .get("quota_redraw_spent")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
+        .retry
+        .as_ref()
+        .map(|allowance| allowance.retries as u64);
+    let automatic = progress.quota_redraw_spent;
     let launched_switches = progress
         .attempts
         .iter()

@@ -1,33 +1,5 @@
 use super::*;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AttemptState {
-    Starting,
-    Running,
-    Unresolved,
-    Terminal,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AttemptOutcome {
-    Succeeded,
-    TaskFailed,
-    /// A lane reported a declared stop; review roles may accept its result.
-    DeclaredStop,
-    /// The host settled a writer against its attempt-level unchanged Git head.
-    StoppedNoWork,
-    OtherFailure,
-    ReviewRequired,
-    AuthRequired,
-    UsageLimited,
-    AdapterUnavailable,
-    /// A local refusal before provider launch, retaining its safe typed cause.
-    PreparationRefused(provenant_records::run::TerminalCause),
-    DeadlineExceeded,
-}
-
 /// Owner-observed facts used to decide whether another route is safe.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PreparationFallbackEvidence {

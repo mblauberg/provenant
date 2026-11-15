@@ -58,7 +58,7 @@ fn disk_policy_refusal_uses_resource_projection() {
 fn retained_import_refusal_carries_custody_and_recovery_targets() {
     let attempt = AttemptId::from_bytes([4; 16]);
     let fence = provenant_supervisor::custody::PendingImport {
-        scope: provenant_supervisor::custody::Scope {
+        scope: provenant_records::custody::Scope {
             attempt,
             generation: 3,
         },

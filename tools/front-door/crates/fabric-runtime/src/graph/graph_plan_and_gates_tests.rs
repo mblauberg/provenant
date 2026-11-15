@@ -477,7 +477,11 @@ fn gate_verdict_accepts_one_line_wherever_it_sits_outside_fences() {
             verdict_fixture(VerdictThreshold::All, &[Some("PASS"), Some("PASS")]);
         owner.observations[0] = terminal_with_result(AttemptOutcome::Succeeded, text);
         let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
-        assert_eq!(run.checkpoint.nodes[2].state, NodeState::Succeeded, "{text:?}");
+        assert_eq!(
+            run.checkpoint.nodes[2].state,
+            NodeState::Succeeded,
+            "{text:?}"
+        );
         assert_eq!(
             run.checkpoint.nodes[0]
                 .outputs
@@ -656,6 +660,8 @@ fn gate_only_graph_obeys_structural_limits_before_evaluating() {
         }),
         GraphNode {
             family_group: None,
+            template: None,
+            review_base: None,
             id: "second".into(),
             ..gate_node(GateCondition::Budget {
                 extra: Default::default(),

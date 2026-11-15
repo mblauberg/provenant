@@ -1,8 +1,9 @@
 //! Repository-declared CI observation transport implementing the common Forge port.
 use super::super::gh::{Forge, Response};
 use super::{GhTransport, ObserveError};
-use provenant_config::{PortCommand, PortCommandDisposition, PortSource};
+use provenant_config::PortCommandDisposition;
 use provenant_os::exec::SystemExecutor;
+use provenant_records::{PortCommand, PortSource};
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,

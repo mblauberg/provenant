@@ -14,7 +14,7 @@ fn implementation_is_planned_unless_its_brief_is_already_bounded() {
         ("implement.fix", false, false),
         ("implement.issue", false, true),
     ] {
-        let mut raw = json!({"id":"work", "use":template, "brief":"Meet the acceptance criteria",
+        let mut raw = json!({"id":"work", "use":template, "prompt":"Meet the acceptance criteria",
             "worktree":"/fixture/writer", "write_scope":["src"]});
         if bounded {
             raw["with"] = json!({"bounded":true});
@@ -38,12 +38,7 @@ fn implementation_is_planned_unless_its_brief_is_already_bounded() {
         let planners: Vec<_> = expanded
             .nodes
             .iter()
-            .filter(|node| {
-                node.extra
-                    .get(template::TEMPLATE_FIELD)
-                    .and_then(serde_json::Value::as_str)
-                    == Some("plan")
-            })
+            .filter(|node| node.template.as_deref() == Some("plan"))
             .collect();
         if expects_plan {
             let planner = planners.first().expect("an open brief needs a sizing plan");

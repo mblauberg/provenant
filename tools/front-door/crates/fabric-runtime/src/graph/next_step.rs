@@ -6,18 +6,17 @@
 use super::*;
 use provenant_records::{Continuation, NextStep, StopCause, StopFacts};
 
-const STOP_FENCE: &str = "stop_fence";
 const DECLARED_STOP: &str = "stopped_no_work";
 
 /// A cancelled node keeps its failure: no restart follows a fenced stop.
 pub(super) fn fence_stopped(progress: &mut NodeProgress) {
     if progress.state == NodeState::Failed {
-        progress.extra.insert(STOP_FENCE.into(), true.into());
+        progress.stop_fence = true;
     }
 }
 
 fn fenced(progress: &NodeProgress) -> bool {
-    progress.extra.get(STOP_FENCE) == Some(&serde_json::Value::Bool(true))
+    progress.stop_fence
 }
 
 /// A writer that declared its stop: settlement owes a restart or a chair
@@ -465,7 +464,7 @@ fn decide(
     // The node's sealed infrastructure allowance bounds its launches across
     // restarts after provider stops; a declared stop spends only the budget.
     if !declared(progress)
-        && progress.extra.contains_key("retry")
+        && progress.retry.is_some()
         && !next_attempt::quota_redraw_budget(progress)
     {
         return pause(format!(

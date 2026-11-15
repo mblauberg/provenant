@@ -88,6 +88,8 @@ pub(super) fn checkpoint_bound(
     let skeleton = GraphCheckpoint {
         bases: None,
         extra: Default::default(),
+        cancellation_request_receipt: None,
+        pending_writer_provisioning: Default::default(),
         expansions: expansions.to_vec(),
         remaining: Some(RemainingBudgets {
             extra: Default::default(),
@@ -229,20 +231,35 @@ fn node_bound(
     let ci = matches!(node.condition, Some(GateCondition::Ci { .. }));
     let boundary = gate || node.loop_body.is_some();
     let mut skeleton = NodeProgress {
-        extra: [(
-            "retry".into(),
-            serde_json::json!({"retries":u8::MAX,"origin":"shipped_default"}),
-        )]
-        .into_iter()
-        .collect(),
+        extra: Default::default(),
         children: node.composite_members.clone(),
         source_binding: node.source.clone(),
         min_successful: node.composite.as_ref().and_then(|spec| spec.min_successful),
         source_commit: node.source.as_ref().map(|_| String::new()),
         writer_binding: None,
         writer_binding_pending: plans::writer(node),
-        review_base: node.extra.get("review_base").map(|_| "1".repeat(64)),
+        review_base: node.review_base.as_ref().map(|_| "1".repeat(64)),
         review_base_pending: false,
+        owner_notified: false,
+        children_cancelled: false,
+        detached_from_graph_cancel: false,
+        subtree_cancel: None,
+        yielded_slot: false,
+        stop_fence: false,
+        retry: Some(RetryAllowance {
+            retries: u8::MAX,
+            origin: "shipped_default".into(),
+        }),
+        quota_redraw_spent: 0,
+        quota_redraw_archived: 0,
+        retry_generation: None,
+        container_retry: false,
+        concurrency_warning: None,
+        repair_growth: None,
+        review_verdict_correction_refused: None,
+        provisioned_source: None,
+        warnings: Vec::new(),
+        removed_requirements: node.removed_requirements.clone(),
         fragment: (plans::agent(node) && !admitted).then(String::new),
         handoff: None,
         blocked: false,
@@ -313,6 +330,8 @@ fn node_bound(
         land: node.land.as_ref().map(|spec| land_skeleton(spec.tier)),
         title: Some(node.title.clone().unwrap_or_else(|| node.id.clone())),
         worktree: node.worktree.clone(),
+        settled_dependency_snapshots: Default::default(),
+        new_worktree_base: None,
         id: node.id.clone(),
         state: NodeState::Succeeded,
         cancelled_from: Some(NodeState::Running),
@@ -325,6 +344,15 @@ fn node_bound(
         } else {
             NodeOutputs {
                 extra: Default::default(),
+                repair_design: None,
+                partial: false,
+                risk_tier: None,
+                repair_items: None,
+                spec_concerns: None,
+                spec_concern_count: None,
+                spec_defect_count: None,
+                artifact_findings: None,
+                compact_disposition_findings: None,
                 verdict_error: Some(String::new()),
                 schema_version: 2,
                 decide_outcome: None,
@@ -358,36 +386,34 @@ fn node_bound(
     // A refused automatic verdict correction retains its bounded admission error.
     let correction = template::review_behaviour(node) == Some(template::ReviewBehaviour::Lens);
     if correction {
-        skeleton
-            .extra
-            .insert(review::CORRECTION_REFUSED.into(), String::new().into());
+        skeleton.review_verdict_correction_refused = Some(String::new());
     }
     // Only a repair acceptance gate can retain a measured growth cache.
     // Ordinary agent nodes may still report risk assessments in their output.
     if repair_gate {
-        skeleton.extra.insert(
-            "repair_growth".into(),
-            serde_json::json!({"before":"1".repeat(64),"after":"1".repeat(64),"grew":false}),
-        );
+        skeleton.repair_growth = Some(RepairGrowth {
+            before: "1".repeat(64),
+            after: "1".repeat(64),
+            grew: false,
+        });
     }
-    if node.extra.get("repair_scope_gate") == Some(&serde_json::Value::Bool(true)) {
-        skeleton.extra.insert("owner_notified".into(), true.into());
+    if node.repair_scope_gate {
+        skeleton.owner_notified = true;
     }
     // `substantial` is the longest accepted risk tier, and false is the
     // longest cached growth boolean. Commit IDs may be SHA-256 (64 bytes).
     if let Some(outputs) = &mut skeleton.outputs {
-        outputs.extra.insert(review::PARTIAL.into(), false.into());
-        outputs
-            .extra
-            .insert("risk_tier".into(), "substantial".into());
-        if plan.nodes.iter().any(|consumer| {
-            consumer.extra.get("repair_scope_gate") == Some(&serde_json::Value::Bool(true))
-                && consumer.depends_on.contains(&node.id)
-        }) {
-            outputs.extra.insert(
-                "repair_design".into(),
-                serde_json::json!({"within_scope":false,"one_way_door":false}),
-            );
+        outputs.partial = false;
+        outputs.risk_tier = Some(provenant_records::workflow::RiskTier::Substantial);
+        if plan
+            .nodes
+            .iter()
+            .any(|consumer| consumer.repair_scope_gate && consumer.depends_on.contains(&node.id))
+        {
+            outputs.repair_design = Some(RepairDesign {
+                within_scope: false,
+                one_way_door: false,
+            });
         }
     }
     let mut bytes = canonical_len(&skeleton)
@@ -448,8 +474,7 @@ fn node_bound(
     }
     if let Some(spec) = &node.decide {
         // One ask per decide node: a rejected answer's request replaces it.
-        let repair_scope =
-            node.extra.get("repair_scope_gate") == Some(&serde_json::Value::Bool(true));
+        let repair_scope = node.repair_scope_gate;
         let session = asks::decide_session(spec, plan.decision_session.as_deref())
             .unwrap_or(if repair_scope { &plan.graph_id } else { "" });
         let ask = asks::decide_ask(
@@ -553,9 +578,12 @@ fn node_bound(
         let attempt = GraphAttempt {
             extra: Default::default(),
             review_substitution: true,
+            host_refused_before_acceptance: false,
             launched: false,
             key: AttemptKey {
                 extra: Default::default(),
+                retry_generation: None,
+                previous_attempt_ref: None,
                 graph_id: plan.graph_id.clone(),
                 node_id: node.id.clone(),
                 attempt: u32::MAX,

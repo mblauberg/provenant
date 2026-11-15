@@ -119,6 +119,8 @@ fn terminal_task_failure_does_not_try_a_fallback_route() {
         require_skill_location: false,
         access: AccessMode::ReadOnly,
         worktree: None,
+        template: None,
+        review_base: None,
         id: "node".to_owned(),
         title: None,
         deadline_seconds: None,
@@ -460,7 +462,10 @@ fn review_substitute_prefers_a_new_family_but_can_use_the_same_family() {
 #[test]
 fn configured_graph_concurrency_refusal_uses_the_owner_policy() {
     use provenant_records::policy::{Policy, Source, Strength};
-    let document = graph(vec![node("one", route("first")), node("two", route("first"))]);
+    let document = graph(vec![
+        node("one", route("first")),
+        node("two", route("first")),
+    ]);
     let limits = crate::config::GraphLimits {
         concurrency: Some(1),
         ..Default::default()
@@ -484,10 +489,18 @@ fn configured_graph_concurrency_refusal_uses_the_owner_policy() {
     )
     .unwrap();
     assert_eq!(owner.calls.len(), 1);
-    let refused = run.checkpoint.nodes.iter().find(|node| node.id == "two").unwrap();
+    let refused = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "two")
+        .unwrap();
     assert_eq!(refused.state, NodeState::Failed);
-    assert_eq!(refused.advance_error_code.as_deref(), Some("concurrency_cap"));
-    assert!(!refused.extra.contains_key("concurrency_warning"));
+    assert_eq!(
+        refused.advance_error_code.as_deref(),
+        Some("concurrency_cap")
+    );
+    assert!(refused.concurrency_warning.is_none());
 }
 
 #[test]
@@ -502,10 +515,7 @@ fn graph_concurrency_cap_warns_and_admits_the_next_node() {
         ..Default::default()
     };
     let mut owner = FakeOwner {
-        observations: VecDeque::from(vec![
-            AttemptObservation::Pending { attempt_ref: None };
-            3
-        ]),
+        observations: VecDeque::from(vec![AttemptObservation::Pending { attempt_ref: None }; 3]),
         ..Default::default()
     };
     let run = advance_with_budget(
@@ -519,14 +529,18 @@ fn graph_concurrency_cap_warns_and_admits_the_next_node() {
     assert_eq!(run.status, GraphStatus::Pending);
     assert_eq!(owner.calls.len(), 3);
     assert_eq!(
-        run.checkpoint.nodes.iter().filter(|n| n.state == NodeState::Running).count(),
+        run.checkpoint
+            .nodes
+            .iter()
+            .filter(|n| n.state == NodeState::Running)
+            .count(),
         3
     );
     let warned = run
         .checkpoint
         .nodes
         .iter()
-        .filter(|node| node.extra.contains_key("concurrency_warning"))
+        .filter(|node| node.concurrency_warning.is_some())
         .count();
     assert_eq!(warned, 1);
 }

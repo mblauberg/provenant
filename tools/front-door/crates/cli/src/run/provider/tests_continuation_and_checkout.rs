@@ -108,6 +108,7 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
     let task = run::TaskRequest {
         context: None,
         extra: Default::default(),
+        limit_extensions: Default::default(),
         build_heavy: false,
         title: None,
         base: Some(source_head.clone()),
@@ -125,11 +126,8 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         account: None,
         authority_digest: Digest::from_bytes([23; 32]),
         writer: Some(run::WriterRequest {
-            extra: [(
-                "custody_project".into(),
-                serde_json::json!(binding.project_id()),
-            )]
-            .into(),
+            extra: Default::default(),
+            custody_project: Some(binding.project_id()),
             project: project.clone(),
             worktree: worktree.clone(),
         }),

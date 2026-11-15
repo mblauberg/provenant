@@ -65,11 +65,11 @@ impl Factory {
             return Some(routes.join("; "));
         }
         match record.state {
-            provenant_records::run::AttemptState::Terminal { extra, reason, .. } => extra
-                .get("terminal_note")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .or(reason),
+            provenant_records::run::AttemptState::Terminal {
+                terminal_note,
+                reason,
+                ..
+            } => terminal_note.or(reason),
             _ => None,
         }
     }

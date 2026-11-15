@@ -88,7 +88,7 @@ fn lane_command_with_launch(
     );
     options.inherited_profile = confined
         .as_ref()
-        .map(|c| &c.profile as &dyn provenant_os::sys::profile::ProfileSource);
+        .map(|c| &c.profile as &dyn provenant_os::sys::profile::LimitSource);
     options.env = Some(&environment);
     let output = SystemExecutor::new(1)?.execute(options)?;
     assert_eq!(
@@ -119,10 +119,9 @@ fn settled_attempt(
     success: bool,
     graph: &str,
 ) -> Result<AttemptId> {
+    use provenant_records::custody::Scope;
     use provenant_records::{CanonicalV1, run::RouteRecord};
-    use provenant_supervisor::custody::{
-        ExitObservation, PublicationState, Scope, SettlementEvidence,
-    };
+    use provenant_supervisor::custody::{ExitObservation, PublicationState, SettlementEvidence};
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = provenant_run::Request {
@@ -293,6 +292,9 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
         &clock,
     )?;
     journal.bind(GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+
         extra: Default::default(),
         bases: None,
         directory: rig.project.clone(),

@@ -141,10 +141,10 @@ fn graph_run_has_remote_pending(
         .iter()
         .filter(|node| {
             target.is_none_or(|target| {
-                target.node.as_ref().is_none_or(|id| {
-                    &node.id == id
-                        || node.extra.get("subtree_cancel").and_then(Value::as_str) == Some(id)
-                })
+                target
+                    .node
+                    .as_ref()
+                    .is_none_or(|id| &node.id == id || node.subtree_cancel.as_deref() == Some(id))
             })
         })
         .flat_map(|node| node.recorded_attempts())
@@ -429,10 +429,10 @@ fn control_receipt_unfinished(
             .nodes
             .iter()
             .filter(|node| {
-                target.node.as_ref().is_none_or(|id| {
-                    &node.id == id
-                        || node.extra.get("subtree_cancel").and_then(Value::as_str) == Some(id)
-                })
+                target
+                    .node
+                    .as_ref()
+                    .is_none_or(|id| &node.id == id || node.subtree_cancel.as_deref() == Some(id))
             })
             .flat_map(|node| &node.attempts)
             .any(|attempt| attempt.state != provenant_fabric_runtime::graph::AttemptState::Terminal)
@@ -2036,6 +2036,7 @@ impl Factory {
                 network: None,
                 capability: Vec::new(),
                 no_capability: Vec::new(),
+                provenance: None,
             };
             if let Err(error) = provenant_cli::run::lane_access(
                 &access,
@@ -2374,7 +2375,7 @@ impl Factory {
         cancel: &CancelToken,
         stopping: bool,
     ) -> Result<Value, FacadeError> {
-        let cancellation_request = run.checkpoint.extra.remove("cancellation_request_receipt");
+        let cancellation_request = run.checkpoint.cancellation_request_receipt.take();
         let mut timed_out = false;
         let mut observation_report = None;
         let mut observation_wait = None;
@@ -2446,8 +2447,7 @@ impl Factory {
         }
         if let Some(request_id) = cancellation_request
             .as_ref()
-            .and_then(|receipt| receipt.get("request_id"))
-            .and_then(Value::as_str)
+            .map(|receipt| receipt.request_id.as_str())
         {
             let pending = FileJournal::cancellation_request_pending(
                 &self.context.roots.state,
@@ -3333,6 +3333,8 @@ mod tests {
             &factory.clock,
         )?;
         journal.bind(provenant_fabric_runtime::graph::GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
             extra: Default::default(),
             bases: None,
             directory: PathBuf::from("/legacy/project"),
@@ -3391,6 +3393,8 @@ mod tests {
             &factory.clock,
         )?;
         journal.bind(provenant_fabric_runtime::graph::GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
             extra: Default::default(),
             bases: None,
             directory: PathBuf::from("/legacy/project"),
@@ -3750,6 +3754,9 @@ mod tests {
                 &factory.clock,
             )?;
             journal.bind(GraphExecution {
+                peer_origin_context: None,
+                peer_submission_digest: None,
+
                 extra: Default::default(),
                 bases: None,
                 directory: factory.cwd.clone(),
@@ -4376,6 +4383,9 @@ mod tests {
         )?;
         let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
         let execution = GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+
             extra: Default::default(),
             bases: None,
             directory: factory.cwd.clone(),
@@ -4832,6 +4842,9 @@ mod tests {
                 &factory.clock,
             )?;
             journal.bind(GraphExecution {
+                peer_origin_context: None,
+                peer_submission_digest: None,
+
                 extra: Default::default(),
                 bases,
                 directory: rig.project.clone(),
@@ -4929,13 +4942,7 @@ mod tests {
                     let state = factory.context.roots.state.as_path();
                     let request =
                         provenant_run::resolve_writer(state, Path::new(path), Path::new(path))?;
-                    let selected: provenant_core::ProjectId = serde_json::from_value(
-                        request
-                            .extra
-                            .get("custody_project")
-                            .cloned()
-                            .ok_or("custody project")?,
-                    )?;
+                    let selected = request.custody_project.ok_or("resolved custody project")?;
                     assert_ne!(selected, factory.context.identity.project);
                     let name = provenant_confinement::worktrees::state_dir_name(Path::new(path));
                     assert!(
@@ -4960,10 +4967,7 @@ mod tests {
                             .is_dir()
                     );
                     let mut forged = request;
-                    forged.extra.insert(
-                        "custody_project".into(),
-                        json!(factory.context.identity.project),
-                    );
+                    forged.custody_project = Some(factory.context.identity.project);
                     assert!(
                         provenant_run::prepare_writer(
                             &forged,
@@ -5410,6 +5414,7 @@ mod tests {
             {
                 Ok(Some(graph::WriterWorktreeBinding {
                     extra: Default::default(),
+                    source_directory_identity: None,
                     worktree: worktree.into(),
                     head: self.source.clone(),
                 }))
@@ -5569,6 +5574,8 @@ mod tests {
             &factory.clock,
         )?;
         journal.bind(provenant_fabric_runtime::graph::GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
             extra: Default::default(),
             bases: None,
             directory: factory.cwd.clone(),
@@ -5646,6 +5653,8 @@ mod tests {
             &factory.clock,
         )?;
         journal.bind(provenant_fabric_runtime::graph::GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
             extra: Default::default(),
             bases: None,
             directory: factory.cwd.clone(),

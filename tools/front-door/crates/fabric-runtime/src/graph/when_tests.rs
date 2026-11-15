@@ -46,6 +46,12 @@ fn compile(
 fn document(nodes: Vec<GraphNode>) -> GraphDocument {
     GraphDocument {
         graph_id: "when".into(),
+        submission_patch: None,
+        template_library: Default::default(),
+        template_layers: Default::default(),
+        template_resolvers: Default::default(),
+        peer_origin_work_key: None,
+        review_tier_override: None,
         schema_version: 2,
         nodes,
         ..serde_json::from_value(json!({"graph_id":"when","schema_version":2,"nodes":[]})).unwrap()
@@ -209,7 +215,7 @@ fn refusal(error: template::CompileError) -> template::ParameterRefusal {
 fn a_mistyped_condition_name_is_refused_with_the_name() {
     let error = compile(
         &resolvers("f0-v0-s0"),
-        json!({"id":"x","use":"task","brief":"b","when":{"review-frames":true}}),
+        json!({"id":"x","use":"task","prompt":"b","when":{"review-frames":true}}),
     )
     .unwrap_err();
     let refusal = refusal(error);
@@ -230,7 +236,7 @@ fn a_condition_must_be_a_table_of_scalars() {
     for when in [json!(["x"]), json!(true), json!({"review-frame":[1]})] {
         let result = compile(
             &resolvers("f0-v0-s0"),
-            json!({"id":"x","use":"task","brief":"b","when":when}),
+            json!({"id":"x","use":"task","prompt":"b","when":when}),
         );
         // A list is the resolved form and passes through to graph decoding.
         if when.is_array() {
@@ -249,7 +255,7 @@ fn a_condition_must_be_a_table_of_scalars() {
 fn a_condition_cannot_sit_on_a_repeat() {
     let error = compile(
         &resolvers("f0-v0-s0"),
-        json!({"id":"x","use":"task","brief":"b","when":{"review-frame":true},
+        json!({"id":"x","use":"task","prompt":"b","when":{"review-frame":true},
                "repeat":{"until":"x","max_rounds":1}}),
     )
     .unwrap_err();

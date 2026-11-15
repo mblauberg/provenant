@@ -6,7 +6,7 @@ mod final_fragment {
         for nested in [false, true] {
             let document = planner(4);
             let slice = json!({
-                "id": "slice", "use": "implement", "brief": "Implement the sized parser slice",
+                "id": "slice", "use": "implement", "prompt": "Implement the sized parser slice",
                 "worktree": ".worktrees/slice", "write_scope": ["src/parser"],
             });
             let node = if nested {

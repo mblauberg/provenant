@@ -1632,6 +1632,9 @@ fn fake_launch_owner_refusal_reaches_real_graph_status() -> Result {
             &clock,
         )?;
         journal.bind(GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+
             extra: Default::default(),
             bases: None,
             directory: rig.project.clone(),

@@ -11,6 +11,7 @@ fn launch_prompt_refuses_invalid_input_before_account_resolution()
         let requested = run::TaskRequest {
             context: None,
             extra: Default::default(),
+            limit_extensions: Default::default(),
             build_heavy: false,
             title: None,
             base: None,
@@ -579,11 +580,8 @@ fn registry_provider_resolves_prepares_and_reports_quota(
             .any(|row| row.account.adapter == adapter_name
                 && row.status == provenant_quota::QuotaStatus::Available)
     );
-    let utility = provenant_confinement::UtilityRuntime::new(
-        &git,
-        &git_home,
-        roots.state.as_path(),
-    )?;
+    let utility =
+        provenant_confinement::UtilityRuntime::new(&git, &git_home, roots.state.as_path())?;
     let cancel = CancelToken::new();
     let repo = utility.open_repo(
         &executor,
@@ -651,6 +649,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
     let task = run::TaskRequest {
         context: None,
         extra: Default::default(),
+        limit_extensions: Default::default(),
         build_heavy: false,
         title: None,
         base: None,
@@ -782,11 +781,8 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
         ..provenant_core::RootInputs::new(home.clone(), project.clone())
     }
     .resolve(&provenant_os::fs::SystemPathResolver)?;
-    let utility = provenant_confinement::UtilityRuntime::new(
-        &git,
-        &git_home,
-        roots.state.as_path(),
-    )?;
+    let utility =
+        provenant_confinement::UtilityRuntime::new(&git, &git_home, roots.state.as_path())?;
     let cancel = CancelToken::new();
     let repo = utility.open_repo(
         &executor,
@@ -847,6 +843,7 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
     let task = run::TaskRequest {
         context: None,
         extra: Default::default(),
+        limit_extensions: Default::default(),
         build_heavy: false,
         title: None,
         base: None,
@@ -1024,11 +1021,8 @@ fn prepare_with_partial_account_estimates(
         std::fs::write(&path, serde_json::to_vec(&record)?)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
-    let utility = provenant_confinement::UtilityRuntime::new(
-        &git,
-        &git_home,
-        roots.state.as_path(),
-    )?;
+    let utility =
+        provenant_confinement::UtilityRuntime::new(&git, &git_home, roots.state.as_path())?;
     let cancel = CancelToken::new();
     let repo = utility.open_repo(
         &executor,
@@ -1067,6 +1061,7 @@ fn prepare_with_partial_account_estimates(
     let task = run::TaskRequest {
         context: None,
         extra: Default::default(),
+        limit_extensions: Default::default(),
         build_heavy: false,
         title: None,
         base: None,

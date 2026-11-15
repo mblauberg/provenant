@@ -743,7 +743,7 @@ mod tests {
         ));
         let retained = RunError::RetainedWriterImport {
             fence: Box::new(custody::PendingImport {
-                scope: custody::Scope {
+                scope: provenant_records::custody::Scope {
                     attempt: provenant_core::AttemptId::from_bytes([4; 16]),
                     generation: 1,
                 },
@@ -792,7 +792,8 @@ mod tests {
         let record = store.record(request.attempt_id, &call)?;
         let mut task = request.request.task.clone();
         task.writer = Some(provenant_records::run::WriterRequest {
-            extra: crate::tests::writer_extra(),
+            extra: Default::default(),
+            custody_project: Some(crate::tests::writer_project()),
             project: temp.path().into(),
             worktree: temp.path().join("writer"),
         });

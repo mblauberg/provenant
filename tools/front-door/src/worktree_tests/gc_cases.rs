@@ -994,6 +994,7 @@ pub(super) fn gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text() -> Resu
     let mut input = writer_run(
         provenant_run::WriterRequest {
             extra: Default::default(),
+            custody_project: Some(context.project_id),
             project: rig.project.clone(),
             worktree: rig.project.join(".worktrees/gc-tmp"),
         },

@@ -27,6 +27,9 @@ fn stored_fixture() -> StoredCheckpoint {
     }))
     .unwrap();
     let execution = GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+
         extra: Default::default(),
         bases: None,
         directory: base.clone(),
@@ -146,11 +149,7 @@ fn interrupted_peer_origin_publication_never_reuses_the_launch_name() {
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
     let origin = provenant_records::WorkKey::new(project, "origin", "writer", 1).unwrap();
     let mut fixture: StoredCheckpoint = stored_fixture();
-    fixture
-        .execution
-        .document
-        .extra
-        .insert("peer_origin_work_key".into(), serde_json::json!(origin));
+    fixture.execution.document.peer_origin_work_key = Some(origin.clone());
     let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
     journal.bind(fixture.execution.clone()).unwrap();
     CRASH_POINT.with(|point| point.set(Some(CrashPoint::PeerOrigin)));
@@ -318,6 +317,9 @@ fn manual_resume_publishes_marker_before_reopened_checkpoint() {
         FileJournal::open(&root, project, "resume-test", budget, &cancel, &clock).unwrap();
     journal
         .bind(GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+
             extra: Default::default(),
             bases: None,
             directory: base.clone(),
@@ -1121,6 +1123,9 @@ fn advance_error_is_recorded_replaced_and_cleared_and_rebind_keeps_directory() {
     for directory in [base.clone(), base.join("state")] {
         journal
             .bind(GraphExecution {
+                peer_origin_context: None,
+                peer_submission_digest: None,
+
                 extra: Default::default(),
                 bases: None,
                 directory,
@@ -1149,6 +1154,9 @@ fn advance_error_is_recorded_replaced_and_cleared_and_rebind_keeps_directory() {
     let mut journal = FileJournal::open(&root, project, "errors", budget, &cancel, &clock).unwrap();
     journal
         .bind(GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+
             extra: Default::default(),
             bases: None,
             directory: base.join("state"),
@@ -1194,6 +1202,9 @@ fn schema_two_document_with_optional_fields_absent_reloads() {
             FileJournal::open(&root, project, "plain-v2", budget, &cancel, &clock).unwrap();
         journal
             .bind(GraphExecution {
+                peer_origin_context: None,
+                peer_submission_digest: None,
+
                 extra: Default::default(),
                 bases: None,
                 directory: base.clone(),
@@ -1241,6 +1252,9 @@ fn checkpoint_reopens_with_project_isolation_and_detects_tampering() {
     let integration = provenant_core::GitOid::parse(&"a".repeat(40)).unwrap();
     let bases = GraphBaseBinding::new(None, Some(integration)).unwrap();
     let execution = GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+
         extra: Default::default(),
         bases: Some(bases),
         directory: base.clone(),
@@ -1413,6 +1427,9 @@ fn bound_attempt_manifest_survives_file_journal_reopen_and_reattachment() {
     }))
     .unwrap();
     let execution = GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+
         extra: Default::default(),
         bases: None,
         directory: base_dir.clone(),
@@ -1490,6 +1507,7 @@ fn implicit_writer_binding_reattaches_without_resolving_the_moved_head() {
             self.bindings += 1;
             Ok(Some(WriterWorktreeBinding {
                 extra: Default::default(),
+                source_directory_identity: None,
                 worktree: "/fixture/lane".into(),
                 head: self.head.clone(),
             }))
@@ -1535,6 +1553,9 @@ fn implicit_writer_binding_reattaches_without_resolving_the_moved_head() {
     }))
     .unwrap();
     let execution = GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+
         extra: Default::default(),
         bases: None,
         directory: directory.clone(),
@@ -1737,6 +1758,9 @@ mod launch_recovery {
                 root,
                 project: ProjectId::from_bytes([1; 16]),
                 execution: GraphExecution {
+                    peer_origin_context: None,
+                    peer_submission_digest: None,
+
                     extra: Default::default(),
                     bases: None,
                     directory: base,

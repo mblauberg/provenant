@@ -77,7 +77,7 @@ fn cancel_settles_a_prepared_attempt_nobody_holds() -> TestResult {
         None,
         &call,
     )?;
-    let scope = provenant_supervisor::custody::Scope {
+    let scope = provenant_records::custody::Scope {
         attempt: orphan,
         generation: 1,
     };
@@ -409,7 +409,8 @@ fn reconcile_leaves_temporary_data_behind_a_writer_reservation() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let mut run = input();
     run.request.task.writer = Some(WriterRequest {
-        extra: crate::tests::writer_extra(),
+        extra: Default::default(),
+        custody_project: Some(crate::tests::writer_project()),
         project: temp.path().join("checkout"),
         worktree: temp.path().join("checkout/.worktrees/lane"),
     });

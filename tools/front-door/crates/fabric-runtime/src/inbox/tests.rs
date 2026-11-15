@@ -1436,6 +1436,25 @@ fn hook_offers_retry_idempotently_without_hiding_later_queued_answers() {
     assert!(retried.items.iter().all(|item| item.delivery.attempts == 1));
 }
 
+#[test]
+fn graph_steer_context_round_trips_and_rejects_malformed_values() {
+    let context = super::GraphSteerContext {
+        launch_actor: ActorId::from_bytes([4; 16]),
+        launch_operation: OperationId::parse("graph-steer-op").unwrap(),
+        origin_work_key: "P/G#1".parse().unwrap(),
+    };
+    let encoded = serde_json::to_value(&context).unwrap();
+    assert_eq!(
+        serde_json::from_value::<super::GraphSteerContext>(encoded.clone()).unwrap(),
+        context
+    );
+    for field in ["launch_actor", "launch_operation", "origin_work_key"] {
+        let mut malformed = encoded.clone();
+        malformed[field] = serde_json::json!(false);
+        assert!(serde_json::from_value::<super::GraphSteerContext>(malformed).is_err());
+    }
+}
+
 fn chair_message(session: &str, text: &str, id: &str) -> InboxInput {
     InboxInput::ChairMessage {
         extra: Default::default(),
@@ -1448,6 +1467,7 @@ fn chair_message(session: &str, text: &str, id: &str) -> InboxInput {
 fn steer(text: &str, id: &str) -> InboxInput {
     InboxInput::Steer {
         extra: Default::default(),
+        graph_context: None,
         attempt: provenant_core::AttemptId::from_bytes([7; 16]),
         text: text.into(),
         operation_id: op(id),
@@ -1644,4 +1664,79 @@ fn control_is_refused_inside_a_lane_and_without_a_lookup() {
         f.call(input),
         Err(InboxError::Mutation { ref source, .. }) if source.code() == "inbox_unavailable"
     ));
+}
+
+#[test]
+fn listing_metadata_round_trips_and_rejects_malformed_values() {
+    let host = HostId::from_bytes([7; 16]);
+    let result = InboxResult::Listed {
+        extra: Default::default(),
+        items: Vec::new(),
+        next_cursor: None,
+        truncated: false,
+        coverage: "local_only".into(),
+        projects: std::collections::BTreeMap::from([
+            (
+                "local-null-path".into(),
+                InboxProject {
+                    label: None,
+                    path: InboxProjectPath::Unavailable,
+                    host: None,
+                },
+            ),
+            (
+                "local-path".into(),
+                InboxProject {
+                    label: Some("repo".into()),
+                    path: InboxProjectPath::Local("/repo".into()),
+                    host: None,
+                },
+            ),
+            (
+                "peer-path-omitted".into(),
+                InboxProject {
+                    label: Some("peer repo".into()),
+                    path: InboxProjectPath::Omitted,
+                    host: Some(host),
+                },
+            ),
+        ]),
+        peers: [
+            (InboxPeerState::Complete, None),
+            (InboxPeerState::Partial, Some("invalid_page")),
+            (InboxPeerState::Unreachable, Some("timeout")),
+            (InboxPeerState::Unsupported, None),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (state, reason))| InboxPeerCoverage {
+            host,
+            label: "peer".into(),
+            state,
+            included: index,
+            invalid_rows: index + 1,
+            duplicate_rows: index + 2,
+            truncated: index % 2 == 0,
+            reason: reason.map(str::to_owned),
+        })
+        .collect(),
+    };
+    let value = serde_json::to_value(&result).unwrap();
+    assert_eq!(
+        value["projects"]["local-null-path"]["path"],
+        serde_json::Value::Null
+    );
+    assert!(value["projects"]["peer-path-omitted"].get("path").is_none());
+    assert_eq!(
+        serde_json::from_value::<InboxResult>(value.clone()).unwrap(),
+        result
+    );
+
+    let mut malformed_project = value.clone();
+    malformed_project["projects"]["local-path"]["label"] = serde_json::json!(7);
+    assert!(serde_json::from_value::<InboxResult>(malformed_project).is_err());
+
+    let mut malformed_peer = value;
+    malformed_peer["peers"][0]["state"] = serde_json::json!("pending");
+    assert!(serde_json::from_value::<InboxResult>(malformed_peer).is_err());
 }

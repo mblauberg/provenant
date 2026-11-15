@@ -22,7 +22,9 @@ impl RunStore {
     /// Read the host's immutable settlement snapshot, never provider history.
     pub fn handoff(&self, record: &AttemptRecord) -> Result<Option<Handoff>> {
         let attempt = self.attempt_dir(record.attempt_id, false)?;
-        Ok(read_snapshot(&attempt)?.map(|handoff| attach_scope_report(&attempt, &handoff)))
+        read_snapshot(&attempt)?
+            .map(|handoff| attach_scope_report(&attempt, &handoff))
+            .transpose()
     }
 
     pub(crate) fn capture_handoff(
@@ -32,7 +34,7 @@ impl RunStore {
         decoded: &Decoded,
     ) -> Result<Option<Handoff>> {
         if let Some(handoff) = read_snapshot(attempt)? {
-            return Ok(Some(attach_scope_report(attempt, &handoff)));
+            return Ok(Some(attach_scope_report(attempt, &handoff)?));
         }
         let interrupted = !decoded.complete
             || matches!(
@@ -124,42 +126,27 @@ pub fn sanitise_handoff(handoff: &Handoff) -> Result<Handoff> {
 /// Attach the sealed write-scope evidence to the in-memory handoff view. The
 /// original `handoff.json` is an immutable provider snapshot, so derived scope
 /// facts are never resealed over it. Oversized full reports fall back to a
-/// pointer to the bounded artifact; if even that does not fit, retain the
-/// original safe handoff.
-pub(crate) fn attach_scope_report(attempt: &Directory, handoff: &Handoff) -> Handoff {
-    let Ok(Some(raw)) = read_sealed(
+/// pointer to the artifact; if that also exceeds the handoff bound, return the
+/// validation error so the scope evidence is never silently omitted.
+pub(crate) fn attach_scope_report(attempt: &Directory, handoff: &Handoff) -> Result<Handoff> {
+    let Some(raw) = read_sealed(
         attempt,
         "policy-write-scope.json",
         provenant_records::run::TERMINAL_RECORD_LIMIT,
-    ) else {
-        return handoff.clone();
+    )?
+    else {
+        return Ok(handoff.clone());
     };
-    let Ok(report) = serde_json::from_slice::<serde_json::Value>(&raw) else {
-        return handoff.clone();
-    };
+    let report: provenant_records::handoff::WriteScopeReport = crate::db::decode(&raw)?;
     let mut full = handoff.clone();
-    full.extra.insert("write_scope".into(), report.clone());
+    full.write_scope = Some(report.clone());
     if let Ok(safe) = sanitise_handoff(&full) {
-        return safe;
+        return Ok(safe);
     }
 
-    let count = report
-        .get("out_of_scope_paths")
-        .and_then(serde_json::Value::as_array)
-        .map_or(0, Vec::len);
     let mut compact = handoff.clone();
-    compact.extra.insert(
-        "write_scope".into(),
-        serde_json::json!({
-            "code": report.get("code").cloned().unwrap_or(serde_json::json!("WRITE_SCOPE")),
-            "strength": report.get("strength"),
-            "source": report.get("source"),
-            "paths_artifact": "policy-write-scope.json",
-            "out_of_scope_count": count,
-            "paths_omitted_from_handoff": true,
-        }),
-    );
-    sanitise_handoff(&compact).unwrap_or_else(|_| handoff.clone())
+    compact.write_scope = Some(report.compact());
+    sanitise_handoff(&compact)
 }
 
 /// Transform decoded values and object keys, including nested forward fields,
@@ -350,12 +337,24 @@ mod tests {
             &raw,
             HANDOFF_BYTES as u64,
         )?;
-        let report = serde_json::json!({
-            "code": "WRITE_SCOPE",
-            "strength": "warn",
-            "source": "project",
-            "out_of_scope_paths": ["x".repeat(HANDOFF_BYTES * 2)],
-        });
+        let mut paths = Vec::new();
+        for index in 0..HANDOFF_BYTES / 32 {
+            let relative = provenant_core::RelativePath::parse(format!(
+                "outside/{index}/{}",
+                "x".repeat(128)
+            ))?;
+            paths.push(provenant_records::PathWire::from_relative(&relative)?);
+        }
+        let path_count = paths.len();
+        let report = provenant_records::handoff::WriteScopeReport::Full {
+            schema_version: 1,
+            code: "WRITE_SCOPE".into(),
+            base: "1".repeat(40),
+            head: "2".repeat(40),
+            strength: provenant_records::policy::Strength::Warn,
+            source: provenant_records::policy::Source::Project,
+            out_of_scope_paths: paths,
+        };
         seal(
             &attempt,
             "policy-write-scope.json",
@@ -363,12 +362,15 @@ mod tests {
             provenant_records::run::TERMINAL_RECORD_LIMIT,
         )?;
 
-        let attached = attach_scope_report(&attempt, &original);
-        assert_eq!(
-            attached.extra["write_scope"]["paths_artifact"],
-            "policy-write-scope.json"
-        );
-        assert_eq!(attached.extra["write_scope"]["out_of_scope_count"], 1);
+        let attached = attach_scope_report(&attempt, &original)?;
+        assert!(matches!(
+            attached.write_scope,
+            Some(provenant_records::handoff::WriteScopeReport::Compact {
+                out_of_scope_count,
+                paths_omitted_from_handoff: true,
+                ..
+            }) if out_of_scope_count == path_count
+        ));
         assert_eq!(read_snapshot(&attempt)?, Some(original));
         assert_eq!(store.handoff(&record)?, Some(attached));
         Ok(())
@@ -552,6 +554,7 @@ mod tests {
         old.provider_launched = Some(true);
         old.state = AttemptState::Running {
             extra: Default::default(),
+            child_wait: None,
         };
         store.db.execute(
             "UPDATE attempts SET record=?1 WHERE id=?2",

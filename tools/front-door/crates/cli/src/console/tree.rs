@@ -45,7 +45,7 @@ pub(super) fn read_inner(
         (ProjectId, AttemptId),
         (
             provenant_records::WorkKey,
-            (Option<Value>, Option<AttemptId>),
+            (Option<AttemptId>, Option<AttemptId>),
             String,
         ),
     > = BTreeMap::new();
@@ -136,10 +136,7 @@ pub(super) fn read_inner(
                 let work_key = attempt.key.clone();
                 // A dispatch parent is sealed on the admitting operation; a
                 // continuation is the only source of `retry_of`.
-                let parents = (
-                    lane.operation.extra.get("parent_attempt").cloned(),
-                    attempt.retry_of,
-                );
+                let parents = (lane.operation.parent_attempt, attempt.retry_of);
                 if let Some((existing, existing_parents, existing_store)) = seen.get(&key) {
                     duplicate_count += 1;
                     if *existing != work_key {

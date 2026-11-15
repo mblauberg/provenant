@@ -316,11 +316,7 @@ pub(super) fn retry_suffix(progress: &NodeProgress) -> String {
 }
 
 pub(super) fn retry_generation(progress: &NodeProgress) -> u64 {
-    progress
-        .extra
-        .get("retry_generation")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0)
+    progress.retry_generation.unwrap_or_default()
 }
 
 /// The ID sequence of a decide ask, so a replacement never reuses an ID.
@@ -435,7 +431,7 @@ pub(super) fn validate_decide(
     {
         return Err("decide needs a question and 2 to 16 options with inbox-safe IDs and labels");
     }
-    if repair_scope_gate(node.extra.get("repair_scope_gate")) && spec.default.is_some() {
+    if node.repair_scope_gate && spec.default.is_some() {
         return Err("repair-scope decide must not declare a timeout default");
     }
     if spec
@@ -472,7 +468,7 @@ pub(super) fn validate_decide(
         return Err("decide question makes the request body longer than the inbox's 8192 bytes");
     }
     if decide_session(spec, decision_session)
-        .or_else(|| repair_scope_gate(node.extra.get("repair_scope_gate")).then_some(graph_id))
+        .or_else(|| node.repair_scope_gate.then_some(graph_id))
         .is_none_or(|s| crate::inbox::session_id(s).is_err())
     {
         return Err("decide needs a valid session or graph decision_session");
@@ -684,7 +680,7 @@ fn decide_request(
         previous,
     );
     ask.ask_id.push_str(&retry_suffix(&checkpoint.nodes[index]));
-    if repair_scope_gate(node.extra.get("repair_scope_gate"))
+    if node.repair_scope_gate
         && let Some(report) = node.depends_on.iter().find_map(|id| {
             checkpoint
                 .nodes
@@ -752,8 +748,7 @@ pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
     owner: &mut R,
     journal: &mut J,
 ) -> Result<(), GraphError<R::Error, J::Error>> {
-    if repair_scope_gate(node.extra.get("repair_scope_gate"))
-        && repair_scope(index, node, spec, plan, checkpoint, owner, journal)?
+    if node.repair_scope_gate && repair_scope(index, node, spec, plan, checkpoint, owner, journal)?
     {
         return Ok(());
     }
@@ -765,10 +760,7 @@ pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
                 return Ok(());
             }
             let session = decide_session(spec, plan.decision_session.as_deref())
-                .or_else(|| {
-                    repair_scope_gate(node.extra.get("repair_scope_gate"))
-                        .then_some(plan.graph_id.as_str())
-                })
+                .or_else(|| node.repair_scope_gate.then_some(plan.graph_id.as_str()))
                 .ok_or_else(|| GraphError::BadCheckpoint {
                     node: node.id.clone(),
                     invariant: "decision must name an inbox session",
@@ -911,6 +903,15 @@ fn decision_outputs(ask_id: &str, outcome: DecideOutcome) -> NodeOutputs {
     let verdict = outcome.option().map(str::to_owned);
     NodeOutputs {
         extra: Default::default(),
+        repair_design: None,
+        partial: false,
+        risk_tier: None,
+        repair_items: None,
+        spec_concerns: None,
+        spec_concern_count: None,
+        spec_defect_count: None,
+        artifact_findings: None,
+        compact_disposition_findings: None,
         verdict_error: None,
         schema_version: 2,
         decide_outcome: Some(outcome.clone()),
@@ -1103,11 +1104,10 @@ fn loop_rounds(checkpoint: &GraphCheckpoint, loop_id: &str) -> usize {
 /// from graph cancellation keeps its own.
 pub(super) fn withdrawn(checkpoint: &GraphCheckpoint, node_id: &str) -> bool {
     checkpoint.cancelled
-        && !checkpoint.nodes.iter().any(|node| {
-            node.id == node_id
-                && node.extra.get(super::relay::DETACHED_FROM_GRAPH_CANCEL)
-                    == Some(&serde_json::Value::Bool(true))
-        })
+        && !checkpoint
+            .nodes
+            .iter()
+            .any(|node| node.id == node_id && node.detached_from_graph_cancel)
 }
 
 /// Whether an ask's question has gone away: its node settled, the graph was
@@ -1201,8 +1201,7 @@ pub(super) fn validate(checkpoint: &GraphCheckpoint, plan: &PlannedGraph) -> Res
                         && ask.timeout.is_some_and(|timeout| timeout.seconds > 0)
                         && node.decide.as_ref().is_some_and(|spec| {
                             decide_session(spec, plan.decision_session.as_deref()).or_else(|| {
-                                repair_scope_gate(node.extra.get("repair_scope_gate"))
-                                    .then_some(plan.graph_id.as_str())
+                                node.repair_scope_gate.then_some(plan.graph_id.as_str())
                             }) == session
                         })
                 }
@@ -1245,9 +1244,9 @@ pub(super) fn validate_progress(
             // A running decision without a link raises its ask again.
             NodeState::Running => progress.outputs.is_none(),
             NodeState::Succeeded => {
-                (repair_scope_gate(node.extra.get("repair_scope_gate"))
+                (node.repair_scope_gate
                     && approved_repair_scope(node, checkpoint)
-                    && progress.extra.get("owner_notified") == Some(&serde_json::Value::Bool(true))
+                    && progress.owner_notified
                     && progress.outputs.as_ref().is_some_and(|outputs| {
                         outputs.verdict.as_deref() == Some("approve")
                             && matches!(
@@ -1295,10 +1294,6 @@ fn unanswered_progress(progress: &NodeProgress, node: &PlannedNode) -> bool {
     })
 }
 
-fn repair_scope_gate(value: Option<&serde_json::Value>) -> bool {
-    value == Some(&serde_json::Value::Bool(true))
-}
-
 fn approved_repair_scope(node: &PlannedNode, checkpoint: &GraphCheckpoint) -> bool {
     node.depends_on
         .iter()
@@ -1309,17 +1304,8 @@ fn approved_repair_scope(node: &PlannedNode, checkpoint: &GraphCheckpoint) -> bo
                 .find(|progress| &progress.id == id)
                 .and_then(|progress| progress.outputs.as_ref())
         })
-        .and_then(|outputs| outputs.extra.get("repair_design"))
-        .is_some_and(|design| {
-            design
-                .get("within_scope")
-                .and_then(serde_json::Value::as_bool)
-                == Some(true)
-                && design
-                    .get("one_way_door")
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(false)
-        })
+        .and_then(|outputs| outputs.repair_design.as_ref())
+        .is_some_and(|design| design.within_scope && !design.one_way_door)
 }
 
 /// The host owns notification and the scope barrier. Principal prose and a
@@ -1341,16 +1327,12 @@ fn repair_scope<R: AttemptOwner, J: GraphJournal>(
             .and_then(|progress| progress.outputs.as_ref())
     });
     let approved_scope = approved_repair_scope(node, checkpoint);
-    if checkpoint.nodes[index].extra.get("owner_notified") != Some(&serde_json::Value::Bool(true)) {
+    if !checkpoint.nodes[index].owner_notified {
         let report = design
             .and_then(|outputs| outputs.result.as_ref())
             .map(|result| result.excerpt.as_str())
             .unwrap_or("Principal report unavailable");
-        let generation = checkpoint.nodes[index]
-            .extra
-            .get("retry_generation")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
+        let generation = checkpoint.nodes[index].retry_generation.unwrap_or_default();
         let notice_id = if generation == 0 {
             format!("{}.owner-notification", node.id)
         } else {
@@ -1400,9 +1382,7 @@ fn repair_scope<R: AttemptOwner, J: GraphJournal>(
         if !notified {
             return Ok(true);
         }
-        checkpoint.nodes[index]
-            .extra
-            .insert("owner_notified".into(), true.into());
+        checkpoint.nodes[index].owner_notified = true;
         journal.save(checkpoint).map_err(GraphError::Journal)?;
     }
     if approved_scope {

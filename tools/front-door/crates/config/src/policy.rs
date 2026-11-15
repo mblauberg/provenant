@@ -104,7 +104,7 @@ pub fn read(state: &Path, project: &str, dispatch: &BTreeMap<String, Strength>) 
 }
 /// Dispatch overrides are already parsed and sealed by `dispatch_profile`.
 pub fn dispatch(profile: &provenant_records::run::HarnessProfile) -> BTreeMap<String, Strength> {
-    profile
+    let mut values = profile
         .overrides
         .iter()
         .filter_map(|entry| {
@@ -113,16 +113,16 @@ pub fn dispatch(profile: &provenant_records::run::HarnessProfile) -> BTreeMap<St
             let strength = serde_json::from_value(profile.knobs.get(name)?.clone()).ok()?;
             Some((code.to_owned(), strength))
         })
-        .collect()
+        .collect::<BTreeMap<_, _>>();
+    values.extend(profile.policy_overrides.clone());
+    values
 }
 pub fn for_task(state: &Path, project: &str, task: &provenant_records::run::TaskRequest) -> Policy {
-    if let Some(value) = task.profile.extra.get("launch_policy")
-        && let Ok(snapshot) = serde_json::from_value::<Policy>(value.clone())
-    {
+    if let Some(snapshot) = &task.profile.launch_policy {
         // Only configurable strengths can be restored. Persisted data cannot
         // replace table-owned boundaries, codes, knobs or justifications.
         let mut policy = Policy::default();
-        for row in snapshot.rules {
+        for row in snapshot.rules.iter().cloned() {
             let Some(table_rule) = policy
                 .rules
                 .iter()
@@ -140,13 +140,12 @@ pub fn for_task(state: &Path, project: &str, task: &provenant_records::run::Task
         }
         return policy;
     }
-    let mut values = dispatch(&task.profile);
-    if let Some(value) = task.profile.extra.get("policy_overrides")
-        && let Ok(overrides) = serde_json::from_value::<BTreeMap<String, Strength>>(value.clone())
-    {
-        values.extend(overrides);
-    }
-    read(state, project, &values)
+    let values = dispatch(&task.profile);
+    let project_id = task
+        .profile
+        .policy_project
+        .map(|project| project.to_string());
+    read(state, project_id.as_deref().unwrap_or(project), &values)
 }
 
 pub fn overlay_knobs(policy: &mut Policy, knobs: &BTreeMap<String, crate::KnobValue>) {

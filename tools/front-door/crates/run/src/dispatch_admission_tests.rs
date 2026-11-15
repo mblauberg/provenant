@@ -84,7 +84,8 @@ fn memory_floor_warns_for_both_lane_classes() -> TestResult {
         assert_eq!(
             admitted?.state,
             AttemptState::Running {
-                extra: Default::default()
+                extra: Default::default(),
+                child_wait: None,
             },
             "writer: {writer}"
         );

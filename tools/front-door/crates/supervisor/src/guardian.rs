@@ -11,6 +11,7 @@ use crate::machine::{
 };
 use provenant_core::{CancelToken, Clock, WallTime};
 use provenant_os::fs::{Directory, Publication, PublishMode};
+use provenant_records::custody::Scope;
 use provenant_records::{Limits, decode_v1};
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
@@ -1997,7 +1998,7 @@ impl Driver<'_> {
                             secret_input: self.secret_input.as_ref(),
                             inherited_lease: None,
                             inherited_profile: self.profile_file.as_ref().map(|profile| {
-                                profile as &dyn provenant_os::sys::profile::ProfileSource
+                                profile as &dyn provenant_os::sys::profile::LimitSource
                             }),
                             inherited_ports: ports,
                             process_group: false,

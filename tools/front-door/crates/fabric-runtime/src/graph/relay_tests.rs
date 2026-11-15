@@ -749,7 +749,7 @@ fn composite_child_timeout_reaches_every_provider_leaf_and_retains_template_evid
     for leaf in leaves {
         assert_eq!(leaf.deadline_seconds, Some(23));
         assert_eq!(leaf.prompt, request.brief);
-        assert_eq!(leaf.extra[template::TEMPLATE_FIELD], "task");
+        assert_eq!(leaf.template.as_deref(), Some("task"));
         assert!(!leaf.extra.contains_key("extensions"));
     }
     let evidence = &checkpoint.expansions[0].uses[0];
@@ -1106,7 +1106,7 @@ fn provisioning_fence_survives_a_checkpoint_round_trip_until_cleared() {
     );
     relay::clear_provisioning(&mut checkpoint, "a--w");
     assert!(relay::pending_provisioning(&checkpoint).is_empty());
-    assert!(!checkpoint.extra.contains_key("pending_writer_provisioning"));
+    assert!(checkpoint.pending_writer_provisioning.is_empty());
 }
 
 #[test]
@@ -1117,8 +1117,7 @@ fn successful_parent_closes_attached_children_but_not_detached_children() {
         .iter_mut()
         .find(|node| node.id == "a")
         .unwrap()
-        .extra
-        .insert("children_cancelled".into(), true.into());
+        .children_cancelled = true;
     add(&document, &mut checkpoint, "a", &child("stop", "s1")).unwrap();
     let mut keep = child("keep", "s2");
     keep.detached = true;
@@ -1289,7 +1288,7 @@ fn successful_final_patch_producer_leaves_its_planned_work_pending() {
         Some("a--producer"),
         &patch::Patch {
             schema_version: patch::PATCH_SCHEMA_VERSION,
-            nodes: vec![json!({"id":"planned", "use":"task", "brief":"Scheduled final work"})],
+            nodes: vec![json!({"id":"planned", "use":"task", "prompt":"Scheduled final work"})],
             ..Default::default()
         },
         &context,
@@ -1525,6 +1524,35 @@ fn child_writer_admission_uses_the_declared_worktree_template() {
 }
 
 #[test]
+fn patch_record_child_receipt_round_trips_and_rejects_malformed_types() {
+    let record: PatchRecord = serde_json::from_value(json!({
+        "revision": 3,
+        "digest": "sha256:request",
+        "relay_child_receipt": {
+            "schema_version": 1,
+            "request_digest": "sha256:request",
+            "receipt": {
+                "graph_id": "g", "parent": "p", "node": "p--child",
+                "revision": 3, "replayed": false, "worktree": null,
+                "detached": false, "lifecycle_notice": "Attached child"
+            }
+        }
+    }))
+    .unwrap();
+    let encoded = serde_json::to_value(&record).unwrap();
+    let decoded: PatchRecord = serde_json::from_value(encoded.clone()).unwrap();
+    assert_eq!(decoded, record);
+    assert!(encoded.get("relay_child_receipt").is_some());
+    assert!(
+        serde_json::from_value::<PatchRecord>(json!({
+            "revision": 3, "digest": "sha256:request",
+            "relay_child_receipt": {"schema_version": "wrong"}
+        }))
+        .is_err()
+    );
+}
+
+#[test]
 fn child_receipt_replay_rejects_missing_or_malformed_durable_state() {
     let (document, mut admitted) = live(None);
     mark_running(&mut admitted, "a");
@@ -1532,12 +1560,7 @@ fn child_receipt_replay_rejects_missing_or_malformed_durable_state() {
     add(&document, &mut admitted, "a", &request).unwrap();
 
     let mut missing = admitted.clone();
-    missing.expansions[0]
-        .patch
-        .as_mut()
-        .unwrap()
-        .extra
-        .remove(relay::CHILD_RECEIPT_KEY);
+    missing.expansions[0].patch.as_mut().unwrap().child_receipt = None;
     assert_eq!(
         relay::replay_child(&document, &missing, "a", &request)
             .unwrap_err()
@@ -1545,22 +1568,12 @@ fn child_receipt_replay_rejects_missing_or_malformed_durable_state() {
         "invalid"
     );
 
-    let mut malformed = admitted;
-    malformed.expansions[0]
-        .patch
-        .as_mut()
-        .unwrap()
-        .extra
-        .insert(
-            relay::CHILD_RECEIPT_KEY.into(),
-            json!({"schema_version": 1}),
-        );
-    assert_eq!(
-        relay::replay_child(&document, &malformed, "a", &request)
-            .unwrap_err()
-            .code,
-        "invalid"
-    );
+    let malformed = json!({
+        "revision": 1,
+        "digest": "sha256:request",
+        "relay_child_receipt": {"schema_version": "wrong"}
+    });
+    assert!(serde_json::from_value::<PatchRecord>(malformed).is_err());
 }
 
 #[test]
@@ -1667,7 +1680,7 @@ fn bound_document_child_preserves_explicit_worktree_and_upstream_source() {
     };
     let request: ChildRequest = serde_json::from_value(json!({
         "id":"bound", "brief":"", "writer":true, "idempotency_key":"bound", "launch":{
-            "node":{"id":"bound", "use":"implement", "brief":"Preserve existing work", "worktree":".worktrees/existing",
+            "node":{"id":"bound", "use":"implement", "prompt":"Preserve existing work", "worktree":".worktrees/existing",
                 "source":{"type":"node", "node":"a"}, "depends_on":["a"], "delivery":"push"}
         }
     })).unwrap();
@@ -1719,11 +1732,7 @@ fn bound_document_child_preserves_explicit_worktree_and_upstream_source() {
         expanded
             .nodes
             .iter()
-            .filter(|node| node
-                .extra
-                .get(template::TEMPLATE_FIELD)
-                .and_then(Value::as_str)
-                == Some("plan"))
+            .filter(|node| node.template.as_deref() == Some("plan"))
             .all(|node| node.source == Some(SourceBinding::Node { node: "a".into() }))
     );
 }
@@ -1820,10 +1829,7 @@ fn planner_native_child_runs_before_parent_settles_and_final_fragment_closes_onc
     );
     assert!(run.checkpoint.successful());
     assert_eq!(run.checkpoint.expansions.len(), 2);
-    assert_eq!(
-        run.checkpoint.expansions[1].extra.get("final_result"),
-        Some(&json!(true))
-    );
+    assert_eq!(run.checkpoint.expansions[1].final_result, true);
     assert!(ids(&document, &run.checkpoint).contains(&"parent--final".into()));
     assert_eq!(
         advance(&document, &mut owner, &mut journal)
@@ -1908,8 +1914,8 @@ nodes = [{id = "lens", use = "review", with = {lens = "tests"}}]
         .iter()
         .find(|node| node.id == "a--review--lens")
         .unwrap();
-    assert_eq!(lens.extra[template::TEMPLATE_FIELD], "review");
-    assert_eq!(lens.extra["review_lens"], "tests");
-    assert_eq!(lens.extra["review_behaviour"], "lens");
+    assert_eq!(lens.template.as_deref(), Some("review"));
+    assert_eq!(lens.review_lens.as_deref(), Some("tests"));
+    assert_eq!(lens.review_behaviour, Some(template::ReviewBehaviour::Lens));
     assert!(!lens.extra.contains_key("extensions"));
 }

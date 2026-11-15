@@ -213,10 +213,10 @@ pub(super) fn redact_checkout_paths(
 ) {
     for node in &mut checkpoint.nodes {
         // Internal immutable dependency evidence may contain bound checkout paths.
-        node.extra.remove("settled_dependency_snapshots");
+        node.settled_dependency_snapshots.clear();
         if let Some(binding) = &mut node.writer_binding {
             binding.worktree = "[redacted]".into();
-            binding.extra.remove("source_directory_identity");
+            binding.source_directory_identity = None;
         }
     }
 }

@@ -358,11 +358,10 @@ mod test_presentation {
                 human.push_str(&format!(" ({})", bounded_reason(error)));
             }
             if full {
-                if let Some(retry) = node.extra.get("retry") {
+                if let Some(retry) = &node.retry {
                     human.push_str(&format!(
                         " settlement_retries={} origin={}",
-                        retry["retries"],
-                        retry["origin"].as_str().unwrap_or("unknown")
+                        retry.retries, retry.origin
                     ));
                 }
                 if let Some(attempt) = node.attempts.last() {
