@@ -266,6 +266,7 @@ impl super::SessionStore {
             operation_id: operation_id.clone(),
             digest,
             summary,
+            extra: Default::default(),
             saved: super::Saved {
                 revision: current.revision,
                 parent: current.parent,
