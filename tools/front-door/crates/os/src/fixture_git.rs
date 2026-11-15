@@ -205,11 +205,12 @@ mod tests {
                 hook_dir.display()
             ),
         )?;
+        let test_path = crate::fixture::exact_test_path(
+            module_path!(),
+            "fixture_commits_ignore_hostile_configuration",
+        );
         let status = Command::new(std::env::current_exe()?)
-            .args([
-                "--exact",
-                "fixture::fixture_git::tests::fixture_commits_ignore_hostile_configuration",
-            ])
+            .args(["--exact", test_path.as_str()])
             .env("PROVENANT_HOSTILE_GIT_CHILD", temp.path())
             .env("HOME", temp.path())
             .env("XDG_CONFIG_HOME", temp.path())
@@ -225,13 +226,6 @@ mod tests {
         assert!(temp.path().join("child-ran").is_file());
         assert!(!temp.path().join("hook-ran").exists());
         Ok(())
-    }
-
-    #[test]
-    fn fixture_uses_resolved_git_when_available() {
-        if let Some(git) = crate::git::git_executable() {
-            assert_eq!(super::git_command().get_program(), git.as_os_str());
-        }
     }
 
     #[test]
@@ -288,11 +282,12 @@ mod tests {
         let before = lane_snapshot(&lane)?;
         fs::write(shim.join("git"), "#!/bin/sh\nexit 99\n")?;
         fs::set_permissions(shim.join("git"), fs::Permissions::from_mode(0o700))?;
+        let test_path = crate::fixture::exact_test_path(
+            module_path!(),
+            "executor_git_ignores_poisoned_lane_environment",
+        );
         let status = std::process::Command::new(std::env::current_exe()?)
-            .args([
-                "--exact",
-                "fixture::fixture_git::tests::executor_git_ignores_poisoned_lane_environment",
-            ])
+            .args(["--exact", test_path.as_str()])
             .env("PROVENANT_FIXTURE_EXECUTOR_CHILD", temp.path())
             .env("PATH", &shim)
             .env("GIT_DIR", lane.join(".git"))

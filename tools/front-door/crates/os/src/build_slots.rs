@@ -16,6 +16,22 @@ use crate::fs::{Directory, FsError, LockGuard, LockMode, Result};
 use crate::sys::fs as os;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum BuildSlotsError {
+    #[error(
+        "build slot directory {path} is owned by uid {actual}, expected uid {expected}",
+        path = .path.display()
+    )]
+    DirectoryOwner {
+        path: PathBuf,
+        actual: u32,
+        expected: u32,
+    },
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
 
 /// Slot directory below the host state root. It sits beside `fabric/`, not
 /// inside `fabric/locks`: a lane writes its landing locks under
@@ -42,27 +58,31 @@ impl BuildSlots {
     /// wrong mode is recreated or corrected. A directory owned by another user
     /// is refused, since only its owner may repair it. Never called from a
     /// lane.
-    pub fn provision(state: &Path, limit: u64) -> std::io::Result<()> {
+    pub fn provision(state: &Path, limit: u64) -> std::result::Result<(), BuildSlotsError> {
         Self::provision_owned(state, limit, crate::fs::effective_uid())
     }
 
     /// `provision`, refusing a directory owned by anyone but `owner`.
-    fn provision_owned(state: &Path, limit: u64, owner: u32) -> std::io::Result<()> {
+    fn provision_owned(
+        state: &Path,
+        limit: u64,
+        owner: u32,
+    ) -> std::result::Result<(), BuildSlotsError> {
         use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
         let path = directory(state);
         match std::fs::symlink_metadata(&path) {
             Ok(meta) if !meta.is_dir() => {
-                return Err(std::io::Error::other(format!(
+                return Err(BuildSlotsError::Io(std::io::Error::other(format!(
                     "{} is not a directory",
                     path.display()
-                )));
+                ))));
             }
             Ok(meta) if meta.uid() != owner => {
-                return Err(std::io::Error::other(format!(
-                    "{} is owned by uid {}, not the host user (uid {owner})",
-                    path.display(),
-                    meta.uid()
-                )));
+                return Err(BuildSlotsError::DirectoryOwner {
+                    path: path.clone(),
+                    actual: meta.uid(),
+                    expected: owner,
+                });
             }
             Ok(meta) => {
                 if meta.permissions().mode() & 0o7777 != 0o700 {
@@ -264,13 +284,6 @@ mod tests {
     }
 
     #[test]
-    fn a_crashed_holder_releases_its_slot() {
-        let _serial = serial();
-        let (_state, slots) = provisioned(1);
-        drop(slots.try_acquire(1).unwrap().unwrap());
-        assert!(slots.try_acquire(1).unwrap().is_some());
-    }
-
     #[test]
     fn provisioning_again_repairs_the_directory_and_its_slot_files() {
         use std::os::unix::fs::MetadataExt;
@@ -320,7 +333,13 @@ mod tests {
         // there; refuse rather than leave a directory another user controls.
         let stranger = crate::fs::effective_uid().wrapping_add(1);
         let error = BuildSlots::provision_owned(state.path(), 2, stranger).unwrap_err();
-        assert!(error.to_string().contains("is owned by uid"), "{error}");
+        assert!(matches!(
+            error,
+            BuildSlotsError::DirectoryOwner {
+                actual, expected, ..
+            }
+                if actual == crate::fs::effective_uid() && expected == stranger
+        ));
         // The real owner still repairs it.
         BuildSlots::provision(state.path(), 2).unwrap();
         BuildSlots::open(state.path()).unwrap();

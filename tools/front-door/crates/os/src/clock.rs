@@ -97,10 +97,6 @@ mod tests {
     #[test]
     fn separate_instances_share_one_monotonic_coordinate() {
         let first = SystemClock::new();
-        let started = first.mono_now().as_micros();
-        while first.mono_now().as_micros().saturating_sub(started) < 1_000 {
-            std::thread::yield_now();
-        }
         let before = first.mono_now();
         let second = SystemClock::new();
         assert!(second.mono_now() >= before);

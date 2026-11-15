@@ -510,6 +510,13 @@ pub fn directory_scans() -> u64 {
 }
 
 impl Directory {
+    /// Test seam for simulating a mount boundary without requiring a host mount.
+    #[cfg(test)]
+    pub(crate) fn with_device_for_test(mut self, device: u64) -> Self {
+        self.device = device;
+        self
+    }
+
     /// Open the signal itself as its lock, refusing links and replaced entries.
     pub(crate) fn signal_file(&self, name: &OsStr, write: bool) -> Result<File> {
         let name = component(name)?;
@@ -790,7 +797,7 @@ impl Directory {
     /// Observe a stable existing lock using a read-only descriptor. This never
     /// creates a missing lock or changes its contents, mode or timestamps.
     pub fn try_lock_existing(&self, name: &OsStr, mode: LockMode) -> Result<LockGuard> {
-        self.lock_existing_with_timeout(name, mode, Duration::ZERO, &CancelToken::new())
+        self.lock_existing_with_timeout(name, mode, Duration::ZERO, &CancelToken::new(), os::wait)
     }
 
     /// Probe a lock file another program owns, such as Cargo's `.cargo-lock`,
@@ -844,7 +851,7 @@ impl Directory {
         clock: &dyn Clock,
     ) -> Result<LockGuard> {
         let timeout = Duration::from_micros(budget.remaining(clock.mono_now()).as_micros());
-        self.lock_existing_with_timeout(name, mode, timeout, cancel)
+        self.lock_existing_with_timeout(name, mode, timeout, cancel, os::wait)
     }
 
     #[allow(clippy::disallowed_methods)]
@@ -854,6 +861,7 @@ impl Directory {
         mode: LockMode,
         timeout: Duration,
         cancel: &CancelToken,
+        mut wait: impl FnMut(Duration),
     ) -> Result<LockGuard> {
         let name = component(name)?;
         if !name.as_bytes().ends_with(b".lock") {
@@ -901,7 +909,7 @@ impl Directory {
             if remaining.is_zero() {
                 return Err(FsError::LockTimeout { path, timeout });
             }
-            os::wait(remaining.min(Duration::from_millis(5)));
+            wait(remaining.min(Duration::from_millis(5)));
         }
     }
 
@@ -1241,7 +1249,7 @@ impl Directory {
     ) -> Result<Publication> {
         component(name)?;
         for _ in 0..128 {
-            let temporary = staging_name(".provenant-staging.")?;
+            let temporary = staging_name(STAGING_PREFIX)?;
             match self.symlink(target, &temporary) {
                 Ok(()) => {}
                 Err(error) if error.is_exists() => continue,
@@ -1510,9 +1518,11 @@ pub fn entropy_128() -> Result<[u8; 16]> {
 }
 
 /// OS entropy, no global counter or clock; callers use exclusive creation too.
+const STAGING_PREFIX: &str = ".provenant-staging.";
+
 pub fn temporary_name() -> Result<OsString> {
     let bytes = os::entropy::<12>().map_err(error("getentropy", Path::new("<temporary name>")))?;
-    let mut name = String::from(".provenant-staging.");
+    let mut name = String::from(STAGING_PREFIX);
     name.push_str(&provenant_core::hex(&bytes));
     Ok(name.into())
 }

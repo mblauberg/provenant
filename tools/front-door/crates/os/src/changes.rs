@@ -257,19 +257,17 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::print_stderr)]
     fn signal_replaces_a_hard_link_without_writing_through_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path();
         let target = path.join("target");
         std::fs::write(&target, b"untouched").unwrap();
         let signal = path.join(FILE_NAME);
-        // Some sandboxes refuse hard links with EPERM; CI runs this case.
-        if let Err(error) = std::fs::hard_link(&target, &signal) {
-            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-            eprintln!("skipped: hard links are refused here ({error})");
-            return;
-        }
+        let hard_link = std::fs::hard_link(&target, &signal);
+        assert!(
+            hard_link.is_ok(),
+            "hard-link fixture capability is required: {hard_link:?}"
+        );
         bump(path, Scope::Inbox).unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"untouched");
         let replaced = read(path).unwrap();
@@ -292,23 +290,5 @@ mod tests {
         let after = read(path).unwrap();
         assert_eq!(after.inbox, Some(1));
         assert_eq!(after.board, None);
-    }
-
-    #[test]
-    #[ignore = "manual write-path measurement"]
-    #[allow(clippy::disallowed_methods, clippy::print_stderr)]
-    fn signal_bump_cost() {
-        let dir = tempfile::tempdir().unwrap();
-        bump(dir.path(), Scope::Inbox).unwrap();
-        let start = std::time::Instant::now();
-        for _ in 0..100 {
-            bump(dir.path(), Scope::Inbox).unwrap();
-        }
-        eprintln!("100 signal bumps: {:?}", start.elapsed());
-        let start2 = std::time::Instant::now();
-        for _ in 0..100 {
-            bump_scopes(dir.path(), &[Scope::Inbox, Scope::Board]).unwrap();
-        }
-        eprintln!("100 bump_scopes(2 scopes): {:?}", start2.elapsed());
     }
 }
