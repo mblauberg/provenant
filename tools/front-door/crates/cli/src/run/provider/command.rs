@@ -444,9 +444,11 @@ pub(super) fn configure_build_slots(
     knobs: &std::collections::BTreeMap<String, serde_json::Value>,
     policy: &provenant_records::policy::Policy,
 ) -> Result<Vec<PathGrant>, String> {
-    if spec.env.iter().any(|(name, value)| {
-        name == provenant_core::consumer_env::SANDBOX && value == "off"
-    }) {
+    if spec
+        .env
+        .iter()
+        .any(|(name, value)| name == provenant_core::consumer_env::SANDBOX && value == "off")
+    {
         check_sandbox_off_build_disk(&spec.env, state, policy)?;
         return Ok(Vec::new());
     }
