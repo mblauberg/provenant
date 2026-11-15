@@ -115,11 +115,11 @@ fn session_start_reports_linked_worktree_in_native_context() -> Result {
     assert!(context.contains("hook-lane"), "{context}");
     Ok(())
 }
+/// The guard carries no tool policy, so neither a command nor input it cannot
+/// use (another harness's event shape, malformed or oversized bodies) is denied.
 #[test]
-fn bash_guard_denies_bad_input_and_allows_process_control() -> Result {
+fn bash_guard_abstains_on_unusable_input_and_allows_process_control() -> Result {
     let rig = TestRig::new()?;
-    let host: serde_json::Value = serde_json::from_slice(&recording("host-deny-json.json")?)?;
-    assert_eq!(host["permission_denials"][0]["tool_name"], "Bash");
     let mut input: serde_json::Value = serde_json::from_slice(&recording("pre-tool-use.json")?)?;
     input["tool_input"]["command"] = "pkill -f claude; sleep 30; $CMD".into();
     let output = rig.execute(
@@ -129,19 +129,21 @@ fn bash_guard_denies_bad_input_and_allows_process_control() -> Result {
     )?;
     assert_eq!(code(&output), 0);
     assert!(output.stdout.bytes.is_empty());
-    for bytes in [b"{".to_vec(), vec![b' '; 1024 * 1024 + 1]] {
+    let foreign = serde_json::json!({
+        "hook_event_name": "beforeShellExecution", "command": "ls", "cwd": rig.project,
+    });
+    for bytes in [
+        b"{".to_vec(),
+        vec![b' '; 1024 * 1024 + 1],
+        serde_json::to_vec(&foreign)?,
+    ] {
         let output = rig.execute(
             Path::new(env!("CARGO_BIN_EXE_provenant")),
             &["hook", "claude", "pre-tool-use"],
             Some(&bytes),
         )?;
         assert_eq!(code(&output), 0);
-        let deny: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
-        assert_eq!(deny["hookSpecificOutput"]["permissionDecision"], "deny");
-        assert_eq!(
-            output.stdout.bytes.iter().filter(|b| **b == b'\n').count(),
-            1
-        );
+        assert!(output.stdout.bytes.is_empty(), "{output:?}");
     }
     Ok(())
 }
@@ -226,28 +228,6 @@ fn removed_shell_rules_allow_real_commands_on_disposable_roots() -> Result {
     Ok(())
 }
 
-#[test]
-fn denial_write_failure_uses_recorded_exit_two_fallback() -> Result {
-    let rig = TestRig::new()?;
-    // Duplicate the read-only stdin pipe onto stdout. The binary starts
-    // normally but its denial cannot be written. No product-only test switch.
-    let output = rig.execute(
-        Path::new("/bin/sh"),
-        &[
-            "-c",
-            "exec \"$1\" hook claude pre-tool-use 1>&0",
-            "fixture",
-            env!("CARGO_BIN_EXE_provenant"),
-        ],
-        Some(b"{"),
-    )?;
-    assert_eq!(code(&output), 2);
-    assert!(String::from_utf8_lossy(&output.stderr.bytes).contains("bounded-input error"));
-    assert!(output.stderr.bytes.len() <= 1024);
-    let host: serde_json::Value = serde_json::from_slice(&recording("host-deny-exit2.json")?)?;
-    assert_eq!(host["permission_denials"][0]["tool_name"], "Bash");
-    Ok(())
-}
 fn git(rig: &TestRig, args: &[&str]) -> Result<String> {
     let output = rig.execute(
         &provenant_os::git::git_executable().ok_or("Git unavailable")?,
@@ -713,8 +693,8 @@ fn hook_recovers_committed_offers_and_advances_past_an_oversized_head_page() -> 
             "console",
         ],
     )?;
-    // A malformed event must not consume queued answers. Shell command
-    // policy is owned by confinement, so a valid command is not a denial probe.
+    // A malformed event must not consume queued answers, and abstains rather
+    // than denying: shell command policy is owned by confinement.
     let denied = rig.execute(
         Path::new(env!("CARGO_BIN_EXE_provenant")),
         &["hook", "claude", "pre-tool-use"],
@@ -724,13 +704,7 @@ fn hook_recovers_committed_offers_and_advances_past_an_oversized_head_page() -> 
         }))?),
     )?;
     assert_eq!(code(&denied), 0);
-    let denial: serde_json::Value = serde_json::from_slice(&denied.stdout.bytes)?;
-    assert_eq!(denial["hookSpecificOutput"]["permissionDecision"], "deny");
-    assert!(
-        denial["hookSpecificOutput"]
-            .get("additionalContext")
-            .is_none()
-    );
+    assert!(denied.stdout.bytes.is_empty(), "{denied:?}");
     let db = rusqlite::Connection::open(rig.state.join("fabric/fabric.sqlite3"))?;
     // Warm a durable write, including BEGIN IMMEDIATE and fsync, without
     // changing the queued state. The empty lookup above only warms reads.
