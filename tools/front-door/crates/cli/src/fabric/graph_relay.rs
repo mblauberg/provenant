@@ -211,13 +211,15 @@ pub fn serve_with_read(
                 .map_err(|error| refused("invalid_template", error))?;
             let config = crate::config_reads::read_for(&context.roots, "run")
                 .map_err(|error| refused("invalid_config", error.to_string()))?;
+            let review_subjects = relay_child_review_subjects(&request, &library)
+                .map_err(|error| refused("invalid_template", error))?;
             let resolvers = launch_resolvers_for_relay(
                 &context.roots,
                 &context.cwd,
                 &config.domains.routing.review,
                 &document,
                 &checkpoint,
-                &parent,
+                &review_subjects,
             )
             .map_err(|error| refused("invalid_review", error))?;
             let patch_context = PatchContext {
@@ -384,13 +386,15 @@ pub fn serve_with_read(
                 .map_err(|error| refused("invalid_template", error))?;
             let config = crate::config_reads::read_for(&context.roots, "run")
                 .map_err(|error| refused("invalid_config", error.to_string()))?;
+            let review_subjects = relay_patch_review_subjects(&patch, &library)
+                .map_err(|error| refused("invalid_template", error))?;
             let resolvers = launch_resolvers_for_relay(
                 &context.roots,
                 &context.cwd,
                 &config.domains.routing.review,
                 &document,
                 &checkpoint,
-                &parent,
+                &review_subjects,
             )
             .map_err(|error| refused("invalid_review", error))?;
             // The ID selects this graph; prepare checks each skip/replace target
@@ -896,63 +900,236 @@ pub fn launch_resolvers_at_roots(
     document: &provenant_fabric_runtime::graph::GraphDocument,
     review_range: Option<(&str, &str)>,
 ) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
-    let exclude = document.exclude.clone();
     let pinned_diff = match review_range.map(|(base, head)| {
         let git = provenant_os::git::git_executable().ok_or("git is unavailable")?;
         provenant_run::review_diff_context_at(&git, cwd, base, head)
             .map_err(|error| error.to_string())
     }) {
         None => ReviewDiffSelection::NotRequested,
-        Some(Ok(diff)) => ReviewDiffSelection::Captured(diff),
-        Some(Err(_)) => ReviewDiffSelection::Unreadable,
+        Some(Ok(diff)) => ReviewDiffSelection::Captured(vec![diff]),
+        Some(Err(_)) => ReviewDiffSelection::Incomplete(Vec::new()),
     };
+    launch_resolvers_at_roots_with_selection(roots, cwd, review, document, pinned_diff)
+}
+
+fn launch_resolvers_at_roots_with_selection(
+    roots: &provenant_core::Roots,
+    cwd: &std::path::Path,
+    review: &provenant_routing::ReviewConfig,
+    document: &provenant_fabric_runtime::graph::GraphDocument,
+    pinned_diff: ReviewDiffSelection,
+) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
+    let exclude = document.exclude.clone();
     launch_resolvers_with(review, document, pinned_diff, |slot, family| {
         crate::route::resolve_review_family(roots, &slot.tier, family, &exclude)
     })
 }
 
-/// Dynamic relay patches inherit only the graph's admitted review base and
-/// the calling node's already-bound subject. Missing pins stay unpinned; the
-/// relay never resolves mutable refs or substitutes the host's current HEAD.
+/// Resolve relayed panels against the source each child or patch actually
+/// declares. Dynamic or absent subjects stay incomplete so configured
+/// unreadable-path floors apply; the relay never substitutes the caller's
+/// source or the host's current HEAD.
 fn launch_resolvers_for_relay(
     roots: &provenant_core::Roots,
     cwd: &std::path::Path,
     review: &provenant_routing::ReviewConfig,
     document: &provenant_fabric_runtime::graph::GraphDocument,
     checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
-    parent: &str,
+    subjects: &[Option<provenant_fabric_runtime::graph::SourceBinding>],
 ) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
-    let review_range = relay_review_range(checkpoint, parent);
-    launch_resolvers_at_roots(
-        roots,
-        cwd,
-        review,
-        document,
-        review_range
-            .as_ref()
-            .map(|(base, subject)| (base.as_str(), subject.as_str())),
-    )
+    let pinned_diff = relay_review_diffs(cwd, checkpoint, subjects);
+    launch_resolvers_at_roots_with_selection(roots, cwd, review, document, pinned_diff)
 }
 
-fn relay_review_range(
+fn relay_child_review_subjects(
+    request: &provenant_fabric_runtime::graph::relay::ChildRequest,
+    library: &TemplateLibrary,
+) -> Result<Vec<Option<provenant_fabric_runtime::graph::SourceBinding>>, String> {
+    let launch = request.launch.as_ref();
+    let library = match launch {
+        Some(launch) => library.with(Layer::Inline, &launch.templates)?,
+        None => library.clone(),
+    };
+    let node = match launch {
+        Some(launch) => launch.node.clone(),
+        None => json!({"id": request.id.clone(), "use": request.template.clone()}),
+    };
+    let mut subjects = Vec::new();
+    collect_relay_review_subjects(&node, None, &library, &mut Vec::new(), &mut subjects)?;
+    Ok(subjects)
+}
+
+fn relay_patch_review_subjects(
+    patch: &provenant_fabric_runtime::graph::patch::Patch,
+    library: &TemplateLibrary,
+) -> Result<Vec<Option<provenant_fabric_runtime::graph::SourceBinding>>, String> {
+    let library = library.with(Layer::Inline, &patch.templates)?;
+    let mut subjects = Vec::new();
+    for node in patch.nodes.iter().chain(&patch.replace) {
+        collect_relay_review_subjects(node, None, &library, &mut Vec::new(), &mut subjects)?;
+    }
+    Ok(subjects)
+}
+
+fn collect_relay_review_subjects(
+    node: &Value,
+    inherited: Option<&provenant_fabric_runtime::graph::SourceBinding>,
+    library: &TemplateLibrary,
+    expansion: &mut Vec<String>,
+    subjects: &mut Vec<Option<provenant_fabric_runtime::graph::SourceBinding>>,
+) -> Result<(), String> {
+    let own = node.get("source").filter(|source| !source.is_null());
+    let effective = own
+        .and_then(|source| serde_json::from_value(source.clone()).ok())
+        .or_else(|| own.is_none().then(|| inherited.cloned()).flatten());
+    if node.get("over").and_then(Value::as_str) == Some("@review-panel") {
+        subjects.push(effective.clone());
+    }
+    if let Some(name) = node.get("use").and_then(Value::as_str) {
+        let template = library.resolve(name)?;
+        if template.composite_behaviour
+            == Some(provenant_fabric_runtime::graph::template::CompositeBehaviour::ReviewPanel)
+        {
+            subjects.push(effective);
+            return Ok(());
+        }
+        if !template.nodes.is_empty() {
+            if expansion.len() >= provenant_fabric_runtime::graph::template::MAX_TEMPLATE_DEPTH
+                || expansion.iter().any(|active| active == name)
+            {
+                return Err(format!("template expansion cycle or depth at {name}"));
+            }
+            expansion.push(name.to_owned());
+            for child in &template.nodes {
+                collect_relay_review_subjects(
+                    child,
+                    effective.as_ref(),
+                    library,
+                    expansion,
+                    subjects,
+                )?;
+            }
+            expansion.pop();
+        }
+    }
+    for pointer in ["/composite/nodes", "/loop/body"] {
+        if let Some(children) = node.pointer(pointer).and_then(Value::as_array) {
+            for child in children {
+                collect_relay_review_subjects(
+                    child,
+                    effective.as_ref(),
+                    library,
+                    expansion,
+                    subjects,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn relay_review_diffs(
+    cwd: &std::path::Path,
     checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
-    parent: &str,
-) -> Option<(String, String)> {
-    let base = checkpoint.bases?.review?.to_string();
-    let subject = checkpoint
-        .nodes
-        .iter()
-        .find(|node| node.id == parent)?
-        .source_commit
-        .clone()?;
-    Some((base, subject))
+    subjects: &[Option<provenant_fabric_runtime::graph::SourceBinding>],
+) -> ReviewDiffSelection {
+    if subjects.is_empty() {
+        return ReviewDiffSelection::NotRequested;
+    }
+    let Some(base) = checkpoint
+        .bases
+        .and_then(|bases| bases.review)
+        .map(|base| base.to_string())
+    else {
+        return ReviewDiffSelection::Incomplete(Vec::new());
+    };
+    let Some(git) = provenant_os::git::git_executable() else {
+        return ReviewDiffSelection::Incomplete(Vec::new());
+    };
+    let mut incomplete = false;
+    let mut diffs = Vec::new();
+    for subject in subjects {
+        let Some(subject) = subject
+            .as_ref()
+            .and_then(|binding| relay_review_subject_commit(binding, checkpoint))
+        else {
+            incomplete = true;
+            continue;
+        };
+        match provenant_run::review_diff_context_at(&git, cwd, &base, &subject) {
+            Ok(diff) => diffs.push(diff),
+            Err(_) => incomplete = true,
+        }
+    }
+    if incomplete {
+        ReviewDiffSelection::Incomplete(diffs)
+    } else {
+        ReviewDiffSelection::Captured(diffs)
+    }
+}
+
+fn relay_review_subject_commit(
+    binding: &provenant_fabric_runtime::graph::SourceBinding,
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+) -> Option<String> {
+    use provenant_fabric_runtime::graph::SourceBinding;
+    match binding {
+        SourceBinding::Commit { commit } => Some(commit.clone()),
+        SourceBinding::Node { node } => checkpoint
+            .nodes
+            .iter()
+            .find(|progress| {
+                progress.id == *node
+                    && progress.state == provenant_records::graph::NodeState::Succeeded
+            })
+            .and_then(|progress| progress.outputs.as_ref())
+            .and_then(|outputs| outputs.commit.clone()),
+        // A head binding can advance with an upstream writer chain. Unless a
+        // delivered head has been sealed for this new review, retain the
+        // configured fallback floors instead of using an earlier source pin.
+        SourceBinding::Head { .. } => None,
+        SourceBinding::Integration => checkpoint.integration_pin.clone().or_else(|| {
+            checkpoint
+                .bases
+                .and_then(|bases| bases.integration)
+                .map(|base| base.to_string())
+        }),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ReviewDiffSelection {
     NotRequested,
-    Captured(provenant_run::ReviewDiffContext),
-    Unreadable,
+    Captured(Vec<provenant_run::ReviewDiffContext>),
+    Incomplete(Vec<provenant_run::ReviewDiffContext>),
+}
+
+fn combine_review_diffs(
+    diffs: &[provenant_run::ReviewDiffContext],
+) -> (Vec<String>, Option<String>, Option<String>) {
+    let paths = diffs
+        .iter()
+        .flat_map(|diff| diff.paths.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let metadata_complete = !diffs.is_empty()
+        && diffs
+            .iter()
+            .all(|diff| diff.numstat.is_some() && diff.tree.is_some());
+    let numstat = metadata_complete.then(|| {
+        diffs.iter().fold(String::new(), |mut combined, diff| {
+            combined.push_str(diff.numstat.as_deref().unwrap_or_default());
+            combined
+        })
+    });
+    let tree = metadata_complete.then(|| {
+        diffs.iter().fold(String::new(), |mut combined, diff| {
+            combined.push_str(diff.tree.as_deref().unwrap_or_default());
+            combined
+        })
+    });
+    (paths, numstat, tree)
 }
 
 fn launch_resolvers_with(
@@ -968,17 +1145,28 @@ fn launch_resolvers_with(
     }
     let (fallback_review, paths, measured_size, incomplete_context) = match pinned_diff {
         ReviewDiffSelection::NotRequested => (None, Vec::new(), None, false),
-        ReviewDiffSelection::Captured(diff) if diff.numstat.is_some() && diff.tree.is_some() => {
-            let measured_size = (request.kind.as_deref() != Some("integration"))
-                .then_some(())
-                .and_then(|()| diff.numstat.as_deref())
-                .filter(|numstat| !numstat.is_empty())
-                .zip(diff.tree.as_deref())
-                .map(|(numstat, tree)| review.size.classify_numstat(numstat, tree));
-            (None, diff.paths, measured_size, false)
+        ReviewDiffSelection::Captured(diffs) => {
+            let (paths, numstat, tree) = combine_review_diffs(&diffs);
+            if let (Some(numstat), Some(tree)) = (numstat, tree) {
+                let measured_size = (request.kind.as_deref() != Some("integration"))
+                    .then_some(())
+                    .and_then(|()| (!numstat.is_empty()).then_some(numstat.as_str()))
+                    .map(|numstat| review.size.classify_numstat(numstat, &tree));
+                (None, paths, measured_size, false)
+            } else {
+                let (fallback, mut paths_with_floors) = review.unreadable_paths();
+                paths_with_floors.extend(paths);
+                paths_with_floors.sort();
+                paths_with_floors.dedup();
+                (Some(fallback), paths_with_floors, None, true)
+            }
         }
-        ReviewDiffSelection::Captured(_) | ReviewDiffSelection::Unreadable => {
-            let (fallback, paths) = review.unreadable_paths();
+        ReviewDiffSelection::Incomplete(diffs) => {
+            let (known_paths, _, _) = combine_review_diffs(&diffs);
+            let (fallback, mut paths) = review.unreadable_paths();
+            paths.extend(known_paths);
+            paths.sort();
+            paths.dedup();
             (Some(fallback), paths, None, true)
         }
     };
@@ -2670,7 +2858,7 @@ mod panel_tests {
 
     // Spec: docs/specs/routing.md#pinned-review-selection
     #[test]
-    fn relayed_review_panels_reuse_the_callers_pinned_range()
+    fn relayed_review_panels_use_their_explicit_source_not_the_callers()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_fabric_runtime::graph::{GraphBaseBinding, GraphCheckpoint, GraphDocument};
 
@@ -2724,7 +2912,11 @@ mod panel_tests {
         let limits = provenant_fabric_runtime::config::GraphLimits::default();
         let worktree_layout = provenant_config::PortTable::builtin().worktree_layout;
 
-        for (subject, deep) in [(&protected_subject, true), (&docs_subject, false)] {
+        for (caller_subject, child_subject, deep) in [
+            (&protected_subject, &protected_subject, true),
+            (&docs_subject, &docs_subject, false),
+            (&docs_subject, &protected_subject, true),
+        ] {
             let document: GraphDocument = serde_json::from_value(json!({
                 "schema_version": 2,
                 "graph_id": "relay-review",
@@ -2734,7 +2926,7 @@ mod panel_tests {
                     "access": "read_only",
                     "prompt": "Caller",
                     "route": {"alias": "senior"},
-                    "source": {"type": "commit", "commit": subject}
+                    "source": {"type": "commit", "commit": caller_subject}
                 }]
             }))?;
             let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
@@ -2744,20 +2936,50 @@ mod panel_tests {
                 "nodes": [{
                     "id": "caller",
                     "state": "running",
-                    "source_commit": subject,
+                    "source_commit": caller_subject,
                     "attempts": []
                 }]
             }))?;
             checkpoint.bases =
                 GraphBaseBinding::new(Some(provenant_core::GitOid::parse(&base)?), None);
 
+            let patch: provenant_fabric_runtime::graph::patch::Patch =
+                serde_json::from_value(json!({
+                    "schema_version": 1,
+                    "expected_revision": 0,
+                    "idempotency_key": "nested-review",
+                    "nodes": [{
+                        "id": "review",
+                        "use": "review-panel",
+                        "source": {"type": "commit", "commit": child_subject}
+                    }]
+                }))?;
+            let subjects = relay_patch_review_subjects(&patch, &library)?;
+            let add_request: provenant_fabric_runtime::graph::relay::ChildRequest =
+                serde_json::from_value(json!({
+                    "id": "review",
+                    "use": "task",
+                    "brief": "Review the selected subject",
+                    "idempotency_key": "nested-review",
+                    "launch": {
+                        "node": {
+                            "id": "review",
+                            "use": "review-panel",
+                            "source": {"type": "commit", "commit": child_subject}
+                        }
+                    }
+                }))?;
+            assert_eq!(
+                relay_child_review_subjects(&add_request, &library)?,
+                subjects
+            );
             let resolvers = launch_resolvers_for_relay(
                 &roots,
                 &project,
                 &review,
                 &document,
                 &checkpoint,
-                "caller",
+                &subjects,
             )?;
             let lenses = &resolvers["review-panel"];
             if deep {
@@ -2777,13 +2999,6 @@ mod panel_tests {
 
             let mut document = document;
             document.template_resolvers = resolvers.clone();
-            let patch: provenant_fabric_runtime::graph::patch::Patch =
-                serde_json::from_value(json!({
-                    "schema_version": 1,
-                    "expected_revision": 0,
-                    "idempotency_key": "nested-review",
-                    "nodes": [{"id": "review", "use": "review-panel"}]
-                }))?;
             let admitted = provenant_fabric_runtime::graph::patch::admit_patch(
                 &mut LiveGraph {
                     document: &document,
@@ -2813,6 +3028,113 @@ mod panel_tests {
                 review_leaves.len()
             );
         }
+
+        let document: GraphDocument = serde_json::from_value(json!({
+            "schema_version": 2,
+            "graph_id": "relay-review-unresolved",
+            "review_base": base,
+            "nodes": [{
+                "id": "caller",
+                "access": "read_only",
+                "prompt": "Caller",
+                "route": {"alias": "senior"},
+                "source": {"type": "commit", "commit": docs_subject}
+            }]
+        }))?;
+        let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+            "schema_version": 2,
+            "graph_id": "relay-review-unresolved",
+            "plan_digest": "fixture",
+            "nodes": [{
+                "id": "caller",
+                "state": "running",
+                "source_commit": docs_subject,
+                "attempts": []
+            }, {
+                "id": "writer",
+                "state": "running",
+                "source_commit": docs_subject,
+                "attempts": []
+            }]
+        }))?;
+        checkpoint.bases = GraphBaseBinding::new(Some(provenant_core::GitOid::parse(&base)?), None);
+
+        let missing_add: provenant_fabric_runtime::graph::relay::ChildRequest =
+            serde_json::from_value(json!({
+                "id": "missing",
+                "use": "review-panel",
+                "brief": "Review the selected subject",
+                "idempotency_key": "missing-source"
+            }))?;
+        let dynamic_add: provenant_fabric_runtime::graph::relay::ChildRequest =
+            serde_json::from_value(json!({
+                "id": "dynamic",
+                "use": "task",
+                "brief": "Review the selected subject",
+                "idempotency_key": "dynamic-source",
+                "launch": {
+                    "node": {
+                        "id": "dynamic",
+                        "use": "review-panel",
+                        "source": {"type": "head", "node": "writer"}
+                    }
+                }
+            }))?;
+        let missing = relay_child_review_subjects(&missing_add, &library)?;
+        let dynamic = relay_child_review_subjects(&dynamic_add, &library)?;
+        for subjects in [&missing, &dynamic] {
+            let resolvers = launch_resolvers_for_relay(
+                &roots,
+                &project,
+                &review,
+                &document,
+                &checkpoint,
+                subjects,
+            )?;
+            assert!(resolvers["review-panel"].len() >= 8);
+            for stage in ["review-frame", "review-verify", "review-synthesis"] {
+                assert_eq!(resolvers[stage], vec!["true".to_owned()]);
+            }
+            assert!(
+                resolvers["review-advice-correctness-spec"][0]
+                    .contains("configured unreadable-path floors were applied")
+            );
+        }
+
+        let mixed_patch: provenant_fabric_runtime::graph::patch::Patch = serde_json::from_value(
+            json!({
+                "schema_version": 1,
+                "expected_revision": 0,
+                "idempotency_key": "mixed-review-sources",
+                "nodes": [
+                    {"id": "docs-review", "use": "review-panel", "source": {"type": "commit", "commit": docs_subject}},
+                    {"id": "writer-review", "use": "review-panel", "source": {"type": "head", "node": "writer"}}
+                ]
+            }),
+        )?;
+        let mixed_subjects = relay_patch_review_subjects(&mixed_patch, &library)?;
+        let ReviewDiffSelection::Incomplete(mixed_diffs) =
+            relay_review_diffs(&project, &checkpoint, &mixed_subjects)
+        else {
+            return Err("mixed sources should retain the known diff and unresolved head".into());
+        };
+        assert_eq!(
+            combine_review_diffs(&mixed_diffs).0,
+            vec!["docs/guide.md".to_owned()]
+        );
+        let mixed_resolvers = launch_resolvers_for_relay(
+            &roots,
+            &project,
+            &review,
+            &document,
+            &checkpoint,
+            &mixed_subjects,
+        )?;
+        assert!(mixed_resolvers["review-panel"].len() >= 8);
+        assert!(
+            mixed_resolvers["review-advice-correctness-spec"][0]
+                .contains("configured unreadable-path floors were applied")
+        );
         Ok(())
     }
 
@@ -2889,13 +3211,14 @@ mod panel_tests {
             "review": {"kind": "docs", "risk_tier": "routine"}
         }))
         .unwrap();
-        let incomplete_size = ReviewDiffSelection::Captured(provenant_run::ReviewDiffContext {
-            paths: vec!["docs/guide.md".into()],
-            numstat: None,
-            tree: None,
-        });
+        let incomplete_size =
+            ReviewDiffSelection::Captured(vec![provenant_run::ReviewDiffContext {
+                paths: vec!["docs/guide.md".into()],
+                numstat: None,
+                tree: None,
+            }]);
 
-        for selection in [ReviewDiffSelection::Unreadable, incomplete_size] {
+        for selection in [ReviewDiffSelection::Incomplete(Vec::new()), incomplete_size] {
             let resolvers =
                 launch_resolvers_with(&review, &document, selection, |_, _| Ok("fixture".into()))
                     .unwrap();
@@ -2913,11 +3236,11 @@ mod panel_tests {
             );
         }
 
-        let empty_diff = ReviewDiffSelection::Captured(provenant_run::ReviewDiffContext {
+        let empty_diff = ReviewDiffSelection::Captured(vec![provenant_run::ReviewDiffContext {
             paths: Vec::new(),
             numstat: Some(String::new()),
             tree: Some(String::new()),
-        });
+        }]);
         let quick =
             launch_resolvers_with(&review, &document, empty_diff, |_, _| Ok("fixture".into()))
                 .unwrap();
