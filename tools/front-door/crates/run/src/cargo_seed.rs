@@ -647,7 +647,12 @@ mod tests {
             )
             .unwrap();
         }
-        let binding = provenant_confinement::cargo::CargoHome::resolve(&host_home, |_| None);
+        let environment = provenant_confinement::cargo::CargoHome::resolve(&host_home, |_| None)
+            .map(|binding| {
+                let mut environment = Vec::new();
+                binding.lane_cargo_environment(&lane_home, &lane_cache, &mut environment);
+                environment
+            });
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -657,9 +662,7 @@ mod tests {
             )
             .unwrap();
         }
-        let binding = binding.unwrap();
-        let mut environment = Vec::new();
-        binding.lane_cargo_environment(&lane_home, &lane_cache, &mut environment);
+        let environment = environment.unwrap();
 
         let cargo_home_values: Vec<_> = environment
             .iter()

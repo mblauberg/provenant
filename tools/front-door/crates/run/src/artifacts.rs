@@ -417,15 +417,27 @@ mod tests {
         let larger = vec![b'x'; RECORD_LIMIT as usize + 1];
         seal(
             &dir,
-            "terminal-pending.json",
+            provenant_records::AttemptFile::TerminalPending.name(),
             &larger,
             TERMINAL_RECORD_LIMIT,
         )?;
         assert_eq!(
-            read_sealed(&dir, "terminal-pending.json", TERMINAL_RECORD_LIMIT)?.as_deref(),
+            read_sealed(
+                &dir,
+                provenant_records::AttemptFile::TerminalPending.name(),
+                TERMINAL_RECORD_LIMIT
+            )?
+            .as_deref(),
             Some(larger.as_slice())
         );
-        assert!(read_sealed(&dir, "terminal-pending.json", RECORD_LIMIT).is_err());
+        assert!(
+            read_sealed(
+                &dir,
+                provenant_records::AttemptFile::TerminalPending.name(),
+                RECORD_LIMIT
+            )
+            .is_err()
+        );
         Ok(())
     }
 

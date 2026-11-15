@@ -1249,14 +1249,9 @@ mod tests {
         row!(RateLimit, json!({"reset":100}));
     }
 
-    /// One resource read: its path and the conditional tag it sent.
-    type ResourceRequest = (String, Option<String>);
     #[derive(Clone, Default)]
-    struct ResourceForge(Arc<Mutex<Vec<ResourceRequest>>>);
-    impl ResourceForge {
-        fn requests(&self) -> Vec<ResourceRequest> {
-            self.0.lock().expect("requests").clone()
-        }
+    struct ResourceForge {
+        revalidated: Arc<Mutex<bool>>,
     }
     impl Forge for ResourceForge {
         fn request(
@@ -1272,12 +1267,12 @@ mod tests {
             let path = path.as_str();
             let etag = etag.as_deref();
             let response = (|| -> io::Result<Response> {
-                self.0
-                    .lock()
-                    .expect("requests")
-                    .push((path.into(), etag.map(str::to_owned)));
+                if path != "repos/Owner/Repo/pulls/12" {
+                    return Err(io::Error::other("unknown repository resource"));
+                }
                 let headers = BTreeMap::from([("etag".into(), "stable".into())]);
                 if etag == Some("stable") {
+                    *self.revalidated.lock().expect("revalidated") = true;
                     Ok(Response {
                         status: 304,
                         headers,
@@ -1317,11 +1312,8 @@ mod tests {
             )
             .expect("conditional resource");
         assert_eq!(first, second);
-        let requests = forge.requests();
         assert!(
-            requests.iter().any(|(path, tag)| {
-                path == "repos/Owner/Repo/pulls/12" && tag.as_deref() == Some("stable")
-            }),
+            *forge.revalidated.lock().expect("revalidated"),
             "the cached resource must be conditionally revalidated"
         );
     }

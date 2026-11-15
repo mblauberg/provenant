@@ -89,9 +89,12 @@ fn write_grant_warning_threshold_preserves_a_large_terminal_record() -> TestResu
             > provenant_records::run::MAX_WRITE_GRANT_BYTES as usize
     );
     let attempt = store.attempt_dir(id, false)?;
-    let terminal =
-        crate::artifacts::read_sealed(&attempt, "terminal-pending.json", TERMINAL_RECORD_LIMIT)?
-            .ok_or("terminal decision")?;
+    let terminal = crate::artifacts::read_sealed(
+        &attempt,
+        provenant_records::AttemptFile::TerminalPending.name(),
+        TERMINAL_RECORD_LIMIT,
+    )?
+    .ok_or("terminal decision")?;
     assert!(terminal.len() > provenant_records::run::MAX_WRITE_GRANT_BYTES as usize);
     let terminal_record = crate::db::decode_attempt(&terminal)?;
     assert_eq!(terminal_record.write_grants, record.write_grants);
