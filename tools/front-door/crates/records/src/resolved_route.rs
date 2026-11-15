@@ -206,6 +206,8 @@ pub struct RouteExclusion {
 /// the reason reaches any message, so no sign-in identity is ever shown.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkippedAccount {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub account: String,
     pub reason: RouteExclusionReason,
 }
@@ -260,6 +262,34 @@ pub enum RouteExclusionReason {
     /// The account's persisted quota evidence is malformed, so only that account is excluded.
     InvalidAccountEvidence,
 }
+
+impl RouteExclusionReason {
+    pub const ALL: &'static [Self] = &[
+        Self::SetupFailed,
+        Self::AccountPinned,
+        Self::AdmissionRefused,
+        Self::Disabled,
+        Self::MissingExecutable,
+        Self::ProviderUpdating,
+        Self::UnknownAvailability,
+        Self::StaleAvailability,
+        Self::UnknownAccount,
+        Self::DisclosureDenied,
+        Self::ConfinementUnavailable,
+        Self::UnsupportedEffort,
+        Self::Exhausted,
+        Self::PacingReserve,
+        Self::UnknownPartialHeadroom,
+        Self::AuthRequired,
+        Self::LoginExpired,
+        Self::UnverifiedModel,
+        Self::AccountMismatch,
+        Self::FreeTierRefused,
+        Self::ProviderRefused,
+        Self::InvalidAccountEvidence,
+    ];
+}
+
 impl RouteExclusionReason {
     /// The typed owner's safe cause and next action for this exclusion.
     pub fn diagnostic_parts(&self) -> (&'static str, &'static str) {

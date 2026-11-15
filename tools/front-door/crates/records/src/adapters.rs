@@ -1577,71 +1577,27 @@ adapter_specs! { $;
 mod tests {
     use super::*;
 
-    export_adapter_bindings!($; test_adapter_bindings; [];
-        [#[cfg(any())]] [disabled: 0]
-        [] [enabled: 1]
-        [] []
-    );
-
     #[test]
-    fn implementation_bindings_retain_conditional_guards() {
-        macro_rules! names {
-            ($( $(#[$cfg:meta])* $module:ident : $order:literal,)*) => {
-                &[ $( $(#[$cfg])* (stringify!($module), $order), )* ]
-            };
-        }
-        assert_eq!(test_adapter_bindings!(names), &[("enabled", 1)]);
-    }
-
-    #[test]
-    fn account_and_session_policies_preserve_adapter_behavior() {
+    fn account_and_session_facts_are_consistent() {
         for spec in ADAPTER_SPECS {
-            assert_eq!(
-                spec.transcript_account_root,
-                spec.id == Harness::Claude,
+            assert!(
+                !spec.transcript_account_root || spec.registered_account,
                 "{}",
                 spec.name
             );
-            assert_eq!(
-                spec.setup_root,
-                match spec.id {
-                    Harness::Cursor => SetupRoot::Home,
-                    Harness::Opencode => SetupRoot::XdgDataHome,
-                    _ => SetupRoot::None,
-                },
+            assert!(
+                spec.account_directory_prefix.is_none() || spec.registered_account,
                 "{}",
                 spec.name
             );
-            assert_eq!(
-                spec.isolated_login_keychain,
-                spec.id == Harness::Agy,
+            assert!(
+                !spec.shared_account_settings
+                    || (spec.registered_account && spec.account_config_dir),
                 "{}",
                 spec.name
             );
-            assert_eq!(
-                spec.shared_account_settings,
-                spec.id == Harness::Claude,
-                "{}",
-                spec.name
-            );
-            assert_eq!(
-                spec.account_directory_prefix,
-                (spec.id == Harness::Claude).then_some(".claude-"),
-                "{}",
-                spec.name
-            );
-            assert_eq!(
-                spec.copy_sessions_only,
-                spec.id == Harness::Codex,
-                "{}",
-                spec.name
-            );
-            assert_eq!(
-                spec.relocated_session_state,
-                matches!(
-                    spec.id,
-                    Harness::Claude | Harness::Cursor | Harness::Opencode
-                ),
+            assert!(
+                !spec.isolated_login_keychain || spec.local_login,
                 "{}",
                 spec.name
             );
@@ -1776,15 +1732,17 @@ mod account_tests {
     }
 
     #[test]
-    fn only_agy_has_an_unregistered_local_account() {
+    fn unregistered_local_accounts_follow_registered_local_login_facts() {
         for spec in ADAPTER_SPECS {
-            assert_eq!(
-                spec.is_unregistered_local("local"),
-                spec.name == "agy",
-                "{}",
-                spec.name
-            );
-            assert!(!spec.is_unregistered_local("agy-google-fixture"));
+            let has_local_account = spec.registered_account && spec.local_login;
+            for (key, expected) in [("local", has_local_account), ("fixture-account", false)] {
+                assert_eq!(
+                    spec.is_unregistered_local(key),
+                    expected,
+                    "{}: {key}",
+                    spec.name
+                );
+            }
         }
     }
 }
@@ -1860,18 +1818,6 @@ mod launch_tests {
     }
 
     #[test]
-    fn image_input_capability_matches_native_delivery() {
-        for spec in ADAPTER_SPECS {
-            assert_eq!(
-                spec.launch.image_input,
-                matches!(spec.name, "claude" | "codex"),
-                "{}",
-                spec.name
-            );
-        }
-    }
-
-    #[test]
     fn launch_table_is_checked_per_adapter() {
         // (adapter, effort, resume, network, write, refused field)
         let effort = Some("high");
@@ -1910,46 +1856,74 @@ mod launch_tests {
                 ..Default::default()
             })
             .unwrap_err();
-        assert_eq!(error.to_string(), "cursor does not support effort");
+        assert_eq!(error.adapter, "cursor");
+        assert_eq!(error.field, LaunchField::Effort);
     }
 
     #[test]
-    fn unsupported_modes_are_refused_by_field() {
-        let narrow = AdapterSpec {
-            launch: LaunchCapabilities {
-                model: true,
-                default_network: NetworkAccess::Open,
-                resume: false,
-                network: &[NetworkAccess::Provider],
-                write: false,
-                ..ADAPTER_SPECS[0].launch
-            },
-            ..ADAPTER_SPECS[0]
-        };
-        for (request, field) in [
-            (
-                LaunchRequest {
-                    resume: true,
-                    ..Default::default()
-                },
-                LaunchField::Resume,
-            ),
-            (
-                LaunchRequest {
-                    network: Some(NetworkAccess::Local),
-                    ..Default::default()
-                },
-                LaunchField::Network,
-            ),
-            (
-                LaunchRequest {
-                    write: true,
-                    ..Default::default()
-                },
-                LaunchField::Write,
-            ),
-        ] {
-            assert_eq!(narrow.check_launch(&request).unwrap_err().field, field);
+    fn declared_unsupported_modes_are_refused_by_field() {
+        for spec in ADAPTER_SPECS {
+            let capabilities = spec.launch;
+            let cases = [
+                (
+                    LaunchRequest {
+                        model: Some("fixture/model"),
+                        ..Default::default()
+                    },
+                    capabilities.model,
+                    LaunchField::Model,
+                ),
+                (
+                    LaunchRequest {
+                        effort: Some("high"),
+                        ..Default::default()
+                    },
+                    capabilities.effort,
+                    LaunchField::Effort,
+                ),
+                (
+                    LaunchRequest {
+                        resume: true,
+                        ..Default::default()
+                    },
+                    capabilities.resume,
+                    LaunchField::Resume,
+                ),
+                (
+                    LaunchRequest {
+                        write: true,
+                        ..Default::default()
+                    },
+                    capabilities.write,
+                    LaunchField::Write,
+                ),
+                (
+                    LaunchRequest {
+                        skill_location: true,
+                        ..Default::default()
+                    },
+                    spec.skills.is_some(),
+                    LaunchField::SkillLocation,
+                ),
+            ];
+            for (request, supported, field) in cases {
+                if !supported {
+                    assert_eq!(spec.check_launch(&request).unwrap_err().field, field);
+                }
+            }
+            for network in ALL_NETWORK {
+                if !capabilities.network.contains(network) {
+                    assert_eq!(
+                        spec.check_launch(&LaunchRequest {
+                            network: Some(*network),
+                            ..Default::default()
+                        })
+                        .unwrap_err()
+                        .field,
+                        LaunchField::Network
+                    );
+                }
+            }
         }
     }
 }

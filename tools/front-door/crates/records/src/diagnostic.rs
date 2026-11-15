@@ -698,30 +698,40 @@ pub fn shell_path(path: &Path, destination: Destination<'_>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn every_route_exclusion_is_covered(cause: &crate::RouteExclusionReason) {
+        use crate::RouteExclusionReason as Cause;
+        match cause {
+            Cause::SetupFailed
+            | Cause::AccountPinned
+            | Cause::AdmissionRefused
+            | Cause::Disabled
+            | Cause::MissingExecutable
+            | Cause::ProviderUpdating
+            | Cause::UnknownAvailability
+            | Cause::StaleAvailability
+            | Cause::UnknownAccount
+            | Cause::DisclosureDenied
+            | Cause::ConfinementUnavailable
+            | Cause::UnsupportedEffort
+            | Cause::Exhausted
+            | Cause::PacingReserve
+            | Cause::UnknownPartialHeadroom
+            | Cause::AuthRequired
+            | Cause::LoginExpired
+            | Cause::UnverifiedModel
+            | Cause::AccountMismatch
+            | Cause::FreeTierRefused
+            | Cause::ProviderRefused
+            | Cause::InvalidAccountEvidence => {}
+        }
+    }
+
     #[test]
     fn route_exclusions_have_bounded_causes_and_actions() {
         use crate::RouteExclusionReason as Cause;
-        for cause in [
-            Cause::Disabled,
-            Cause::MissingExecutable,
-            Cause::ProviderUpdating,
-            Cause::UnknownAvailability,
-            Cause::StaleAvailability,
-            Cause::UnknownAccount,
-            Cause::DisclosureDenied,
-            Cause::ConfinementUnavailable,
-            Cause::UnsupportedEffort,
-            Cause::Exhausted,
-            Cause::PacingReserve,
-            Cause::UnknownPartialHeadroom,
-            Cause::AuthRequired,
-            Cause::LoginExpired,
-            Cause::UnverifiedModel,
-            Cause::AccountMismatch,
-            Cause::FreeTierRefused,
-            Cause::ProviderRefused,
-            Cause::InvalidAccountEvidence,
-        ] {
+        for cause in Cause::ALL {
+            every_route_exclusion_is_covered(cause);
             let diagnostic = cause.diagnostic("REFUSED");
             assert_eq!(diagnostic.code, "REFUSED");
             for text in [diagnostic.detail.unwrap(), diagnostic.next.unwrap()] {

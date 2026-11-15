@@ -544,44 +544,85 @@ pub fn provider_seconds(provider_ms: Option<u64>) -> Option<f64> {
     provider_ms.map(|millis| millis as f64 / 1000.0)
 }
 
+impl crate::run::TerminalCause {
+    pub const ALL: &'static [Self] = &[
+        Self::SourceViewRefused,
+        Self::AccountLoginRequired,
+        Self::RouteResolutionRefused,
+        Self::AccessPolicyRefused,
+        Self::DiskFloor,
+        Self::DiskObservationUnavailable,
+        Self::StoredPromptUnreadable,
+        Self::CloudPlacementRemoved,
+        Self::WriteGrantsRefused,
+        Self::WorktreeBusy,
+        Self::HandoffRefused,
+        Self::RetainedWriterImport,
+        Self::UnsupportedPlatform,
+        Self::UnknownPacingAccount,
+        Self::UnregisteredAccount,
+        Self::DeliveryPrepareCredentialHelper,
+        Self::SpawnFailure,
+        Self::ProcessCrash,
+        Self::TokenBudget,
+        Self::SettlementFailure,
+        Self::ProviderEarlyStop,
+        Self::FreePoolQuota,
+        Self::CommandUnavailable,
+        Self::HostNativeUnconfigured,
+        Self::IdentityMismatch,
+        Self::StoppedNoWork,
+        Self::EmptyWriterResult,
+        Self::ContextHandoff,
+        Self::Blocked,
+        Self::LaneTokenLost,
+    ];
+}
+
 #[cfg(test)]
 mod terminal_cause_tests {
     use super::*;
     use crate::run::{AttemptState, Outcome, TerminalCause};
 
+    fn every_terminal_cause_is_covered(cause: TerminalCause) {
+        match cause {
+            TerminalCause::SourceViewRefused
+            | TerminalCause::AccountLoginRequired
+            | TerminalCause::RouteResolutionRefused
+            | TerminalCause::AccessPolicyRefused
+            | TerminalCause::DiskFloor
+            | TerminalCause::DiskObservationUnavailable
+            | TerminalCause::StoredPromptUnreadable
+            | TerminalCause::CloudPlacementRemoved
+            | TerminalCause::WriteGrantsRefused
+            | TerminalCause::WorktreeBusy
+            | TerminalCause::HandoffRefused
+            | TerminalCause::RetainedWriterImport
+            | TerminalCause::UnsupportedPlatform
+            | TerminalCause::UnknownPacingAccount
+            | TerminalCause::UnregisteredAccount
+            | TerminalCause::DeliveryPrepareCredentialHelper
+            | TerminalCause::SpawnFailure
+            | TerminalCause::ProcessCrash
+            | TerminalCause::TokenBudget
+            | TerminalCause::SettlementFailure
+            | TerminalCause::ProviderEarlyStop
+            | TerminalCause::FreePoolQuota
+            | TerminalCause::CommandUnavailable
+            | TerminalCause::HostNativeUnconfigured
+            | TerminalCause::IdentityMismatch
+            | TerminalCause::StoppedNoWork
+            | TerminalCause::EmptyWriterResult
+            | TerminalCause::ContextHandoff
+            | TerminalCause::Blocked
+            | TerminalCause::LaneTokenLost => {}
+        }
+    }
+
     #[test]
     fn terminal_reasons_use_typed_causes_without_provider_text() {
-        for cause in [
-            TerminalCause::SourceViewRefused,
-            TerminalCause::AccountLoginRequired,
-            TerminalCause::RouteResolutionRefused,
-            TerminalCause::AccessPolicyRefused,
-            TerminalCause::DiskFloor,
-            TerminalCause::DiskObservationUnavailable,
-            TerminalCause::StoredPromptUnreadable,
-            TerminalCause::CloudPlacementRemoved,
-            TerminalCause::WriteGrantsRefused,
-            TerminalCause::WorktreeBusy,
-            TerminalCause::HandoffRefused,
-            TerminalCause::RetainedWriterImport,
-            TerminalCause::UnsupportedPlatform,
-            TerminalCause::UnknownPacingAccount,
-            TerminalCause::UnregisteredAccount,
-            TerminalCause::DeliveryPrepareCredentialHelper,
-            TerminalCause::SpawnFailure,
-            TerminalCause::ProcessCrash,
-            TerminalCause::TokenBudget,
-            TerminalCause::SettlementFailure,
-            TerminalCause::ProviderEarlyStop,
-            TerminalCause::FreePoolQuota,
-            TerminalCause::CommandUnavailable,
-            TerminalCause::HostNativeUnconfigured,
-            TerminalCause::IdentityMismatch,
-            TerminalCause::StoppedNoWork,
-            TerminalCause::ContextHandoff,
-            TerminalCause::Blocked,
-            TerminalCause::LaneTokenLost,
-        ] {
+        for cause in TerminalCause::ALL.iter().copied() {
+            every_terminal_cause_is_covered(cause);
             let state = AttemptState::Terminal {
                 extra: Default::default(),
                 terminal_cause: Some(cause),

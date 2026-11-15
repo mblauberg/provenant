@@ -107,8 +107,8 @@ impl BudgetAction {
     pub const ALL: [Self; 3] = [Self::WrapUp, Self::Warn, Self::Stop];
     /// The configuration spellings, in [`Self::ALL`] order. Schema metadata
     /// for every budget-action field uses this one declaration.
-    pub const NAMES: [&'static str; 3] = {
-        let mut names = [""; 3];
+    pub const NAMES: [&'static str; Self::ALL.len()] = {
+        let mut names = [""; Self::ALL.len()];
         let mut index = 0;
         while index < Self::ALL.len() {
             names[index] = Self::ALL[index].as_str();
@@ -205,12 +205,14 @@ impl<'de> Deserialize<'de> for BudgetGrace {
 }
 
 /// The resolved soft-budget behaviour and the winning source for each field.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BudgetPolicy {
     pub action: BudgetAction,
     pub action_source: LimitSource,
     pub grace: BudgetGrace,
     pub grace_source: LimitSource,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
 }
 
 impl Default for BudgetPolicy {
@@ -220,6 +222,7 @@ impl Default for BudgetPolicy {
             action_source: LimitSource::Default,
             grace: BudgetGrace::default(),
             grace_source: LimitSource::Default,
+            extra: Default::default(),
         }
     }
 }
@@ -326,6 +329,8 @@ pub struct LaneLimits {
     /// advisory: it never stops the lane and is not an API request cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gh_invocations: Option<Limit>,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
 }
 
 impl LaneLimits {
@@ -363,7 +368,7 @@ impl LaneLimits {
         for (name, limit) in self.named().filter(|(_, limit)| limit.enforced()) {
             let line = match name {
                 "token_budget" => {
-                    let policy = self.budget_policy.unwrap_or_default();
+                    let policy = self.budget_policy.clone().unwrap_or_default();
                     let action = match policy.action {
                         BudgetAction::WrapUp => format!(
                             "resumes this session once to commit, push and report, with {}% grace",
@@ -410,7 +415,12 @@ mod tests {
     /// Every action's configuration spelling is the one serde reads and writes.
     #[test]
     fn budget_action_names_are_its_serde_spellings() {
-        for (action, name) in BudgetAction::ALL.into_iter().zip(BudgetAction::NAMES) {
+        for (index, action) in BudgetAction::ALL.iter().copied().enumerate() {
+            match action {
+                BudgetAction::WrapUp | BudgetAction::Warn | BudgetAction::Stop => {}
+            }
+            let name = action.as_str();
+            assert_eq!(BudgetAction::NAMES[index], name);
             assert_eq!(serde_json::to_value(action).unwrap(), name);
             assert_eq!(
                 serde_json::from_value::<BudgetAction>(name.into()).unwrap(),
