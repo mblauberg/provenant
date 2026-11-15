@@ -1137,6 +1137,18 @@ impl RunStore {
         id: AttemptId,
         call: &Request<'_>,
     ) -> Result<Option<AttemptId>> {
+        // Cancellation and continuation admission share this attempt fence.
+        // Holding it through resume_graph's durable parent/child link makes
+        // the accepted stop intent and successor admission a single ordering
+        // decision, including the terminal-before-settlement window.
+        let attempt = self.attempt_dir(id, false)?;
+        let _publication = attempt.lock(
+            std::ffi::OsStr::new("publication.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+            call.lock_budget(),
+            call.cancel,
+            call.clock,
+        )?;
         let record = self.record(id, call)?;
         let (outcome, terminal_cause, finished_at) = match &record.state {
             AttemptState::Terminal {
@@ -1151,7 +1163,6 @@ impl RunStore {
         if intents.is_empty() {
             return Ok(None);
         }
-        let attempt = self.attempt_dir(id, false)?;
         let explicit_stop = read_sealed(&attempt, "cancel.json", RECORD_LIMIT)?
             .and_then(|raw| crate::db::decode::<crate::store::CancellationEvidence>(&raw).ok())
             .is_some_and(|request| {
@@ -1244,7 +1255,10 @@ impl RunStore {
             created_at: finished_at,
             extend: Vec::new(),
         };
-        Ok(Some(self.resume_graph(&input, &context, call)?.attempt_id))
+        Ok(Some(
+            self.resume_graph_with_parent_publication_lock(&input, &context, call)?
+                .attempt_id,
+        ))
     }
 
     /// Reconcile a failed import as a final failure once custody proves that
