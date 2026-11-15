@@ -1721,16 +1721,11 @@ fn unknown_key_in_a_serde_decoded_section_reports_unknown_key_at_the_key() {
             "retention.unknown",
             3,
         ),
-        // The same name at two depths: the one serde rejected, not the first.
+        // The same name at two depths: each is reported at its own key.
         (
             "schema_version=1\n[gc]\nidle_days=7\n[gc.projects.p]\nidle_days=7",
             "gc.projects.p.idle_days",
             5,
-        ),
-        (
-            "schema_version=1\n[gc]\nunknown=true\n[gc.projects.p]\nunknown=true",
-            "gc.unknown",
-            3,
         ),
         (
             "schema_version=1\n[gc.projects.p]\nunknown=true",
@@ -1759,6 +1754,18 @@ fn unknown_key_in_a_serde_decoded_section_reports_unknown_key_at_the_key() {
         assert_eq!(warning.line, line);
         assert!(warning.message.starts_with(&format!("{key_path}:")));
     }
+
+    // Every unknown key is reported, each at its own line.
+    let text = "schema_version=1\n[gc]\nunknown=true\n[gc.projects.p]\nunknown=true";
+    let config = load(&roots(), Some(text.as_bytes())).unwrap();
+    let mut found: Vec<_> = config
+        .warnings
+        .iter()
+        .filter(|warning| warning.rule == "unknown_key")
+        .map(|warning| (warning.line, warning.message.split(':').next().unwrap()))
+        .collect();
+    found.sort_unstable();
+    assert_eq!(found, [(3, "gc.unknown"), (5, "gc.projects.p.unknown")]);
 }
 
 #[test]

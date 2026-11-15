@@ -47,13 +47,16 @@ fn rules(f: &Fixture) -> Vec<(String, PathBuf)> {
         .map(|finding| (finding.rule, finding.path.to_path_buf().unwrap()))
         .collect()
 }
+/// The installed hook commands as a set: registration order in the file is not an invariant.
 fn hook_lines(path: &Path) -> Vec<String> {
-    fs::read_to_string(path)
+    let mut lines: Vec<String> = fs::read_to_string(path)
         .unwrap()
         .lines()
         .filter(|line| line.contains("'hook' 'claude'"))
         .map(|line| line.trim().to_owned())
-        .collect()
+        .collect();
+    lines.sort();
+    lines
 }
 
 #[test]

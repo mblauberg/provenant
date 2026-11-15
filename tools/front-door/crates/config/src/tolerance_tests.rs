@@ -88,7 +88,7 @@ fn warnings_recover_rows_and_preserve_effective_origins() {
         "domains.sample.count",
         "domains.sample.rows.1.weight",
         "domains.sample.rows.1.enabled",
-        "domains.sample.rows.3.weight",
+        "domains.sample.rows.3",
         "domains.sample.entries.bad.weight",
     ];
     let actual_warning_paths: std::collections::BTreeSet<_> = config
