@@ -722,6 +722,7 @@ impl Forge for GhForge {
             result,
             pool: None,
             duration_seconds: None,
+            extra: Default::default(),
         }])
     }
     #[allow(clippy::disallowed_methods)]
@@ -1462,6 +1463,7 @@ fn bind_evidence(
         checks,
         coverage: definition.coverage.clone(),
         duration_seconds: None,
+        extra: Default::default(),
     })
 }
 /// Poll until the required checks settle or the budget (summed pauses) ends.
@@ -2402,27 +2404,10 @@ esac
     }
 
     fn definition(checks: &[&str], issuer: Option<&str>) -> GateDefinition {
-        GateDefinition {
-            kind: provenant_cli::domains::GateKind::Checks,
-            digest: "digest".into(),
-            checks: checks.iter().map(|c| (*c).into()).collect(),
-            commands: Vec::new(),
-            issuer: issuer.map(str::to_owned),
-            executor: None,
-            coverage: Vec::new(),
-            timeout_seconds: 10,
-            pool: None,
-            env_passthrough: Vec::new(),
-        }
+        super::super::test_support::LandingFixture::definition_for(checks, "digest", issuer, 10)
     }
     fn candidate() -> Candidate {
-        Candidate {
-            base: "base".into(),
-            steps: Vec::new(),
-            commit: "cand".into(),
-            tree: "tree".into(),
-            ref_name: "land/x".into(),
-        }
+        super::super::test_support::LandingFixture::candidate_named("cand", "tree", "land/x")
     }
     fn observed(checks: &[(&str, Option<&str>, GateResult)]) -> GateEvidence {
         GateEvidence {
@@ -2442,6 +2427,7 @@ esac
             result: GateResult::Pending,
             pool: None,
             duration_seconds: None,
+            extra: Default::default(),
         }
     }
 
@@ -2489,7 +2475,10 @@ esac
         budget.rate_micros_per_minute.insert("hosted".into(), 60);
         assert_eq!(
             super::super::budget::estimate(&budget, &[(priced.pool.unwrap(), 2)]).unwrap(),
-            CostEstimate::Known { micros: 2 }
+            CostEstimate::Known {
+                micros: 2,
+                extra: Default::default(),
+            }
         );
     }
 
@@ -2675,6 +2664,7 @@ esac
         let alarm = Alarm {
             code: "post_merge_failed".into(),
             message: "check Build failed".into(),
+            extra: Default::default(),
         };
         deliver_alarm(
             Some("chair-a"),
@@ -2744,6 +2734,7 @@ esac
         let text = alarm_text(&Alarm {
             code: "TREE_MISMATCH".into(),
             message: "x".repeat(9000),
+            extra: Default::default(),
         });
         assert!(text.starts_with("landing alarm TREE_MISMATCH: "));
         assert_eq!(text.chars().count(), 4000);

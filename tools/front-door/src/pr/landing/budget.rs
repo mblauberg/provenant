@@ -12,6 +12,7 @@ pub fn estimate(
     if durations_seconds.is_empty() {
         return Ok(CostEstimate::Unknown {
             reason: "no pool durations recorded".into(),
+            extra: Default::default(),
         });
     }
     let mut unpriced: Vec<&str> = durations_seconds
@@ -24,6 +25,7 @@ pub fn estimate(
         unpriced.dedup();
         return Ok(CostEstimate::Unknown {
             reason: format!("no price configured for pool {}", unpriced.join(", ")),
+            extra: Default::default(),
         });
     }
     let mut total: u128 = 0;
@@ -33,6 +35,7 @@ pub fn estimate(
     }
     Ok(CostEstimate::Known {
         micros: u64::try_from(total).unwrap_or(u64::MAX),
+        extra: Default::default(),
     })
 }
 
@@ -42,7 +45,7 @@ pub fn check(
     estimate: &CostEstimate,
 ) -> Result<Option<String>, LandingError> {
     match estimate {
-        CostEstimate::Known { micros } => {
+        CostEstimate::Known { micros, .. } => {
             if let Some(cap) = settings.cap_micros
                 && *micros > cap
             {
@@ -58,7 +61,7 @@ pub fn check(
                     format!("estimated cost {micros} micros exceeds the advisory budget of {advisory} micros")
                 }))
         }
-        CostEstimate::Unknown { reason } => {
+        CostEstimate::Unknown { reason, .. } => {
             // An unknown price cannot be shown to exceed a cap, so it warns rather than refuses.
             if settings.advisory_micros.is_some() || settings.cap_micros.is_some() {
                 Ok(Some(format!(
@@ -76,6 +79,13 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
+    fn known(micros: u64) -> CostEstimate {
+        CostEstimate::Known {
+            micros,
+            extra: Default::default(),
+        }
+    }
+
     fn settings(advisory: Option<u64>, cap: Option<u64>) -> BudgetSettings {
         BudgetSettings {
             rate_micros_per_minute: BTreeMap::from([("fast".to_string(), 600_000)]),
@@ -89,14 +99,11 @@ mod tests {
         let s = settings(None, None);
         assert_eq!(
             estimate(&s, &[("fast".into(), 90), ("fast".into(), 1)])?,
-            CostEstimate::Known { micros: 910_000 }
+            known(910_000)
         );
         let mut fractional = s.clone();
         fractional.rate_micros_per_minute.insert("fast".into(), 1);
-        assert_eq!(
-            estimate(&fractional, &[("fast".into(), 1)])?,
-            CostEstimate::Known { micros: 1 }
-        );
+        assert_eq!(estimate(&fractional, &[("fast".into(), 1)])?, known(1));
         Ok(())
     }
 
@@ -104,7 +111,7 @@ mod tests {
     fn unknown_price_is_reported_not_zero() -> Result<(), LandingError> {
         let s = settings(None, None);
         let got = estimate(&s, &[("fast".into(), 60), ("slow".into(), 60)])?;
-        assert!(matches!(got, CostEstimate::Unknown { ref reason } if reason.contains("slow")));
+        assert!(matches!(got, CostEstimate::Unknown { ref reason, .. } if reason.contains("slow")));
         assert!(matches!(estimate(&s, &[])?, CostEstimate::Unknown { .. }));
         Ok(())
     }
@@ -112,19 +119,22 @@ mod tests {
     #[test]
     fn advisory_warns_and_cap_refuses_only_above() -> Result<(), LandingError> {
         let s = settings(Some(100), Some(200));
-        assert_eq!(check(&s, &CostEstimate::Known { micros: 100 })?, None);
-        assert!(check(&s, &CostEstimate::Known { micros: 101 })?.is_some());
-        assert!(check(&s, &CostEstimate::Known { micros: 200 })?.is_some());
-        assert!(check(&s, &CostEstimate::Known { micros: 201 }).is_err());
+        assert_eq!(check(&s, &known(100))?, None);
+        assert!(check(&s, &known(101))?.is_some());
+        assert!(check(&s, &known(200))?.is_some());
+        assert!(check(&s, &known(201)).is_err());
         let no_cap = settings(Some(1), None);
-        assert!(check(&no_cap, &CostEstimate::Known { micros: u64::MAX })?.is_some());
+        assert!(check(&no_cap, &known(u64::MAX))?.is_some());
         Ok(())
     }
 
     #[test]
     fn unknown_cost_warns_when_a_budget_is_configured_and_never_refuses() -> Result<(), LandingError>
     {
-        let unknown = CostEstimate::Unknown { reason: "r".into() };
+        let unknown = CostEstimate::Unknown {
+            reason: "r".into(),
+            extra: Default::default(),
+        };
         assert!(check(&settings(None, Some(1)), &unknown)?.is_some());
         assert_eq!(check(&settings(None, None), &unknown)?, None);
         Ok(())

@@ -197,6 +197,7 @@ impl Approver<'_, '_> {
                                 reference: record.reference,
                                 reviewer: record.reviewer,
                                 head: record.head,
+                                extra: Default::default(),
                             })
                             .collect::<Vec<_>>()
                     }
@@ -217,6 +218,7 @@ impl Approver<'_, '_> {
                             reference: record.reference,
                             reviewer: record.reviewer,
                             head: head.to_owned(),
+                            extra: Default::default(),
                         })
                         .collect(),
                     Err(error) => {
@@ -251,6 +253,7 @@ impl Approver<'_, '_> {
                 accepted: Some(Accepted {
                     reason: reason.to_owned(),
                     actor: forge.actor()?,
+                    extra: Default::default(),
                 }),
                 ..Approved::by("accepted-delta")
             }));

@@ -72,14 +72,19 @@ pub fn settle(
             let result = if let Some(commit) = record.approved_to_landed.get(&step.pr.head) {
                 SettledOutcome::Landed {
                     commit: commit.clone(),
+                    extra: Default::default(),
                 }
             } else if refusal.is_some()
                 && (!refused || attempt.publish.mode == PublishMode::FastForward)
             {
                 refused = true;
-                SettledOutcome::Refused
+                SettledOutcome::Refused {
+                    extra: Default::default(),
+                }
             } else {
-                SettledOutcome::NotLanded
+                SettledOutcome::NotLanded {
+                    extra: Default::default(),
+                }
             };
             (step.pr.number, result)
         })
@@ -94,6 +99,7 @@ pub fn settle(
         follow_pending,
         local_follow_pending: landed_commit.is_some(),
         cleanup_pending: true,
+        extra: Default::default(),
     });
     receipt::record_pending(state, attempt)
 }
@@ -155,6 +161,7 @@ pub fn finish_settled(
                     "gated tree {} differs from landed commit {} tree {}",
                     attempt.candidate.tree, commit, tree
                 ),
+                extra: Default::default(),
             });
         }
         settled.tree_pending = false;
@@ -645,7 +652,7 @@ pub(crate) fn recover_pending_with(
             // A candidate step includes all earlier heads, so a gap cannot be
             // used as evidence to blame any of the published pull requests.
             record.candidate_steps.clear();
-            record.alarms.push(Alarm { code: "LAND_BISECT_UNAVAILABLE".into(), message: "recovered pull requests are not an ordered candidate prefix; bisection is unavailable".into() });
+            record.alarms.push(Alarm { code: "LAND_BISECT_UNAVAILABLE".into(), message: "recovered pull requests are not an ordered candidate prefix; bisection is unavailable".into() , extra: Default::default()});
         }
         record.pull_requests = landed_prs;
         record.outcomes = outcomes;
@@ -678,4 +685,50 @@ pub(crate) fn recover_pending_with(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settlement_checkpoints_each_candidate_member() -> Result<(), LandingError> {
+        let state = tempfile::tempdir().map_err(|error| LandingError::Failed(error.to_string()))?;
+        let candidate = super::super::test_support::LandingFixture::ordered_candidate();
+        let mut attempt = super::super::receipt::tests::attempt("main", &candidate.commit);
+        attempt.candidate = candidate.clone();
+        let mut record =
+            super::super::test_support::LandingFixture::receipt(&candidate.commit, false);
+        record.base = candidate.base.clone();
+        record.tree = candidate.tree.clone();
+        record.candidate_ref = candidate.ref_name.clone();
+        record.candidate_steps = candidate.steps.clone();
+        record.pull_requests = candidate.steps.iter().map(|step| step.pr.clone()).collect();
+        record.approved_to_landed = BTreeMap::from([("head-2".into(), "landed-2".into())]);
+
+        settle(state.path(), &mut attempt, record, None)?;
+
+        let persisted = receipt::pending(state.path(), "fake-repository", "main")?;
+        let settled = persisted[0]
+            .settled
+            .as_ref()
+            .expect("settlement is durable");
+        assert_eq!(
+            settled.outcomes.get(&1),
+            Some(&SettledOutcome::NotLanded {
+                extra: Default::default(),
+            })
+        );
+        assert_eq!(
+            settled.outcomes.get(&2),
+            Some(&SettledOutcome::Landed {
+                commit: "landed-2".into(),
+                extra: Default::default(),
+            })
+        );
+        assert_eq!(settled.landed_commit.as_deref(), Some("landed-2"));
+        assert!(settled.receipt_pending);
+        assert!(settled.cleanup_pending);
+        Ok(())
+    }
 }

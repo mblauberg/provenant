@@ -137,6 +137,7 @@ pub fn select_batch_with_reasons(
                         base_branch: info.base_branch,
                         approval_evidence: approved.evidence,
                         accepted: approved.accepted,
+                        extra: Default::default(),
                     });
                     if selected.len() == limit {
                         break;
@@ -193,6 +194,7 @@ pub fn build_candidate(
             pr: pr.clone(),
             commit,
             tree,
+            extra: Default::default(),
         });
     }
     let tree = steps
@@ -220,6 +222,7 @@ pub fn build_candidate(
         commit: previous,
         tree,
         ref_name,
+        extra: Default::default(),
     })
 }
 
@@ -443,6 +446,7 @@ mod tests {
                 approval_evidence: Vec::new(),
                 accepted: None,
                 base_branch: "main".into(),
+                extra: Default::default(),
             })
             .collect();
         let mut repo = FakeRepo::default();

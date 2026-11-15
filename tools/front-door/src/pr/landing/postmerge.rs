@@ -9,6 +9,7 @@ fn alarm(code: &str, message: String) -> Alarm {
     Alarm {
         code: code.into(),
         message,
+        extra: Default::default(),
     }
 }
 
@@ -103,6 +104,7 @@ fn bisect(
         commit: last.commit.clone(),
         tree: last.tree.clone(),
         ref_name: format!("{}-prefix-full", receipt.candidate_ref),
+        extra: Default::default(),
     };
     repo.push_ref(&full.ref_name, &full.commit, None).ok()?;
     let full_verdict = gate.gate(&full, definition, poll_seconds);
@@ -144,15 +146,44 @@ fn evidence_duration(evidence: &GateEvidence) -> Option<(String, u64)> {
 
 fn add_cost(receipt: &mut LandingReceipt, cost: CostEstimate) {
     receipt.cost = match (&receipt.cost, cost) {
-        (CostEstimate::Known { micros: prior }, CostEstimate::Known { micros }) => {
+        (
+            CostEstimate::Known {
+                micros: prior,
+                extra: prior_extra,
+            },
+            CostEstimate::Known { micros, extra },
+        ) => {
+            let mut merged_extra = prior_extra.clone();
+            merged_extra.extend(extra);
             CostEstimate::Known {
                 micros: prior.saturating_add(micros),
+                extra: merged_extra,
             }
         }
-        (CostEstimate::Unknown { reason }, _) => CostEstimate::Unknown {
-            reason: reason.clone(),
-        },
-        (_, CostEstimate::Unknown { reason }) => CostEstimate::Unknown { reason },
+        (CostEstimate::Unknown { reason, extra }, incoming) => {
+            let newer_extra = match incoming {
+                CostEstimate::Known { extra, .. } | CostEstimate::Unknown { extra, .. } => extra,
+            };
+            let mut merged_extra = extra.clone();
+            merged_extra.extend(newer_extra);
+            CostEstimate::Unknown {
+                reason: reason.clone(),
+                extra: merged_extra,
+            }
+        }
+        (
+            CostEstimate::Known {
+                extra: prior_extra, ..
+            },
+            CostEstimate::Unknown { reason, extra },
+        ) => {
+            let mut merged_extra = prior_extra.clone();
+            merged_extra.extend(extra);
+            CostEstimate::Unknown {
+                reason,
+                extra: merged_extra,
+            }
+        }
     };
 }
 
@@ -306,6 +337,7 @@ fn follow_with(
         Some(pool) => super::budget::estimate(&settings.budget, &[(pool.clone(), seconds)])?,
         None => CostEstimate::Unknown {
             reason: "post-merge pool unavailable".into(),
+            extra: Default::default(),
         },
     };
     add_cost(receipt, post_cost);
@@ -350,6 +382,7 @@ fn follow_with(
         let cost = if bisect_costs.iter().any(Option::is_none) {
             CostEstimate::Unknown {
                 reason: "post-merge bisection pool or duration unavailable".into(),
+                extra: Default::default(),
             }
         } else {
             super::budget::estimate(
@@ -425,6 +458,7 @@ mod tests {
     use crate::pr::landing::{
         fakes::{FakeAlarms, FakeForge, FakeGate, FakeRepo},
         ports::Approval,
+        test_support::LandingFixture,
     };
     use provenant_cli::domains::{LandOverride, LandSettings, PostMergeOverride};
     use std::collections::BTreeMap;
@@ -435,6 +469,13 @@ mod tests {
         gate: FakeGate,
         alarms: FakeAlarms,
         receipt: LandingReceipt,
+    }
+
+    fn known_cost(micros: u64) -> CostEstimate {
+        CostEstimate::Known {
+            micros,
+            extra: Default::default(),
+        }
     }
 
     fn rig(bisect: bool, revert: bool, prs: u64) -> Rig {
@@ -460,14 +501,8 @@ mod tests {
         let mut map = BTreeMap::new();
         let mut pull_requests = Vec::new();
         for n in 1..=prs {
-            let pr = EligiblePr {
-                number: n,
-                head: format!("h{n}"),
-                approval: format!("a{n}"),
-                approval_evidence: Vec::new(),
-                accepted: None,
-                base_branch: "main".into(),
-            };
+            let mut pr = LandingFixture::pr(n, &format!("h{n}"));
+            pr.approval = format!("a{n}");
             forge.approvals_at_head.insert(
                 (n, pr.head.clone()),
                 vec![Approval {
@@ -476,11 +511,11 @@ mod tests {
                 }],
             );
             map.insert(pr.head.clone(), format!("l{n}"));
-            steps.push(CandidateStep {
-                pr: pr.clone(),
-                commit: format!("s{n}"),
-                tree: format!("t{n}"),
-            });
+            steps.push(LandingFixture::step(
+                pr.clone(),
+                &format!("s{n}"),
+                &format!("t{n}"),
+            ));
             pull_requests.push(pr);
         }
         let mut receipt = super::super::receipt::tests::receipt(&format!("s{prs}"), false);
@@ -738,54 +773,35 @@ mod tests {
     }
 
     #[test]
-    fn passing_observation_after_deadline_is_passed() -> Result<(), LandingError> {
-        let mut r = rig(false, false, 1);
-        post_result(&mut r, "l1", GateResult::Passed);
-        let calls = std::cell::Cell::new(0);
-        follow_with(
-            &mut r.forge,
-            &mut r.repo,
-            Approvals::forge(),
-            &mut r.gate,
-            &mut r.alarms,
-            &mut r.receipt,
-            &|_| {},
-            &|| {
-                let n = calls.get();
-                calls.set(n + 1);
-                std::time::Duration::from_secs(if n == 0 { 0 } else { 3601 })
-            },
-        )?;
-        assert!(r.alarms.0.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn failure_observed_at_deadline_is_not_unsettled() -> Result<(), LandingError> {
-        let mut r = rig(false, false, 1);
-        post_result(&mut r, "l1", GateResult::Failed);
-        let calls = std::cell::Cell::new(0);
-        follow_with(
-            &mut r.forge,
-            &mut r.repo,
-            Approvals::forge(),
-            &mut r.gate,
-            &mut r.alarms,
-            &mut r.receipt,
-            &|_| {},
-            &|| {
-                let n = calls.get();
-                calls.set(n + 1);
-                std::time::Duration::from_secs(if n == 0 { 0 } else { 3601 })
-            },
-        )?;
-        assert!(r.alarms.0.iter().all(|alarm| alarm.code != "unsettled"));
-        assert!(
-            r.alarms
-                .0
-                .iter()
-                .any(|alarm| alarm.code == "post_merge_failed")
-        );
+    fn settled_deadline_observation_keeps_its_result() -> Result<(), LandingError> {
+        for (result, expected_alarm) in [
+            (GateResult::Passed, None),
+            (GateResult::Failed, Some("post_merge_failed")),
+        ] {
+            let mut r = rig(false, false, 1);
+            post_result(&mut r, "l1", result);
+            let calls = std::cell::Cell::new(0);
+            follow_with(
+                &mut r.forge,
+                &mut r.repo,
+                Approvals::forge(),
+                &mut r.gate,
+                &mut r.alarms,
+                &mut r.receipt,
+                &|_| {},
+                &|| {
+                    let n = calls.get();
+                    calls.set(n + 1);
+                    std::time::Duration::from_secs(if n == 0 { 0 } else { 3601 })
+                },
+            )?;
+            assert!(!r.alarms.0.iter().any(|alarm| alarm.code == "unsettled"));
+            if let Some(code) = expected_alarm {
+                assert!(r.alarms.0.iter().any(|alarm| alarm.code == code));
+            } else {
+                assert!(r.alarms.0.is_empty());
+            }
+        }
         Ok(())
     }
 
@@ -862,7 +878,7 @@ mod tests {
             &LandOverride::default(),
         )
         .unwrap();
-        r.receipt.cost = CostEstimate::Known { micros: 5 };
+        r.receipt.cost = known_cost(5);
         follow_with(
             &mut r.forge,
             &mut r.repo,
@@ -874,7 +890,7 @@ mod tests {
             &|| std::time::Duration::ZERO,
         )?;
         assert_eq!(r.alarms.0[0].code, "unsettled");
-        assert_eq!(r.receipt.cost, CostEstimate::Known { micros: 7 });
+        assert_eq!(r.receipt.cost, known_cost(7));
         assert!(r.forge.reverts.is_empty());
         Ok(())
     }
@@ -896,7 +912,7 @@ mod tests {
             &LandOverride::default(),
         )
         .unwrap();
-        r.receipt.cost = CostEstimate::Known { micros: 5 };
+        r.receipt.cost = known_cost(5);
         post_result(&mut r, "l2", GateResult::Failed);
         for (commit, result, seconds) in
             [("s2", GateResult::Failed, 3), ("s1", GateResult::Passed, 2)]
@@ -907,7 +923,7 @@ mod tests {
             r.gate.results.push_back(evidence);
         }
         run(&mut r)?;
-        assert_eq!(r.receipt.cost, CostEstimate::Known { micros: 10 });
+        assert_eq!(r.receipt.cost, known_cost(10));
         Ok(())
     }
 
@@ -928,13 +944,13 @@ mod tests {
             &LandOverride::default(),
         )
         .unwrap();
-        r.receipt.cost = CostEstimate::Known { micros: 5 };
+        r.receipt.cost = known_cost(5);
         post_result(&mut r, "l2", GateResult::Failed);
         r.gate.results.push_back(verdict("s2", GateResult::Failed));
         r.gate.results.push_back(verdict("s1", GateResult::Passed));
         run(&mut r)?;
         assert!(
-            matches!(&r.receipt.cost, CostEstimate::Unknown { reason } if reason.contains("bisection"))
+            matches!(&r.receipt.cost, CostEstimate::Unknown { reason, .. } if reason.contains("bisection"))
         );
         Ok(())
     }

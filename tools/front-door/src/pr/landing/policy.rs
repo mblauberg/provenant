@@ -10,6 +10,8 @@ use serde_json::Value;
 pub struct TargetRule {
     pub index: usize,
     pub target: String,
+    #[serde(flatten, default)]
+    pub extra: provenant_records::ExtraFields,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -18,6 +20,8 @@ pub struct Source {
     pub path: Option<Value>,
     pub key: String,
     pub rule: Option<TargetRule>,
+    #[serde(flatten, default)]
+    pub extra: provenant_records::ExtraFields,
 }
 
 impl Source {
@@ -27,6 +31,7 @@ impl Source {
             path,
             key,
             rule: None,
+            extra: Default::default(),
         }
     }
 
@@ -67,6 +72,8 @@ impl Source {
 pub struct Sourced<T> {
     pub value: T,
     pub source: Source,
+    #[serde(flatten, default)]
+    pub extra: provenant_records::ExtraFields,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -77,6 +84,8 @@ pub struct LandPolicy {
     pub landing: Option<provenant_records::landing::LandingContext>,
     pub fields: BTreeMap<String, Sourced<Value>>,
     pub budget_rate_micros_per_minute: BTreeMap<String, Sourced<u64>>,
+    #[serde(flatten, default)]
+    pub extra: provenant_records::ExtraFields,
 }
 
 fn flatten(prefix: &str, value: Value, out: &mut BTreeMap<String, Value>) {
@@ -183,6 +192,7 @@ impl LandPolicy {
                 Sourced {
                     value: *value,
                     source,
+                    extra: Default::default(),
                 },
             );
         }
@@ -205,7 +215,14 @@ impl LandPolicy {
                 }
                 _ => Source::new("bundled", path, None),
             };
-            fields.insert(key, Sourced { value, source });
+            fields.insert(
+                key,
+                Sourced {
+                    value,
+                    source,
+                    extra: Default::default(),
+                },
+            );
         }
         fn apply(
             fields: &mut BTreeMap<String, Sourced<Value>>,
@@ -238,6 +255,7 @@ impl LandPolicy {
                                     &format!("budget.rate_micros_per_minute.{pool}"),
                                     origins,
                                 )?,
+                                extra: Default::default(),
                             },
                         );
                     }
@@ -256,6 +274,7 @@ impl LandPolicy {
                         Sourced {
                             value,
                             source: field_source,
+                            extra: Default::default(),
                         },
                     );
                 }
@@ -343,7 +362,9 @@ impl LandPolicy {
                     rule: Some(TargetRule {
                         index,
                         target: rule.target.clone(),
+                        extra: Default::default(),
                     }),
+                    extra: Default::default(),
                 },
                 false,
                 &mut budget_rate_micros_per_minute,
@@ -379,6 +400,7 @@ impl LandPolicy {
             landing: None,
             fields,
             budget_rate_micros_per_minute,
+            extra: Default::default(),
         })
     }
 
@@ -426,6 +448,7 @@ impl LandPolicy {
                 Sourced {
                     value,
                     source: Source::new("invocation", format!("request.{key}"), None),
+                    extra: Default::default(),
                 },
             );
         }

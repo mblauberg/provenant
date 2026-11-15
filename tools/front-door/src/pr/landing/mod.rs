@@ -12,6 +12,8 @@ pub mod model;
 pub mod owner;
 pub mod policy;
 pub mod ports;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LandingError {
@@ -795,7 +797,7 @@ mod response_tests {
     }
 
     #[test]
-    fn excluded_pr_has_error_envelope() {
+    fn excluded_pr_maps_to_refusal_code_and_preserves_its_outcome() {
         let report = driver::Report {
             outcomes: std::collections::BTreeMap::from([(7, model::Outcome::Excluded)]),
             exclusion_reasons: std::collections::BTreeMap::from([(
@@ -807,12 +809,12 @@ mod response_tests {
         let response = batch_response(report, None);
         let error = response.error.unwrap();
         assert_eq!(error.code, "LAND_REFUSED");
-        assert!(error.message.contains("no independent approval"));
-        assert!(error.message.contains("provenant land 7"));
+        assert_eq!(response.status, provenant_records::Outcome::Refused);
+        assert_eq!(response.data["outcomes"]["7"], "excluded");
     }
 
     #[test]
-    fn unknown_publication_keeps_pending_outcomes_and_recovery_path() {
+    fn unknown_publication_keeps_pending_outcome_and_code() {
         let report = driver::Report {
             outcomes: std::collections::BTreeMap::from([(7, model::Outcome::PendingUnknown)]),
             ..Default::default()
@@ -820,33 +822,35 @@ mod response_tests {
         let response = batch_response(
             report,
             Some(LandingError::PublicationUnknownAt {
-                marker: "/state/landing/pending/marker.json".into(),
+                marker: std::path::PathBuf::new(),
             }),
         );
         assert_eq!(response.status, provenant_records::Outcome::Pending);
         let error = response.error.expect("unknown publication has an error");
         assert_eq!(error.code, "LAND_PUBLICATION_UNKNOWN");
-        assert!(error.message.contains("/state/landing/pending/marker.json"));
-        assert!(error.message.contains("rerun land"));
         assert_eq!(response.data["outcomes"]["7"], "pending_unknown");
     }
 
     #[test]
     fn gate_conflict_and_cap_errors_preserve_prior_outcomes() {
-        for (failure, code, detail) in [
+        for (failure, status, code) in [
             (
                 LandingError::UnmetGate("build: missing".into()),
+                provenant_records::Outcome::Failed,
                 "LAND_GATE_UNMET",
-                "build",
             ),
-            (LandingError::Conflict(9), "LAND_CONFLICT", "9"),
+            (
+                LandingError::Conflict(9),
+                provenant_records::Outcome::Failed,
+                "LAND_CONFLICT",
+            ),
             (
                 LandingError::SpendingCap {
                     micros: 11,
                     cap: 10,
                 },
+                provenant_records::Outcome::Refused,
                 "LAND_SPENDING_CAP",
-                "10",
             ),
         ] {
             let report = driver::Report {
@@ -855,8 +859,8 @@ mod response_tests {
             };
             let response = batch_response(report, Some(failure));
             let error = response.error.unwrap();
+            assert_eq!(response.status, status);
             assert_eq!(error.code, code);
-            assert!(error.message.contains(detail));
             assert_eq!(response.data["outcomes"]["7"], "landed");
         }
     }

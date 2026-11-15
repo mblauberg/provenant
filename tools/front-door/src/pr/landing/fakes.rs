@@ -230,7 +230,6 @@ impl ReviewRecords for FakeReviews {
 }
 #[derive(Default)]
 pub struct FakeRepo {
-    pub command_calls: Vec<PendingAttempt>,
     pub command_result: Option<Result<PublishResult, LandingError>>,
     pub command_publishes: bool,
     pub target: String,
@@ -265,7 +264,6 @@ impl Repo for FakeRepo {
         _command: &provenant_records::landing::RepositoryCommand,
         attempt: &PendingAttempt,
     ) -> Result<PublishResult, LandingError> {
-        self.command_calls.push(attempt.clone());
         if self.command_publishes {
             self.target = attempt.candidate.commit.clone();
         }
@@ -481,6 +479,7 @@ impl GateRunner for FakeGate {
                 result,
                 pool: self.pool.clone(),
                 duration_seconds: self.duration_seconds,
+                extra: Default::default(),
             });
         }
         self.results

@@ -277,6 +277,7 @@ fn run_inner(
                 approval_evidence: Vec::new(),
                 accepted: None,
                 base_branch: info.base_branch,
+                extra: Default::default(),
             };
             report.outcomes.insert(number, Outcome::Landed);
             let result = repo.follow_local(&pr);
@@ -391,6 +392,7 @@ fn run_inner(
             let cost = if durations.is_empty() {
                 CostEstimate::Unknown {
                     reason: "gate pool or duration unavailable".into(),
+                    extra: Default::default(),
                 }
             } else {
                 cleanup_unpublished(
@@ -546,6 +548,7 @@ fn run_inner(
                     settled: None,
                     dispatched: Some(Vec::new()),
                     started_at: super::reconcile::now_seconds(),
+                    extra: Default::default(),
                 };
                 receipt::record_pending(request.state, &attempt)?;
                 let mut progress = Vec::new();
@@ -719,6 +722,7 @@ fn run_inner(
                     settled: None,
                     dispatched: None,
                     started_at: None,
+                    extra: Default::default(),
                 };
                 reconcile::settle(request.state, &mut attempt, record, None)?;
                 let record = reconcile::finish_settled(
@@ -838,56 +842,7 @@ pub(super) mod tests {
     pub(crate) fn fixture(
         count: u64,
     ) -> (FakeForge, FakeRepo, FakeGate, LandSettings, GateDefinition) {
-        use super::super::ports::{Approval, PullRequestInfo, PullRequestState};
-        let mut forge = FakeForge {
-            direct_push: true,
-            target_branch: "main".into(),
-            ..FakeForge::default()
-        };
-        for n in 1..=count {
-            let head = format!("{n:040x}");
-            forge.pull_requests.insert(
-                n,
-                PullRequestInfo {
-                    number: n,
-                    head: head.clone(),
-                    base_branch: "main".into(),
-                    author: "author".into(),
-                    state: PullRequestState::Open,
-                    merged_commit: None,
-                    stack: None,
-                },
-            );
-            forge.heads.insert(n, head.clone());
-            forge.approvals_at_head.insert(
-                (n, head),
-                vec![Approval {
-                    reference: format!("approval-{n}"),
-                    reviewer: "reviewer".into(),
-                }],
-            );
-        }
-        let repo = FakeRepo {
-            target: "a".repeat(40),
-            valid_commit_ids: true,
-            ..FakeRepo::default()
-        };
-        let gate = FakeGate {
-            auto: true,
-            ..FakeGate::default()
-        };
-        let settings = LandSettings {
-            batch_wait_seconds: 0,
-            publish_settle_seconds: 0,
-            pr_ci: provenant_cli::domains::PrCiSettings {
-                mode: provenant_cli::domains::PrCiMode::None,
-                ..Default::default()
-            },
-            ..LandSettings::default()
-        };
-        let mut definition = super::super::receipt::tests::definition();
-        definition.checks = vec!["ci-status".into()];
-        (forge, repo, gate, settings, definition)
+        super::super::test_support::LandingFixture::driver_case(count)
     }
 
     #[test]
@@ -900,6 +855,7 @@ pub(super) mod tests {
             (false, false, true),
         ] {
             let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
+            let initial_target = repo.target.clone();
             let command = provenant_records::landing::RepositoryCommand {
                 argv: vec!["publisher".into()],
                 unknown_exit_code: 75,
@@ -935,9 +891,11 @@ pub(super) mod tests {
             } else {
                 assert!(result.is_err());
             }
-            assert!(!repo.command_calls.is_empty());
-            assert!(forge.merge_attempts.is_empty());
-            assert!(repo.push_attempts.iter().all(|name| name != "main"));
+            assert_eq!(repo.target != initial_target, published);
+            assert_eq!(
+                forge.pull_requests[&1].state,
+                crate::pr::landing::ports::PullRequestState::Open
+            );
             let pending = receipt::pending(state.path(), "fake-repository", "main")?;
             if published || refused {
                 assert!(pending.is_empty());
@@ -947,7 +905,6 @@ pub(super) mod tests {
                         .iter()
                         .any(|attempt| attempt.publish.mode == PublishMode::Command)
                 );
-                let calls = repo.command_calls.len();
                 assert!(
                     exercise(
                         &mut forge,
@@ -959,10 +916,17 @@ pub(super) mod tests {
                         false,
                         state.path()
                     )
-                    .is_err()
+                    .is_err_and(|error| matches!(error, LandingError::PublicationUnknownAt { .. }))
                 );
-                assert_eq!(repo.command_calls.len(), calls);
-                assert!(forge.merge_attempts.is_empty());
+                let retained = receipt::pending(state.path(), "fake-repository", "main")?;
+                assert!(retained.iter().any(|attempt| {
+                    attempt.publish.mode == PublishMode::Command && attempt.settled.is_none()
+                }));
+                assert_eq!(repo.target, initial_target);
+                assert_eq!(
+                    forge.pull_requests[&1].state,
+                    crate::pr::landing::ports::PullRequestState::Open
+                );
             }
         }
         Ok(())
@@ -1010,36 +974,9 @@ pub(super) mod tests {
         state: &std::path::Path,
         approvals: Approvals<'_>,
     ) -> Result<Report, LandingError> {
-        let mut policy = LandPolicy::resolve(
-            settings,
-            &BTreeMap::new(),
-            None,
-            None,
-            &LandOverride::default(),
+        super::super::test_support::LandingFixture::exercise_with(
+            forge, repo, runner, settings, definition, numbers, shadow, state, approvals,
         )
-        .map_err(|e| LandingError::Failed(e.to_string()))?;
-        policy.publication_port = super::super::resolve_land_port(repo.project_path(), state)?;
-        run(
-            forge,
-            repo,
-            runner,
-            &mut FakeAlarms::default(),
-            Request {
-                pins: &Default::default(),
-                numbers,
-                target: "main",
-                settings,
-                policy: &policy,
-                gate: definition,
-                shadow,
-                state,
-                approvals,
-            },
-        )
-        .map_err(|error| match error {
-            LandingError::RunFailed { cause, .. } => *cause,
-            error => error,
-        })
     }
 
     #[test]
@@ -1432,13 +1369,13 @@ pub(super) mod tests {
         )?;
         assert!(gate.observed.len() <= 7);
         assert_eq!(report.outcomes[&4], Outcome::Red);
-        assert!(
-            report
-                .receipts
-                .iter()
-                .any(|record| record.outcomes.get(&4) == Some(&Outcome::Red)
-                    && record.cost == CostEstimate::Known { micros: 1 })
-        );
+        assert!(report.receipts.iter().any(|record| record.outcomes.get(&4)
+            == Some(&Outcome::Red)
+            && record.cost
+                == CostEstimate::Known {
+                    micros: 1,
+                    extra: Default::default(),
+                }));
         assert!(
             report
                 .warnings
@@ -1954,10 +1891,13 @@ pub(super) mod tests {
                         approval_evidence: Vec::new(),
                         accepted: None,
                         base_branch: "main".into(),
+                        extra: Default::default(),
                     },
                     commit: "candidate".into(),
                     tree: "tree".into(),
+                    extra: Default::default(),
                 }],
+                extra: Default::default(),
             };
             repo.refs
                 .insert(candidate.ref_name.clone(), candidate.commit.clone());
@@ -1980,13 +1920,16 @@ pub(super) mod tests {
                     publish: PublishDecision {
                         mode,
                         reason: "test".into(),
+                        extra: Default::default(),
                     },
                     cost: CostEstimate::Unknown {
                         reason: "test".into(),
+                        extra: Default::default(),
                     },
                     settled: None,
                     dispatched: None,
                     started_at: None,
+                    extra: Default::default(),
                 },
             )?;
             let result = reconcile::recover_pending(
@@ -2034,10 +1977,13 @@ pub(super) mod tests {
                         approval_evidence: Vec::new(),
                         accepted: None,
                         base_branch: "main".into(),
+                        extra: Default::default(),
                     },
                     commit: "candidate".into(),
                     tree: "tree".into(),
+                    extra: Default::default(),
                 }],
+                extra: Default::default(),
             };
             repo.refs
                 .insert(candidate.ref_name.clone(), candidate.commit.clone());
@@ -2056,13 +2002,16 @@ pub(super) mod tests {
                     publish: PublishDecision {
                         mode,
                         reason: "test".into(),
+                        extra: Default::default(),
                     },
                     cost: CostEstimate::Unknown {
                         reason: "test".into(),
+                        extra: Default::default(),
                     },
                     settled: None,
                     dispatched: None,
                     started_at: None,
+                    extra: Default::default(),
                 },
             )?;
             let result = reconcile::recover_pending(
@@ -2089,9 +2038,16 @@ pub(super) mod tests {
         }
         Ok(())
     }
+    #[derive(Clone, Copy)]
+    enum RecoveryChange {
+        Head,
+        Approval,
+        Base,
+        Closed,
+    }
     fn recovery_does_not_retry_changed_pr(
         mode: PublishMode,
-        change: &str,
+        change: RecoveryChange,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
         let policy = LandPolicy::resolve(
@@ -2116,29 +2072,31 @@ pub(super) mod tests {
                     approval_evidence: Vec::new(),
                     accepted: None,
                     base_branch: "main".into(),
+                    extra: Default::default(),
                 },
                 commit: "candidate".into(),
                 tree: "tree".into(),
+                extra: Default::default(),
             }],
+            extra: Default::default(),
         };
         repo.refs
             .insert(candidate.ref_name.clone(), candidate.commit.clone());
         match change {
-            "head" => {
+            RecoveryChange::Head => {
                 forge.heads.insert(1, "new-head".into());
                 forge.pull_requests.get_mut(&1).unwrap().head = "new-head".into();
             }
-            "approval" => {
+            RecoveryChange::Approval => {
                 forge.approvals_at_head.clear();
             }
-            "base" => {
+            RecoveryChange::Base => {
                 forge.pull_requests.get_mut(&1).unwrap().base_branch = "other".into();
             }
-            "closed" => {
+            RecoveryChange::Closed => {
                 forge.pull_requests.get_mut(&1).unwrap().state =
                     super::super::ports::PullRequestState::Closed;
             }
-            _ => unreachable!(),
         }
         receipt::record_pending(
             state.path(),
@@ -2152,13 +2110,16 @@ pub(super) mod tests {
                 publish: PublishDecision {
                     mode,
                     reason: "fixture".into(),
+                    extra: Default::default(),
                 },
                 cost: CostEstimate::Unknown {
                     reason: "fixture".into(),
+                    extra: Default::default(),
                 },
                 settled: None,
                 dispatched: None,
                 started_at: None,
+                extra: Default::default(),
             },
         )?;
         let result = reconcile::recover_pending(
@@ -2175,7 +2136,7 @@ pub(super) mod tests {
         );
         assert!(forge.merges.is_empty());
         assert!(repo.pushes.is_empty());
-        if mode == PublishMode::RestOrdered && change != "closed" {
+        if mode == PublishMode::RestOrdered && !matches!(change, RecoveryChange::Closed) {
             assert!(matches!(
                 result,
                 Err(LandingError::PublicationUnknownAt { .. })
@@ -2191,31 +2152,17 @@ pub(super) mod tests {
         Ok(())
     }
     #[test]
-    fn recovery_revalidates_heads() -> Result<(), Box<dyn std::error::Error>> {
+    fn recovery_revalidates_saved_approval_head_base_and_open_state()
+    -> Result<(), Box<dyn std::error::Error>> {
         for mode in [PublishMode::FastForward, PublishMode::RestOrdered] {
-            recovery_does_not_retry_changed_pr(mode, "head")?;
-        }
-        Ok(())
-    }
-    #[test]
-    fn recovery_revalidates_approvals() -> Result<(), Box<dyn std::error::Error>> {
-        for mode in [PublishMode::FastForward, PublishMode::RestOrdered] {
-            recovery_does_not_retry_changed_pr(mode, "approval")?;
-        }
-        Ok(())
-    }
-    #[test]
-    fn recovery_revalidates_bases() -> Result<(), Box<dyn std::error::Error>> {
-        for mode in [PublishMode::FastForward, PublishMode::RestOrdered] {
-            recovery_does_not_retry_changed_pr(mode, "base")?;
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn recovery_does_not_retry_closed_pr() -> Result<(), Box<dyn std::error::Error>> {
-        for mode in [PublishMode::FastForward, PublishMode::RestOrdered] {
-            recovery_does_not_retry_changed_pr(mode, "closed")?;
+            for change in [
+                RecoveryChange::Head,
+                RecoveryChange::Approval,
+                RecoveryChange::Base,
+                RecoveryChange::Closed,
+            ] {
+                recovery_does_not_retry_changed_pr(mode, change)?;
+            }
         }
         Ok(())
     }
@@ -2243,9 +2190,11 @@ pub(super) mod tests {
                         approval_evidence: Vec::new(),
                         accepted: None,
                         base_branch: "main".into(),
+                        extra: Default::default(),
                     },
                     commit: format!("step-{number}"),
                     tree: format!("tree-{number}"),
+                    extra: Default::default(),
                 })
                 .collect();
             let candidate = Candidate {
@@ -2254,6 +2203,7 @@ pub(super) mod tests {
                 tree: "tree-2".into(),
                 ref_name: "land/test".into(),
                 steps,
+                extra: Default::default(),
             };
             repo.refs
                 .insert(candidate.ref_name.clone(), candidate.commit.clone());
@@ -2275,13 +2225,16 @@ pub(super) mod tests {
                     publish: PublishDecision {
                         mode: PublishMode::RestOrdered,
                         reason: "fixture".into(),
+                        extra: Default::default(),
                     },
                     cost: CostEstimate::Unknown {
                         reason: "fixture".into(),
+                        extra: Default::default(),
                     },
                     settled: None,
                     dispatched: None,
                     started_at: None,
+                    extra: Default::default(),
                 },
             )?;
             let mut recovered = Vec::new();
@@ -2336,10 +2289,13 @@ pub(super) mod tests {
                     approval_evidence: Vec::new(),
                     accepted: None,
                     base_branch: "main".into(),
+                    extra: Default::default(),
                 },
                 commit: "candidate".into(),
                 tree: "tree".into(),
+                extra: Default::default(),
             }],
+            extra: Default::default(),
         };
         repo.refs
             .insert(candidate.ref_name.clone(), candidate.commit.clone());
@@ -2359,13 +2315,16 @@ pub(super) mod tests {
                 publish: PublishDecision {
                     mode: PublishMode::RestOrdered,
                     reason: "fixture".into(),
+                    extra: Default::default(),
                 },
                 cost: CostEstimate::Unknown {
                     reason: "fixture".into(),
+                    extra: Default::default(),
                 },
                 settled: None,
                 dispatched: None,
                 started_at: None,
+                extra: Default::default(),
             },
         )?;
         let mut recovered = Vec::new();
@@ -2410,9 +2369,11 @@ pub(super) mod tests {
                 approval_evidence: Vec::new(),
                 accepted: None,
                 base_branch: "main".into(),
+                extra: Default::default(),
             },
             commit: "candidate".into(),
             tree: "tree".into(),
+            extra: Default::default(),
         }];
         use super::super::ports::{Forge, PullRequestState, StackMembership};
         forge.pull_requests.get_mut(&1).unwrap().stack = Some(StackMembership {
@@ -2487,9 +2448,11 @@ pub(super) mod tests {
                     approval_evidence: Vec::new(),
                     accepted: None,
                     base_branch: "main".into(),
+                    extra: Default::default(),
                 },
                 commit: format!("step-{n}"),
                 tree: format!("tree-{n}"),
+                extra: Default::default(),
             })
             .collect();
         receipt::record_pending(state.path(), &attempt)?;
@@ -2546,9 +2509,11 @@ pub(super) mod tests {
                     approval_evidence: Vec::new(),
                     accepted: None,
                     base_branch: "main".into(),
+                    extra: Default::default(),
                 },
                 commit: format!("step-{n}"),
                 tree: format!("tree-{n}"),
+                extra: Default::default(),
             })
             .collect();
         attempt.dispatched = Some(vec![1]);
@@ -2620,9 +2585,11 @@ pub(super) mod tests {
                     approval_evidence: Vec::new(),
                     accepted: None,
                     base_branch: "main".into(),
+                    extra: Default::default(),
                 },
                 commit: format!("step-{n}"),
                 tree: format!("tree-{n}"),
+                extra: Default::default(),
             })
             .collect();
         let candidate = Candidate {
@@ -2631,6 +2598,7 @@ pub(super) mod tests {
             tree: "tree-2".into(),
             ref_name: "land/test".into(),
             steps,
+            extra: Default::default(),
         };
         repo.refs
             .insert(candidate.ref_name.clone(), candidate.commit.clone());
@@ -2651,13 +2619,16 @@ pub(super) mod tests {
                 publish: PublishDecision {
                     mode: PublishMode::RestOrdered,
                     reason: "fixture".into(),
+                    extra: Default::default(),
                 },
                 cost: CostEstimate::Unknown {
                     reason: "fixture".into(),
+                    extra: Default::default(),
                 },
                 settled: None,
                 dispatched: None,
                 started_at: None,
+                extra: Default::default(),
             },
         )?;
         let mut recovered = Vec::new();
@@ -2711,9 +2682,11 @@ pub(super) mod tests {
                     approval_evidence: Vec::new(),
                     accepted: None,
                     base_branch: "main".into(),
+                    extra: Default::default(),
                 },
                 commit: format!("step-{n}"),
                 tree: format!("tree-{n}"),
+                extra: Default::default(),
             })
             .collect();
         let candidate = Candidate {
@@ -2722,6 +2695,7 @@ pub(super) mod tests {
             tree: "tree-2".into(),
             ref_name: "land/test".into(),
             steps,
+            extra: Default::default(),
         };
         repo.refs
             .insert(candidate.ref_name.clone(), candidate.commit.clone());
@@ -2742,13 +2716,16 @@ pub(super) mod tests {
                 publish: PublishDecision {
                     mode: PublishMode::RestOrdered,
                     reason: "fixture".into(),
+                    extra: Default::default(),
                 },
                 cost: CostEstimate::Unknown {
                     reason: "fixture".into(),
+                    extra: Default::default(),
                 },
                 settled: None,
                 dispatched: None,
                 started_at: None,
+                extra: Default::default(),
             },
         )?;
         let mut recovered = Vec::new();
@@ -2819,10 +2796,13 @@ pub(super) mod tests {
                         approval_evidence: Vec::new(),
                         accepted: None,
                         base_branch: "main".into(),
+                        extra: Default::default(),
                     },
                     commit: commit.into(),
                     tree: "tree".into(),
+                    extra: Default::default(),
                 }],
+                extra: Default::default(),
             };
             repo.refs.insert(candidate.ref_name.clone(), commit.into());
             receipt::record_pending(
@@ -2837,13 +2817,16 @@ pub(super) mod tests {
                     publish: PublishDecision {
                         mode: PublishMode::RestOrdered,
                         reason: "fixture".into(),
+                        extra: Default::default(),
                     },
                     cost: CostEstimate::Unknown {
                         reason: "fixture".into(),
+                        extra: Default::default(),
                     },
                     settled: None,
                     dispatched: None,
                     started_at: None,
+                    extra: Default::default(),
                 },
             )?;
         }
