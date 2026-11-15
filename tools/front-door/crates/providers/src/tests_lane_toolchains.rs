@@ -109,9 +109,6 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
     // Spec: docs/specs/supervisor.md#native-environment-and-sandbox-tool-stores
     let path_fixture = tempfile::tempdir()?;
     let home = path_fixture.path().join("host-home");
-    let xdg_cache = path_fixture.path().join("xdg/cache");
-    let xdg_data = path_fixture.path().join("xdg/data");
-    let xdg_config = path_fixture.path().join("xdg/config");
     let selected_node = path_fixture.path().join("nvm/versions/node/v24.0.1");
     let later_node = path_fixture.path().join("later-node-prefix");
     let selected_bin = selected_node.join("bin");
@@ -136,24 +133,84 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
         ),
         ("PATH".to_owned(), path),
         ("HOME".to_owned(), home.clone().into_os_string()),
-        (
-            "XDG_CACHE_HOME".to_owned(),
-            xdg_cache.clone().into_os_string(),
-        ),
-        (
-            "XDG_DATA_HOME".to_owned(),
-            xdg_data.clone().into_os_string(),
-        ),
-        (
-            "XDG_CONFIG_HOME".to_owned(),
-            xdg_config.clone().into_os_string(),
-        ),
     ]);
-    let host_var = |name: &str| host.get(name).cloned();
-    let expected_npm = home.join(".npm");
-    let expected_corepack = xdg_cache.join("node/corepack");
-    let expected_pnpm_cache = xdg_cache.join("pnpm");
-    let expected_pnpm_store = xdg_data.join("pnpm/store");
+    // Native preparation inherits the runner's environment directly. The
+    // host lookup for cache binding must agree with those inherited XDG and
+    // package-manager values; only HOME and PATH are fixture overrides.
+    let native_host_environment = std::env::vars_os().collect::<Vec<_>>();
+    let host_var = |name: &str| {
+        host.get(name).cloned().or_else(|| {
+            native_host_environment
+                .iter()
+                .find(|(key, _)| key.to_str().is_some_and(|key| key == name))
+                .map(|(_, value)| value.clone())
+        })
+    };
+    let host_value = |name: &str| {
+        host_var(name).or_else(|| {
+            let uppercase = name.to_ascii_uppercase();
+            (uppercase != name).then(|| host_var(&uppercase)).flatten()
+        })
+    };
+    let selector_values = |env: &[(std::ffi::OsString, std::ffi::OsString)], key: &str| {
+        let mut values = env
+            .iter()
+            .filter(|(name, _)| {
+                name.to_str()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(key))
+            })
+            .map(|(_, value)| value.clone())
+            .collect::<Vec<_>>();
+        values.sort();
+        values
+    };
+    let expected_npm = host_value("npm_config_cache")
+        .map(std::path::PathBuf::from)
+        .or_else(
+            || match crate::package_cache::npm_global_cache(&home, &host_var) {
+                crate::package_cache::Setting::Missing => {
+                    Some(crate::package_cache::npm_default_cache(&home))
+                }
+                crate::package_cache::Setting::Present(path) => path,
+            },
+        );
+    let expected_corepack = host_value("COREPACK_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            let base = host_var("XDG_CACHE_HOME")
+                .or_else(|| host_var("LOCALAPPDATA"))
+                .map(std::path::PathBuf::from);
+            match base {
+                Some(path) => path.is_absolute().then(|| path.join("node/corepack")),
+                None => home
+                    .is_absolute()
+                    .then(|| home.join(".cache/node/corepack")),
+            }
+        });
+    let expected_pnpm_cache = host_value("pnpm_config_cache_dir")
+        .or_else(|| host_value("npm_config_cache_dir"))
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            match crate::package_cache::pnpm_global_path(&home, &host_var, "cacheDir", "cache-dir")
+            {
+                crate::package_cache::Setting::Missing => {
+                    Some(crate::package_cache::pnpm_default_cache(&home, &host_var))
+                }
+                crate::package_cache::Setting::Present(path) => path,
+            }
+        });
+    let expected_pnpm_store = host_value("pnpm_config_store_dir")
+        .or_else(|| host_value("npm_config_store_dir"))
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            match crate::package_cache::pnpm_global_path(&home, &host_var, "storeDir", "store-dir")
+            {
+                crate::package_cache::Setting::Missing => {
+                    Some(crate::package_cache::pnpm_default_store(&home, &host_var))
+                }
+                crate::package_cache::Setting::Present(path) => path,
+            }
+        });
     let keychain_root = tempfile::tempdir()?;
     let account_home = keychain_root.path().join("accounts/agy-work");
     let keychain = account_home.join("Library/Keychains/login.keychain-db");
@@ -228,53 +285,53 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
             assert_eq!(selected_home, account_home);
             assert_eq!(
                 configured("npm_config_cache").as_ref(),
-                Some(&expected_npm),
+                expected_npm.as_ref(),
                 "Agy must bind npm's default cache while its account HOME differs"
             );
             assert_eq!(
                 configured("COREPACK_HOME").as_ref(),
-                Some(&expected_corepack),
+                expected_corepack.as_ref(),
                 "Agy must bind Corepack downloads while its account HOME differs"
             );
             assert_eq!(
                 configured("pnpm_config_cache_dir")
                     .or_else(|| configured("npm_config_cache_dir"))
                     .as_ref(),
-                Some(&expected_pnpm_cache),
-                "Agy must bind pnpm cache to the fixed host XDG path"
+                expected_pnpm_cache.as_ref(),
+                "Agy must bind pnpm cache to the host-configured path"
             );
             assert_eq!(
                 configured("pnpm_config_store_dir")
                     .or_else(|| configured("npm_config_store_dir"))
                     .as_ref(),
-                Some(&expected_pnpm_store),
-                "Agy must bind pnpm store to the fixed host XDG path"
+                expected_pnpm_store.as_ref(),
+                "Agy must bind pnpm store to the host-configured path"
             );
         }
         if id == "opencode" {
             assert_eq!(
                 configured("npm_config_cache"),
-                None,
-                "OpenCode keeps npm's host HOME default"
+                host_value("npm_config_cache").map(std::path::PathBuf::from),
+                "OpenCode keeps the host npm selector"
             );
             assert_eq!(
                 configured("COREPACK_HOME").as_ref(),
-                Some(&expected_corepack),
+                expected_corepack.as_ref(),
                 "OpenCode keeps private XDG state while Corepack downloads stay shared"
             );
             assert_eq!(
                 configured("pnpm_config_cache_dir")
                     .or_else(|| configured("npm_config_cache_dir"))
                     .as_ref(),
-                Some(&expected_pnpm_cache),
-                "OpenCode binds pnpm cache to the fixed host XDG path"
+                expected_pnpm_cache.as_ref(),
+                "OpenCode binds pnpm cache to the host-configured path"
             );
             assert_eq!(
                 configured("pnpm_config_store_dir")
                     .or_else(|| configured("npm_config_store_dir"))
                     .as_ref(),
-                Some(&expected_pnpm_store),
-                "OpenCode binds pnpm store to the fixed host XDG path"
+                expected_pnpm_store.as_ref(),
+                "OpenCode binds pnpm store to the host-configured path"
             );
             assert!(prepared.env.iter().any(|(key, value)| {
                 key == "XDG_CACHE_HOME" && value == "/fixture/state/cache"
@@ -287,7 +344,11 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
                 "pnpm_config_cache_dir",
                 "pnpm_config_store_dir",
             ] {
-                assert!(configured(key).is_none(), "{id} injected {key}");
+                assert_eq!(
+                    selector_values(&prepared.env, key),
+                    selector_values(&native_host_environment, key),
+                    "{id} changed or injected {key}"
+                );
             }
         }
     }
