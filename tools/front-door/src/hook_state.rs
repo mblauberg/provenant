@@ -501,6 +501,7 @@ mod tests {
             &script,
             r##"#!/bin/sh
 case "$*" in
+  probe) exit 0 ;;
   *worktree*) printf '%s\n' '{"total":3}' '{"worktree":{"path":"/primary"}}' '{"worktree":{"path":"/lane","branch":"refs/heads/lane"}}' ;;
   *--all*) printf '%s\n' '{"total":0,"next":null}' ;;
   *) printf '%s\n' '{"total":2,"next":null}' '{"cursor":2,"lane":{"key":{"graph":"g","node":"a","attempt":1},"attempt_id":"a","state":"running"}}' ;;
@@ -510,6 +511,20 @@ esac
         )
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // A process forked by a concurrent test may still hold the write
+        // descriptor until it execs, so exec can briefly fail with ETXTBSY.
+        // The descriptor is closed here, so one successful exec settles it.
+        for _ in 0..100 {
+            match std::process::Command::new(&script).arg("probe").status() {
+                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                result => {
+                    assert!(result.unwrap().success());
+                    break;
+                }
+            }
+        }
         let executor = SystemExecutor::new(3).unwrap();
         let cli = Cli {
             exe: script,

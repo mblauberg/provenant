@@ -311,8 +311,10 @@ mod tests {
         inputs.workspaces.push(project.clone());
         let roots = provenant_os::fs::bind_roots(&inputs)?;
         assert_eq!(roots.state.as_path(), state);
+        // Installed release assets under the state root are expected
+        // containment, not an advisory overlap.
         assert!(
-            roots
+            !roots
                 .state
                 .warnings()
                 .iter()
