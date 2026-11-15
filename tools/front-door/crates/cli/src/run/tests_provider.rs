@@ -982,12 +982,12 @@ fn settled_auth_uses_only_the_selected_registered_account() -> Result<(), Box<dy
 fn codex_native_home_comes_from_the_route_account_registration()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
-    let mut inputs =
-        provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+    let home = temp.path().join("home");
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), temp.path().join("checkout"));
     inputs.state_dir = Some(temp.path().join("state"));
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
     provenant_os::fixture::private_state_dir(roots.state.as_path())?;
-    let account_home = roots.home.join("registered-codex");
+    let account_home = home.join("registered-codex");
     std::fs::create_dir_all(&account_home)?;
     std::fs::write(
         roots.state.as_path().join("config.toml"),
