@@ -1,7 +1,7 @@
 //! Scheduled host work. Deadlines live on disk; this process owns no timers.
 use provenant_cli::Globals;
 use provenant_confinement::worktrees::WorkerObserver;
-use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget, WallTime};
+use provenant_core::{Clock, DurationMicros, WaitBudget, WallTime};
 use provenant_os::{
     clock::SystemClock,
     fs::{Directory, LockMode, PublishMode},
@@ -58,41 +58,6 @@ fn write_result(
         .atomic_write(file.as_ref(), purpose, &bytes, PublishMode::Replace)
         .map_err(|error| error.to_string())?;
     Ok(())
-}
-
-/// Rebuild pending markers and collect old, terminal graph checkpoints using
-/// the same cutoff for manual and scheduled collection.
-pub(crate) fn collect_graph_checkpoints(
-    state: &provenant_core::StateRoot,
-    projects: impl IntoIterator<Item = provenant_core::ProjectId>,
-    retention_days: u64,
-    dry_run: bool,
-    clock: &dyn Clock,
-) -> Result<usize, String> {
-    if dry_run {
-        return Ok(0);
-    }
-    let mut removed = 0usize;
-    for project in projects {
-        provenant_fabric_runtime::graph::FileJournal::rebuild_pending(state, project)
-            .map_err(|error| error.to_string())?;
-        let before_ns = i128::from(
-            clock
-                .wall_now()
-                .map_err(|error| error.to_string())?
-                .as_micros(),
-        ) * 1_000
-            - i128::from(retention_days) * 86_400 * 1_000_000_000;
-        removed += provenant_fabric_runtime::graph::FileJournal::collect_terminal(
-            state,
-            project,
-            before_ns,
-            &CancelToken::new(),
-            clock,
-        )
-        .map_err(|error| error.to_string())?;
-    }
-    Ok(removed)
 }
 
 /// The cadence lock is held by the caller. Spawn errors retain a due deadline;
@@ -192,16 +157,6 @@ pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
         let collected = (|| -> Result<(), String> {
             let config = provenant_cli::config_reads::read_for(&resolved.roots, "tick")
                 .map_err(|error| error.to_string())?;
-            collect_graph_checkpoints(
-                &resolved.roots.state,
-                provenant_config::registered_projects(&resolved.roots)
-                    .map_err(|error| error.to_string())?
-                    .into_iter()
-                    .map(|binding| binding.project_id()),
-                config.gc.graph_checkpoint_days,
-                false,
-                &clock,
-            )?;
             crate::worktrees::scheduled_gc(globals, config.gc.idle_days, workers)
         })();
         write_gc_result(

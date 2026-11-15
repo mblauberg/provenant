@@ -661,7 +661,6 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
     let gc = store.gc_temporary(
         &Directory::open_anchor(execution.state_root.as_path())?,
         7,
-        30,
         provenant_core::WallTime::from_micros(86_400_000_150)?,
         false,
         &call,

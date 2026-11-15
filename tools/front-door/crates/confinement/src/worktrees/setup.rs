@@ -52,44 +52,64 @@ pub(super) fn branch_name(
         cancel,
     );
     let evidence_key = format!("{}:{requested}", context.binding.project_id());
-    if let Err(error) = provenant_config::record_port_command(
+    let publication = match provenant_config::record_port_command(
         &state,
         "naming",
         ports.naming.source,
         "derive",
         &evidence_key,
         &execution,
+        provenant_config::PortReceiptLifetime::AgeDays {
+            days: provenant_config::DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS,
+        },
     ) {
-        return fallback(format!("could not record command evidence: {error}"));
-    }
+        Ok(publication) => publication,
+        Err(error) => return fallback(format!("could not record command evidence: {error}")),
+    };
+    let durability_warning = match publication {
+        provenant_config::PortCommandPublication::Durable => None,
+        provenant_config::PortCommandPublication::VisibleDurabilityUnconfirmed { cause } => Some(
+            format!("command receipt is visible but durability is unconfirmed: {cause}"),
+        ),
+    };
+    let fallback_after_publication = |reason: String| {
+        let (name, warning) = fallback(reason);
+        let warning = match (warning, durability_warning.as_ref()) {
+            (Some(warning), Some(receipt)) => Some(format!("{warning}; {receipt}")),
+            (Some(warning), None) => Some(warning),
+            (None, Some(receipt)) => Some(receipt.clone()),
+            (None, None) => None,
+        };
+        (name, warning)
+    };
     if execution.disposition != provenant_config::PortCommandDisposition::Succeeded {
-        return fallback(format!("returned {:?}", execution.disposition));
+        return fallback_after_publication(format!("returned {:?}", execution.disposition));
     }
     let Some(outcome) = execution.outcome.as_ref() else {
-        return fallback("returned no execution evidence".into());
+        return fallback_after_publication("returned no execution evidence".into());
     };
     if !execution.capture_complete() {
-        return fallback("returned incomplete output".into());
+        return fallback_after_publication("returned incomplete output".into());
     }
     let output = match String::from_utf8(outcome.stdout.bytes.clone()) {
         Ok(output) => output,
-        Err(_) => return fallback("returned non-UTF-8 output".into()),
+        Err(_) => return fallback_after_publication("returned non-UTF-8 output".into()),
     };
     let output = output
         .strip_suffix("\r\n")
         .or_else(|| output.strip_suffix('\n'))
         .unwrap_or(&output);
     if output.is_empty() && outcome.stdout.bytes.is_empty() {
-        return (requested.to_owned(), None);
+        return (requested.to_owned(), durability_warning);
     }
     if output.is_empty()
         || output.trim() != output
         || output.contains(['\n', '\r'])
         || crate::repo::GitRefName::branch(output).is_err()
     {
-        return fallback("returned an invalid derived branch".into());
+        return fallback_after_publication("returned an invalid derived branch".into());
     }
-    (output.to_owned(), None)
+    (output.to_owned(), durability_warning)
 }
 
 pub(super) fn run(
@@ -98,6 +118,7 @@ pub(super) fn run(
     branch: &str,
     cancel: &CancelToken,
 ) -> Vec<String> {
+    let mut durability_warning = None;
     let result = (|| -> Result<(), String> {
         let state = context.host_state().map_err(|error| error.to_string())?;
         let settings = provenant_config::WorktreeSettings::read(&state)
@@ -134,26 +155,38 @@ pub(super) fn run(
             branch,
             path.display()
         );
-        provenant_config::record_port_command(
+        let publication = provenant_config::record_port_command(
             &state,
             "post_create",
             ports.post_create.source,
             "create",
             &evidence_key,
             &execution,
+            provenant_config::PortReceiptLifetime::AgeDays {
+                days: provenant_config::DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS,
+            },
         )
         .map_err(|error| format!("could not record command evidence: {error}"))?;
+        if let provenant_config::PortCommandPublication::VisibleDurabilityUnconfirmed { cause } =
+            publication
+        {
+            durability_warning = Some(format!(
+                "post-create receipt is visible but durability is unconfirmed: {cause}"
+            ));
+        }
         match execution.disposition {
             provenant_config::PortCommandDisposition::Succeeded => Ok(()),
             disposition => Err(format!("post-create command returned {disposition:?}")),
         }
     })();
     match result {
-        Ok(()) => Vec::new(),
+        Ok(()) => durability_warning.into_iter().collect(),
         Err(error) => {
             let warning = format!("{error}; worktree remains usable at {}", path.display());
             let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
-            vec![warning]
+            let mut warnings: Vec<_> = durability_warning.into_iter().collect();
+            warnings.push(warning);
+            warnings
         }
     }
 }

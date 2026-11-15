@@ -1,5 +1,9 @@
 //! One sourced, versioned declaration for repository integration ports.
 use provenant_records::{CanonicalV1, FileDigest};
+pub use provenant_records::{
+    DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, PortCommandBackend, PortCommandDisposition,
+    PortCommandReceipt, PortReceiptLifetime, PortSource,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -15,18 +19,13 @@ pub const PORTS_SCHEMA_VERSION: u16 = 2;
 
 mod evidence;
 pub use evidence::{
-    PortCommandReceiptProof, PortEvidenceError, port_command_receipt_proof, record_port_command,
+    PortCommandPublication, PortCommandReceiptCollectionLock, PortCommandReceiptEntry,
+    PortCommandReceiptInventory, PortCommandReceiptProof, PortEvidenceError, PortReceiptIssue,
+    port_command_receipt_proof, port_command_receipts, record_port_command,
+    remove_port_command_receipt, try_lock_port_command_receipts,
 };
 const MAX_PORTS_BYTES: u64 = 65_536;
 const BRANCH_TOKEN: &str = "<branch>";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PortSource {
-    Builtin,
-    Host,
-    Project,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PortBackendKind {
@@ -81,17 +80,6 @@ impl PortCommand {
 
 /// Typed result from executing a repository command port. The bounded process
 /// capture is retained as evidence; callers decide whether to render it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PortCommandDisposition {
-    Succeeded,
-    Unknown,
-    Refused,
-    TimedOut,
-    Cancelled,
-    Failed,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PortCommandExecution {
     pub command_digest: FileDigest,

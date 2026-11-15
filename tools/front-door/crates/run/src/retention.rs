@@ -70,6 +70,12 @@ pub struct ProviderStateIssue {
     pub reason: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RetentionPass {
+    ProviderState { days: u64, logs_days: u64 },
+    AttemptScratch { days: u64 },
+}
+
 impl RunStore {
     /// Retain the source until a continuation has been accepted. GC also
     /// spares sources of nonterminal continuations until their copy completes.
@@ -96,8 +102,8 @@ impl RunStore {
         Ok(lease)
     }
 
-    /// Host maintenance: only indexed terminal attempts, across projects in
-    /// this store. Only the temporary cleanup hint changes, never records or digests.
+    /// Collect provider state and logs for indexed terminal attempts across
+    /// projects, without changing attempt records or their digests.
     pub fn gc_provider_state(
         &self,
         expected: &Directory,
@@ -119,29 +125,40 @@ impl RunStore {
         dry_run: bool,
         call: &Request<'_>,
     ) -> Result<ProviderStateGc> {
-        self.gc_retention(expected, days, logs_days, now, dry_run, false, None, call)
+        self.gc_retention(
+            expected,
+            now,
+            dry_run,
+            RetentionPass::ProviderState { days, logs_days },
+            None,
+            call,
+        )
     }
 
-    /// Pressure collection is limited to expired temporary payloads.
+    /// Collect temporary payload from settled attempts after its declared age.
     pub fn gc_temporary(
         &self,
         expected: &Directory,
         days: u64,
-        logs_days: u64,
         now: WallTime,
         dry_run: bool,
         call: &Request<'_>,
     ) -> Result<ProviderStateGc> {
-        self.gc_retention(expected, days, logs_days, now, dry_run, true, None, call)
+        self.gc_retention(
+            expected,
+            now,
+            dry_run,
+            RetentionPass::AttemptScratch { days },
+            None,
+            call,
+        )
     }
 
-    /// Pressure collection restricted to the selected project identities.
-    #[allow(clippy::too_many_arguments)]
+    /// Restrict attempt scratch collection to selected project identities.
     pub fn gc_temporary_for_projects(
         &self,
         expected: &Directory,
         days: u64,
-        logs_days: u64,
         now: WallTime,
         dry_run: bool,
         projects: &[provenant_core::ProjectId],
@@ -149,38 +166,39 @@ impl RunStore {
     ) -> Result<ProviderStateGc> {
         self.gc_retention(
             expected,
-            days,
-            logs_days,
             now,
             dry_run,
-            true,
+            RetentionPass::AttemptScratch { days },
             Some(projects),
             call,
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn gc_retention(
         &self,
         expected: &Directory,
-        days: u64,
-        logs_days: u64,
         now: WallTime,
         dry_run: bool,
-        temporary_only: bool,
+        pass: RetentionPass,
         projects: Option<&[provenant_core::ProjectId]>,
         call: &Request<'_>,
     ) -> Result<ProviderStateGc> {
-        if !(1..=3650).contains(&logs_days) {
-            return Err(RunError::Validation("logs_days_range"));
-        }
         if !self.root.metadata()?.same_identity(&expected.metadata()?) {
             return Err(RunError::unsafe_path(".", PathCheck::Identity));
         }
+        let (days, logs_days) = match pass {
+            RetentionPass::ProviderState { days, logs_days } => {
+                if !(1..=3650).contains(&logs_days) {
+                    return Err(RunError::Validation("logs_days_range"));
+                }
+                (days, Some(logs_days))
+            }
+            RetentionPass::AttemptScratch { days } => (days, None),
+        };
         if !(1..=3650).contains(&days) {
             return Err(RunError::Validation("provider_state_days_range"));
         }
-        if !dry_run {
+        if !dry_run && let Some(logs_days) = logs_days {
             // Finished reaction rows age out with the run's logs.
             self.prune_reactions(
                 now.as_micros().div_euclid(1_000_000) - (logs_days as i64) * 86_400,
@@ -253,7 +271,10 @@ impl RunStore {
                         ..
                     }
                 ) && record.exit_evidence.is_none();
-                if age >= DAY_MICROS && !uncertain_loss {
+                if matches!(pass, RetentionPass::AttemptScratch { .. })
+                    && age >= DAY_MICROS.saturating_mul(days as i64)
+                    && !uncertain_loss
+                {
                     let temporary = path.with_file_name("tmp");
                     let collection = (|| -> Result<()> {
                         collect_temporary(
@@ -316,7 +337,7 @@ impl RunStore {
                         record_issue(&mut report, temporary, &error);
                     }
                 }
-                if temporary_only {
+                if matches!(pass, RetentionPass::AttemptScratch { .. }) {
                     return Ok(());
                 }
                 if continuing {
@@ -324,7 +345,7 @@ impl RunStore {
                         "a continuation still needs this provider state",
                     ));
                 }
-                if age >= DAY_MICROS.saturating_mul(logs_days as i64) {
+                if logs_days.is_some_and(|days| age >= DAY_MICROS.saturating_mul(days as i64)) {
                     {
                         collect_logs(
                             &attempt,
@@ -1600,13 +1621,31 @@ mod tests {
         dry_run: bool,
         call: &Request<'_>,
     ) -> crate::Result<ProviderStateGc> {
-        store.gc_provider_state(
-            &Directory::open_anchor(context.state_root.as_path())?,
-            days,
-            WallTime::from_micros(200 + age).map_err(|_| RunError::Validation("fixture time"))?,
-            dry_run,
-            call,
-        )
+        sweep_with_days(store, context, days, days, age, dry_run, call)
+    }
+
+    fn sweep_with_days(
+        store: &RunStore,
+        context: &ExecutionContext,
+        provider_state_days: u64,
+        scratch_days: u64,
+        age: i64,
+        dry_run: bool,
+        call: &Request<'_>,
+    ) -> crate::Result<ProviderStateGc> {
+        let root = Directory::open_anchor(context.state_root.as_path())?;
+        let now =
+            WallTime::from_micros(200 + age).map_err(|_| RunError::Validation("fixture time"))?;
+        let mut report = store.gc_provider_state(&root, provider_state_days, now, dry_run, call)?;
+        let mut scratch = store.gc_temporary(&root, scratch_days, now, dry_run, call)?;
+        report.removed.append(&mut scratch.removed);
+        report.tightened.append(&mut scratch.tightened);
+        report.attempt_tmp.append(&mut scratch.attempt_tmp);
+        report.attempt_logs.append(&mut scratch.attempt_logs);
+        report.expired_events += scratch.expired_events;
+        report.kept.append(&mut scratch.kept);
+        report.errors.append(&mut scratch.errors);
+        Ok(report)
     }
 
     #[test]
@@ -1890,7 +1929,6 @@ mod tests {
         let scoped = store.gc_temporary_for_projects(
             &Directory::open_anchor(context.state_root.as_path())?,
             7,
-            30,
             WallTime::from_micros(200 + 31 * DAY_MICROS)?,
             false,
             &[provenant_core::ProjectId::from_bytes([99; 16])],
@@ -1901,7 +1939,6 @@ mod tests {
         let report = store.gc_temporary(
             &Directory::open_anchor(context.state_root.as_path())?,
             7,
-            30,
             WallTime::from_micros(200 + 31 * DAY_MICROS)?,
             false,
             &call,
@@ -1994,6 +2031,14 @@ mod tests {
             &call,
         )?;
         assert!(report.attempt_tmp.is_empty());
+        let scratch = store.gc_temporary(
+            &Directory::open_anchor(context.state_root.as_path())?,
+            1,
+            WallTime::from_micros(clock.wall_now()?.as_micros() + DAY_MICROS)?,
+            false,
+            &call,
+        )?;
+        assert!(scratch.attempt_tmp.is_empty());
         assert!(temporary.exists());
         Ok(())
     }
@@ -2022,18 +2067,18 @@ mod tests {
         fs::create_dir(temporary.join("candidate-0"))?;
         fs::write(temporary.join("candidate-0/payload.lock"), "payload")?;
         assert!(
-            sweep(&store, &context, 7, DAY_MICROS - 1, false, &call)?
+            sweep(&store, &context, 7, 7 * DAY_MICROS - 1, false, &call)?
                 .attempt_tmp
                 .is_empty()
         );
         assert!(temporary.exists());
-        let preview = sweep(&store, &context, 7, DAY_MICROS, true, &call)?;
+        let preview = sweep(&store, &context, 7, 7 * DAY_MICROS, true, &call)?;
         assert!(preview.errors.is_empty(), "{:?}", preview.errors);
         assert_eq!(preview.attempt_tmp.len(), 1);
         assert_eq!(preview.attempt_tmp[0].path, temporary);
         assert!(preview.attempt_tmp[0].bytes >= 8192);
         assert!(temporary.join("candidate-0/payload.lock").exists());
-        let applied = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
+        let applied = sweep(&store, &context, 7, 7 * DAY_MICROS, false, &call)?;
         assert!(applied.errors.is_empty(), "{:?}", applied.errors);
         assert_eq!(applied.attempt_tmp.len(), 1);
         assert_eq!(applied.attempt_tmp[0].path, temporary);
@@ -2041,7 +2086,7 @@ mod tests {
         assert!(!temporary.exists());
         assert!(attempt.join("terminal-pending.json").exists());
         assert!(
-            sweep(&store, &context, 7, DAY_MICROS, false, &call)?
+            sweep(&store, &context, 7, 7 * DAY_MICROS, false, &call)?
                 .attempt_tmp
                 .is_empty()
         );
@@ -2093,12 +2138,12 @@ mod tests {
         let candidate = attempt.join("provider-state/candidate-0");
         fs::create_dir(candidate.join("cache"))?;
         fs::write(candidate.join("cache/payload"), "regenerable")?;
-        let preview = sweep(&store, &context, 7, DAY_MICROS, true, &call)?;
+        let preview = sweep_with_days(&store, &context, 30, 7, 7 * DAY_MICROS, true, &call)?;
         assert_eq!(preview.attempt_tmp.len(), 1);
         assert!(preview.attempt_tmp[0].bytes >= 8192);
         assert!(!preview.errors.is_empty());
         assert!(temporary.exists());
-        let applied = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
+        let applied = sweep_with_days(&store, &context, 30, 7, 7 * DAY_MICROS, false, &call)?;
         assert_eq!(applied.attempt_tmp.len(), 1);
         assert!(applied.attempt_tmp[0].bytes >= 8192);
         assert!(!applied.errors.is_empty());
@@ -2148,7 +2193,7 @@ mod tests {
             clock: &slow,
             cancel: &cancel,
         };
-        let report = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
+        let report = sweep(&store, &context, 7, 7 * DAY_MICROS, false, &call)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert!(report.kept.is_empty(), "{:?}", report.kept);
         assert!(!attempt.join("tmp").exists());
@@ -2177,7 +2222,7 @@ mod tests {
             let candidate = attempt.join("provider-state/candidate-0");
             fs::create_dir(candidate.join("cache"))?;
             fs::write(candidate.join("cache/payload"), "regenerable")?;
-            let report = sweep(&store, &context, days, DAY_MICROS, false, &call)?;
+            let report = sweep(&store, &context, days, days * DAY_MICROS, false, &call)?;
             assert!(
                 report
                     .errors
@@ -2188,7 +2233,7 @@ mod tests {
             assert!(temporary.exists());
             assert!(!candidate.join("auth.json").exists());
             assert!(!candidate.join("cache").exists());
-            assert_eq!(attempt.join(EXPIRED).exists(), days == 1);
+            assert!(attempt.join(EXPIRED).exists());
             let retained: bool = store.db.query_row(
                 "SELECT tmp_retained FROM attempts WHERE id=?1",
                 [id.to_string()],
@@ -2221,9 +2266,9 @@ mod tests {
                 |row| row.get(0),
             )?)
         };
-        sweep(&store, &context, 7, DAY_MICROS, true, &call)?;
+        sweep(&store, &context, 7, 7 * DAY_MICROS, true, &call)?;
         assert!(retained()?);
-        sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
+        sweep(&store, &context, 7, 7 * DAY_MICROS, false, &call)?;
         assert!(!attempt.join("tmp").exists());
         assert!(!retained()?);
         let raw: Vec<u8> = store.db.query_row(
@@ -2257,7 +2302,7 @@ mod tests {
         assert!(candidate.join("auth.json").exists());
         assert!(!attempt.join(EXPIRED).exists());
         assert!(!attempt.join("provider-history").exists());
-        let report = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
+        let report = sweep(&store, &context, 7, 7 * DAY_MICROS, false, &call)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert!(!candidate.join("auth.json").exists());
         assert!(!candidate.join("claude-config/.credentials.json").exists());
@@ -2411,31 +2456,28 @@ mod tests {
         let run = store.attempt_dir(input.attempt_id, false)?;
         let publication =
             run.try_lock_existing(OsStr::new("publication.lock"), LockMode::Shared)?;
-        assert_eq!(
-            sweep(&store, &context, 1, DAY_MICROS, false, &call)?
+        assert!(
+            !sweep(&store, &context, 1, DAY_MICROS, false, &call)?
                 .kept
-                .len(),
-            1
+                .is_empty()
         );
         assert!(attempt.join("tmp/keep").exists());
         drop(publication);
         let writer = directory.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?;
-        assert_eq!(
-            sweep(&store, &context, 1, DAY_MICROS, false, &call)?
+        assert!(
+            !sweep(&store, &context, 1, DAY_MICROS, false, &call)?
                 .kept
-                .len(),
-            1
+                .is_empty()
         );
         assert!(attempt.join("tmp/keep").exists());
         drop(writer);
         let evidence = attempt.join(input.attempt_id.to_string());
         fs::create_dir_all(&evidence)?;
         fs::write(evidence.join("reservation.json"), "{}")?;
-        assert_eq!(
-            sweep(&store, &context, 1, DAY_MICROS, false, &call)?
+        assert!(
+            !sweep(&store, &context, 1, DAY_MICROS, false, &call)?
                 .kept
-                .len(),
-            1
+                .is_empty()
         );
         assert!(attempt.join("tmp/keep").exists());
         assert!(
@@ -2463,13 +2505,13 @@ mod tests {
             .mode(0o700)
             .create(attempt.join("tmp"))?;
         std::os::unix::fs::symlink(outside.path(), attempt.join("tmp/escape"))?;
-        let report = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
+        let report = sweep(&store, &context, 7, 7 * DAY_MICROS, false, &call)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert_eq!(report.attempt_tmp.len(), 1);
         assert!(!attempt.join("tmp").exists());
         assert_eq!(fs::read_to_string(outside.path().join("keep"))?, "outside");
         std::os::unix::fs::symlink(outside.path(), attempt.join("tmp"))?;
-        let report = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
+        let report = sweep(&store, &context, 7, 7 * DAY_MICROS, false, &call)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert_eq!(report.attempt_tmp.len(), 1);
         assert!(!attempt.join("tmp").exists());
@@ -2497,7 +2539,7 @@ mod tests {
         fs::write(outside.path().join("keep"), "outside")?;
         symlink(outside.path(), temporary.join("candidate-0/.tmpX/escape"))?;
 
-        let report = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
+        let report = sweep(&store, &context, 7, 7 * DAY_MICROS, false, &call)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert_eq!(report.attempt_tmp.len(), 1);
         assert_eq!(report.attempt_tmp[0].path, temporary);

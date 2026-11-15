@@ -22,6 +22,7 @@ mod json;
 mod jsonc;
 mod path_wire;
 pub mod policy;
+pub mod port_receipt;
 mod source;
 pub mod telemetry_context;
 mod trace;
@@ -41,6 +42,10 @@ pub use input::{InputWarning, decode_input};
 pub use json::{DecodeError, EncodeError, Limits, RecordHeader, decode, decode_v1, encode};
 pub use jsonc::{JsoncDocument, JsoncToken, JsoncTokenKind, decode_jsonc};
 pub use path_wire::{PathWire, PathWireError, StructuredPathWire};
+pub use port_receipt::{
+    DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, PORT_COMMAND_RECEIPT_SCHEMA_VERSION, PortCommandBackend,
+    PortCommandDisposition, PortCommandReceipt, PortReceiptLifetime, PortSource,
+};
 pub use source::{SourceDigest, SourceDigestError, SourceInput, source_digest};
 pub use trace::Trace;
 pub use usage_identity::{

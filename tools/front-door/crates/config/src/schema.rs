@@ -52,6 +52,8 @@ const GC_FIELDS: &[FieldMetadata] = &[
     FieldMetadata::new("critical_free", "string"),
     FieldMetadata::new("lane_cargo_cache_max", "string"),
     FieldMetadata::new("alert_below", "string"),
+    FieldMetadata::new("projects.{project}.regenerable", "array"),
+    FieldMetadata::new("projects.{project}.keep", "array"),
     FieldMetadata::new("projects.{project}.integration_branches", "array"),
     FieldMetadata::new("projects.{project}.keep_paths", "array"),
     FieldMetadata::enumeration("projects.{project}.remote_branches", &["never", "managed"]),

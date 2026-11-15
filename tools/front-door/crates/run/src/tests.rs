@@ -3359,7 +3359,7 @@ fn receipt_busy_then_replay_converges_and_retains_conflict() -> TestResult {
 }
 
 #[test]
-fn pressure_collection_uses_configured_logs_age() -> TestResult {
+fn provider_state_collection_uses_configured_logs_age() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
@@ -3380,9 +3380,9 @@ fn pressure_collection_uses_configured_logs_age() -> TestResult {
         .execute("UPDATE reactions SET settled_at=100", [])?;
     let directory = provenant_os::fs::Directory::open_anchor(context.state_root.as_path())?;
     let now = provenant_core::WallTime::from_micros((100 + 10 * 86_400) * 1_000_000)?;
-    store.gc_temporary(&directory, 7, 20, now, false, &call)?;
+    store.gc_provider_state_with_logs(&directory, 7, 20, now, false, &call)?;
     assert!(store.reaction(id, &call)?.is_some());
-    store.gc_temporary(&directory, 7, 5, now, false, &call)?;
+    store.gc_provider_state_with_logs(&directory, 7, 5, now, false, &call)?;
     assert!(store.reaction(id, &call)?.is_none());
     Ok(())
 }
