@@ -635,35 +635,53 @@ pub(crate) fn admit(
 pub(crate) const SYSTEM_TOOL_SEARCH_PATH: &str = "/usr/bin:/bin";
 pub(crate) const HOMEBREW_NODE_PREFIXES: [&str; 2] = ["/opt/homebrew", "/usr/local"];
 
-/// Resolve a Homebrew Node prefix only when the requester's PATH names its bin
-/// directory and both Node and npm resolve inside that prefix. Native package
-/// config lookup must not execute npm to discover its prefix.
-pub(crate) fn homebrew_node_prefix(host_var: &dyn Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+/// Resolve the Node installation used by the first npm and node on requester
+/// PATH. Native package config lookup must not execute npm to discover its
+/// prefix. Unknown shims and split installations remain unresolved.
+pub(crate) fn selected_node_prefix(host_var: &dyn Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
     let path = host_var("PATH")?;
-    for directory in std::env::split_paths(&path) {
-        for prefix in HOMEBREW_NODE_PREFIXES.map(Path::new) {
-            let bin = prefix.join("bin");
-            if directory != bin || !bin.join("node").is_file() || !bin.join("npm").is_file() {
-                continue;
-            }
-            let Ok(canonical_prefix) = std::fs::canonicalize(prefix) else {
-                continue;
-            };
-            let Ok(canonical_bin) = std::fs::canonicalize(&bin) else {
-                continue;
-            };
-            let Ok(node) = std::fs::canonicalize(bin.join("node")) else {
-                continue;
-            };
-            let Ok(npm) = std::fs::canonicalize(bin.join("npm")) else {
-                continue;
-            };
-            if canonical_bin == canonical_prefix.join("bin")
-                && node.starts_with(&canonical_prefix)
-                && npm.starts_with(&canonical_prefix)
-            {
-                return Some(prefix.to_owned());
-            }
+    let npm = first_path_executable(&path, "npm")?;
+    let node = first_path_executable(&path, "node")?;
+    let npm_bin = std::fs::canonicalize(npm.parent()?).ok()?;
+    let node_bin = std::fs::canonicalize(node.parent()?).ok()?;
+    if npm_bin != node_bin {
+        return None;
+    }
+    let npm = std::fs::canonicalize(npm).ok()?;
+    let node = std::fs::canonicalize(node).ok()?;
+
+    // Homebrew's stable global config lives at the prefix root, even though
+    // node and npm resolve into a versioned Cellar directory.
+    for prefix in HOMEBREW_NODE_PREFIXES.map(Path::new) {
+        let bin = prefix.join("bin");
+        let Ok(canonical_prefix) = std::fs::canonicalize(prefix) else {
+            continue;
+        };
+        let Ok(canonical_bin) = std::fs::canonicalize(&bin) else {
+            continue;
+        };
+        if npm_bin == canonical_bin
+            && npm.starts_with(&canonical_prefix)
+            && node.starts_with(&canonical_prefix)
+        {
+            return Some(prefix.to_owned());
+        }
+    }
+
+    let prefix = node.parent()?.parent()?.to_owned();
+    (npm.starts_with(&prefix) && node.starts_with(&prefix)).then_some(prefix)
+}
+
+fn first_path_executable(path: &OsStr, name: &str) -> Option<PathBuf> {
+    for directory in std::env::split_paths(path) {
+        // Relative and empty PATH entries depend on the launch cwd. Preserve
+        // the existing selector if that earlier lookup cannot be resolved.
+        if directory.as_os_str().is_empty() || !directory.is_absolute() {
+            return None;
+        }
+        let executable = directory.join(name);
+        if provenant_os::sys::is_executable(&executable) {
+            return Some(executable);
         }
     }
     None
