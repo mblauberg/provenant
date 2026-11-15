@@ -17,6 +17,10 @@ own use, flags and limits. Paths are relative to `tools/front-door/`.
 
 ## Identity and store
 
+Chair custody and session checkpoints derive the actor through the same
+harness-aware inbox identity. When `PROVENANT_SESSION_ID` is unset, custody
+uses the saved session for that actor if one exists.
+
 ### Projects never merge by guess
 
 `ProjectId` derives from the host and canonical Git common directory, so linked

@@ -151,21 +151,25 @@ pub fn chair_process() -> Option<provenant_records::custody::HolderProcess> {
         native_start: parent.identity.native_start,
     })
 }
-pub fn current_chair(context: &Context) -> provenant_records::custody::Chair {
-    provenant_records::custody::Chair {
+pub fn current_chair(
+    context: &Context,
+) -> Result<provenant_records::custody::Chair, EdgeError> {
+    let inbox = context.inbox_address(None)?;
+    let actor = inbox.actor;
+    Ok(provenant_records::custody::Chair {
         extra: Default::default(),
-        host: context.identity.inbox.host,
-        actor: context.identity.inbox.actor,
+        host: inbox.host,
+        actor,
         session: current_session().or_else(|| {
             provenant_workflow::session::chair_session_for(
                 &context.roots.state,
                 context.identity.project,
-                context.identity.inbox.actor,
+                actor,
             )
             .map(|s| s.as_str().to_owned())
         }),
         process: chair_process(),
-    }
+    })
 }
 
 /// Record a lifecycle acquisition without turning advisory custody into admission.

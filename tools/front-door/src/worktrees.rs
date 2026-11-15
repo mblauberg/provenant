@@ -39,6 +39,8 @@ pub(crate) enum Error {
     #[error(transparent)]
     Root(#[from] roots::RootError),
     #[error(transparent)]
+    Fabric(#[from] provenant_cli::fabric::EdgeError),
+    #[error(transparent)]
     Worktree(#[from] WorktreeError),
     #[error(transparent)]
     Permissions(#[from] provenant_confinement::permissions::PermissionError),
@@ -347,7 +349,7 @@ fn execute(
                     if authority.identity.project != context.binding.project_id() {
                         return Err(Error::InvalidScope);
                     }
-                    let chair = provenant_cli::fabric::current_chair(&authority);
+                    let chair = provenant_cli::fabric::current_chair(&authority)?;
                     let retirement = crate::custody::RetirementWriter::open(
                         roots,
                         context.binding.project_id(),
@@ -1282,7 +1284,7 @@ pub(crate) fn retention_event(
             let retirement = crate::custody::RetirementWriter::open(
                 &resolved.roots,
                 context.binding.project_id(),
-                provenant_cli::fabric::current_chair(&authority),
+                provenant_cli::fabric::current_chair(&authority)?,
                 context.clock,
                 cancel,
             )?;
@@ -1464,7 +1466,7 @@ pub(crate) fn land_cleanup(
             if identity.identity.project != project_id {
                 return Err(Error::InvalidScope);
             }
-            let chair = provenant_cli::fabric::current_chair(&identity);
+            let chair = provenant_cli::fabric::current_chair(&identity)?;
             let retirement = crate::custody::RetirementWriter::open(
                 &roots,
                 project_id,
@@ -1928,7 +1930,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                         Some(crate::custody::RetirementWriter::open(
                             roots,
                             context.binding.project_id(),
-                            provenant_cli::fabric::current_chair(&authority),
+                            provenant_cli::fabric::current_chair(&authority)?,
                             context.clock,
                             cancel,
                         )?)

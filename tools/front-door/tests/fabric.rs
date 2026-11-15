@@ -144,6 +144,124 @@ fn custody_claim_adoption_and_release_share_the_mine_view() -> Result {
     );
     rig.assert_v1_root_untouched()
 }
+
+#[test]
+fn chair_custody_matches_checkpoint_identity_for_harnesses_and_overrides() -> Result {
+    let mut rig = TestRig::new()?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric]\nclient_label='terminal'\n",
+    )?;
+    let checkpoint = rig.root.join("checkpoint.md");
+    std::fs::write(&checkpoint, "# Goal\nChair identity fixture.\n")?;
+    let identity = call(&rig, &["fabric", "identity"], 0)?["data"].clone();
+    let project = identity["project"].as_str().ok_or("project identity")?;
+
+    // Spec: docs/specs/fabric.md#identity-and-store
+    let cases: [(&str, Option<(&str, &str)>, Option<&str>, Option<&str>); 5] = [
+        (
+            "codex",
+            Some(("CODEX_THREAD_ID", "chair-fixture")),
+            None,
+            None,
+        ),
+        ("claude", Some(("CLAUDECODE", "1")), None, None),
+        (
+            "codex",
+            Some(("CODEX_THREAD_ID", "chair-fixture")),
+            Some("named-chair"),
+            None,
+        ),
+        ("terminal", None, None, None),
+        (
+            "codex",
+            Some(("CODEX_THREAD_ID", "chair-fixture")),
+            None,
+            Some("explicit-session"),
+        ),
+    ];
+    for (index, (client, marker, agent, session_override)) in cases.into_iter().enumerate() {
+        rig.env.retain(|(key, _)| {
+            ![
+                "PROVENANT_AGENT_LABEL",
+                "PROVENANT_SESSION_ID",
+                "CODEX_THREAD_ID",
+                "CLAUDECODE",
+                "CLAUDE_CODE_SESSION_ID",
+                "CLAUDE_SESSION_ID",
+            ]
+            .iter()
+            .any(|name| key == name)
+        });
+        if let Some((name, value)) = marker {
+            rig.env.push((name.into(), value.into()));
+        }
+        if let Some(agent) = agent {
+            rig.env.push(("PROVENANT_AGENT_LABEL".into(), agent.into()));
+        }
+
+        let session = format!("{client}-chair-{index}");
+        call(
+            &rig,
+            &[
+                "workflow",
+                "session",
+                "save",
+                &session,
+                "--file",
+                checkpoint.to_str().ok_or("checkpoint path")?,
+            ],
+            0,
+        )?;
+        let discovery: Value = serde_json::from_slice(&std::fs::read(rig.state.join(format!(
+            "workflow/projects/{project}/sessions/{session}/discovery.json"
+        )))?)?;
+        if let Some(session_override) = session_override {
+            rig.env
+                .push(("PROVENANT_SESSION_ID".into(), session_override.into()));
+        }
+
+        let subject_id = (40_000 + index).to_string();
+        let subject = format!("issue:{subject_id}");
+        let operation = format!("chair-identity-{index}");
+        let acquired = call(
+            &rig,
+            &[
+                "fabric",
+                "claim",
+                "acquire",
+                &subject,
+                "--operation-id",
+                &operation,
+            ],
+            0,
+        )?;
+        let holder = &acquired["data"]["change"]["record"]["holder"]["chair"];
+        let expected_session = session_override.unwrap_or(&session);
+        assert_eq!(holder["actor"], discovery["chair_actor"]);
+        assert_eq!(holder["session"], expected_session);
+
+        let mine = call(&rig, &["status", "--mine", "--full"], 0)?;
+        let item = mine["data"]["items"]
+            .as_array()
+            .ok_or("custody items")?
+            .iter()
+            .find(|item| item["record"]["subject"]["id"] == subject_id)
+            .ok_or("current chair custody missing from status")?;
+        assert!(item["mine"].as_bool().ok_or("mine status")?);
+        assert_eq!(
+            item["record"]["holder"]["chair"]["actor"],
+            discovery["chair_actor"]
+        );
+        assert_eq!(
+            item["record"]["holder"]["chair"]["session"],
+            expected_session
+        );
+        assert_eq!(item["record"]["subject"]["kind"], "issue");
+    }
+    rig.assert_v1_root_untouched()
+}
+
 #[test]
 fn malformed_operations_and_waits_fail_before_state_creation() -> Result {
     let rig = TestRig::new()?.without_state()?;
