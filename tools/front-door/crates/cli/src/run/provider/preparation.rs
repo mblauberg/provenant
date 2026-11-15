@@ -5517,7 +5517,7 @@ mod route_launch_boundary_regressions {
         let agy_local = agy_entry("default", "local", &home);
         let mut cursor_local = agy_entry("default", "local", &home);
         cursor_local.adapter = "cursor".into();
-        let entries = [cursor_local, agy_local];
+        let entries = [cursor_local, agy_local.clone()];
         let selected = select_retained_account(
             &entries,
             RetainedIdentity {
@@ -5541,7 +5541,7 @@ mod route_launch_boundary_regressions {
 
         let mut cursor_only = agy_entry("local", "cursor-only", &home);
         cursor_only.adapter = "cursor".into();
-        let mismatch_entries = [agy_local, cursor_only];
+        let mismatch_entries = [agy_local.clone(), cursor_only];
         let mismatch = select_retained_account(
             &mismatch_entries,
             RetainedIdentity {
