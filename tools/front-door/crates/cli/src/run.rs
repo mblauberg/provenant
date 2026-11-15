@@ -48,6 +48,27 @@ pub use output::*;
 pub fn provider_executable(name: &str) -> Result<PathBuf, String> {
     provider::find_executable(name)
 }
+
+/// Capture the requester's filtered PATH policy for a project and selected
+/// checkout, resolving linked-checkout roots through the verified inventory.
+pub fn filtered_requester_lane_path(
+    host: Option<&run::HostLaunchContext>,
+    project_path: &Path,
+    worktree_path: &Path,
+    git: &Path,
+    executor: &dyn provenant_os::exec::Executor,
+    cancel: &CancelToken,
+) -> Result<run::FilteredLanePath, String> {
+    provider::confinement::filtered_requester_lane_path(
+        host,
+        project_path,
+        worktree_path,
+        git,
+        executor,
+        cancel,
+    )
+}
+
 #[cfg(feature = "fixture")]
 pub use provider::{apply_fixture_setup, prepare_fixture, writer_fixture_plan};
 pub use provider::{graph_inputs_directory, graph_node_inputs_directory};

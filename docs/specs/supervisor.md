@@ -176,12 +176,13 @@ compare-and-swap.
 Unsandboxed lanes inherit the host environment. `FilteredLanePath` selects
 retained requester PATH, otherwise captured host search path, or process PATH
 only without a host handoff. It filters canonical directories and executable
-symlink targets under the enclosing project and selected worktree, even when
-the requester starts below the checkout root. Lane model/account identity and
-version probes, bare commands and native provider launches share that PATH.
-Sandboxed launches prepend their fixed tool directories and private wrappers;
-PATH entries do not add filesystem or executable grants. Host delivery filters
-its captured host PATH through the same owner for tool lookup. Explicit
+symlink targets under the primary project and selected worktree, including both
+roots for linked checkouts and requesters starting in a subdirectory. Lane
+model/account identity and version probes, bare commands and native provider
+launches share that PATH. Sandboxed launches prepend their fixed tool directories
+and private wrappers; PATH entries do not add filesystem or executable grants.
+Host delivery filters its captured host PATH through the same owner for tool
+lookup. Explicit
 program paths stay explicit. Graph retry saves PATH with its checkpoint under
 one journal lock. Remote peers record their own PATH at ingress because origin
 directories may not exist there.

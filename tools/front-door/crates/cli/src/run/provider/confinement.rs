@@ -893,18 +893,98 @@ pub(super) fn source_identity(path: &Path) -> Result<run::SourceIdentity, String
     })
 }
 
-/// Resolve the enclosing checkout used to exclude project executables from
-/// automatic PATH discovery. A subdirectory is never treated as its own root.
-pub(super) fn requester_path_project_root(path: &Path) -> Result<PathBuf, String> {
-    let path = canonical(path)?;
-    let Some(marker) = path
-        .ancestors()
-        .find(|ancestor| provenant_os::git::repository_marker(ancestor).is_some())
-    else {
-        return Ok(path);
+/// Resolve one PATH policy for the request project and selected worktree.
+/// Git-backed roots come from the shared, verified worktree inventory owner;
+/// a linked checkout contributes both its primary project and selected root.
+pub(in crate::run) fn filtered_requester_lane_path(
+    host: Option<&run::HostLaunchContext>,
+    project_path: &Path,
+    worktree_path: &Path,
+    git: &Path,
+    executor: &dyn provenant_os::exec::Executor,
+    cancel: &provenant_core::CancelToken,
+) -> Result<run::FilteredLanePath, String> {
+    let (project, selected) = requester_path_roots(project_path, git, executor, cancel)?;
+    let selected_worktree = if canonical(project_path)? == canonical(worktree_path)? {
+        selected
+    } else {
+        requester_path_roots(worktree_path, git, executor, cancel)?.1
     };
-    provenant_os::git::repository_path(marker, provenant_os::git::RepositoryPath::Toplevel)
-        .map_err(|error| format!("cannot resolve requester PATH project root: {error}"))
+    run::FilteredLanePath::for_requester(host, &project, &selected_worktree)
+        .map_err(|error| error.to_string())
+}
+
+/// Return the verified primary project root and selected checkout root. A
+/// non-checkout directory remains its own root; linked and separate Git
+/// directories use the canonical common directory and verified inventory.
+fn requester_path_roots(
+    path: &Path,
+    git: &Path,
+    executor: &dyn provenant_os::exec::Executor,
+    cancel: &provenant_core::CancelToken,
+) -> Result<(PathBuf, PathBuf), String> {
+    let path = canonical(path)?;
+    if !path
+        .ancestors()
+        .any(|ancestor| provenant_os::git::repository_marker(ancestor).is_some())
+    {
+        return Ok((path.clone(), path));
+    }
+    let common = provenant_os::git::repository_path_with_cancel(
+        executor,
+        git,
+        &path,
+        provenant_os::git::RepositoryPath::CommonDir,
+        Some(cancel),
+    )
+    .map_err(|error| format!("cannot resolve requester PATH repository: {error}"))?;
+    let selected = provenant_os::git::repository_path_with_cancel(
+        executor,
+        git,
+        &path,
+        provenant_os::git::RepositoryPath::Toplevel,
+        Some(cancel),
+    )
+    .map_err(|error| format!("cannot resolve requester PATH worktree: {error}"))?;
+    Ok((
+        verified_project_root(&common, git, executor, cancel)?,
+        selected,
+    ))
+}
+
+pub(super) fn verified_project_root(
+    common: &Path,
+    git: &Path,
+    executor: &dyn provenant_os::exec::Executor,
+    cancel: &provenant_core::CancelToken,
+) -> Result<PathBuf, String> {
+    let environment = requester_git_environment();
+    let layout = provenant_confinement::worktrees::project_layout_for_common(
+        executor,
+        common,
+        git,
+        &environment,
+        std::time::Duration::from_secs(5),
+        cancel,
+    )
+    .map_err(|error| format!("cannot verify requester PATH project layout: {error}"))?;
+    Ok(layout.root().to_path_buf())
+}
+
+fn requester_git_environment() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    [
+        ("HOME", "/nonexistent"),
+        ("XDG_CONFIG_HOME", "/nonexistent"),
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("GIT_CONFIG_SYSTEM", "/dev/null"),
+        ("GIT_NO_REPLACE_OBJECTS", "1"),
+        ("GIT_NO_LAZY_FETCH", "1"),
+        ("GIT_TERMINAL_PROMPT", "0"),
+        ("LC_ALL", "C"),
+    ]
+    .map(|(key, value)| (key.into(), value.into()))
+    .into()
 }
 
 /// Reopen the graph-bound checkout at launch, refusing a moved or replaced
