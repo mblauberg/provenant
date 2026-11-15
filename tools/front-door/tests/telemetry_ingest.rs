@@ -249,7 +249,7 @@ fn submitted_graph_reports_its_checkpoint_quality() -> Result {
     std::fs::write(
         &document,
         serde_json::to_vec(&json!({
-            "schema_version": 1, "graph_id":"attributed-graph",
+            "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION, "graph_id":"attributed-graph",
             "context": {"pattern":"graph-default", "preset":"example"},
             "nodes": [{
                 "id":"inspect", "prompt":"Review the bounded slice", "access":"read_only",

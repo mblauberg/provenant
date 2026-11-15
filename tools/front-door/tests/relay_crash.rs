@@ -83,7 +83,7 @@ fn advance(
         &clock,
     )?;
     let document: graph::GraphDocument = serde_json::from_value(
-        json!({"schema_version":1,"graph_id":"relay-crash","template_library":{},"nodes":[{"id":"parent","access":"read_only","prompt":"Parent","route":{"alias":"senior"}}]}),
+        json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"relay-crash","template_library":{},"nodes":[{"id":"parent","access":"read_only","prompt":"Parent","route":{"alias":"senior"}}]}),
     )?;
     journal.bind(GraphExecution {
         peer_origin_context: None,

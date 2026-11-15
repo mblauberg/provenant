@@ -1,23 +1,7 @@
 //! End-to-end Fabric commands use the isolated binary rig, never real state.
 mod support;
 use serde_json::{Value, json};
-use support::{Result, TestRig, code};
-fn call(rig: &TestRig, args: &[&str], expected: i64) -> Result<Value> {
-    let mut args = args.to_vec();
-    args.push("--json");
-    let output = rig.command(&args)?;
-    assert_eq!(
-        code(&output),
-        expected,
-        "stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout.bytes),
-        String::from_utf8_lossy(&output.stderr.bytes)
-    );
-    let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert_eq!(value["schema_version"], 1);
-    assert_eq!(value.as_object().ok_or("object")?.len(), 5);
-    Ok(value)
-}
+use support::{Result, TestRig, call, code};
 #[test]
 fn identity_mail_tasks_and_events_use_durable_scoped_receipts() -> Result {
     let rig = TestRig::new()?;
