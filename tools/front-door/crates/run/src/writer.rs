@@ -135,13 +135,19 @@ fn project_location(
     }
 }
 
-fn registered_project_root(
+fn registered_project_layout(
     state: &Path,
     repo: &provenant_confinement::repo::VerifiedRepo,
     executor: &dyn provenant_os::exec::Executor,
     utility: &UtilityRuntime,
     cancel: &CancelToken,
-) -> Result<(provenant_config::ProjectBinding, PathBuf)> {
+) -> Result<(provenant_config::ProjectBinding, worktrees::ProjectLayout)> {
+    if repo.private_git_dir() != repo.common_git_dir() {
+        // A linked checkout is a Git executor only after Git's inventory
+        // proves that it belongs to this common repository.
+        provenant_confinement::verify_worktree(repo, repo.root_path())
+            .map_err(worktrees::WorktreeError::from)?;
+    }
     let location = project_location(repo)?;
     let binding = provenant_config::lookup_project_at_state(state, &location)
         .map_err(error(
@@ -159,11 +165,20 @@ fn registered_project_root(
         Duration::from_secs(5),
         cancel,
     )?;
-    let root = layout
-        .project()
-        .ok_or(worktrees::WorktreeError::ProjectLayoutUnresolved)?
-        .to_path_buf();
-    Ok((binding, root))
+    Ok((binding, layout))
+}
+
+fn same_project_layout(
+    expected: &worktrees::ProjectLayout,
+    actual: &worktrees::ProjectLayout,
+) -> Result<bool> {
+    if expected.root() != actual.root() || expected.project() != actual.project() {
+        return Ok(false);
+    }
+    Ok(expected
+        .directory()
+        .metadata()?
+        .same_identity(&actual.directory().metadata()?))
 }
 
 /// Resolve relative paths from the selected repository's primary root. Git's
@@ -188,8 +203,12 @@ pub fn resolve_reader_source(state: &Path, cwd: &Path, path: &Path) -> Result<Pa
     let repo = selected
         .repository
         .ok_or(RunError::Validation("source needs a Git project"))?;
+    if repo.private_git_dir() != repo.common_git_dir() {
+        provenant_confinement::verify_worktree(&repo, repo.root_path())
+            .map_err(worktrees::WorktreeError::from)?;
+    }
     let location = project_location(&repo)?;
-    let project =
+    let layout =
         if let Some(binding) = provenant_config::lookup_project_at_state(state, &location).map_err(
             error("read source project binding", Some(repo.common_git_dir())),
         )? {
@@ -202,9 +221,6 @@ pub fn resolve_reader_source(state: &Path, cwd: &Path, path: &Path) -> Result<Pa
                 &CancelToken::new(),
             )?;
             layout
-                .project()
-                .ok_or(worktrees::WorktreeError::ProjectLayoutUnresolved)?
-                .to_path_buf()
         } else {
             let read_repo = utility
                 .open_read_repo(&executor, repo.root_path(), budget()?, &CancelToken::new())
@@ -220,10 +236,8 @@ pub fn resolve_reader_source(state: &Path, cwd: &Path, path: &Path) -> Result<Pa
                 &CancelToken::new(),
             )?;
             layout
-                .project()
-                .ok_or(worktrees::WorktreeError::ProjectLayoutUnresolved)?
-                .to_path_buf()
         };
+    let project = layout.project().unwrap_or_else(|| repo.root_path());
     let selected = project.join(path);
     let path = canonicalize(&selected).map_err(|error| {
         if error.is_not_found() {
@@ -271,9 +285,10 @@ fn resolve_writer_with(
     let repo = selected
         .repository
         .ok_or(RunError::Validation("writer needs a Git project"))?;
-    let (binding, project) =
-        registered_project_root(state, &repo, &executor, &utility, &CancelToken::new())?;
-    let selected = project.join(path);
+    let (binding, layout) =
+        registered_project_layout(state, &repo, &executor, &utility, &CancelToken::new())?;
+    let managed_root = layout.root();
+    let selected = managed_root.join(path);
     let path = canonicalize(&selected).map_err(|error| {
         if error.is_not_found() {
             RunError::WorktreeMissing(selected)
@@ -284,13 +299,16 @@ fn resolve_writer_with(
     let custody_project = binding.project_id();
     let extra = provenant_records::ExtraFields::default();
     if !verify {
-        if !path.starts_with(project) {
+        if !path.starts_with(managed_root) {
             return Err(RunError::unsafe_path(path, PathCheck::Containment));
         }
         return Ok(WriterRequest {
             extra,
             custody_project: Some(custody_project),
-            project: project.to_path_buf(),
+            project: layout
+                .project()
+                .unwrap_or_else(|| repo.root_path())
+                .to_path_buf(),
             worktree: path,
         });
     }
@@ -299,7 +317,10 @@ fn resolve_writer_with(
     Ok(WriterRequest {
         extra,
         custody_project: Some(custody_project),
-        project: project.to_path_buf(),
+        project: layout
+            .project()
+            .unwrap_or_else(|| repo.root_path())
+            .to_path_buf(),
         worktree: worktree.path().to_path_buf(),
     })
 }
@@ -307,17 +328,30 @@ fn resolve_writer_with(
 pub struct WriterLaunch {
     pub worktree: VerifiedWorktree,
     pub branch: GitRefName,
-    project_root: PathBuf,
-    project_root_identity: provenant_os::fs::Metadata,
+    layout: worktrees::ProjectLayout,
+    executor_root: PathBuf,
+    executor_root_identity: provenant_os::fs::Metadata,
     pub(crate) base: GitOid,
     pub(crate) custody: Option<(Directory, WriterBinding)>,
     /// Repository observations and caps shared by this writer operation.
     pub(crate) facts: worktrees::RepoFacts,
 }
 impl WriterLaunch {
-    /// The verified primary checkout owning project configuration and scratch.
-    pub fn project_root(&self) -> &Path {
-        &self.project_root
+    /// The verified checkout that owns project configuration, if one exists.
+    pub fn project_root(&self) -> Option<&Path> {
+        self.layout.project()
+    }
+
+    /// Root used for managed worktree paths. Bare repositories use their
+    /// common Git directory and deliberately have no project config owner.
+    pub fn managed_root(&self) -> &Path {
+        self.layout.root()
+    }
+
+    /// Safe checkout to exclude from automatic tool lookup. Bare-backed
+    /// writers use the verified selected linked checkout here.
+    pub fn lane_path_root(&self) -> &Path {
+        self.project_root().unwrap_or(&self.executor_root)
     }
 
     /// The verified branch head captured while preparing this writer.
@@ -950,16 +984,20 @@ fn prepare_writer_with_facts_and_clock(
         &CancelToken::new(),
     )?;
     let custody_project = writer_project_id(request)?;
-    let (binding, project_root) =
-        registered_project_root(state, &repo, &executor, &utility, &cancel)?;
+    let (binding, layout) = registered_project_layout(state, &repo, &executor, &utility, &cancel)?;
     if binding.project_id() != custody_project {
         return Err(RunError::Validation(
             "writer custody project does not match its repository",
         ));
     }
-    if project_root != repo.root_path() {
-        return Err(worktrees::WorktreeError::ProjectLayoutUnresolved.into());
+    match layout.project() {
+        Some(primary)
+            if primary == repo.root_path() && repo.private_git_dir() == repo.common_git_dir() => {}
+        None if repo.private_git_dir() != repo.common_git_dir() => {}
+        _ => return Err(worktrees::WorktreeError::ProjectLayoutUnresolved.into()),
     }
+    let executor_root = repo.root_path().to_path_buf();
+    let executor_root_identity = repo.root_identity();
     let state_dir = Directory::open_anchor(state)?;
     if custody_project != project {
         let references =
@@ -997,8 +1035,9 @@ fn prepare_writer_with_facts_and_clock(
     Ok(WriterLaunch {
         worktree,
         branch,
-        project_root,
-        project_root_identity: repo.root_identity(),
+        layout,
+        executor_root,
+        executor_root_identity,
         base,
         custody: Some((directory, binding)),
         facts: facts.clone(),
@@ -1323,7 +1362,7 @@ fn prepare_writer_git(
     let executor =
         SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
     let old_repo = writer.worktree.repo();
-    let project = writer.project_root.clone();
+    let project = writer.executor_root.clone();
     let path = writer.worktree.path().to_path_buf();
     let common = old_repo.common_dir().try_clone()?;
     let lock_config = |mode| -> Result<provenant_os::fs::LockGuard> {
@@ -1345,14 +1384,18 @@ fn prepare_writer_git(
         .open_repo(&executor, &project, budget()?, cancel)
         .map_err(utility_error("reopen writer repository", Some(&project)))?;
     if repo.root_path() != project
-        || repo.private_git_dir() != repo.common_git_dir()
         || !writer
-            .project_root_identity
+            .executor_root_identity
             .same_identity(&repo.root_identity())
         || !repo.common_identity().same_identity(&common_identity)
     {
         return Err(worktrees::WorktreeError::ProjectLayoutUnresolved.into());
     }
+    let (_, layout) = registered_project_layout(state, &repo, &executor, &utility, cancel)?;
+    if !same_project_layout(&writer.layout, &layout)? {
+        return Err(worktrees::WorktreeError::ProjectLayoutUnresolved.into());
+    }
+    writer.layout = layout;
     let refreshed = provenant_confinement::verify_worktree(&repo, &path)
         .map_err(worktrees::WorktreeError::from)?;
     if !root_identity.same_identity(&refreshed.identity())
@@ -1404,6 +1447,19 @@ fn prepare_writer_git(
             "reopen writer repository after fetch",
             Some(&project),
         ))?;
+    if fresh_repo.root_path() != project
+        || !writer
+            .executor_root_identity
+            .same_identity(&fresh_repo.root_identity())
+        || !fresh_repo.common_identity().same_identity(&common_identity)
+    {
+        return Err(worktrees::WorktreeError::ProjectLayoutUnresolved.into());
+    }
+    let (_, layout) = registered_project_layout(state, &fresh_repo, &executor, &utility, cancel)?;
+    if !same_project_layout(&writer.layout, &layout)? {
+        return Err(worktrees::WorktreeError::ProjectLayoutUnresolved.into());
+    }
+    writer.layout = layout;
     let refreshed = provenant_confinement::verify_worktree(&fresh_repo, &path)
         .map_err(worktrees::WorktreeError::from)?;
     if !root_identity.same_identity(&refreshed.identity())
@@ -2004,6 +2060,105 @@ mod cargo_setup_tests {
             writer
         );
         assert_eq!(binding.common_dir(), git_dir);
+        Ok(())
+    }
+
+    // Spec: docs/specs/run-git.md#project-layout-ownership
+    #[test]
+    fn bare_backed_writer_uses_common_layout_and_verified_linked_executor() -> FixtureResult<()> {
+        if clean_environment_child(stringify!(
+            bare_backed_writer_uses_common_layout_and_verified_linked_executor
+        ))? {
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let seed = root.join("seed");
+        let common = root.join("metadata/project.git");
+        let source = root.join("source");
+        let writer_path = common.join(".worktrees/lane");
+        let home = root.join("home");
+        let state = root.join("state");
+        std::fs::create_dir_all(&seed)?;
+        std::fs::create_dir_all(common.parent().ok_or("common parent")?)?;
+        std::fs::create_dir_all(writer_path.parent().ok_or("writer parent")?)?;
+        std::fs::create_dir(&home)?;
+        provenant_os::fixture::private_state_dir(&state)?;
+        let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
+        let run_git = |cwd: &Path, args: &[&str]| -> FixtureResult<String> {
+            let output = provenant_os::fixture::git_command_at(&git)
+                .env_clear()
+                .envs(provenant_os::fixture::fixture_git_settings())
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &home)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .current_dir(cwd)
+                .args(args)
+                .output()?;
+            if output.status.success() {
+                Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+            } else {
+                Err(String::from_utf8_lossy(&output.stderr).into_owned().into())
+            }
+        };
+        run_git(&root, &["init", "-q", seed.to_str().ok_or("seed path")?])?;
+        run_git(&seed, &["config", "user.name", "Fixture"])?;
+        run_git(&seed, &["config", "user.email", "fixture@example.invalid"])?;
+        std::fs::write(seed.join("README.md"), "bare layout\n")?;
+        run_git(&seed, &["add", "README.md"])?;
+        run_git(&seed, &["commit", "-qm", "initial"])?;
+        run_git(
+            &root,
+            &[
+                "clone",
+                "--bare",
+                seed.to_str().ok_or("seed path")?,
+                common.to_str().ok_or("common path")?,
+            ],
+        )?;
+        run_git(
+            &root,
+            &[
+                "--git-dir",
+                common.to_str().ok_or("common path")?,
+                "worktree",
+                "add",
+                "main",
+                source.to_str().ok_or("source path")?,
+            ],
+        )?;
+        run_git(
+            &root,
+            &[
+                "--git-dir",
+                common.to_str().ok_or("common path")?,
+                "worktree",
+                "add",
+                "-b",
+                "lane",
+                writer_path.to_str().ok_or("writer path")?,
+            ],
+        )?;
+
+        let mut roots = provenant_core::RootInputs::new(home, source.clone());
+        roots.state_dir = Some(state.clone());
+        let roots = roots.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let binding = provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::new(common.clone())?,
+        )?;
+        let request = resolve_writer(&state, &source, Path::new(".worktrees/lane"))?;
+        assert_eq!(request.project, source);
+        assert_eq!(request.worktree, writer_path);
+        assert_eq!(
+            resolve_reader_source(&state, &source, Path::new("README.md"))?,
+            source.join("README.md")
+        );
+        let launch = prepare_writer(&request, &state, binding.project_id())?;
+        assert_eq!(launch.project_root(), None);
+        assert_eq!(launch.managed_root(), common);
+        assert_eq!(launch.lane_path_root(), source);
         Ok(())
     }
 
