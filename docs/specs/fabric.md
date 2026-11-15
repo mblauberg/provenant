@@ -167,13 +167,14 @@ stays queued while the provider continues. After settlement, the graph resumes
 the same provider, model, account and session with the saved instructions as
 the next user turn. It must preserve writer custody and must not fall back to a
 fresh session when retained provider state is missing or expired.
-For native provider launches, the host records the adapter-selected session
-root and compares it with the new prepared launch before invoking the provider.
-The sealed applied route binds provider, model and account to that selection.
-Codex keeps its published v1 HOME selector and validates the exact saved
-session and model there, including a locally discovered account whose selection
-is not persisted in the accounts registry. Other native providers use the
-route-bound selector. The provider receives the exact saved session ID and its
+For native provider launches, the host records one session root for the final
+prepared candidate and binds it to the selected provider, model and account.
+Terminal settlement and the next prepared launch check that host-owned selector
+against the sealed applied route; no mutable account registry lookup or broad
+home scan can redirect identity. Codex uses the selected root to read its
+unchanged v1 rollout metadata and validates the exact saved session and model,
+including a locally discovered account whose selection is not persisted in the
+accounts registry. The provider receives the exact saved session ID and its
 existing stream decoder must confirm that identity and route; missing, expired,
 unreadable or contradictory state stays not-continued. Native account state is
 not scanned or copied into the successor. Sandboxed state continues from

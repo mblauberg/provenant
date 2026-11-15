@@ -400,6 +400,7 @@ pub(super) fn verify_native_continuation(
             &prior_state,
             session,
             &route.model,
+            route.account_key.as_deref(),
             Some(current_root),
         ) {
             Ok(Some(_)) => {}
