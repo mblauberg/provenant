@@ -39,11 +39,11 @@ pub use landed::{
     CommitGraph, IntegrationEdge, LandedBy, Landing, LandingTarget, RepoGraph, Unproven,
     commit_parents, landed,
 };
+pub(crate) use layout::project_layout_for_common_with_bare_setting;
 pub use layout::{
     ProjectLayout, project_layout_for_binding, project_layout_for_checkout,
     project_layout_for_common, project_layout_for_common_at_state, project_layout_git_environment,
 };
-pub(crate) use layout::project_layout_for_common_with_bare_setting;
 pub use lifecycle::*;
 pub use owner::{
     WorktreeOrigin, WorktreeOwner, branch_ownership, load_owner, owned_worktree_paths, prune_owned,

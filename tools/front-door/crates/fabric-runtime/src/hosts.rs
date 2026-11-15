@@ -1160,7 +1160,8 @@ mod tests {
         // Production writes this typed response directly; the strict frame
         // decoder must see every field once and retain each layer's owner.
         let frame = serde_json::to_vec(&response).unwrap();
-        let decoded: PeerResponse = provenant_records::decode(frame.as_slice(), Limits::CONFIG).unwrap();
+        let decoded: PeerResponse =
+            provenant_records::decode(frame.as_slice(), Limits::CONFIG).unwrap();
         assert_eq!(decoded.extra["future_response_field"], "kept");
         let PeerResult::Output { data, extra } = decoded.result else {
             panic!("output response expected");

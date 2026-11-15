@@ -525,7 +525,13 @@ impl RepoFacts {
         cancel: &CancelToken,
     ) -> Result<Vec<u8>, WorktreeError> {
         self.discover_worktree_inventory_inner(
-            cwd, git, environment, executor, timeout, cancel, None,
+            cwd,
+            git,
+            environment,
+            executor,
+            timeout,
+            cancel,
+            None,
         )
     }
 

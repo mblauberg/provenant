@@ -480,10 +480,9 @@ impl UtilityRuntime {
         } else {
             let environment = crate::worktrees::project_layout_git_environment();
             let git = self.git.program()?;
-            let location = provenant_config::ProjectLocation::new(
-                repo.common_git_dir().to_path_buf(),
-            )
-            .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+            let location =
+                provenant_config::ProjectLocation::new(repo.common_git_dir().to_path_buf())
+                    .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
             let binding = provenant_config::lookup_project_at_state(&self.host_state, &location)
                 .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
             let layout = match binding {
@@ -498,14 +497,7 @@ impl UtilityRuntime {
                 None => {
                     let bootstrap = self.bootstrap_lane_roots(repo)?;
                     let trusted_bare = crate::worktrees::RepoFacts::default()
-                        .bare_setting_with_roots(
-                            repo,
-                            executor,
-                            self,
-                            budget,
-                            cancel,
-                            &bootstrap,
-                        )
+                        .bare_setting_with_roots(repo, executor, self, budget, cancel, &bootstrap)
                         .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
                     crate::worktrees::project_layout_for_common_with_bare_setting(
                         executor,
