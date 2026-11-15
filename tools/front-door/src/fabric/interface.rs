@@ -610,7 +610,7 @@ fn bind_submission_subject(
         for child in &mut composite.nodes {
             bind_submission_subject(child, head, subject_missing);
         }
-    } else if node.extra.contains_key("review_behaviour") {
+    } else if node.review_behaviour.is_some() {
         if subject_missing {
             node.prompt.insert_str(0, "No review subject was supplied on the command line; no host diff range is available. Request a pinned subject and base if the brief requires a diff.\n\n");
         }
@@ -2930,7 +2930,7 @@ fn route_choice(input: &Value, raw: Option<&Value>) -> Result<Option<RouteChoice
 /// The role a launched node plays, which `--route role=tier` addresses.
 fn route_role(node: &provenant_fabric_runtime::graph::GraphNode) -> &'static str {
     use provenant_fabric_runtime::graph::{AccessMode, NodeKind};
-    if node.extra.contains_key("review_behaviour")
+    if node.review_behaviour.is_some()
         || provenant_fabric_runtime::graph::is_review_node(node)
     {
         "review"
@@ -3586,7 +3586,7 @@ mod tests {
         named["name"] = json!("handle");
         assert_eq!(explain(&factory, task.clone())?, explain(&factory, named)?);
         let inline =
-            json!({"op":"run","document":{"brief":"inline task","tier":"senior"},"explain":true});
+            json!({"op":"run","document":{"prompt":"inline task","tier":"senior"},"explain":true});
         assert_eq!(
             explain(&factory, inline.clone())?,
             explain(&factory, inline)?
@@ -3595,7 +3595,7 @@ mod tests {
         // source commit are unchanged.
         let controlled = json!({
             "op":"run", "explain":true,
-            "document":{"brief":"Inspect launch policy",
+            "document":{"prompt":"Inspect launch policy",
                 "tier":"senior", "access":"read_only"},
             "attempt":{"host":"local", "confidential":true, "provider_timeout":42}
         });
