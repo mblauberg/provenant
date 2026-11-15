@@ -20,7 +20,7 @@ provenant_sqlite::Schema {
             minor: 3,
             kind: provenant_sqlite::StepKind::Table {
                 name: "provider_session_ready",
-                sql: "CREATE TABLE IF NOT EXISTS provider_session_ready (attempt TEXT PRIMARY KEY REFERENCES attempts(id), generation INTEGER NOT NULL CHECK(generation>0), route_digest TEXT NOT NULL CHECK(length(route_digest)=64), session TEXT CHECK(session IS NULL OR length(session)>0), provider_boot TEXT NOT NULL CHECK(length(provider_boot)>0), provider_pid INTEGER NOT NULL CHECK(provider_pid>0), provider_start INTEGER NOT NULL CHECK(provider_start>0), identity_conflict INTEGER NOT NULL DEFAULT 0 CHECK(identity_conflict IN (0,1)), terminal_confirmed INTEGER NOT NULL DEFAULT 0 CHECK(terminal_confirmed IN (0,1)), CHECK(session IS NOT NULL OR identity_conflict=1)) STRICT",
+                sql: "CREATE TABLE IF NOT EXISTS provider_session_ready (attempt TEXT PRIMARY KEY REFERENCES attempts(id), generation INTEGER NOT NULL CHECK(generation>0), route_digest TEXT NOT NULL CHECK(length(route_digest)=71 AND substr(route_digest,1,7)='sha256:' AND substr(route_digest,8) NOT GLOB '*[^0-9a-f]*'), session TEXT CHECK(session IS NULL OR length(session)>0), provider_boot TEXT NOT NULL CHECK(length(provider_boot)>0), provider_pid INTEGER NOT NULL CHECK(provider_pid>0), provider_start INTEGER NOT NULL CHECK(provider_start>0), identity_conflict INTEGER NOT NULL DEFAULT 0 CHECK(identity_conflict IN (0,1)), terminal_confirmed INTEGER NOT NULL DEFAULT 0 CHECK(terminal_confirmed IN (0,1)), CHECK(session IS NOT NULL OR identity_conflict=1)) STRICT",
             },
         },
         provenant_sqlite::Step {
@@ -34,7 +34,7 @@ provenant_sqlite::Schema {
             minor: 3,
             kind: provenant_sqlite::StepKind::Table {
                 name: "continuation_expectations",
-                sql: "CREATE TABLE IF NOT EXISTS continuation_expectations (attempt TEXT PRIMARY KEY REFERENCES attempts(id), session TEXT NOT NULL CHECK(length(session)>0 AND length(session)<=4096), route_digest TEXT NOT NULL CHECK(length(route_digest)=64)) STRICT",
+                sql: "CREATE TABLE IF NOT EXISTS continuation_expectations (attempt TEXT PRIMARY KEY REFERENCES attempts(id), session TEXT NOT NULL CHECK(length(session)>0 AND length(session)<=4096), route_digest TEXT NOT NULL CHECK(length(route_digest)=71 AND substr(route_digest,1,7)='sha256:' AND substr(route_digest,8) NOT GLOB '*[^0-9a-f]*')) STRICT",
             },
         },
     ],

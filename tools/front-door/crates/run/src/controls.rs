@@ -5576,6 +5576,9 @@ mod tests {
         assert_eq!(admitted_status.cause, None);
 
         let route = crate::tests::route();
+        let expected_route_digest = steer_route_digest(&route)?;
+        assert_eq!(expected_route_digest.len(), 71);
+        assert!(expected_route_digest.starts_with("sha256:"));
         let queued_child = store.record(child, &call)?;
         let starting =
             store.mark_starting(&queued_child, &route, &[], &Default::default(), None, &call)?;
@@ -5598,6 +5601,12 @@ mod tests {
             .continuation_expectation(child, &call)?
             .ok_or("continuation expectation missing")?;
         assert_eq!(saved_expectation.session, "fixture-session");
+        let stored_expectation_digest: String = store.db.query_row(
+            "SELECT route_digest FROM continuation_expectations WHERE attempt=?1",
+            [child.to_string()],
+            |row| row.get(0),
+        )?;
+        assert_eq!(stored_expectation_digest, expected_route_digest);
         let child_running = store
             .claim(child, &clock, &call)?
             .ok_or("child not admitted")?;
@@ -5626,6 +5635,12 @@ mod tests {
             &source,
             &call,
         )?);
+        let stored_ready_digest: String = store.db.query_row(
+            "SELECT route_digest FROM provider_session_ready WHERE attempt=?1",
+            [child.to_string()],
+            |row| row.get(0),
+        )?;
+        assert_eq!(stored_ready_digest, expected_route_digest);
         let resumed_status = store
             .record(id, &call)?
             .steering
