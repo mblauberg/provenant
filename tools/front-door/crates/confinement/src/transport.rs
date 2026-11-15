@@ -174,6 +174,24 @@ impl LaneRoots {
         Ok(Self::new(roots))
     }
 
+    /// Roots already proved before a linked checkout's project layout is
+    /// known. This bootstrap is intentionally limited to the selected checkout,
+    /// explicit runtime roots, and host-managed roots under its common dir.
+    pub(crate) fn bootstrap_for_repository(
+        root: &Path,
+        private: &Path,
+        common: &Path,
+        extra: &Self,
+        host_state: &Path,
+    ) -> Result<Self, TransportError> {
+        let mut roots = extra.0.clone();
+        if private != common {
+            roots.push(root.to_path_buf());
+        }
+        roots.extend(Self::host_only(common, host_state)?.0);
+        Ok(Self::new(roots))
+    }
+
     pub fn into_paths(self) -> Vec<PathBuf> {
         self.0
     }

@@ -428,6 +428,19 @@ mod tests {
                 .windows(b"branch refs/heads/linked\0".len())
                 .any(|field| field == b"branch refs/heads/linked\0")
         );
+        // A forced `core.bare=true` inventory is not itself evidence that an
+        // unbound common directory has no project owner.
+        provenant_os::fixture::run_git(&bare, &["config", "--local", "--unset", "core.bare"])?;
+        git.invalidate_repositories();
+        assert!(git.worktrees(&linked).is_err());
+        provenant_os::fixture::run_git(&bare, &["config", "--local", "core.bare", "true"])?;
+        git.invalidate_repositories();
+        let listing = git.worktrees(&linked)?;
+        assert!(
+            listing
+                .windows(b"bare\0".len())
+                .any(|field| field == b"bare\0")
+        );
         // A linked checkout may write its own config.worktree. It cannot make
         // the common bare repository appear to be a primary checkout.
         provenant_os::fixture::run_git(&bare, &["config", "extensions.worktreeConfig", "true"])?;
