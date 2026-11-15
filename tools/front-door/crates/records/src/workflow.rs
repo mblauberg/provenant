@@ -51,7 +51,6 @@ pub struct RiskFactors {
 }
 /// Compiled factor floors used by the composition edge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RiskPolicy {
     pub minimum: RiskTier,
     /// Matched boundary floors, keyed by repository-relative changed path.
@@ -88,8 +87,9 @@ pub struct UserApproval {
 }
 /// A chair's recorded judgement; owner acceptance uses UserApproval separately.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ChairDowngrade {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub actor_id: ActorId,
     pub evidence: EvidenceRef,
     pub reason: String,
@@ -607,7 +607,6 @@ impl DeliveryReceipt {
 }
 /// Policy is supplied by the caller; production currently uses compiled defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ReviewPolicy {
     pub routine: u64,
     pub substantial: u64,
@@ -845,7 +844,7 @@ mod tests {
         }
     }
     #[test]
-    fn enum_tags_and_user_policy_reject_unknown_input() {
+    fn enum_tags_reject_unknown_wire_values() {
         let r = receipt();
         for (pointer, tag) in [
             ("/subject/kind", "future"),
@@ -858,9 +857,6 @@ mod tests {
             assert!(serde_json::from_value::<DeliveryReceipt>(value).is_err());
         }
         let policy = ReviewPolicy::default();
-        let mut value = serde_json::to_value(&policy).unwrap();
-        value["unknown"] = json!(0);
-        assert!(serde_json::from_value::<ReviewPolicy>(value).is_err());
         assert_eq!(
             serde_json::from_value::<ReviewPolicy>(serde_json::to_value(&policy).unwrap()).unwrap(),
             policy
@@ -965,6 +961,7 @@ mod tests {
                 RiskTier::Routine,
                 RiskTier::Routine,
                 Some(ChairDowngrade {
+                    extra: Default::default(),
                     actor_id: approval().actor_id,
                     evidence: approval().evidence,
                     reason: "Fixture judgement".into()

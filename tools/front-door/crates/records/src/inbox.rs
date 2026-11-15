@@ -12,6 +12,7 @@ pub const MAX_OPTIONS: usize = 16;
 pub const MAX_OFFER_BYTES: usize = 8192;
 pub const MAX_LOCAL_OFFER_ITEMS: u64 = 16;
 pub const MAX_LOCAL_OFFER_BYTES: usize = MAX_OFFER_BYTES * MAX_LOCAL_OFFER_ITEMS as usize;
+pub const HUMAN_REQUEST_SCHEMA_VERSION: u64 = 2;
 
 /// Exact registered destination. An actor label alone never selects a session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,6 +164,7 @@ pub struct RequestDraft {
 pub struct HumanRequest {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
+    #[serde(deserialize_with = "human_request_schema_version")]
     pub schema_version: u64,
     pub id: HumanRequestId,
     pub revision: u64,
@@ -181,6 +183,20 @@ pub struct HumanRequest {
     pub state: RequestState,
     pub answer_id: Option<HumanAnswerId>,
     pub closure_reason: Option<String>,
+}
+
+fn human_request_schema_version<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let version = u64::deserialize(deserializer)?;
+    if version == HUMAN_REQUEST_SCHEMA_VERSION {
+        Ok(version)
+    } else {
+        Err(serde::de::Error::custom(
+            "unsupported human request schema version",
+        ))
+    }
 }
 
 impl HumanRequest {

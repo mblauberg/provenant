@@ -2,6 +2,7 @@
 use provenant_records::{inbox, run, workflow, *};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+use std::collections::{BTreeMap, BTreeSet};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 const ID: &str = "11111111111111111111111111111111";
@@ -47,7 +48,8 @@ fn add_future_fields(value: &mut Value) {
 fn assert_preserved<T: DeserializeOwned + Serialize>(kind: &str, value: Value) -> TestResult {
     let before = CanonicalV1::bytes(&value)?;
     let digest_before = CanonicalV1::record_digest(kind, 1, &value)?;
-    let decoded: T = serde_json::from_value(value.clone())?;
+    let bytes = serde_json::to_vec(&value)?;
+    let decoded: T = decode(bytes.as_slice(), Limits::default())?;
     let after = CanonicalV1::bytes(&decoded)?;
     assert_eq!(before.as_bytes(), after.as_bytes(), "{kind}");
     assert_eq!(
@@ -65,9 +67,63 @@ fn round_trip<T: DeserializeOwned + Serialize>(kind: &str, seed: Value) -> TestR
     assert_preserved::<T>(kind, value)
 }
 
+fn add_future_fields_except(value: &mut Value, skipped: &[&str]) {
+    match value {
+        Value::Object(fields) => {
+            for (key, child) in fields.iter_mut() {
+                if !skipped.contains(&key.as_str()) {
+                    add_future_fields_except(child, skipped);
+                }
+            }
+            fields.insert(
+                "future_object".into(),
+                json!({"writer":"next","values":[1,null,{"ok":true}]}),
+            );
+            fields.insert("future_integer".into(), json!(u64::MAX));
+            fields.insert("future_null".into(), Value::Null);
+        }
+        Value::Array(items) => {
+            for item in items {
+                add_future_fields_except(item, skipped);
+            }
+        }
+        _ => {}
+    }
+}
+
 macro_rules! cases {
     ($($name:ident: $type:ty => $seed:expr;)*) => {
-        $(#[test] fn $name() -> TestResult { round_trip::<$type>(stringify!($name), $seed) })*
+        $(fn $name() -> TestResult { round_trip::<$type>(stringify!($name), $seed) })*
+
+        fn stored_record_registry() -> Vec<(&'static str, fn() -> TestResult)> {
+            let mut registry = vec![$((stringify!($name), $name as fn() -> TestResult),)*];
+            registry.push(("attempt_record_preserves_digest", attempt_record_round_trip));
+            registry.push(("work_key_preserves_identity_and_unknown_fields", work_key_round_trip));
+            registry.push(("account_identity_preserves_all_cases", account_identity_round_trip));
+            registry.push(("port_command_receipt_preserves_all_lifetimes", port_command_receipt_round_trip));
+            registry.push(("forge_observation_preserves_all_variants", forge_observation_round_trip));
+            registry.push(("landing_record_preserves_unknown_fields", landing_record_round_trip));
+            registry.push(("custody_record_preserves_unknown_fields", custody_record_round_trip));
+            registry.push(("ref_ownership_preserves_unknown_fields", ref_ownership_round_trip));
+            registry.push(("removal_record_preserves_outcomes", removal_record_round_trip));
+            registry.push(("retirement_record_preserves_unknown_fields", retirement_record_round_trip));
+            registry.push(("handoff_preserves_unknown_fields", handoff_round_trip));
+            registry.push(("pause_preserves_unknown_fields", pause_round_trip));
+            registry.push(("stop_preserves_unknown_fields", stop_round_trip));
+            registry.push(("finding_decision_preserves_unknown_fields", finding_decision_round_trip));
+            registry.push(("limit_preserves_unknown_fields", limit_round_trip));
+            registry.push(("control_receipt_preserves_unknown_fields", control_receipt_round_trip));
+            registry.push(("attempt_key_preserves_unknown_fields", attempt_key_round_trip));
+            registry
+        }
+
+        #[test]
+        fn stored_record_codecs_preserve_unknown_fields() -> TestResult {
+            for (name, check) in stored_record_registry() {
+                check().map_err(|error| std::io::Error::other(format!("{name}: {error}")))?;
+            }
+            Ok(())
+        }
     };
 }
 
@@ -97,7 +153,15 @@ fn confidentiality() -> Value {
     json!({"evidence_ref":"policy"})
 }
 fn candidate() -> Value {
-    json!({"ranking":serde_json::to_value(provenant_records::route_selection::CandidateRanking::default()).unwrap(),"model":"codex/model","weight":1,"factor_basis_points":10000,
+    let mut ranking =
+        serde_json::to_value(provenant_records::route_selection::CandidateRanking::default())
+            .unwrap();
+    ranking["outcome_prior"] = json!({
+        "enabled":true,"role":"reviewer","pool":"senior","factor_basis_points":11000,
+        "evidence_count":1,"evidence":{"model":"codex/model","pool":"senior","role":"reviewer",
+        "successes":1,"failures":0,"source":"fixture"},"source":"route_outcomes"
+    });
+    json!({"ranking":ranking,"model":"codex/model","weight":1,"factor_basis_points":10000,
         "effort":null,"readiness":readiness(),"exclusion":null})
 }
 fn redraw() -> Value {
@@ -174,7 +238,8 @@ fn risk_factors() -> Value {
         "migration":"none","oracle_quality":"strong","external_effects":"none","critical_surface":"none"})
 }
 fn risk() -> Value {
-    json!({"factors":risk_factors(),"derived":"routine","tier":"routine","downgrade_approval":null})
+    json!({"factors":risk_factors(),"derived":"substantial","tier":"routine",
+        "downgrade_approval":{"actor_id":ID,"evidence":evidence(),"reason":"bounded scope"}})
 }
 fn subject() -> Value {
     json!({"kind":"document","path":path(),"digest":digest()})
@@ -206,7 +271,7 @@ fn request_draft() -> Value {
         "recommended_option_id":"continue","proceeding_with":null})
 }
 fn human_request() -> Value {
-    json!({"schema_version":1,"id":ID,"revision":1,"operation_id":"operation",
+    json!({"schema_version":inbox::HUMAN_REQUEST_SCHEMA_VERSION,"id":ID,"revision":1,"operation_id":"operation",
         "created_at":NOW,"updated_at":NOW,"project_id":ID,"owner_host":ID,
         "chair_session_id":"session","chair_actor":ID,"request":request_draft(),
         "state":"open","answer_id":null,"closure_reason":null})
@@ -292,9 +357,9 @@ cases! {
     path_wire_preserves_digest: PathWire => path();
     absolute_path_preserves_digest: AbsolutePath => absolute_path();
     artifact_ref_preserves_digest: ArtifactRef => json!({"path":path(),"digest":digest()});
+    command_exit_codes_preserve_unknown_fields: CommandExitCodes => json!({"success":[0],"unknown":[75],"other":"unknown"});
+    port_command_preserves_unknown_fields: PortCommand => json!({"argv":["provenant","verify"],"exit_codes":{"success":[0],"unknown":[75],"other":"unknown"}});
     trace_preserves_digest: Trace => json!({"host":ID,"run":ID,"attempt":ID});
-    record_header_preserves_digest: RecordHeader => json!({"schema_version":1});
-
     answer_target_preserves_digest: inbox::AnswerTarget => json!({"host":ID,"project":ID,"session":"session","actor":ID});
     answer_offer_preserves_digest: inbox::AnswerOffer => json!({"answer":human_answer(),"delivery":answer_delivery()});
     request_option_preserves_digest: inbox::RequestOption => request_option();
@@ -331,17 +396,434 @@ cases! {
     resolved_harness_target_preserves_digest: ResolvedHarnessTarget => harness_target();
     install_receipt_preserves_digest: InstallReceipt => install_receipt();
     version_info_preserves_digest: VersionInfo => json!({"source_digest":source_digest(),"asset_digest":source_digest(),"target":"target","toolchain":"toolchain","record_schema_version":1,"config_schema_version":1});
+    budget_policy_preserves_digest: BudgetPolicy => json!({"action":"wrap_up","action_source":"default","grace":"0.1","grace_source":"default"});
+    lane_limits_preserve_digest: LaneLimits => json!({});
+    skipped_account_preserves_digest: SkippedAccount => json!({"account":"fixture","reason":"disabled"});
+}
+
+fn attempt_record_round_trip() -> TestResult {
+    let mut value = normalise::<run::AttemptRecord>(attempt())?;
+    add_future_fields(&mut value);
+    assert_preserved::<run::AttemptRecord>("run-attempt", value)
+}
+
+fn work_key_round_trip() -> TestResult {
+    use std::collections::{BTreeSet, HashSet};
+
+    let key = WorkKey::new(
+        provenant_core::ProjectId::from_bytes([7; 16]),
+        "graph",
+        "node",
+        1,
+    )?;
+    let mut value = serde_json::to_value(&key)?;
+    add_future_fields(&mut value);
+    let bytes = serde_json::to_vec(&value)?;
+    let decoded: WorkKey = decode(bytes.as_slice(), Limits::default())?;
+    assert_eq!(decoded, key);
+
+    let mut hashed = HashSet::new();
+    hashed.insert(key.clone());
+    assert!(hashed.contains(&decoded));
+    let mut ordered = BTreeSet::new();
+    ordered.insert(key.clone());
+    assert!(ordered.contains(&decoded));
+
+    assert_preserved::<WorkKey>("work-key", value)
+}
+
+fn account_identity_round_trip() -> TestResult {
+    use usage_identity::AccountIdentity;
+
+    for identity in [
+        AccountIdentity::known("codex", "account-1", "epoch-1"),
+        AccountIdentity::provider_observation("codex", "account-2"),
+        AccountIdentity::unknown(),
+        AccountIdentity::conflicting_provider_observations(),
+        AccountIdentity::no_provider_account(),
+    ] {
+        let mut value = serde_json::to_value(identity)?;
+        add_future_fields(&mut value);
+        assert_preserved::<AccountIdentity>("account-identity", value)?;
+    }
+    Ok(())
+}
+
+fn port_command_receipt_round_trip() -> TestResult {
+    use port_receipt::{PortCommandReceipt, PortReceiptLifetime};
+    use provenant_core::{ActorId, AttemptId, ProjectId};
+
+    for lifetime in [
+        PortReceiptLifetime::AttemptTerminalAndRelease {
+            attempt_id: AttemptId::from_bytes([1; 16]),
+            project_id: ProjectId::from_bytes([2; 16]),
+            actor_id: ActorId::from_bytes([3; 16]),
+            lease_epoch: 4,
+            extra: Default::default(),
+        },
+        PortReceiptLifetime::AgeDays {
+            days: 30,
+            extra: Default::default(),
+        },
+    ] {
+        let receipt = PortCommandReceipt::new(
+            "fixture".into(),
+            PortSource::Project,
+            "publish".into(),
+            CanonicalV1::file_digest(b"request"),
+            CanonicalV1::file_digest(b"command"),
+            port_receipt::PortCommandDisposition::Succeeded,
+            Some(0),
+            Some(1),
+            None,
+            true,
+            false,
+            false,
+            10,
+            lifetime,
+        );
+        let mut value = serde_json::to_value(receipt)?;
+        add_future_fields(&mut value);
+        assert_preserved::<PortCommandReceipt>("port-command-receipt", value)?;
+    }
+    Ok(())
+}
+
+fn forge_observation_round_trip() -> TestResult {
+    use landing::ForgeObservation;
+
+    for mut value in [
+        json!({"state":"pending","pending":"submitted"}),
+        json!({"state":"merged","evidence":{"candidate_commit":null,
+            "candidate_tree":null,"target_base":null,"member_commits":[],"members":[]}}),
+        json!({"state":"rejected","reason":"closed"}),
+        json!({"state":"unknown","reason":"unavailable"}),
+    ] {
+        add_future_fields(&mut value);
+        assert_preserved::<ForgeObservation>("forge-observation", value)?;
+    }
+    Ok(())
+}
+
+fn landing_record_round_trip() -> TestResult {
+    use landing::{
+        Capabilities, CleanupDebt, CleanupDebtItem, Compose, ConsumerCursor, GateDefinition,
+        GateKind, LandRequest, LandingId, LandingRecord, MemberOutcome, MemberProgress,
+        PublicationGuarantee, ResolvedPlan, RestackMapping, Strategy, Subscriber,
+    };
+
+    let request = LandRequest::default();
+    let resolved_plan = ResolvedPlan::new(
+        Strategy::Batch,
+        &Compose::default(),
+        Capabilities::default(),
+        BTreeMap::new(),
+    )?;
+    let id = LandingId::of("fixture/repo", "main", &request, &resolved_plan.digest)?;
+    let record = LandingRecord {
+        schema_version: 2,
+        id,
+        repository: "fixture/repo".into(),
+        target: "main".into(),
+        request,
+        generation: 1,
+        revision: 1,
+        resolved_plan,
+        gate_definition: GateDefinition {
+            kind: GateKind::Checks,
+            digest: digest(),
+            checks: Vec::new(),
+            commands: Vec::new(),
+            issuer: None,
+            executor: None,
+            coverage: Vec::new(),
+            timeout_seconds: 0,
+            pool: None,
+            env_passthrough: Vec::new(),
+            extra: Default::default(),
+        },
+        outcomes: BTreeMap::from([(
+            1,
+            MemberOutcome::Pending {
+                reason: "awaiting observation".into(),
+                extra: Default::default(),
+            },
+        )]),
+        progress: BTreeMap::from([(
+            1,
+            MemberProgress::Pending {
+                extra: Default::default(),
+            },
+        )]),
+        operation: None,
+        submission: None,
+        unavailable: None,
+        evidence: None,
+        publication_guarantee: PublicationGuarantee::None,
+        cleanup_debt: CleanupDebt {
+            items: vec![CleanupDebtItem {
+                step: "fixture".into(),
+                reason: "pending".into(),
+                attempts: 0,
+                extra: Default::default(),
+            }],
+            extra: Default::default(),
+        },
+        restack_mappings: vec![RestackMapping {
+            pr: 1,
+            previous_head: "a".repeat(40),
+            new_head: "b".repeat(40),
+            previous_base: "c".repeat(40),
+            new_base: "d".repeat(40),
+            extra: Default::default(),
+        }],
+        subscribers: vec![Subscriber {
+            run_id: Some("run".into()),
+            node_id: Some("node".into()),
+            session_id: Some("session".into()),
+            extra: Default::default(),
+        }],
+        consumer_cursors: vec![ConsumerCursor {
+            subscriber: Subscriber::default(),
+            revision: 1,
+            extra: Default::default(),
+        }],
+        applied_observations: BTreeSet::new(),
+        warnings: Vec::new(),
+        passes: 0,
+        extra: Default::default(),
+    };
+    let mut value = normalise::<LandingRecord>(serde_json::to_value(record)?)?;
+    // LandRequest is an authority-bearing request; `values` is enum-keyed data,
+    // not an object record whose unknown fields use ExtraFields.
+    add_future_fields_except(&mut value, &["request", "values"]);
+    assert_preserved::<LandingRecord>("landing-record", value)
+}
+
+fn custody_record_round_trip() -> TestResult {
+    use custody::{Chair, CustodyRecord, CustodyState, Holder, Origin, Subject, SubjectKind};
+    use provenant_core::{ActorId, HostId, ProjectId, WallTime};
+
+    let record = CustodyRecord {
+        extra: Default::default(),
+        schema_version: 2,
+        subject: Subject::new(SubjectKind::Graph, "graph-1"),
+        holder: Holder::Chair {
+            chair: Chair {
+                extra: Default::default(),
+                host: HostId::from_bytes([1; 16]),
+                actor: ActorId::from_bytes([2; 16]),
+                session: Some("session".into()),
+                process: None,
+            },
+            extra: Default::default(),
+        },
+        project: ProjectId::from_bytes([3; 16]),
+        origin: Origin::Provenant,
+        state: CustodyState::Active {
+            extra: Default::default(),
+        },
+        last_activity: WallTime::from_micros(0)?,
+        links: Vec::new(),
+        provenance: None,
+    };
+    let mut value = serde_json::to_value(record)?;
+    add_future_fields(&mut value);
+    assert_preserved::<CustodyRecord>("custody-record", value)
+}
+
+fn ref_ownership_round_trip() -> TestResult {
+    use custody::{RefEndpoint, RefOrigin, RefOwnership};
+    use provenant_core::ProjectId;
+
+    let ownership = RefOwnership {
+        repository: ProjectId::from_bytes([1; 16]),
+        endpoint: RefEndpoint::Local {
+            extra: Default::default(),
+        },
+        reference: "refs/heads/feature".into(),
+        generation: 1,
+        origin: RefOrigin::Created,
+        extra: Default::default(),
+    };
+    let mut value = serde_json::to_value(ownership)?;
+    add_future_fields(&mut value);
+    assert_preserved::<RefOwnership>("ref-ownership", value)
+}
+
+fn removal_record_round_trip() -> TestResult {
+    use custody::{RemovalOutcome, RemovalRecord, RemovalUncertainty, Subject};
+    use provenant_core::{GitOid, ProjectId};
+
+    let project = ProjectId::from_bytes([1; 16]);
+    let subject = Subject::worktree("/fixture/feature", "generation-1");
+    let tip = GitOid::parse(&"aa".repeat(20))?;
+    let outcomes = [
+        RemovalOutcome::Kept {
+            cause: RemovalUncertainty::Busy,
+            extra: Default::default(),
+        },
+        RemovalOutcome::Removed {
+            evidence: custody::RemovalEvidence::IdleRetirement {
+                tip,
+                extra: Default::default(),
+            },
+            retirement_id: "retirement-1".into(),
+            extra: Default::default(),
+        },
+    ];
+    for outcome in outcomes {
+        let record = RemovalRecord {
+            project,
+            subject: subject.clone(),
+            tip,
+            outcome,
+            extra: Default::default(),
+        };
+        let mut value = serde_json::to_value(record)?;
+        add_future_fields(&mut value);
+        assert_preserved::<RemovalRecord>("removal-record", value)?;
+    }
+    Ok(())
+}
+
+fn retirement_record_round_trip() -> TestResult {
+    use custody::{
+        RefEndpoint, RefOrigin, RefOwnership, RemovalEvidence, RetirementDecision,
+        RetirementRecord, Subject,
+    };
+    use provenant_core::{ActorId, GitOid, ProjectId};
+
+    let project = ProjectId::from_bytes([1; 16]);
+    let tip = GitOid::parse(&"aa".repeat(20))?;
+    let reference = RefOwnership {
+        repository: project,
+        endpoint: RefEndpoint::Local {
+            extra: Default::default(),
+        },
+        reference: "refs/heads/feature".into(),
+        generation: 1,
+        origin: RefOrigin::Created,
+        extra: Default::default(),
+    };
+    let record = RetirementRecord::plan(
+        project,
+        vec![Subject::worktree("/fixture/feature", "generation-1")],
+        reference,
+        tip,
+        RetirementDecision::RetireWorktree {
+            authority: ActorId::from_bytes([2; 16]),
+            evidence: RemovalEvidence::IdleRetirement {
+                tip,
+                extra: Default::default(),
+            },
+            extra: Default::default(),
+        },
+    )?;
+    let mut value = serde_json::to_value(record)?;
+    add_future_fields(&mut value);
+    assert_preserved::<RetirementRecord>("retirement-record", value)
+}
+
+fn handoff_round_trip() -> TestResult {
+    use handoff::Handoff;
+
+    for write_scope in [
+        json!({"kind":"full","schema_version":1,"code":"WRITE_SCOPE","base":"1".repeat(40),
+            "head":"2".repeat(40),"strength":"warn","source":"project","out_of_scope_paths":[]}),
+        json!({"kind":"compact","code":"WRITE_SCOPE","strength":"warn","source":"project",
+            "paths_artifact":"policy-write-scope.json","out_of_scope_count":1,
+            "paths_omitted_from_handoff":true}),
+    ] {
+        round_trip::<Handoff>(
+            "handoff",
+            json!({"schema_version":2,"status":"done","note":"finished",
+                "remaining":[],"decisions":[],"verify":[],
+                "spec_concerns":[{"criterion":"C1","claim":"Concern","evidence":"Evidence",
+                    "proposed_change":"Change","status":"as_written"}],
+                "write_scope":write_scope}),
+        )?;
+    }
+    Ok(())
+}
+
+fn pause_round_trip() -> TestResult {
+    use pause::{Pause, PauseCause};
+    round_trip::<Pause>(
+        "pause",
+        serde_json::to_value(Pause::new(
+            PauseCause::BudgetExceeded,
+            None,
+            "Budget paused.",
+        )?)?,
+    )
+}
+
+fn stop_round_trip() -> TestResult {
+    use stop::{Stop, StopCause};
+    round_trip::<Stop>(
+        "stop",
+        serde_json::to_value(Stop::new(StopCause::Lost, None)?)?,
+    )
+}
+
+fn finding_decision_round_trip() -> TestResult {
+    use finding_decision::{FindingDecision, FindingDisposition};
+    use provenant_core::GitOid;
+    let decision = FindingDecision::new(
+        "F1",
+        FindingDisposition::Act,
+        "Addressed.",
+        GitOid::parse(&"aa".repeat(20))?,
+        Some(GitOid::parse(&"bb".repeat(20))?),
+    )?;
+    round_trip::<FindingDecision>("finding-decision", serde_json::to_value(decision)?)
+}
+
+fn limit_round_trip() -> TestResult {
+    round_trip::<Limit>(
+        "limit",
+        serde_json::to_value(Limit::new(3, LimitSource::Launch, LimitStrength::Default))?,
+    )
+}
+
+fn control_receipt_round_trip() -> TestResult {
+    use control::{ControlKind, ControlReceipt, ControlState, ControlSupport, LaunchKind};
+    use provenant_core::OperationId;
+
+    let receipt = ControlReceipt {
+        extra: Default::default(),
+        operation_id: OperationId::parse("fixture-operation")?,
+        control: ControlKind::Steer,
+        target: "attempt-1".into(),
+        launch: LaunchKind::Lane,
+        support: ControlSupport::Unsupported,
+        transport: None,
+        state: ControlState::Unsupported,
+        reason: "no live control path".into(),
+        message_id: None,
+    };
+    round_trip::<ControlReceipt>("control-receipt", serde_json::to_value(receipt)?)
+}
+
+fn attempt_key_round_trip() -> TestResult {
+    round_trip::<graph::AttemptKey>(
+        "graph-attempt-key",
+        json!({"retry_generation":null,"previous_attempt_ref":null,
+            "graph_id":"graph","node_id":"node","attempt":1,"route_index":0}),
+    )
 }
 
 #[test]
-fn attempt_record_preserves_digest() -> TestResult {
-    let mut value = normalise::<run::AttemptRecord>(attempt())?;
-    // WorkKey has exactly four identity fields; unlike record payloads, it
-    // deliberately discards unknown fields (covered by format2_tests).
-    let key = value["key"].clone();
-    add_future_fields(&mut value);
-    value["key"] = key;
-    assert_preserved::<run::AttemptRecord>("run-attempt", value)
+fn human_request_uses_its_declared_schema_version() -> TestResult {
+    let mut current = human_request();
+    let current_bytes = serde_json::to_vec(&current)?;
+    let _: inbox::HumanRequest = decode(current_bytes.as_slice(), Limits::default())?;
+
+    current["schema_version"] = json!(1);
+    let legacy_bytes = serde_json::to_vec(&current)?;
+    assert!(decode::<inbox::HumanRequest, _>(legacy_bytes.as_slice(), Limits::default()).is_err());
+    Ok(())
 }
 
 #[test]
@@ -457,8 +939,12 @@ fn recorded_changed_paths_survive_round_trip() -> TestResult {
 }
 
 #[test]
-fn typed_route_selection_roundtrips_and_rejects_malformed_fields() {
+fn typed_route_selection_preserves_nested_priors_and_rejects_malformed_fields() {
     use provenant_records::{ResolvedRoute, RouteSelectionReceipt, run::RouteRecord};
+    let decode_selection = |value: &Value| {
+        let bytes = serde_json::to_vec(value).unwrap();
+        decode::<RouteSelectionReceipt, _>(bytes.as_slice(), Limits::default())
+    };
     let mut wire = selection();
     wire["account_load"] = json!({
         "account_key":"account", "account_source":"fixture", "headroom_basis_points":5000,
@@ -482,9 +968,9 @@ fn typed_route_selection_roundtrips_and_rejects_malformed_fields() {
                 wire["weight_source"] = json!(source);
                 wire["considered_exclusions"] =
                     json!([{"source":exclusion,"selector":"model codex/other"}]);
-                let decoded: RouteSelectionReceipt = serde_json::from_value(wire.clone()).unwrap();
+                let decoded = decode_selection(&wire).unwrap();
                 let encoded = serde_json::to_value(&decoded).unwrap();
-                let again: RouteSelectionReceipt = serde_json::from_value(encoded).unwrap();
+                let again = decode_selection(&encoded).unwrap();
                 assert_eq!(decoded, again);
                 assert_eq!(
                     again.extra["future_selection_fact"],
@@ -514,29 +1000,43 @@ fn typed_route_selection_roundtrips_and_rejects_malformed_fields() {
         let mut malformed = wire.clone();
         *malformed.pointer_mut(path).unwrap() = bad;
         assert!(
-            serde_json::from_value::<RouteSelectionReceipt>(malformed).is_err(),
+            matches!(decode_selection(&malformed), Err(DecodeError::Typed { .. })),
             "{path}"
         );
     }
     let mut record = route_record();
     record["host_native"] = json!("reviewer");
-    let decoded: RouteRecord = serde_json::from_value(record.clone()).unwrap();
+    let record_bytes = serde_json::to_vec(&record).unwrap();
+    let decoded: RouteRecord = decode(record_bytes.as_slice(), Limits::default()).unwrap();
     assert_eq!(decoded.host_native.as_deref(), Some("reviewer"));
     record["host_native"] = json!(7);
-    assert!(serde_json::from_value::<RouteRecord>(record).is_err());
+    let malformed_bytes = serde_json::to_vec(&record).unwrap();
+    assert!(matches!(
+        decode::<RouteRecord, _>(malformed_bytes.as_slice(), Limits::default()),
+        Err(DecodeError::Typed { .. })
+    ));
     let mut resolved = resolved_route();
     resolved["selection_context"] = json!({"workload":"review","writes":true});
     resolved["diagnostics"]["account_load"] = wire["account_load"].clone();
-    let decoded: ResolvedRoute = serde_json::from_value(resolved.clone()).unwrap();
+    let resolved_bytes = serde_json::to_vec(&resolved).unwrap();
+    let decoded: ResolvedRoute = decode(resolved_bytes.as_slice(), Limits::default()).unwrap();
     let record = RouteRecord::from_resolved(&decoded, None, "fixture");
     assert_eq!(
         record.selection_context.as_ref(),
         Some(&decoded.selection_context)
     );
     assert_eq!(
-        serde_json::from_value::<ResolvedRoute>(serde_json::to_value(&decoded).unwrap()).unwrap(),
+        decode::<ResolvedRoute, _>(
+            serde_json::to_vec(&decoded).unwrap().as_slice(),
+            Limits::default()
+        )
+        .unwrap(),
         decoded
     );
     resolved["diagnostics"]["account_load"]["headroom_basis_points"] = json!("unknown");
-    assert!(serde_json::from_value::<ResolvedRoute>(resolved).is_err());
+    let resolved_bytes = serde_json::to_vec(&resolved).unwrap();
+    assert!(matches!(
+        decode::<ResolvedRoute, _>(resolved_bytes.as_slice(), Limits::default()),
+        Err(DecodeError::Typed { .. })
+    ));
 }

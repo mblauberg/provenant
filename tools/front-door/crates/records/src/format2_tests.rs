@@ -74,28 +74,9 @@ fn settlement_reasons_round_trip_against_the_declared_rules() {
 #[test]
 fn one_terminal_classification_binds_reason_stop_source_and_graph_result() {
     use crate::run::{
-        CauseSource, Outcome, PartialSignal, SETTLEMENT_TABLE, SettlementNodeOutcome,
-        SettlementReason, TerminalCause, TerminalEvidence,
+        CauseSource, Outcome, PartialSignal, SettlementNodeOutcome, SettlementReason,
+        TerminalCause, TerminalEvidence,
     };
-    for reason in SettlementReason::ALL {
-        let encoded = serde_json::to_value(reason).unwrap();
-        assert_eq!(
-            serde_json::from_value::<SettlementReason>(encoded).unwrap(),
-            *reason
-        );
-        assert_eq!(
-            SETTLEMENT_TABLE
-                .iter()
-                .filter(|rule| rule.reason == *reason)
-                .count(),
-            1
-        );
-        assert!(matches!(
-            reason.rule().source,
-            CauseSource::Provider | CauseSource::Host | CauseSource::Owner
-        ));
-    }
-
     let evidence = TerminalEvidence::ProcessExit;
     let completed = SettlementReason::classify(
         Outcome::ReviewRequired,
@@ -461,7 +442,7 @@ where
 #[test]
 fn each_record_round_trips_and_keeps_an_unknown_field() {
     let key = WorkKey::new(ProjectId::from_bytes([7; 16]), "w2a", "implement", 1).unwrap();
-    round_trip(&key, false);
+    round_trip(&key, true);
     for step in [
         NextStep::SameRoute {
             continuation: Continuation::Resume,
@@ -570,8 +551,14 @@ fn handoff_write_scope_report_round_trips_full_and_compact_shapes() {
     let path =
         PathWire::from_relative(&provenant_core::RelativePath::parse("outside.txt").unwrap())
             .unwrap();
+    let future_fields = || -> crate::ExtraFields {
+        [("future_field".into(), json!({"retained": true}))]
+            .into_iter()
+            .collect()
+    };
     let reports = [
         WriteScopeReport::Full {
+            extra: future_fields(),
             schema_version: 1,
             code: "WRITE_SCOPE".into(),
             base: "1".repeat(40),
@@ -581,6 +568,7 @@ fn handoff_write_scope_report_round_trips_full_and_compact_shapes() {
             out_of_scope_paths: vec![path],
         },
         WriteScopeReport::Compact {
+            extra: future_fields(),
             code: "WRITE_SCOPE".into(),
             strength: Strength::Warn,
             source: Source::Project,
@@ -602,7 +590,8 @@ fn handoff_write_scope_report_round_trips_full_and_compact_shapes() {
             extra: Default::default(),
         };
         let wire = serde_json::to_value(&handoff).unwrap();
-        let decoded: Handoff = serde_json::from_value(wire.clone()).unwrap();
+        let bytes = serde_json::to_vec(&wire).unwrap();
+        let decoded: Handoff = crate::decode(bytes.as_slice(), Limits::default()).unwrap();
         assert_eq!(decoded, handoff);
         let mut malformed = wire;
         malformed["write_scope"]["strength"] = json!("invalid");

@@ -78,6 +78,8 @@ pub struct SpecConcern {
     pub evidence: String,
     pub proposed_change: String,
     pub status: SpecConcernStatus,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
 }
 
 impl<'de> Deserialize<'de> for SpecConcern {
@@ -93,6 +95,8 @@ impl<'de> Deserialize<'de> for SpecConcern {
             proposed_change: String,
             #[serde(default)]
             status: SpecConcernStatus,
+            #[serde(flatten)]
+            extra: crate::ExtraFields,
         }
         #[derive(Deserialize)]
         #[serde(untagged)]
@@ -107,6 +111,7 @@ impl<'de> Deserialize<'de> for SpecConcern {
                 evidence: String::new(),
                 proposed_change: String::new(),
                 status: SpecConcernStatus::default(),
+                extra: Default::default(),
             },
             Input::Object(v) => Self {
                 criterion: v.criterion,
@@ -114,6 +119,7 @@ impl<'de> Deserialize<'de> for SpecConcern {
                 evidence: v.evidence,
                 proposed_change: v.proposed_change,
                 status: v.status,
+                extra: v.extra,
             },
         })
     }
@@ -130,9 +136,11 @@ pub enum SpecConcernStatus {
 
 /// Typed scope evidence attached by the host after settlement.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WriteScopeReport {
     Full {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
         #[serde(deserialize_with = "scope_report_schema")]
         schema_version: u64,
         code: String,
@@ -143,6 +151,8 @@ pub enum WriteScopeReport {
         out_of_scope_paths: Vec<crate::PathWire>,
     },
     Compact {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
         code: String,
         strength: crate::policy::Strength,
         source: crate::policy::Source,
@@ -616,8 +626,10 @@ mod tests {
                 evidence: "Evidence".into(),
                 proposed_change: "Change".into(),
                 status,
+                extra: Default::default(),
             });
             handoff.write_scope = Some(WriteScopeReport::Compact {
+                extra: Default::default(),
                 code: "write_scope".into(),
                 strength: crate::policy::Strength::Warn,
                 source: crate::policy::Source::Host,

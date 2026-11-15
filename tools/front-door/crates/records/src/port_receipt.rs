@@ -1,8 +1,14 @@
 //! Versioned evidence for repository command ports.
-use crate::FileDigest;
 pub use crate::ports::PortSource;
+use crate::{ExtraFields, FileDigest};
 use provenant_core::{ActorId, AttemptId, ProjectId};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PortReceiptLifetimeKind {
+    AttemptTerminalAndRelease,
+    AgeDays,
+}
 
 pub const PORT_COMMAND_RECEIPT_SCHEMA_VERSION: u16 = 2;
 pub const DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS: u32 = 30;
@@ -27,7 +33,7 @@ pub enum PortCommandBackend {
 /// Retention is attached to each persisted receipt so collection uses the
 /// lifetime selected by its owner when it was written.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PortReceiptLifetime {
     /// Admission evidence waits for terminal attempt state and a proven
     /// release at the same lease epoch.
@@ -36,15 +42,35 @@ pub enum PortReceiptLifetime {
         project_id: ProjectId,
         actor_id: ActorId,
         lease_epoch: u64,
+        #[serde(flatten)]
+        extra: ExtraFields,
     },
     /// Other port evidence expires after its declared age.
-    AgeDays { days: u32 },
+    AgeDays {
+        days: u32,
+        #[serde(flatten)]
+        extra: ExtraFields,
+    },
+}
+impl PortReceiptLifetime {
+    pub const ALL: &'static [PortReceiptLifetimeKind] = &[
+        PortReceiptLifetimeKind::AttemptTerminalAndRelease,
+        PortReceiptLifetimeKind::AgeDays,
+    ];
+
+    pub fn kind(&self) -> PortReceiptLifetimeKind {
+        match self {
+            Self::AttemptTerminalAndRelease { .. } => {
+                PortReceiptLifetimeKind::AttemptTerminalAndRelease
+            }
+            Self::AgeDays { .. } => PortReceiptLifetimeKind::AgeDays,
+        }
+    }
 }
 
 /// One content-free command receipt. Stored data is decoded by the bounded
 /// records codec and this type accepts exactly its current schema version.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PortCommandReceipt {
     #[serde(deserialize_with = "schema_version")]
     schema_version: u16,
@@ -63,6 +89,8 @@ pub struct PortCommandReceipt {
     pub cancelled: bool,
     pub recorded_at_unix_seconds: u64,
     pub lifetime: PortReceiptLifetime,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
 }
 
 impl PortCommandReceipt {
@@ -100,6 +128,7 @@ impl PortCommandReceipt {
             cancelled,
             recorded_at_unix_seconds,
             lifetime,
+            extra: Default::default(),
         }
     }
 
@@ -147,24 +176,52 @@ mod tests {
                 project_id: ProjectId::from_bytes([2; 16]),
                 actor_id: ActorId::from_bytes([3; 16]),
                 lease_epoch: 1,
+                extra: Default::default(),
             },
         )
     }
 
     #[test]
     fn receipt_round_trips_through_bounded_decoder() {
-        let original = sample();
-        let encoded = crate::encode(&original).expect("receipt encodes");
-        let decoded: PortCommandReceipt = crate::decode(
-            Cursor::new(encoded),
-            crate::Limits {
-                max_bytes: 4096,
-                max_depth: 8,
-                max_members: 32,
+        let lifetimes = [
+            PortReceiptLifetime::AttemptTerminalAndRelease {
+                attempt_id: AttemptId::from_bytes([1; 16]),
+                project_id: ProjectId::from_bytes([2; 16]),
+                actor_id: ActorId::from_bytes([3; 16]),
+                lease_epoch: 1,
+                extra: Default::default(),
             },
-        )
-        .expect("receipt decodes");
-        assert_eq!(decoded, original);
+            PortReceiptLifetime::AgeDays {
+                days: DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS,
+                extra: Default::default(),
+            },
+        ];
+        let observed_kinds = lifetimes
+            .iter()
+            .map(PortReceiptLifetime::kind)
+            .collect::<std::collections::BTreeSet<_>>();
+        let declared_kinds = PortReceiptLifetime::ALL.iter().copied().collect();
+        assert_eq!(observed_kinds, declared_kinds);
+
+        for lifetime in lifetimes {
+            let mut original = sample();
+            original.lifetime = lifetime;
+            original.extra.insert(
+                "future_receipt_field".into(),
+                serde_json::json!({"retained": true}),
+            );
+            match &mut original.lifetime {
+                PortReceiptLifetime::AttemptTerminalAndRelease { extra, .. }
+                | PortReceiptLifetime::AgeDays { extra, .. } => {
+                    extra.insert("future_lifetime_field".into(), serde_json::json!("kept"));
+                }
+            }
+            let encoded = crate::encode(&original).expect("receipt encodes");
+            let decoded: PortCommandReceipt =
+                crate::decode(Cursor::new(encoded), crate::Limits::default())
+                    .expect("receipt decodes");
+            assert_eq!(decoded, original);
+        }
     }
 
     #[test]

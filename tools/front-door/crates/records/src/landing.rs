@@ -1,4 +1,22 @@
 //! Shared, durable landing contract. Execution effects remain in the front-door owner.
+use crate::ExtraFields;
+
+macro_rules! tagged_enum_kinds {
+    ($enum:ident, $kind:ident { $($variant:ident),+ $(,)? }) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+        pub enum $kind { $($variant),+ }
+
+        impl $enum {
+            pub const ALL: &'static [$kind] = &[$($kind::$variant),+];
+
+            pub fn kind(&self) -> $kind {
+                match self {
+                    $(Self::$variant { .. } => $kind::$variant),+
+                }
+            }
+        }
+    };
+}
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -74,11 +92,12 @@ pub struct DependencyEdge {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Subscriber {
     pub run_id: Option<String>,
     pub node_id: Option<String>,
     pub session_id: Option<String>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,11 +117,19 @@ pub struct LandRequest {
 }
 
 /// A stable pinned-request key and a generation/plan-specific identity.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LandingId {
     pub request: provenant_core::Digest,
     pub digest: provenant_core::Digest,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
 }
+impl PartialEq for LandingId {
+    fn eq(&self, other: &Self) -> bool {
+        self.request == other.request && self.digest == other.digest
+    }
+}
+impl Eq for LandingId {}
 
 impl LandingId {
     pub fn request_key(
@@ -148,11 +175,16 @@ impl LandingId {
         plan_digest: &str,
     ) -> Result<Self, serde_json::Error> {
         #[derive(Serialize)]
-        struct Identity<'a> {
+        struct Parent {
+            request: provenant_core::Digest,
+            digest: provenant_core::Digest,
+        }
+        #[derive(Serialize)]
+        struct Identity {
             request: provenant_core::Digest,
             generation: u64,
-            parent: &'a Option<LandingId>,
-            plan_digest: &'a str,
+            parent: Option<Parent>,
+            plan_digest: String,
         }
         let request = Self::request_key(repository, target, input)?;
         let digest = crate::CanonicalV1::record_digest(
@@ -161,12 +193,19 @@ impl LandingId {
             &Identity {
                 request,
                 generation: input.generation,
-                parent: &input.parent,
-                plan_digest,
+                parent: input.parent.as_ref().map(|parent| Parent {
+                    request: parent.request.clone(),
+                    digest: parent.digest.clone(),
+                }),
+                plan_digest: plan_digest.to_owned(),
             },
         )
         .map_err(<serde_json::Error as serde::ser::Error>::custom)?;
-        Ok(Self { request, digest })
+        Ok(Self {
+            request,
+            digest,
+            extra: Default::default(),
+        })
     }
 }
 
@@ -248,14 +287,16 @@ pub enum Completion {
     BoundedSubscription,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Plan {
     pub dependencies: Dependencies,
     pub candidate: CandidateKind,
     pub schedule: Schedule,
     pub publication: Publication,
     pub completion: Completion,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -278,10 +319,12 @@ pub enum CapabilityState {
 
 /// Capabilities are an optional, repository-scoped probe. Missing entries mean unknown.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Capabilities {
     pub repository: Option<String>,
     pub values: BTreeMap<ForgeCapability, CapabilityState>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
 }
 
 impl Capabilities {
@@ -305,6 +348,8 @@ pub struct CapabilityDecision {
     pub capability: ForgeCapability,
     pub state: CapabilityState,
     pub selected: CapabilityPath,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
 }
 
 /// Whether the strategy composition is implemented; backend selection belongs to PortTable.land.
@@ -384,16 +429,16 @@ macro_rules! declare_strategies {
 }
 
 declare_strategies! {
-    Direct => ("direct", Plan { dependencies: Dependencies::Independent, candidate: CandidateKind::Single, schedule: Schedule::Immediate, publication: Publication::ExactCandidate, completion: Completion::Event }, &[], resolve_preset, Builtin);
+    Direct => ("direct", Plan { dependencies: Dependencies::Independent, candidate: CandidateKind::Single, schedule: Schedule::Immediate, publication: Publication::ExactCandidate, completion: Completion::Event, extra: Default::default() }, &[], resolve_preset, Builtin);
     #[default]
-    Batch => ("batch", Plan { dependencies: Dependencies::Independent, candidate: CandidateKind::Batch, schedule: Schedule::Immediate, publication: Publication::ExactCandidate, completion: Completion::Event }, &[], resolve_preset, Builtin);
-    Stack => ("stack", Plan { dependencies: Dependencies::Stack, candidate: CandidateKind::Batch, schedule: Schedule::Ordered, publication: Publication::ExactCandidate, completion: Completion::Event }, &[ForgeCapability::Restack], resolve_preset, Unavailable);
-    Queue => ("queue", Plan { dependencies: Dependencies::Independent, candidate: CandidateKind::Single, schedule: Schedule::Ordered, publication: Publication::ExactCandidate, completion: Completion::Event }, &[ForgeCapability::MergeQueue], resolve_queue, Unavailable);
-    Async => ("async", Plan { dependencies: Dependencies::Independent, candidate: CandidateKind::Single, schedule: Schedule::Immediate, publication: Publication::ExactCandidate, completion: Completion::Event }, &[ForgeCapability::AutoMerge, ForgeCapability::AsyncMerge], resolve_preset, Unavailable);
+    Batch => ("batch", Plan { dependencies: Dependencies::Independent, candidate: CandidateKind::Batch, schedule: Schedule::Immediate, publication: Publication::ExactCandidate, completion: Completion::Event, extra: Default::default() }, &[], resolve_preset, Builtin);
+    Stack => ("stack", Plan { dependencies: Dependencies::Stack, candidate: CandidateKind::Batch, schedule: Schedule::Ordered, publication: Publication::ExactCandidate, completion: Completion::Event, extra: Default::default() }, &[ForgeCapability::Restack], resolve_preset, Unavailable);
+    Queue => ("queue", Plan { dependencies: Dependencies::Independent, candidate: CandidateKind::Single, schedule: Schedule::Ordered, publication: Publication::ExactCandidate, completion: Completion::Event, extra: Default::default() }, &[ForgeCapability::MergeQueue], resolve_queue, Unavailable);
+    Async => ("async", Plan { dependencies: Dependencies::Independent, candidate: CandidateKind::Single, schedule: Schedule::Immediate, publication: Publication::ExactCandidate, completion: Completion::Event, extra: Default::default() }, &[ForgeCapability::AutoMerge, ForgeCapability::AsyncMerge], resolve_preset, Unavailable);
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Compose {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dependencies: Option<Dependencies>,
@@ -424,7 +469,7 @@ impl Strategy {
     }
 
     pub fn plan(self, compose: &Compose, capabilities: &Capabilities) -> Plan {
-        (self.declaration().resolver)(self.declaration().defaults, compose, capabilities)
+        (self.declaration().resolver)(self.declaration().defaults.clone(), compose, capabilities)
     }
 
     pub fn capability_decisions(
@@ -449,6 +494,7 @@ impl Strategy {
                     capability: *capability,
                     state,
                     selected,
+                    extra: Default::default(),
                 }
             })
             .collect()
@@ -474,6 +520,7 @@ impl Strategy {
                 } else {
                     "Execution is planned for 2.1; this strategy has been resolved without switching it.".into()
                 },
+                extra: Default::default(),
             })
         }
     }
@@ -512,6 +559,8 @@ pub struct Unavailable {
     pub requested: Strategy,
     pub alternatives: Vec<Strategy>,
     pub note: String,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
 }
 
 impl std::fmt::Display for Unavailable {
@@ -522,7 +571,6 @@ impl std::fmt::Display for Unavailable {
 impl std::error::Error for Unavailable {}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ResolvedPlan {
     pub strategy: Strategy,
     pub plan: Plan,
@@ -531,6 +579,8 @@ pub struct ResolvedPlan {
     pub capabilities: Capabilities,
     pub capability_decisions: Vec<CapabilityDecision>,
     pub digest: String,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
 }
 
 impl ResolvedPlan {
@@ -574,6 +624,7 @@ impl ResolvedPlan {
             capabilities,
             capability_decisions,
             digest: String::new(),
+            extra: Default::default(),
         };
         resolved.digest = resolved.computed_digest()?;
         Ok(resolved)
@@ -594,11 +645,36 @@ impl ResolvedPlan {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum MemberOutcome {
-    Pending { reason: String },
-    Landed { commit: Option<String> },
-    Unknown { reason: String },
-    Refused { reason: String },
+    Pending {
+        reason: String,
+        #[serde(flatten)]
+        extra: ExtraFields,
+    },
+    Landed {
+        commit: Option<String>,
+        #[serde(flatten)]
+        extra: ExtraFields,
+    },
+    Unknown {
+        reason: String,
+        #[serde(flatten)]
+        extra: ExtraFields,
+    },
+    Refused {
+        reason: String,
+        #[serde(flatten)]
+        extra: ExtraFields,
+    },
 }
+tagged_enum_kinds!(
+    MemberOutcome,
+    MemberOutcomeKind {
+        Pending,
+        Landed,
+        Unknown,
+        Refused
+    }
+);
 
 impl MemberOutcome {
     pub fn landed(&self) -> bool {
@@ -610,13 +686,47 @@ impl MemberOutcome {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum MemberProgress {
-    Pending,
-    Submitted { operation: OperationRef },
-    Queued { operation: OperationRef },
-    Deferred { reason: String },
-    Unknown { reason: String },
-    Failed { reason: String },
+    Pending {
+        #[serde(flatten)]
+        extra: ExtraFields,
+    },
+    Submitted {
+        operation: OperationRef,
+        #[serde(flatten)]
+        extra: ExtraFields,
+    },
+    Queued {
+        operation: OperationRef,
+        #[serde(flatten)]
+        extra: ExtraFields,
+    },
+    Deferred {
+        reason: String,
+        #[serde(flatten)]
+        extra: ExtraFields,
+    },
+    Unknown {
+        reason: String,
+        #[serde(flatten)]
+        extra: ExtraFields,
+    },
+    Failed {
+        reason: String,
+        #[serde(flatten)]
+        extra: ExtraFields,
+    },
 }
+tagged_enum_kinds!(
+    MemberProgress,
+    MemberProgressKind {
+        Pending,
+        Submitted,
+        Queued,
+        Deferred,
+        Unknown,
+        Failed
+    }
+);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -626,22 +736,39 @@ pub enum OperationRef {
         id: String,
         pr: u64,
         head: String,
+        #[serde(flatten)]
+        extra: ExtraFields,
     },
     MergeQueue {
         provider: String,
         id: String,
         pr: u64,
         head: String,
+        #[serde(flatten)]
+        extra: ExtraFields,
     },
     AutoMerge {
         provider: String,
         pr: u64,
         head: String,
+        #[serde(flatten)]
+        extra: ExtraFields,
     },
     Observer {
         id: String,
+        #[serde(flatten)]
+        extra: ExtraFields,
     },
 }
+tagged_enum_kinds!(
+    OperationRef,
+    OperationRefKind {
+        ForgeAsync,
+        MergeQueue,
+        AutoMerge,
+        Observer
+    }
+);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -657,6 +784,8 @@ pub struct MemberEvidence {
     pub candidate_commit: String,
     pub candidate_tree: String,
     pub checks: Vec<CheckEvidence>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -679,6 +808,8 @@ pub struct GateDefinition {
     pub timeout_seconds: u64,
     pub pool: Option<String>,
     pub env_passthrough: Vec<String>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -697,6 +828,8 @@ pub struct CheckEvidence {
     pub name: String,
     pub issuer: Option<String>,
     pub result: GateResult,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -707,15 +840,37 @@ pub struct MergeEvidence {
     #[serde(with = "member_map")]
     pub member_commits: BTreeMap<u64, String>,
     pub members: Vec<MemberEvidence>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Submission {
-    Merged { evidence: MergeEvidence },
-    Accepted { operation: OperationRef },
-    Unknown { dispatch_key: DispatchKey },
+    Merged {
+        evidence: MergeEvidence,
+        #[serde(flatten)]
+        extra: ExtraFields,
+    },
+    Accepted {
+        operation: OperationRef,
+        #[serde(flatten)]
+        extra: ExtraFields,
+    },
+    Unknown {
+        dispatch_key: DispatchKey,
+        #[serde(flatten)]
+        extra: ExtraFields,
+    },
 }
+tagged_enum_kinds!(
+    Submission,
+    SubmissionKind {
+        Merged,
+        Accepted,
+        Unknown
+    }
+);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -729,11 +884,36 @@ pub enum PendingState {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ForgeObservation {
-    Pending { pending: PendingState },
-    Merged { evidence: MergeEvidence },
-    Rejected { reason: String },
-    Unknown { reason: String },
+    Pending {
+        pending: PendingState,
+        #[serde(flatten)]
+        extra: ExtraFields,
+    },
+    Merged {
+        evidence: MergeEvidence,
+        #[serde(flatten)]
+        extra: ExtraFields,
+    },
+    Rejected {
+        reason: String,
+        #[serde(flatten)]
+        extra: ExtraFields,
+    },
+    Unknown {
+        reason: String,
+        #[serde(flatten)]
+        extra: ExtraFields,
+    },
 }
+tagged_enum_kinds!(
+    ForgeObservation,
+    ForgeObservationKind {
+        Pending,
+        Merged,
+        Rejected,
+        Unknown
+    }
+);
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -747,6 +927,8 @@ pub struct Observation {
     pub expected_revision: u64,
     pub key: ObservationKey,
     pub result: ForgeObservation,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -763,11 +945,15 @@ pub struct CleanupDebtItem {
     pub step: String,
     pub reason: String,
     pub attempts: u32,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CleanupDebt {
     pub items: Vec<CleanupDebtItem>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -777,6 +963,8 @@ pub struct RestackMapping {
     pub new_head: String,
     pub previous_base: String,
     pub new_base: String,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
 }
 
 /// Run/graph snapshots retain this reference and cursor without owning a second queue.
@@ -786,16 +974,19 @@ pub struct LandingSubscription {
     pub generation: u64,
     pub subscriber: Subscriber,
     pub revision: u64,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConsumerCursor {
     pub subscriber: Subscriber,
     pub revision: u64,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LandingRecord {
     pub schema_version: u32,
     pub id: LandingId,
@@ -825,6 +1016,8 @@ pub struct LandingRecord {
     pub warnings: Vec<String>,
     /// Number of bounded owner passes; identity/revision are separate.
     pub passes: u64,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
 }
 
 #[cfg(test)]
@@ -868,6 +1061,7 @@ mod tests {
         let available = Capabilities {
             repository: Some("repo".into()),
             values: [(ForgeCapability::MergeQueue, CapabilityState::Available)].into(),
+            extra: Default::default(),
         };
         assert_eq!(
             Strategy::Queue
@@ -948,13 +1142,64 @@ mod tests {
     }
 
     #[test]
-    fn pending_observation_roundtrip() -> Result<(), serde_json::Error> {
-        let observation = ForgeObservation::Pending {
-            pending: PendingState::AwaitingChecks,
-        };
-        let decoded: ForgeObservation = serde_json::from_slice(&serde_json::to_vec(&observation)?)?;
-        assert_eq!(decoded, observation);
-        Ok(())
+    fn every_forge_observation_variant_round_trips_through_bounded_codec() {
+        use std::io::Cursor;
+
+        let cases = [
+            ForgeObservation::Pending {
+                pending: PendingState::AwaitingChecks,
+                extra: [("future_field".into(), serde_json::json!("pending"))].into(),
+            },
+            ForgeObservation::Merged {
+                evidence: MergeEvidence {
+                    candidate_commit: Some("candidate".into()),
+                    candidate_tree: Some("tree".into()),
+                    target_base: Some("base".into()),
+                    member_commits: [(7, "member-commit".into())].into(),
+                    members: vec![MemberEvidence {
+                        pr: 7,
+                        head: "member-head".into(),
+                        base: "member-base".into(),
+                        base_commit: "base-commit".into(),
+                        gate_definition_digest: "gate-digest".into(),
+                        candidate_commit: "member-candidate".into(),
+                        candidate_tree: "member-tree".into(),
+                        checks: vec![CheckEvidence {
+                            name: "check".into(),
+                            issuer: Some("issuer".into()),
+                            result: GateResult::Passed,
+                            extra: [("future_check".into(), serde_json::json!(true))].into(),
+                        }],
+                        extra: [("future_member".into(), serde_json::json!(true))].into(),
+                    }],
+                    extra: [("future_evidence".into(), serde_json::json!(true))].into(),
+                },
+                extra: [("future_field".into(), serde_json::json!("merged"))].into(),
+            },
+            ForgeObservation::Rejected {
+                reason: "rejected".into(),
+                extra: [("future_field".into(), serde_json::json!("rejected"))].into(),
+            },
+            ForgeObservation::Unknown {
+                reason: "unavailable".into(),
+                extra: [("future_field".into(), serde_json::json!("unknown"))].into(),
+            },
+        ];
+
+        let observed_kinds = cases
+            .iter()
+            .map(ForgeObservation::kind)
+            .collect::<std::collections::BTreeSet<_>>();
+        let declared_kinds = ForgeObservation::ALL.iter().copied().collect();
+        assert_eq!(observed_kinds, declared_kinds);
+
+        for original in cases {
+            let encoded = crate::encode(&original).expect("observation encodes");
+            let decoded: ForgeObservation =
+                crate::decode(Cursor::new(encoded), crate::Limits::default())
+                    .expect("observation decodes");
+            assert_eq!(decoded, original);
+        }
     }
 
     #[test]
@@ -974,13 +1219,21 @@ mod tests {
             [("strategy".into(), serde_json::json!({"layer":"project"}))].into(),
         )?;
         assert_ne!(a.digest, b.digest);
-        assert!(
-            Strategy::Async
-                .ensure_executable(
-                    &Strategy::Async.plan(&Compose::default(), &Capabilities::default())
-                )
-                .is_err()
-        );
         Ok(())
+    }
+
+    #[test]
+    fn each_strategy_obeys_its_declared_execution_boundary() {
+        for declaration in STRATEGY_DECLARATIONS {
+            let plan = declaration
+                .strategy
+                .plan(&Compose::default(), &Capabilities::default());
+            assert_eq!(
+                declaration.strategy.ensure_executable(&plan).is_ok(),
+                declaration.execution == Execution::Builtin,
+                "{} execution declaration",
+                declaration.name
+            );
+        }
     }
 }

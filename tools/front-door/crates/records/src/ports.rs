@@ -20,16 +20,18 @@ pub enum ExitDisposition {
 /// Success and unknown codes are declared. Other codes use the declared typed
 /// disposition, so a command never relies on an implicit exit-code guess.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CommandExitCodes {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub success: Vec<i32>,
     pub unknown: Vec<i32>,
     pub other: ExitDisposition,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PortCommand {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub argv: Vec<String>,
     pub exit_codes: CommandExitCodes,
 }
@@ -93,11 +95,13 @@ mod tests {
     fn command_exit_codes_round_trip_and_reject_malformed_values() {
         let cases = [
             CommandExitCodes {
+                extra: Default::default(),
                 success: vec![0],
                 unknown: vec![75],
                 other: ExitDisposition::Refused,
             },
             CommandExitCodes {
+                extra: Default::default(),
                 success: vec![0, 1],
                 unknown: vec![2],
                 other: ExitDisposition::Unknown,
@@ -122,16 +126,20 @@ mod tests {
     fn port_command_round_trips_and_rejects_malformed_values() {
         let cases = [
             PortCommand {
+                extra: Default::default(),
                 argv: vec!["check".into()],
                 exit_codes: CommandExitCodes {
+                    extra: Default::default(),
                     success: vec![0],
                     unknown: vec![75],
                     other: ExitDisposition::Refused,
                 },
             },
             PortCommand {
+                extra: Default::default(),
                 argv: vec!["release".into(), "${branch}".into()],
                 exit_codes: CommandExitCodes {
+                    extra: Default::default(),
                     success: vec![0, 1],
                     unknown: vec![2],
                     other: ExitDisposition::Unknown,
@@ -147,7 +155,7 @@ mod tests {
         }
         for malformed in [
             serde_json::json!({"argv":[1],"exit_codes":{"success":[0],"unknown":[],"other":"refused"}}),
-            serde_json::json!({"argv":["check"],"exit_codes":{"success":[0],"unknown":[],"other":"unknown","future":true}}),
+            serde_json::json!({"argv":["check"],"exit_codes":{"success":[0],"unknown":[],"other":"unknown"}}),
         ] {
             assert!(serde_json::from_value::<PortCommand>(malformed).is_err());
         }

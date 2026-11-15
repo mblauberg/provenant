@@ -2,6 +2,7 @@
 //! A plain lane is a one-node graph, so every attempt has exactly one key.
 use provenant_core::ProjectId;
 use serde::{Deserialize, Serialize};
+use std::hash::{Hash, Hasher};
 
 /// Longest graph identifier, as the graph document validates it.
 pub const GRAPH_ID_BYTES: usize = 64;
@@ -12,23 +13,58 @@ pub const NODE_ID_BYTES: usize = 200;
 /// work identity: it replaces run, task and operation identifiers. Its text
 /// form is the command target `GRAPH/NODE#N`; the project is implied by the
 /// repository a command runs in.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(try_from = "WorkKeyWire")]
 pub struct WorkKey {
     project: ProjectId,
     graph: String,
     node: String,
     attempt: u32,
+    #[serde(flatten)]
+    extra: crate::ExtraFields,
 }
 
-/// Unknown fields from a newer writer are ignored, not kept: a key's identity
-/// is its four fields.
+/// Unknown fields are retained when the key is stored inside a record. They do
+/// not participate in the key's identity.
 #[derive(Deserialize)]
 struct WorkKeyWire {
     project: ProjectId,
     graph: String,
     node: String,
     attempt: u32,
+    #[serde(flatten)]
+    extra: crate::ExtraFields,
+}
+
+impl PartialEq for WorkKey {
+    fn eq(&self, other: &Self) -> bool {
+        (self.project, &self.graph, &self.node, self.attempt)
+            == (other.project, &other.graph, &other.node, other.attempt)
+    }
+}
+impl Eq for WorkKey {}
+impl PartialOrd for WorkKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for WorkKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.project, &self.graph, &self.node, self.attempt).cmp(&(
+            other.project,
+            &other.graph,
+            &other.node,
+            other.attempt,
+        ))
+    }
+}
+impl Hash for WorkKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.project.hash(state);
+        self.graph.hash(state);
+        self.node.hash(state);
+        self.attempt.hash(state);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -76,6 +112,7 @@ impl WorkKey {
             graph,
             node,
             attempt,
+            extra: Default::default(),
         })
     }
 
@@ -109,7 +146,9 @@ impl TryFrom<WorkKeyWire> for WorkKey {
     type Error = WorkKeyError;
 
     fn try_from(wire: WorkKeyWire) -> Result<Self, Self::Error> {
-        Self::new(wire.project, wire.graph, wire.node, wire.attempt)
+        let mut key = Self::new(wire.project, wire.graph, wire.node, wire.attempt)?;
+        key.extra = wire.extra;
+        Ok(key)
     }
 }
 

@@ -105,14 +105,41 @@ no-older-shape reader or migration rule is these additive SQLite steps within
 the same root major. A non-additive stored change requires a new root format
 major and a fresh root, with the owner-configuration handoff used for 1.x to
 2.0.
+
+Within a format major, stored JSON records and config inputs evolve additively.
+
+(a) Persisted JSON records, including files, SQLite JSON columns, receipts,
+markers, checkpoints and ledgers, do not use `deny_unknown_fields`. Fields added
+later are optional or have `serde(default)`. Unknown fields round-trip through
+the existing `#[serde(flatten)] extra: provenant_records::ExtraFields`
+convention; code never reads extension fields by static key. An older writer
+therefore preserves fields introduced by a newer minor when it rewrites a
+record.
+
+(b) Config inputs written by users accept unknown keys with one generic warning
+that shows the source. They do not fail solely because a key is unknown.
+
+(c) Requests from untrusted inputs, including peer wire and CLI JSON, may remain
+strict only where data integrity or authority requires it. Each such strict
+type and its reason is recorded with the change that keeps it strict.
+
+(d) Each owning crate declares a registry for its persisted record shapes. The
+`provenant-records` registry declares every records-owned stored type and drives
+its bounded codec invariant. A type owned by another crate is covered by the
+registry next to that crate's production decoder. Each registry decodes a
+payload with an unknown future field using that decoder, then re-encodes it and
+verifies that the field survives.
+
 - Why: additive changes within one root major must preserve stored state and permit
   binaries of different minors to share the same format.
 - Test: `crates/sqlite/src/schema_tests.rs::same_major_additions_are_bidirectionally_compatible_and_idempotent`;
   `crates/sqlite/src/schema_tests.rs::current_opens_do_not_take_a_write_lock_and_concurrent_upgrades_recheck`;
   `crates/sqlite/src/schema_tests.rs::owner_step_declarations_are_additive`;
   `crates/sqlite/src/schema_tests.rs::owner_table_inserts_always_name_columns`;
-  `crates/sqlite/src/schema_tests.rs::incompatible_stores_are_refused_byte_unchanged`
-- Owner: `crates/sqlite/src/schema.rs`, each store's schema declaration
+  `crates/sqlite/src/schema_tests.rs::incompatible_stores_are_refused_byte_unchanged`;
+  `crates/records/tests/forward_compatibility.rs::stored_record_codecs_preserve_unknown_fields`
+- Owner: `crates/sqlite/src/schema.rs`, each store's schema declaration,
+  `crates/records/src/` and `crates/records/tests/forward_compatibility.rs`
 
 ## Records
 
@@ -129,12 +156,11 @@ generation as unknown and re-read.
 ### Strict, bounded records
 
 Unsupported versions fail before mutation. The reader rejects ambiguous or
-unbounded input and never echoes the rejected value. Closed codecs reject or
-discard unknown fields; records with explicit extension maps preserve their
-extensions. Host-owned semantics belong to typed fields on their owning record;
-malformed values fail decoding instead of becoming absent facts. Extension maps
-preserve only unknown fields, so a newer writer's data can survive a round trip.
-Edge-built facts are `Serialize` only.
+unbounded input and never echoes the rejected value. Host-owned semantics belong
+to typed fields on their owning record; malformed values fail decoding instead
+of becoming absent facts. Extension maps preserve only unknown fields, so a
+newer writer's data can survive a round trip. Edge-built facts are `Serialize`
+only.
 - Why: a forged file must not become evidence.
 - Test: `crates/records/tests/contracts.rs::bounded_decode_fails_closed_for_duplicates_utf8_trailing_and_integer_overflow`;
   `crates/records/tests/contracts.rs::typed_decode_errors_do_not_disclose_rejected_values`;
