@@ -718,8 +718,8 @@ pub(super) fn credential_roots(
                 spec.name
             )
         };
-        let kind = if spec.name == "codex" && path == home.join(".codex") {
-            CredentialKind::CodexHome
+        let kind = if path == home.join(fallback) {
+            (*spec.default_account_root_kind).clone()
         } else {
             CredentialKind::Store
         };
