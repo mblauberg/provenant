@@ -133,7 +133,7 @@ fn read_remote(
         )?;
         let result = super::peer::checked_output_origin(result, origin)?;
         let OutputResult::Chunk {
-            peer,
+            length,
             target: returned_target,
             part,
             offset: returned,
@@ -170,8 +170,7 @@ fn read_remote(
             return Err(FacadeError::StateCorrupt);
         }
         if bytes.len() == max {
-            let length = peer
-                .length
+            let length = length
                 .filter(|length| *length > next_offset)
                 .ok_or_else(|| {
                     FacadeError::io("peer did not report the full redacted result length")

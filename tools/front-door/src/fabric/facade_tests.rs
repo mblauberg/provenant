@@ -353,13 +353,20 @@ fn peer_output_binding_is_consumed_before_the_cli_projection() {
     }))
     .unwrap();
     let checked = peer::checked_output_origin(output, &origin).unwrap();
-    let OutputResult::Chunk { extra, peer, .. } = checked else {
+    let OutputResult::Chunk {
+        extra,
+        peer,
+        length,
+        planner_fallback,
+        ..
+    } = checked
+    else {
         panic!("chunk expected")
     };
     assert!(extra.is_empty());
-    assert_eq!(peer.length, Some(2));
-    assert_eq!(peer.planner_fallback.as_deref(), Some("bounded planner failure"));
-    assert_eq!(peer.graph, Default::default());
+    assert_eq!(length, Some(2));
+    assert_eq!(planner_fallback.as_deref(), Some("bounded planner failure"));
+    assert_eq!(peer, Default::default());
     assert!(
         extra
             .keys()
@@ -369,18 +376,25 @@ fn peer_output_binding_is_consumed_before_the_cli_projection() {
 
 #[test]
 fn peer_output_length_round_trips_and_rejects_malformed_values() {
-    for length in [0_u64, 17_u64] {
-        let fields: provenant_records::run::PeerOutputFields =
-            serde_json::from_value(serde_json::json!({"length":length})).unwrap();
-        assert_eq!(fields.length, Some(length));
-        assert_eq!(serde_json::to_value(fields).unwrap()["length"], length);
-    }
-    assert!(
-        serde_json::from_value::<provenant_records::run::PeerOutputFields>(
-            serde_json::json!({"length":"unknown"})
-        )
-        .is_err()
+    let mut value = serde_json::json!({
+        "kind":"chunk", "target":{"attempt":"11111111111111111111111111111111"},
+        "part":"result", "state":"succeeded", "reason":null, "offset":0,
+        "next_offset":0, "eof":true,
+        "digest":provenant_core::Digest::from_bytes([2; 32]),
+        "bytes":{"encoding":"utf8","data":""}, "length":17,
+        "planner_fallback":"planner failed", "future_output_field":{"kept":true}
+    });
+    let chunk: OutputResult = serde_json::from_value(value.clone()).unwrap();
+    let encoded = serde_json::to_value(chunk).unwrap();
+    assert_eq!(encoded["length"], 17);
+    assert_eq!(encoded["planner_fallback"], "planner failed");
+    assert_eq!(
+        encoded["future_output_field"],
+        serde_json::json!({"kept":true})
     );
+
+    value["length"] = serde_json::json!("unknown");
+    assert!(serde_json::from_value::<OutputResult>(value).is_err());
 }
 
 #[test]
@@ -640,7 +654,12 @@ pub(crate) mod peer_tests {
             inbox: &'a provenant_fabric_runtime::inbox::InboxService<'a>,
             cancel: &'a provenant_core::CancelToken,
         ) -> Self {
-            Self { actor, at, inbox, cancel }
+            Self {
+                actor,
+                at,
+                inbox,
+                cancel,
+            }
         }
     }
 
@@ -902,7 +921,8 @@ pub(crate) mod peer_tests {
                         pinned_base: None,
                         head: None,
                         profile: Default::default(),
-                        route: provenant_run::RequestedRoute::Model { required_family: None,
+                        route: provenant_run::RequestedRoute::Model {
+                            required_family: None,
                             extra: Default::default(),
                             provider: "fixture".into(),
                             model: "fixture/model".into(),
@@ -1011,7 +1031,8 @@ pub(crate) mod peer_tests {
                         pinned_base: None,
                         head: None,
                         profile: Default::default(),
-                        route: provenant_run::RequestedRoute::Model { required_family: None,
+                        route: provenant_run::RequestedRoute::Model {
+                            required_family: None,
                             extra: Default::default(),
                             provider: "fixture".into(),
                             model: "fixture/model".into(),
@@ -1283,7 +1304,8 @@ pub(crate) mod peer_tests {
                     pinned_base: None,
                     head: Some(node_source.to_string()),
                     profile: Default::default(),
-                    route: provenant_run::RequestedRoute::Model { required_family: None,
+                    route: provenant_run::RequestedRoute::Model {
+                        required_family: None,
                         extra: Default::default(),
                         provider: "claude".into(),
                         model: "claude/test-model".into(),

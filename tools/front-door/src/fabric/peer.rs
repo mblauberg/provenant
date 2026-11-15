@@ -744,7 +744,7 @@ pub fn peer(
                         | OutputResult::Artifact { peer, target, .. }) = &mut data;
                         let mut fields = peer_graph_fields(&peer_factory, target.attempt)?;
                         fields.peer_subtree = None;
-                        peer.merge_graph(fields);
+                        peer.merge(fields);
                         Ok(data)
                     }),
                 |data| PeerResult::Output {
@@ -1653,26 +1653,13 @@ pub(super) fn checked_output_origin(
     mut output: OutputResult,
     expected: &provenant_records::WorkKey,
 ) -> Result<OutputResult, FacadeError> {
-    let (OutputResult::Chunk { peer, extra, .. } | OutputResult::Artifact { peer, extra, .. }) =
-        &mut output;
-    if !peer_origin_matches(&peer.graph, expected) {
+    let (OutputResult::Chunk { peer, .. } | OutputResult::Artifact { peer, .. }) = &mut output;
+    if !peer_origin_matches(peer, expected) {
         return Err(FacadeError::StateCorrupt);
     }
-    // Serde's flatten does not consume the keys of a flattened struct that
-    // itself flattens a struct, so every peer key is also retained in `extra`.
-    // Drop those copies so only the typed fields below reach the projection.
-    if let Ok(serde_json::Value::Object(owned)) = serde_json::to_value(&*peer) {
-        extra.retain(|key, _| !owned.contains_key(key));
-    }
-    // These authenticate the peer read; the CLI output schema contains lane
-    // fields only. Consume transport metadata before rendering the payload.
-    let length = peer.length;
-    let planner_fallback = peer.planner_fallback.clone();
-    *peer = provenant_records::run::PeerOutputFields {
-        length,
-        planner_fallback,
-        ..Default::default()
-    };
+    // Graph identity authenticates the peer read. Output length and planner
+    // fallback remain owned by the output envelope for the CLI projection.
+    *peer = Default::default();
     Ok(output)
 }
 
