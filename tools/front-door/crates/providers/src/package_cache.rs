@@ -141,13 +141,36 @@ fn npm_global_cache(home: &Path, host_var: &dyn Fn(&str) -> Option<OsString>) ->
         Ok(setting) => return setting,
         Err(()) => return Setting::Present(None),
     }
-    let global = explicit_host_value(host_var, &["npm_config_globalconfig"])
-        .map(PathBuf::from)
-        .or_else(|| {
-            explicit_host_value(host_var, &["npm_config_prefix"])
-                .map(PathBuf::from)
-                .map(|prefix| prefix.join("etc/npmrc"))
-        })
+    let global = if let Some(path) = explicit_host_value(host_var, &["npm_config_globalconfig"]) {
+        Some(absolute_config_path(path))
+    } else {
+        match ini_setting(&user, "globalconfig") {
+            Ok(Setting::Missing) => None,
+            Ok(Setting::Present(Some(path))) => Some(Ok(path)),
+            Ok(Setting::Present(None)) | Err(()) => Some(Err(())),
+        }
+    };
+    let global = match global {
+        Some(Ok(path)) => Some(path),
+        Some(Err(())) => return Setting::Present(None),
+        None => None,
+    };
+    let prefix = if let Some(prefix) = explicit_host_value(host_var, &["npm_config_prefix"]) {
+        Some(absolute_config_path(prefix))
+    } else {
+        match ini_setting(&user, "prefix") {
+            Ok(Setting::Missing) => None,
+            Ok(Setting::Present(Some(path))) => Some(Ok(path)),
+            Ok(Setting::Present(None)) | Err(()) => Some(Err(())),
+        }
+    };
+    let prefix = match prefix {
+        Some(Ok(path)) => Some(path),
+        Some(Err(())) => return Setting::Present(None),
+        None => None,
+    };
+    let global = global
+        .or_else(|| prefix.map(|prefix| prefix.join("etc/npmrc")))
         .or_else(|| {
             crate::launch::homebrew_node_prefix(host_var).map(|prefix| prefix.join("etc/npmrc"))
         });
@@ -161,6 +184,11 @@ fn npm_global_cache(home: &Path, host_var: &dyn Fn(&str) -> Option<OsString>) ->
     // Unknown npm installations may have a configured PREFIX/etc/npmrc. Do not
     // run npm or silently install a higher-priority cache selector over it.
     Setting::Present(None)
+}
+
+fn absolute_config_path(value: OsString) -> Result<PathBuf, ()> {
+    let path = PathBuf::from(value);
+    path.is_absolute().then_some(path).ok_or(())
 }
 
 fn pnpm_global_path(
@@ -570,14 +598,22 @@ mod tests {
         let account = root.path().join("accounts/agy-work");
         let project = root.path().join("repo");
         let xdg_config = home.join("config");
+        let npm_global = root.path().join("npm-global/etc/npmrc");
         std::fs::create_dir_all(project.join(".git")).expect("project root");
         std::fs::create_dir_all(xdg_config.join("pnpm")).expect("pnpm config");
+        std::fs::create_dir_all(npm_global.parent().expect("npm global config parent"))
+            .expect("npm global config");
         std::fs::create_dir_all(&home).expect("home");
         std::fs::write(
             home.join(".npmrc"),
-            "cache = /host/npm-cache\n//registry.invalid/:_authToken=secret-value\n",
+            format!(
+                "globalconfig = {}\n//registry.invalid/:_authToken=secret-value\n",
+                npm_global.display()
+            ),
         )
         .expect("npm config");
+        std::fs::write(&npm_global, "cache = /host/npm-cache\n_auth=secret-value\n")
+            .expect("npm global config");
         std::fs::write(
             xdg_config.join("pnpm/config.yaml"),
             "cacheDir: /host/pnpm-cache\nstoreDir: /host/pnpm-store\n_auth: secret-value\n",
