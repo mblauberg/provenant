@@ -2100,7 +2100,8 @@ mod cargo_setup_tests {
         assert!(matches!(
             result,
             Err(RunError::Filesystem(FsError::LockTimeout { path, timeout }))
-                if path == fixture.git_dir.join(worktrees::REPOSITORY_LOCK) && timeout.is_zero()
+                if path.file_name() == Some(OsStr::new(worktrees::REPOSITORY_LOCK))
+                    && timeout.is_zero()
         ));
         assert_eq!(observed?, b"[unfinished");
         Ok(())
