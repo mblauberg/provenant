@@ -199,13 +199,13 @@ pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
                                 finding
                                     .reason
                                     .as_deref()
-                                    .or_else(|| finding.triage.as_ref().map(|triage| triage.reason.as_str()))
+                                    .or_else(|| finding
+                                        .triage
+                                        .as_ref()
+                                        .map(|triage| triage.reason.as_str()))
                                     .unwrap_or("unavailable")
                             ),
-                            bounded_reason(
-                                finding.evidence.as_deref()
-                                    .unwrap_or("unavailable")
-                            )
+                            bounded_reason(finding.evidence.as_deref().unwrap_or("unavailable"))
                         ));
                     }
                 }
@@ -525,8 +525,14 @@ mod spec_chair_tests {
             let text = summary.lines.join("\n");
             assert_eq!(text.contains("checked finding"), escalated, "{text}");
             if escalated {
-                assert!(text.contains("F1") && text.contains("checked evidence"), "{text}");
-                assert!(text.contains(direct_reason.unwrap_or("triage reason")), "{text}");
+                assert!(
+                    text.contains("F1") && text.contains("checked evidence"),
+                    "{text}"
+                );
+                assert!(
+                    text.contains(direct_reason.unwrap_or("triage reason")),
+                    "{text}"
+                );
             }
         }
     }
