@@ -224,7 +224,9 @@ because `provenant process-tree --json` is read through it.
 Inside a lane where `PROVENANT_PROCESS_TREE` is set, `provenant process-tree
 --json` returns the envelope with the supervisor's latest sample as `data`, or
 `unavailable` when no fresh, complete sample exists. Consumers may rely on
-these fields; new fields may be added. This tier is stable.
+these fields; new fields may be added. With no `--root`, the command returns the
+supervised command's complete sampled subtree. `--root PID` selects a subtree
+within that sample. This tier is stable.
 
 | Object | Field |
 |---|---|

@@ -156,7 +156,7 @@ Your scripts can tell when they run inside a lane and adapt:
 | Am I sandboxed? | `PROVENANT_SANDBOX` is `on` |
 | A lint run that does not queue behind builds | point `CARGO_TARGET_DIR` and `CARGO_BUILD_BUILD_DIR` at `PROVENANT_LANE_CARGO_LINT_TARGET` |
 | Ports for a dev server | the block from `PROVENANT_LANE_PORT_BASE`, `PROVENANT_LANE_PORT_COUNT` long |
-| Memory of my own process tree | `provenant process-tree --json` when `PROVENANT_PROCESS_TREE` is set |
+| Memory of my own process tree | `provenant process-tree --json` when `PROVENANT_PROCESS_TREE` is set; omit `--root` for the supervised command's full subtree, or pass a sampled descendant PID to select a smaller subtree |
 
 Keep these rules when your tooling and Provenant share a checkout:
 

@@ -137,7 +137,7 @@ fn process_tree_reader_fixture() -> Result<(), Box<dyn std::error::Error>> {
             std::env::var_os(provenant_core::consumer_env::PROCESS_TREE).ok_or("snapshot path")?,
         );
         let _ = ready(&path)?;
-        let sample = process_tree::read(&path, own)?;
+        let sample = process_tree::read(&path, None)?;
         assert_eq!(sample.schema_version, 2);
         assert_eq!(sample.root_pid, own);
         std::fs::write(
@@ -180,10 +180,10 @@ fn process_tree_reader_fixture() -> Result<(), Box<dyn std::error::Error>> {
             assert_eq!(zombie.rss_bytes, 0);
         }
         assert!(
-            process_tree::read(&path, children[2]).is_err(),
+            process_tree::read(&path, Some(children[2])).is_err(),
             "zombie root is unavailable"
         );
-        let subtree = process_tree::read(&path, children[0])?;
+        let subtree = process_tree::read(&path, Some(children[0]))?;
         assert_eq!(subtree.root_pid, children[0]);
         assert_eq!(
             subtree
@@ -201,11 +201,11 @@ fn process_tree_reader_fixture() -> Result<(), Box<dyn std::error::Error>> {
             .collect::<std::collections::BTreeSet<_>>()
         );
         assert!(
-            process_tree::read(&path, host).is_err(),
+            process_tree::read(&path, Some(host)).is_err(),
             "outside host must not be selectable"
         );
         assert!(
-            process_tree::read(&path, peer).is_err(),
+            process_tree::read(&path, Some(peer)).is_err(),
             "identical-profile peer must not be selectable"
         );
         assert!(
@@ -237,6 +237,7 @@ fn process_tree_reader_fixture() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+// Spec: docs/specs/consumer-contract.md#process-tree
 fn lane_process_tree_sample_is_private_under_production_profiles()
 -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var_os("PROVENANT_TREE_FIXTURE_ROLE").is_some() {

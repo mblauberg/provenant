@@ -371,9 +371,10 @@ pub fn publish(directory: &Directory, snapshot: Option<&Snapshot>) -> Result<()>
     Ok(())
 }
 
-/// Read the caller-selected subtree from its lane's bounded, fresh snapshot.
-/// Selecting an outside PID never causes a host-side query or enumeration.
-pub fn read(path: &Path, root_pid: u32) -> Result<Sample> {
+/// Read the supervised process tree, or a selected subtree, from its bounded,
+/// fresh snapshot. Selecting an outside PID never causes a host-side query or
+/// enumeration.
+pub fn read(path: &Path, root_pid: Option<u32>) -> Result<Sample> {
     let mut file = FileHandle::open_source(path).map_err(|_| Unavailable)?;
     if file.metadata().map_err(|_| Unavailable)?.kind != FileKind::Regular {
         return Err(Unavailable);
@@ -411,13 +412,14 @@ fn freshness_micros(interval: std::time::Duration) -> u64 {
 
 fn select(
     snapshot: Snapshot,
-    root_pid: u32,
+    root_pid: Option<u32>,
     now: u64,
     boot: &str,
     wall: WallTime,
     identity: impl FnOnce(u32) -> Result<u64>,
 ) -> Result<Sample> {
     let sample = snapshot.sample;
+    let root_pid = root_pid.unwrap_or(sample.root_pid);
     let age = now
         .checked_sub(snapshot.monotonic_micros)
         .ok_or(Unavailable)?;
@@ -764,7 +766,7 @@ mod tests {
     fn process_tree_selects_only_the_owned_subtree() {
         let selected = select(
             snapshot(),
-            11,
+            Some(11),
             2_000_000,
             "boot",
             WallTime::from_micros(2_000_000).unwrap(),
@@ -793,6 +795,29 @@ mod tests {
         assert_eq!(json["swap_total_bytes"], 8192);
     }
 
+    // Spec: docs/specs/consumer-contract.md#process-tree
+    #[test]
+    fn process_tree_defaults_to_the_sampled_provider_root() {
+        let selected = select(
+            snapshot(),
+            None,
+            2_000_000,
+            "boot",
+            WallTime::from_micros(2_000_000).unwrap(),
+            |_| Ok(100),
+        )
+        .unwrap();
+        assert_eq!(selected.root_pid, 10);
+        assert_eq!(
+            selected
+                .processes
+                .iter()
+                .map(|process| process.pid)
+                .collect::<Vec<_>>(),
+            [10, 11, 12, 13]
+        );
+    }
+
     #[test]
     fn process_tree_unmeasurable_swap_is_null_without_changing_rss() {
         let mut source = fixture_source(false, false);
@@ -812,7 +837,7 @@ mod tests {
         let roundtrip = serde_json::from_value(wire).unwrap();
         let selected = select(
             roundtrip,
-            10,
+            Some(10),
             2_000_000,
             "boot",
             WallTime::from_micros(2_000_000).unwrap(),
@@ -836,7 +861,7 @@ mod tests {
         sampled.freshness_micros = freshness_micros(std::time::Duration::from_secs(20));
         let selected = select(
             sampled,
-            10,
+            Some(10),
             21_000_000,
             "boot",
             WallTime::from_micros(21_000_000).unwrap(),
@@ -854,15 +879,20 @@ mod tests {
             .monotonic_micros
             .saturating_add(stale.freshness_micros)
             .saturating_add(1);
-        assert!(select(stale, 10, stale_after, "boot", wall, |_| Ok(100)).is_err());
-        assert!(select(snapshot(), 10, 999_999, "boot", wall, |_| Ok(100)).is_err());
-        assert!(select(snapshot(), 10, 2_000_000, "other-boot", wall, |_| Ok(100)).is_err());
-        assert!(select(snapshot(), 10, 2_000_000, "boot", wall, |_| Ok(101)).is_err());
-        assert!(select(snapshot(), 99, 2_000_000, "boot", wall, |_| Ok(100)).is_err());
+        assert!(select(stale, Some(10), stale_after, "boot", wall, |_| Ok(100)).is_err());
+        assert!(select(snapshot(), Some(10), 999_999, "boot", wall, |_| Ok(100)).is_err());
+        assert!(
+            select(snapshot(), Some(10), 2_000_000, "other-boot", wall, |_| Ok(
+                100
+            ))
+            .is_err()
+        );
+        assert!(select(snapshot(), Some(10), 2_000_000, "boot", wall, |_| Ok(101)).is_err());
+        assert!(select(snapshot(), Some(99), 2_000_000, "boot", wall, |_| Ok(100)).is_err());
         assert!(
             select(
                 snapshot(),
-                10,
+                Some(10),
                 2_000_000,
                 "boot",
                 WallTime::from_micros(0).unwrap(),
@@ -872,20 +902,20 @@ mod tests {
         );
         let mut invalid = snapshot();
         invalid.sample.processes.clear();
-        assert!(select(invalid, 10, 2_000_000, "boot", wall, |_| Ok(100)).is_err());
+        assert!(select(invalid, Some(10), 2_000_000, "boot", wall, |_| Ok(100)).is_err());
         let mut invalid = snapshot();
         invalid.sample.processes[0].pid = 11;
-        assert!(select(invalid, 10, 2_000_000, "boot", wall, |_| Ok(100)).is_err());
+        assert!(select(invalid, Some(10), 2_000_000, "boot", wall, |_| Ok(100)).is_err());
         let mut invalid = snapshot();
         invalid.sample.schema_version = 1;
-        assert!(select(invalid, 10, 2_000_000, "boot", wall, |_| Ok(100)).is_err());
+        assert!(select(invalid, Some(10), 2_000_000, "boot", wall, |_| Ok(100)).is_err());
     }
 
     #[test]
     fn process_tree_reader_refuses_missing_malformed_and_oversized_files() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(FILE);
-        assert!(read(&path, 10).is_err());
+        assert!(read(&path, Some(10)).is_err());
         for bytes in [
             b"null".to_vec(),
             b"{}".to_vec(),
@@ -893,7 +923,7 @@ mod tests {
             vec![b' '; MAX_BYTES as usize + 1],
         ] {
             std::fs::write(&path, bytes).unwrap();
-            assert!(read(&path, 10).is_err());
+            assert!(read(&path, Some(10)).is_err());
         }
     }
 }

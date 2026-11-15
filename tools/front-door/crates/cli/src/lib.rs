@@ -2843,6 +2843,21 @@ mod tests {
         };
         assert!(!error.to_string().contains("Usage:"));
     }
+
+    // Spec: docs/specs/consumer-contract.md#process-tree
+    #[test]
+    fn process_tree_command_defaults_to_the_supervised_root() {
+        let invocation = valid(&["process-tree", "--json"]);
+        assert!(matches!(
+            invocation.command,
+            Command::ProcessTree { root: None }
+        ));
+        let invocation = valid(&["process-tree", "--json", "--root", "42"]);
+        assert!(matches!(
+            invocation.command,
+            Command::ProcessTree { root: Some(42) }
+        ));
+    }
     #[test]
     fn usage_verbs_include_optional_parents_only() {
         let verbs = usage_verbs();
