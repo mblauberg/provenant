@@ -248,6 +248,10 @@ pub(super) fn prepare_command(
         use std::io::Write;
         let _ = writeln!(std::io::stderr().lock(), "{warning}");
     }
+    for warning in super::preparation::ignore_file_warnings(provider, task, roots.state.as_path()) {
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr().lock(), "{warning}");
+    }
     apply_lane_capabilities(&mut spec.profile.spec, &task.access);
     let common_git_path = repository
         .as_ref()

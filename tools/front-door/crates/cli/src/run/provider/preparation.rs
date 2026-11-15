@@ -137,6 +137,21 @@ pub(super) fn image_input_warning(adapter: &str, attachments: &[PathBuf]) -> Opt
     })
 }
 
+/// Warn when an ignore file the routed adapter declares, in the writer's
+/// checkout, hides the writer's worktree from that adapter's agent.
+pub(super) fn ignore_file_warnings(
+    adapter: &str,
+    task: &run::TaskRequest,
+    state: &Path,
+) -> Vec<String> {
+    match (&task.writer, AdapterSpec::get(adapter)) {
+        (Some(writer), Some(spec)) => {
+            crate::ignore_files::launch_warnings(&writer.project, &writer.worktree, spec, state)
+        }
+        _ => Vec::new(),
+    }
+}
+
 pub(super) fn violates_account_pin(
     selected_key: Option<&str>,
     selected_adapter: Option<&str>,
@@ -4079,6 +4094,9 @@ pub(super) fn prepare_candidates(
             );
         }
         if let Some(warning) = image_input_warning(&route.adapter, &task.access.attachments) {
+            let _ = writeln!(std::io::stderr().lock(), "{warning}");
+        }
+        for warning in ignore_file_warnings(&route.adapter, task, roots.state.as_path()) {
             let _ = writeln!(std::io::stderr().lock(), "{warning}");
         }
         if route.eligibility == provenant_records::RouteEligibility::UnverifiedModel {

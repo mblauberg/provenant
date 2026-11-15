@@ -516,11 +516,47 @@ fn discard_remote_repairs(report: &mut Report) {
         row.repair = None;
     }
 }
+/// Lane worktrees of the selected checkout that an ignore file declared by an
+/// installed adapter hides from that adapter. Outside a checkout there is
+/// nothing to check; the parent checkout is the one holding the common Git
+/// directory, whose ignore files a provider applies to nested worktrees.
+fn ignore_file_warnings(globals: &Globals, state: &Path) -> Vec<String> {
+    let Ok(checkout) = roots::selected_project(globals.project.as_deref(), true) else {
+        return Vec::new();
+    };
+    let common = match provenant_os::git::repository_path(
+        &checkout,
+        provenant_os::git::RepositoryPath::CommonDir,
+    ) {
+        Ok(common) => common,
+        Err(error) => {
+            return vec![format!(
+                "warning: provider ignore files unchecked: Git common directory unavailable: {error}"
+            )];
+        }
+    };
+    let Some(parent) = common.parent() else {
+        return Vec::new();
+    };
+    let installed: Vec<_> = provenant_records::ADAPTER_SPECS
+        .iter()
+        .filter(|spec| !spec.ignore_files.is_empty() && executable(spec.binary).is_some())
+        .collect();
+    if installed.is_empty() {
+        return Vec::new();
+    }
+    provenant_cli::ignore_files::layout_warnings(parent, state, installed.iter().copied())
+}
 fn inspect(globals: &Globals, host: Option<&str>) -> Result<Report, DoctorError> {
     let Some(name) = host else {
         let resolved = roots::resolve(globals, roots::Workspace::Home, roots::Product::Optional)
             .map_err(DoctorError::local)?;
-        return local(&resolved.home, &resolved.roots).map_err(DoctorError::local);
+        let mut report = local(&resolved.home, &resolved.roots).map_err(DoctorError::local)?;
+        report.warnings.extend(ignore_file_warnings(
+            globals,
+            resolved.roots.state.as_path(),
+        ));
+        return Ok(report);
     };
     let resolved = roots::resolve(globals, roots::Workspace::Project, roots::Product::Required)
         .map_err(DoctorError::local)?;

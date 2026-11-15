@@ -10,6 +10,7 @@ pub mod console;
 pub mod domains;
 pub mod external_contract;
 pub mod fabric;
+pub mod ignore_files;
 pub mod quota;
 pub(crate) mod quota_history;
 pub mod route;
