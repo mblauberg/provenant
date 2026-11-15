@@ -1571,7 +1571,7 @@ mod answer_delivery_tests {
                 .all(|warning| { !warning.message.contains("schedule.expires") })
         );
         let event = serde_json::from_value(
-            json!({"hook_event_name":"PreToolUse", "tool_name":"Bash", "tool_input":{"command":"git status"}, "cwd":temp.path()}),
+            json!({"hook_event_name":"PreToolUse", "tool_name":"Bash", "tool_input":{"command":"git status"}, "cwd":temp.path(), "session_id":"chair"}),
         )?;
         assert_eq!(
             guard_reply(

@@ -382,14 +382,17 @@ mod tests {
             // Bound the CI message; a fixture tree change rarely needs more.
             changed.chain(added).take(20).collect()
         }
-        let rig = crate::worktree_tests::repository()?.without_state()?;
+        let rig = crate::worktree_tests::repository()?;
+        // The rig's own state holds fixture configuration; this report reads a
+        // state root that does not exist yet.
+        let state = rig.root.join("unindexed-state");
         let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
-        inputs.state_dir = Some(rig.state.clone());
+        inputs.state_dir = Some(state.clone());
         let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
         let before = snapshot(&rig.root)?;
         let report = collect_resolved(&roots, &rig.home, &rig.project)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
-        assert!(!rig.state.exists());
+        assert!(!state.exists());
         let changed = changed_paths(&before, &snapshot(&rig.root)?);
         assert!(changed.is_empty(), "report changed files: {changed:?}");
         assert_eq!(report.totals["worktree"].count, 1);
@@ -419,20 +422,20 @@ mod tests {
         for root in [
             &rig.project,
             &rig.project.join(".worktrees/disk-fixture"),
-            &rig.state,
+            &state,
         ] {
             fs::create_dir_all(root.join("target"))?;
             fs::write(root.join("target/CACHEDIR.TAG"), "cache")?;
         }
-        fs::create_dir_all(rig.state.join("attempts/attempt/tmp"))?;
-        fs::create_dir_all(rig.state.join("attempts/attempt/scratch"))?;
-        fs::write(rig.state.join("attempts/attempt/tmp/keep"), "unindexed")?;
-        fs::write(rig.state.join("config.toml"), "schema_version = 1\n")?;
+        fs::create_dir_all(state.join("attempts/attempt/tmp"))?;
+        fs::create_dir_all(state.join("attempts/attempt/scratch"))?;
+        fs::write(state.join("attempts/attempt/tmp/keep"), "unindexed")?;
+        fs::write(state.join("config.toml"), "schema_version = 1\n")?;
         for index in 0..50 {
-            fs::write(rig.state.join(format!("metadata-{index}")), "state")?;
+            fs::write(state.join(format!("metadata-{index}")), "state")?;
         }
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&rig.state, fs::Permissions::from_mode(0o700))?;
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700))?;
         // A project identity need not have any worktree registry yet.
         let location = provenant_config::ProjectLocation::new(rig.project.join(".git"))?;
         let _binding = provenant_config::bind_project(&roots, location)?;
@@ -497,7 +500,7 @@ mod tests {
             [
                 rig.project.join("target"),
                 rig.project.join(".worktrees/disk-fixture/target"),
-                rig.state.join("target")
+                state.join("target")
             ]
             .into_iter()
             .collect()
@@ -505,7 +508,7 @@ mod tests {
         for target in targets {
             let path = Path::new(target["path"].as_str().ok_or("target path")?);
             assert!(target.get("reclaim").is_none());
-            if path == rig.state.join("target") {
+            if path == state.join("target") {
                 assert!(target.get("owner").is_none());
                 assert!(target.get("writer").is_none());
             } else {
