@@ -1619,6 +1619,7 @@ mod child_wait_tests {
 mod provisioning_tests {
     use super::*;
 
+    // Spec: docs/specs/fabric.md#cli-and-relay-surfaces
     #[test]
     fn writer_provisioning_contention_keeps_its_fence_until_the_same_checkout_is_free()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1677,7 +1678,7 @@ mod provisioning_tests {
             }]
         }))?;
         let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
-            "schema_version":1,"graph_id":"provision-contention","plan_digest":"fixture","nodes":[{
+            "schema_version":2,"graph_id":"provision-contention","plan_digest":"fixture","nodes":[{
                 "id":"writer","state":"pending","worktree":path,"attempts":[]
             }]
         }))?;
@@ -1990,6 +1991,7 @@ mod provisioning_tests {
         Ok(())
     }
 
+    // Spec: docs/specs/fabric.md#cli-and-relay-surfaces
     #[test]
     fn readonly_parent_add_and_edit_provision_writers_at_the_pinned_graph_source()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -2075,7 +2077,7 @@ mod provisioning_tests {
         }
         git(&["remote", "add", "origin", remote])?;
         git(&["checkout", "--detach", "-q"])?;
-        let request = json!({"op":"add","id":"writer","use":"implement","brief":"Write","writer":true,"write_scope":["src"],"idempotency_key":"write"});
+        let request = json!({"op":"add","id":"writer","use":"implement","prompt":"Write","writer":true,"write_scope":["src"],"idempotency_key":"write"});
         let receipt = serve(&context, "caller", request.clone(), budget, &cancel, &clock)?;
         let path = receipt["worktree"].as_str().ok_or("missing worktree")?;
         assert_eq!(git(&["-C", path, "rev-parse", "HEAD"])?, source);
@@ -2083,7 +2085,7 @@ mod provisioning_tests {
         assert_eq!(replay["node"], receipt["node"]);
         assert_eq!(replay["replayed"], true);
         let edit = json!({"op":"edit","id":"g-writers","patch":{"schema_version":1,"idempotency_key":"edit-writer","nodes":[{
-            "id":"edited","use":"implement","brief":"Edit","write_scope":["other"]
+            "id":"edited","use":"implement","prompt":"Edit","write_scope":["other"]
         }]}});
         let _ = serve(&context, "caller", edit, budget, &cancel, &clock)?;
         assert_eq!(
@@ -2098,6 +2100,7 @@ mod provisioning_tests {
         Ok(())
     }
 
+    // Spec: docs/specs/fabric.md#cli-and-relay-surfaces
     #[test]
     fn lost_child_receipt_replays_after_graph_settlement() -> Result<(), Box<dyn std::error::Error>>
     {
@@ -2128,7 +2131,7 @@ mod provisioning_tests {
             let budget = WaitBudget::cli(clock.mono_now(), 5)?;
             let reference = format!("{}/caller", context.identity.host);
             let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
-                "schema_version":1,"graph_id":"g-lost-receipt","plan_digest":"fixture",
+                "schema_version":2,"graph_id":"g-lost-receipt","plan_digest":"fixture",
                 "nodes":[{"id":"parent","state":"running","worktree":null,"attempts":[{
                     "launched":true,"key":{"graph_id":"g-lost-receipt","node_id":"parent","route_index":0, "attempt": 1},
                     "route":{"alias":"senior"},"state":"running","attempt_ref":reference,
@@ -2161,7 +2164,7 @@ mod provisioning_tests {
                 })?;
                 journal.save(&checkpoint)?;
             }
-            let request = json!({"op":"add","id":"child","use":"task","brief":"Read", "idempotency_key":"lost-reply"});
+            let request = json!({"op":"add","id":"child","use":"task","prompt":"Read", "idempotency_key":"lost-reply"});
             let receipt = serve(&context, "caller", request.clone(), budget, &cancel, &clock)?;
             let settled = {
                 let mut journal = open()?;
@@ -2186,7 +2189,7 @@ mod provisioning_tests {
             assert_eq!(replay["replayed"], true);
             assert_eq!(open()?.load("g-lost-receipt")?, Some(settled));
             let mut changed = request.clone();
-            changed["brief"] = json!("Different");
+            changed["prompt"] = json!("Different");
             assert!(
                 matches!(serve(&context, "caller", changed, budget, &cancel, &clock),
                 Err(ServiceError::Cli { code, .. }) if code == "idempotency_conflict")
@@ -2201,6 +2204,7 @@ mod provisioning_tests {
         Ok(())
     }
 
+    // Spec: docs/specs/fabric.md#cli-and-relay-surfaces
     #[test]
     fn lane_edit_refuses_skip_and_replace_outside_its_subtree()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -2227,7 +2231,7 @@ mod provisioning_tests {
             ]
         }))?;
         let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
-            "schema_version":1,"graph_id":"edit-scope","plan_digest":"fixture",
+            "schema_version":2,"graph_id":"edit-scope","plan_digest":"fixture",
             "nodes":[
                 {"id":"writer","state":"running","worktree":null,"attempts":[{
                     "launched":true,"key":{"graph_id":"edit-scope","node_id":"writer","route_index":0, "attempt": 1},
@@ -2288,6 +2292,7 @@ mod provisioning_tests {
         Ok(())
     }
 
+    // Spec: docs/specs/fabric.md#cli-and-relay-surfaces
     #[test]
     fn crash_after_the_fence_is_recovered_by_the_next_serve()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -2345,7 +2350,7 @@ mod provisioning_tests {
         // any Git effect.
         let reference = format!("{}/caller", context.identity.host);
         let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
-            "schema_version":1, "graph_id":"g-crash", "plan_digest":"fixture", "nodes":[
+            "schema_version":2, "graph_id":"g-crash", "plan_digest":"fixture", "nodes":[
                 {"id":"a","state":"running","worktree":null,"attempts":[{
                     "launched":true,"key":{"graph_id":"g-crash","node_id":"a","route_index":0, "attempt": 1},
                     "route":{"alias":"senior"},"state":"running","attempt_ref":reference,
@@ -2553,6 +2558,7 @@ mod provisioning_tests {
 mod panel_tests {
     use super::*;
 
+    // Spec: docs/specs/fabric.md#cli-and-relay-surfaces
     #[test]
     fn relay_review_resolver_uses_graph_risk_and_tags() {
         let review = provenant_routing::RoutingConfig::default().review;
@@ -2585,7 +2591,7 @@ mod panel_tests {
         let limits = provenant_fabric_runtime::config::GraphLimits::default();
         let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
             serde_json::from_value(json!({
-                "schema_version": 1, "graph_id": "panel-risk", "plan_digest": "fixture", "nodes": [],
+                "schema_version": 2, "graph_id": "panel-risk", "plan_digest": "fixture", "nodes": [],
             })).unwrap();
         let patch = serde_json::from_value(json!({
             "schema_version": 1,
