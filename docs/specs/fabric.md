@@ -177,10 +177,12 @@ discarded head frame cannot erase it. Oversized frames, undecodable
 delimiter-complete frames, unreadable output, or drain-truncated live output
 also seal incomplete identity evidence; settlement leaves that result
 unsettled instead of admitting a same-session continuation. The guardian
-separately records an incomplete JSON record in the final bytes only when the
-stream reaches actual EOF. That final fragment is tolerated only after a
-delivered `ExplicitCancellation` or `Steered` stop; natural completion and
-uncertain signal delivery remain unsettled. A parseable final record still
+immediately routes a live identity conflict through its existing protocol
+rejection stop path while preserving the separate conflict evidence for
+settlement. It separately records an incomplete JSON record in the final bytes
+only when the stream reaches actual EOF. That final fragment is tolerated only
+after a delivered `ExplicitCancellation` or `Steered` stop; natural completion
+and uncertain signal delivery remain unsettled. A parseable final record still
 passes through the shared adapter checks, so a session or model mismatch always
 fences continuation, including when that record has no trailing newline.
 

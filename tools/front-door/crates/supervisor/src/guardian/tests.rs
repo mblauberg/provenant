@@ -1702,6 +1702,34 @@ fn context_handoff_is_due_only_at_a_reported_context_past_a_set_threshold() {
 }
 
 #[test]
+// Spec: docs/specs/fabric.md#session-ready-steering
+fn live_identity_conflict_enters_the_existing_protocol_stop_path() {
+    use provenant_os::capture::{DecodedEventSink, FrameEvent};
+
+    let events = super::Events::default();
+    events.try_send(FrameEvent::IdentityConflict).unwrap();
+    assert!(events.protocol_rejection_observed());
+
+    let (running, _) = crate::machine::step(
+        crate::machine::State::prepared(crate::machine::Budgets::with_cleanup(100, 10, 5)),
+        crate::machine::Event::Started,
+        crate::machine::Tick::at(0),
+    );
+    let (stopping, effects) = crate::machine::step(
+        running,
+        crate::machine::Event::ProtocolRejected,
+        crate::machine::Tick::at(1),
+    );
+    assert_eq!(stopping.phase(), crate::machine::Phase::Stopping);
+    assert_eq!(
+        effects,
+        vec![crate::machine::Effect::DeliverStop(
+            crate::machine::StopReason::ProtocolRejected
+        )]
+    );
+}
+
+#[test]
 fn unavailable_port_allocation_warns_and_does_not_claim_a_block()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;

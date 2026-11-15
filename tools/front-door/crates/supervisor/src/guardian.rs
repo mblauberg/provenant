@@ -757,6 +757,14 @@ impl Events {
     fn context(&self) -> Option<u64> {
         self.usage.lock().ok().and_then(|usage| usage.context)
     }
+
+    /// Protocol rejection and a validated provider identity conflict both
+    /// make the live stream unsafe to continue. The latter remains separately
+    /// sealed in ProcessExit for Run's continuation decision.
+    fn protocol_rejection_observed(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.rejected.load(Ordering::Relaxed) || self.identity_conflict.load(Ordering::Acquire)
+    }
 }
 impl provenant_os::capture::DecodedEventSink for Events {
     fn try_send(
@@ -1284,8 +1292,8 @@ impl Driver<'_> {
                 && (out_events.terminal.load(Ordering::Relaxed)
                     || err_events.terminal.load(Ordering::Relaxed));
             terminal |= newly_terminal;
-            let rejected = out_events.rejected.load(Ordering::Relaxed)
-                || err_events.rejected.load(Ordering::Relaxed);
+            let rejected = out_events.protocol_rejection_observed()
+                || err_events.protocol_rejection_observed();
             let tokens = out_events.tokens().saturating_add(err_events.tokens());
             if plan.token_budget > 0
                 && !budget_warned
