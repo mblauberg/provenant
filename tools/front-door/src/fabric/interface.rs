@@ -838,13 +838,14 @@ impl Factory {
         &self,
         document: Option<&Value>,
     ) -> Result<BTreeMap<String, Vec<String>>, FacadeError> {
-        self.launch_resolvers_for_tier(document, None)
+        self.launch_resolvers_for_tier(document, None, None)
     }
 
     fn launch_resolvers_for_tier(
         &self,
         document: Option<&Value>,
         route: Option<&RouteChoice>,
+        review_range: Option<(&str, &str)>,
     ) -> Result<BTreeMap<String, Vec<String>>, FacadeError> {
         let config = provenant_cli::config_reads::read_for(&self.context.roots, "run")
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
@@ -883,8 +884,10 @@ impl Factory {
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         provenant_cli::fabric::graph_relay::launch_resolvers_at_roots(
             &self.context.roots,
+            &self.cwd,
             &config.domains.routing.review,
             &document,
+            review_range,
         )
         .map_err(|reason| FacadeError::DispatchRefused {
             fact: None,
@@ -1128,7 +1131,7 @@ impl Factory {
             &self.context.port_table,
         )?;
         node["id"] = json!(key);
-        let resolvers = self.launch_resolvers_for_tier(raw, route.as_ref())?;
+        let resolvers = self.launch_resolvers_for_tier(raw, route.as_ref(), None)?;
         let mut compiled = provenant_fabric_runtime::graph::template::Compiler {
             library: &library,
             resolvers: &resolvers,
@@ -1505,15 +1508,6 @@ impl Factory {
         }
         let library = self.template_library(Some(&inline))?;
         let route = route_choice(&input, raw)?;
-        let resolver = self.launch_resolvers_for_tier(raw, route.as_ref())?;
-        let context = PatchContext {
-            library: &library,
-            resolvers: &resolver,
-            scan: &patch::scan_for_secrets,
-            journal: None,
-            limits: &self.context.config.graph.limits,
-            worktree_layout: self.context.port_table.worktree_layout.clone(),
-        };
         let template_name = input["template"]
             .as_str()
             .or_else(|| lane_document.and_then(|document| document["use"].as_str()))
@@ -1582,6 +1576,18 @@ impl Factory {
             resolved_head = Some(head);
             resolved_review_base = Some(base);
         }
+        let review_range = resolved_review_base
+            .as_deref()
+            .zip(resolved_head.as_deref());
+        let resolver = self.launch_resolvers_for_tier(raw, route.as_ref(), review_range)?;
+        let context = PatchContext {
+            library: &library,
+            resolvers: &resolver,
+            scan: &patch::scan_for_secrets,
+            journal: None,
+            limits: &self.context.config.graph.limits,
+            worktree_layout: self.context.port_table.worktree_layout.clone(),
+        };
         // The commit the launch starts from belongs to its identity. A checkout
         // with no commit yet simply has none.
         let source_commit = resolved_head.clone().or_else(|| {
@@ -3639,6 +3645,91 @@ mod tests {
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
         let result = factory.graph_document(json!({"op":"run","template":"review","brief":"Review","set":{"subject":head,"review_base":"review-target"},"explain":true}), budget, &cancel)?;
         assert_eq!(result["document"]["review_base"], tip);
+        Ok(())
+    }
+
+    // Spec: docs/specs/routing.md#pinned-review-selection
+    #[test]
+    fn pinned_review_expansion_applies_path_floors_and_keeps_docs_quick() -> Result {
+        let rig = crate::worktree_tests::repository()?;
+        let base = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        let workflow = rig.project.join(".github/workflows/release.yml");
+        std::fs::create_dir_all(workflow.parent().ok_or("workflow parent")?)?;
+        std::fs::write(&workflow, "name: Release\n")?;
+        let credentials = rig.project.join("credentials/identity.json");
+        std::fs::create_dir_all(credentials.parent().ok_or("credentials parent")?)?;
+        std::fs::write(&credentials, "{}\n")?;
+        crate::worktree_tests::git(
+            &rig,
+            &[
+                "add",
+                ".github/workflows/release.yml",
+                "credentials/identity.json",
+            ],
+        )?;
+        crate::worktree_tests::git(&rig, &["commit", "-qm", "touch protected review paths"])?;
+        let protected_head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+
+        crate::worktree_tests::git(&rig, &["checkout", "-q", "-b", "docs-review", &base])?;
+        let documentation = rig.project.join("docs/guide.md");
+        std::fs::create_dir_all(documentation.parent().ok_or("documentation parent")?)?;
+        std::fs::write(&documentation, "Review selection guide\n")?;
+        crate::worktree_tests::git(&rig, &["add", "docs/guide.md"])?;
+        crate::worktree_tests::git(&rig, &["commit", "-qm", "touch docs only"])?;
+        let docs_head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let explain = |subject: &str| -> Result<GraphDocument> {
+            let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+            let result = factory.graph_document(
+                json!({
+                    "op":"run", "template":"review", "brief":"Review pinned paths",
+                    "over":"@review-panel", "explain":true,
+                    "set":{"subject":subject,"review_base":base}
+                }),
+                budget,
+                &cancel,
+            )?;
+            Ok(serde_json::from_value(result["document"].clone())?)
+        };
+
+        let protected = explain(&protected_head)?;
+        let protected_lenses = &protected.template_resolvers["review-panel"];
+        assert!(protected_lenses.len() >= 8, "{protected_lenses:?}");
+        for lens in ["correctness-spec", "reliability", "security-privacy"] {
+            assert!(
+                protected_lenses.iter().any(|selected| selected == lens),
+                "{protected_lenses:?}"
+            );
+        }
+        assert_eq!(
+            protected.template_resolvers["review-frame"],
+            vec!["true".to_owned()]
+        );
+        assert_eq!(
+            protected.template_resolvers["review-verify"],
+            vec!["true".to_owned()]
+        );
+        assert_eq!(
+            protected.template_resolvers["review-synthesis"],
+            vec!["true".to_owned()]
+        );
+
+        let docs = explain(&docs_head)?;
+        assert_eq!(docs.template_resolvers["review-panel"].len(), 1);
+        assert_eq!(
+            docs.template_resolvers["review-frame"],
+            vec!["false".to_owned()]
+        );
+        assert_eq!(
+            docs.template_resolvers["review-verify"],
+            vec!["false".to_owned()]
+        );
+        assert_eq!(
+            docs.template_resolvers["review-synthesis"],
+            vec!["false".to_owned()]
+        );
         Ok(())
     }
 

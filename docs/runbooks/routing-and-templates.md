@@ -36,8 +36,14 @@ Configure review shapes and selection under `[domains.routing.review]`; inspect
 the schema for available settings. Preview a review before submitting it:
 
 ```sh
-provenant run review --brief-file brief.md --set subject=origin/branch --set review_base=origin/main --explain
+provenant run review --brief-file brief.md --set subject=origin/branch --set review_base=origin/main --over @review-panel --explain
 ```
+
+The host pins both refs, then selects the panel from the changed paths and size
+between their merge base and the subject. Configured path floors therefore apply
+before `@review-panel` expands. For an explicit risk or risk tag, supply the
+graph's top-level `review` request; `--set subject` and `--set review_base` pin
+the range only.
 
 Bind each attempt's resolved route to the review evidence. Review a changed head
 again as required by the repository's workflow.

@@ -61,8 +61,9 @@ pub use controls::{
 };
 pub use delivery::{HostDeliveryContext, filtered_lane_path};
 pub use git_context::{
-    GitContext, continuation_history, ensure_local_branch, ensure_recorded_local_branch,
-    resolve_git_base, resolve_git_base_with_facts, review_merge_base, review_merge_base_between,
+    GitContext, ReviewDiffContext, continuation_history, ensure_local_branch,
+    ensure_recorded_local_branch, resolve_git_base, resolve_git_base_with_facts,
+    review_diff_context_at, review_merge_base, review_merge_base_between,
 };
 pub use holder::{
     HolderContext, HostLaunchContext, RetainedGit, RootSeed, RunHolder, SealedTask, retained_git,

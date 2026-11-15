@@ -213,8 +213,10 @@ pub fn serve_with_read(
                 .map_err(|error| refused("invalid_config", error.to_string()))?;
             let resolvers = launch_resolvers_at_roots(
                 &context.roots,
+                &context.cwd,
                 &config.domains.routing.review,
                 &document,
+                None,
             )
             .map_err(|error| refused("invalid_review", error))?;
             let patch_context = PatchContext {
@@ -383,8 +385,10 @@ pub fn serve_with_read(
                 .map_err(|error| refused("invalid_config", error.to_string()))?;
             let resolvers = launch_resolvers_at_roots(
                 &context.roots,
+                &context.cwd,
                 &config.domains.routing.review,
                 &document,
+                None,
             )
             .map_err(|error| refused("invalid_review", error))?;
             // The ID selects this graph; prepare checks each skip/replace target
@@ -862,12 +866,13 @@ pub fn tier_route(
     }
 }
 
-/// Resolve dynamic panels at the host, using the graph's declared review risk.
+/// Resolve dynamic panels at the host using declared review context and an
+/// optional subject/base range already pinned by the caller.
 pub fn launch_resolvers(
     review: &provenant_routing::ReviewConfig,
     document: &provenant_fabric_runtime::graph::GraphDocument,
 ) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
-    launch_resolvers_with(review, document, |_, family| {
+    launch_resolvers_with(review, document, None, |_, family| {
         Err(format!(
             "required provider family {}: route eligibility context unavailable",
             family.unwrap_or("unknown")
@@ -876,13 +881,20 @@ pub fn launch_resolvers(
 }
 
 /// Resolve family-constrained panels against host eligibility before expansion.
+/// The optional pinned range contributes path floors and measured size.
 pub fn launch_resolvers_at_roots(
     roots: &provenant_core::Roots,
+    cwd: &std::path::Path,
     review: &provenant_routing::ReviewConfig,
     document: &provenant_fabric_runtime::graph::GraphDocument,
+    review_range: Option<(&str, &str)>,
 ) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
     let exclude = document.exclude.clone();
-    launch_resolvers_with(review, document, |slot, family| {
+    let pinned_diff = review_range.and_then(|(base, head)| {
+        let git = provenant_os::git::git_executable()?;
+        provenant_run::review_diff_context_at(&git, cwd, base, head).ok()
+    });
+    launch_resolvers_with(review, document, pinned_diff, |slot, family| {
         crate::route::resolve_review_family(roots, &slot.tier, family, &exclude)
     })
 }
@@ -890,6 +902,7 @@ pub fn launch_resolvers_at_roots(
 fn launch_resolvers_with(
     review: &provenant_routing::ReviewConfig,
     document: &provenant_fabric_runtime::graph::GraphDocument,
+    pinned_diff: Option<provenant_run::ReviewDiffContext>,
     eligible: impl FnMut(&provenant_routing::ResolvedSlot, Option<&str>) -> Result<String, String>,
 ) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
     let mut request = document.review.clone().unwrap_or_default();
@@ -897,7 +910,18 @@ fn launch_resolvers_with(
         request.risk_tier = request.risk_tier.or_else(|| context.risk_tier.clone());
         request.kind = request.kind.or_else(|| context.task_kind.clone());
     }
-    let mut panel = review.resolve_panel(&request, None, &[], false)?;
+    let measured_size = pinned_diff.as_ref().and_then(|diff| {
+        (request.kind.as_deref() != Some("integration"))
+            .then_some(())
+            .and_then(|()| diff.numstat.as_deref())
+            .filter(|numstat| !numstat.is_empty())
+            .zip(diff.tree.as_deref())
+            .map(|(numstat, tree)| review.size.classify_numstat(numstat, tree))
+    });
+    let paths = pinned_diff
+        .as_ref()
+        .map_or(&[][..], |diff| diff.paths.as_slice());
+    let mut panel = review.resolve_panel(&request, measured_size, paths, false)?;
     if (!panel.minimum_family_counts.is_empty()
         || panel
             .slots
@@ -2706,31 +2730,32 @@ mod panel_tests {
                 ]
             }
         }))?;
-        let resolvers = launch_resolvers_with(&config.review, &document, |slot, required| {
-            let result = provenant_routing::resolve_for_account_with_seed_excluding_family(
-                &RouteRequest {
-                    intent: Default::default(),
-                    choice: RouteChoice::NamedRoute(
-                        RouteName::parse(slot.tier.as_str().unwrap()).unwrap(),
-                    ),
-                    effort: None,
-                    confidential: false,
-                    fallback: provenant_routing::Fallback::None,
-                },
-                &context,
-                None,
-                "family-panel",
-                0,
-                &[],
-                &[],
-                required,
-            )
-            .map_err(|error| error.to_string())?;
-            Ok(provenant_records::AdapterSpec::get(&result.adapter)
-                .unwrap()
-                .family
-                .to_owned())
-        })?;
+        let resolvers =
+            launch_resolvers_with(&config.review, &document, None, |slot, required| {
+                let result = provenant_routing::resolve_for_account_with_seed_excluding_family(
+                    &RouteRequest {
+                        intent: Default::default(),
+                        choice: RouteChoice::NamedRoute(
+                            RouteName::parse(slot.tier.as_str().unwrap()).unwrap(),
+                        ),
+                        effort: None,
+                        confidential: false,
+                        fallback: provenant_routing::Fallback::None,
+                    },
+                    &context,
+                    None,
+                    "family-panel",
+                    0,
+                    &[],
+                    &[],
+                    required,
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(provenant_records::AdapterSpec::get(&result.adapter)
+                    .unwrap()
+                    .family
+                    .to_owned())
+            })?;
         let record: provenant_routing::PanelResolution =
             serde_json::from_str(&resolvers["review-family-resolution"][0])?;
         assert_eq!(
@@ -2775,7 +2800,7 @@ mod panel_tests {
                 );
             }
         }
-        let refused = launch_resolvers_with(&config.review, &document, |_, _| {
+        let refused = launch_resolvers_with(&config.review, &document, None, |_, _| {
             Err("candidate account unavailable; excluded by policy".into())
         })
         .unwrap_err();
