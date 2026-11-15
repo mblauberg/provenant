@@ -2089,34 +2089,6 @@ impl PeerGraphFields {
     }
 }
 
-/// Output-only peer metadata, with the byte length owned by the output boundary.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct PeerOutputFields {
-    #[serde(flatten)]
-    pub graph: PeerGraphFields,
-    #[serde(rename = "length", skip_serializing_if = "Option::is_none")]
-    pub length: Option<u64>,
-    #[serde(rename = "planner_fallback", skip_serializing_if = "Option::is_none")]
-    pub planner_fallback: Option<String>,
-}
-
-impl PeerOutputFields {
-    pub fn merge_graph(&mut self, newer: PeerGraphFields) {
-        self.graph.merge(newer);
-    }
-}
-
-impl From<PeerGraphFields> for PeerOutputFields {
-    fn from(graph: PeerGraphFields) -> Self {
-        Self {
-            graph,
-            length: None,
-            planner_fallback: None,
-        }
-    }
-}
-
 fn decode_peer_handoff<'de, D>(
     deserializer: D,
 ) -> Result<Option<crate::handoff::HandoffResult>, D::Error>
@@ -2828,23 +2800,6 @@ mod tests {
         assert!(
             serde_json::from_value::<PeerGraphRoute>(serde_json::json!({
                 "required_family":7
-            }))
-            .is_err()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn peer_output_planner_fallback_round_trips_and_rejects_wrong_type()
-    -> Result<(), Box<dyn std::error::Error>> {
-        // A flattened fragment of its owning record, which keeps the future fields.
-        let value = serde_json::json!({"planner_fallback":"planner failed"});
-        let peer: PeerOutputFields = serde_json::from_value(value.clone())?;
-        assert_eq!(peer.planner_fallback.as_deref(), Some("planner failed"));
-        assert_eq!(serde_json::to_value(&peer)?, value);
-        assert!(
-            serde_json::from_value::<PeerOutputFields>(serde_json::json!({
-                "planner_fallback":{"reason":"wrong shape"}
             }))
             .is_err()
         );

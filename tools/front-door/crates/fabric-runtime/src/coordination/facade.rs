@@ -2207,7 +2207,11 @@ impl OutputBytes {
 pub enum OutputResult {
     Chunk {
         #[serde(flatten)]
-        peer: provenant_records::run::PeerOutputFields,
+        peer: provenant_records::run::PeerGraphFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        length: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        planner_fallback: Option<String>,
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
         target: AttemptTarget,
@@ -2225,7 +2229,11 @@ pub enum OutputResult {
     },
     Artifact {
         #[serde(flatten)]
-        peer: provenant_records::run::PeerOutputFields,
+        peer: provenant_records::run::PeerGraphFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        length: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        planner_fallback: Option<String>,
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
         target: AttemptTarget,

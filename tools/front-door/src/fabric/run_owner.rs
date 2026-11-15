@@ -1293,6 +1293,8 @@ impl BinaryRunOwner<'_> {
                     }
                     return Ok(OutputResult::Chunk {
                         peer: Default::default(),
+                        length: None,
+                        planner_fallback: None,
                         extra: chunk_fields,
                         target,
                         part,
@@ -1336,11 +1338,9 @@ impl BinaryRunOwner<'_> {
                     None
                 };
                 Ok(OutputResult::Chunk {
-                    peer: provenant_records::run::PeerOutputFields {
-                        length: Some(output_length),
-                        planner_fallback,
-                        ..Default::default()
-                    },
+                    peer: Default::default(),
+                    length: Some(output_length),
+                    planner_fallback,
                     extra: chunk_fields,
                     target,
                     part,
@@ -1386,10 +1386,9 @@ impl BinaryRunOwner<'_> {
                     bytes.extend_from_slice(&chunk.bytes);
                     if chunk.eof {
                         return Ok(OutputResult::Artifact {
-                            peer: provenant_records::run::PeerOutputFields {
-                                length: Some(chunk.len),
-                                ..Default::default()
-                            },
+                            peer: Default::default(),
+                            length: Some(chunk.len),
+                            planner_fallback: None,
                             extra: fields,
                             target,
                             artifact,
