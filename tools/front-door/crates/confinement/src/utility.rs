@@ -2596,9 +2596,21 @@ pub(crate) mod tests {
         )?;
         let binding = provenant_config::bind_project(&roots, discovered.location)?;
         assert_eq!(binding.primary_checkout_hint(), Some(root.as_path()));
-        let result = runtime.open_repo(
+        let linked_repo = runtime.open_repo(
             &fixture.executor,
             &linked,
+            UtilityBudget::bounded(Duration::from_secs(10))?,
+            &CancelToken::new(),
+        )?;
+        // Opening a repo captures the configuration view so later commands
+        // can be tied to it. The host transport boundary runs when a host-only
+        // remote operation is requested.
+        let result = fetch_missing_remote_branch(
+            &fixture.executor,
+            &linked_repo,
+            &runtime,
+            &fixture.home,
+            "origin/linked",
             UtilityBudget::bounded(Duration::from_secs(10))?,
             &CancelToken::new(),
         );
@@ -2606,7 +2618,9 @@ pub(crate) mod tests {
             Err(UtilityError::Transport(TransportError::LaneConfig { .. })) => {}
             Err(error) => return Err(format!("unexpected refusal: {error}").into()),
             Ok(_) => {
-                return Err("linked config in a primary-owned lane root was accepted".into());
+                return Err(
+                    "host transport operation accepted config in a primary-owned lane root".into(),
+                );
             }
         }
         Ok(())
