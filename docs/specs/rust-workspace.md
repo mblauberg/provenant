@@ -1,8 +1,7 @@
 # Rust workspace rules
 
 Owner: the chairs; manifests in `tools/front-door/Cargo.toml`
-Anchor: `tools/front-door/Cargo.toml` (workspace dependencies and lints),
-`tests/workspace_policy.rs::LAYERS`
+Anchor: `tools/front-door/Cargo.toml` (workspace dependencies and lints)
 
 Engineering rules for the Rust workspace under `tools/front-door/`, the sole
 runtime ([ADR 0021](../adr/0021-configured-workspace-dispatch-boundaries.md)). Paths are relative to
@@ -10,19 +9,18 @@ runtime ([ADR 0021](../adr/0021-configured-workspace-dispatch-boundaries.md)). P
 
 ## Crate layering
 
-A member crate depends only on the internal crates the `LAYERS` table in
-`tests/workspace_policy.rs` allows; the table is the rule, and a change to a
-crate's edges updates it in the same PR. `provenant` is the only executable.
+Member manifests declare internal dependency edges. Libraries never depend on
+the CLI; edges follow the owning crate boundaries. Changes to permitted edges
+update the workspace policy gate in the same PR. `provenant` is the only executable.
 - Why: one-way edges keep policy testable without the command layer; typed
   events break cycles instead of an import of `run` into `providers` or `routing`.
-- Owner: `tests/workspace_policy.rs` (`LAYERS`)
+- Owner: member manifests in `crates/`
 
 ## Dependencies
 
-Direct dependencies come only from the `DIRECT` list in
-`tests/workspace_policy.rs` ([ADR 0028](../adr/0028-rust-port-dependencies.md)
-decision 3), declared once in `[workspace.dependencies]`. A new crate, feature
-or material transitive addition needs a recorded reason in that list.
+Direct dependencies use the audited `[workspace.dependencies]` declaration
+([ADR 0028](../adr/0028-rust-port-dependencies.md) decision 3). A new crate,
+feature or material transitive addition needs a recorded reason.
 - Why: a small, audited supply chain with bounded, synchronous code.
 - Owner: `Cargo.toml`, `deny.toml`
 

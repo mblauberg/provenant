@@ -119,6 +119,8 @@ malformed values fail decoding instead of becoming absent facts. Extension maps
 preserve only unknown fields, so a newer writer's data can survive a round trip.
 Edge-built facts are `Serialize` only.
 - Why: a forged file must not become evidence.
+- Lint: `scripts/check-extra-fields` rejects host literal and constant keys in
+  non-test extension-map reads and writes, with no allowlist.
 - Owner: `crates/records/src/`
 
 Landing records retain the current snapshot and consumer revisions without an unconsumed event outbox. Their readers use the common bounded records decoder and reject removed fields.

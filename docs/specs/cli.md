@@ -1,7 +1,8 @@
 # Command surface
 
 Owner: `crates/cli` (grammar and rendering), `src/` (composition and hooks)
-Anchor: `crates/cli/src/lib.rs`, `crates/cli/src/render.rs`, `src/hooks.rs`
+Anchor: `crates/cli/src/lib.rs`, `crates/cli/src/render.rs`,
+`crates/cli/src/wait.rs`, `src/hooks.rs`
 
 Use `provenant help --all` for commands and `provenant config schema` for configuration.
 The outward contract is declared in `crates/cli/src/external_contract.rs`, covering commands, lane environment and JSON schemas.
@@ -92,8 +93,14 @@ error. Reports name each setting with its source.
 - Why: a wait must not outlive its budget in a transport it can no longer
   interrupt, and one setting must not fail three different ways.
 
+Wait budgets clamp to `domains.wait.max_timeout_seconds`, warning once with
+the effective limit and source when exceeded. A larger request remains a
+blocking wait. Parsing retains the request so configured limits take effect
+in one place.
 - Why: an oversized budget must not turn a blocking call into a retry loop.
 
+With `--json`, wait emits JSONL events followed by a terminal command-result
+envelope, including without `--follow`.
 - Why: a reader must neither terminate healthy work nor wake on stale evidence.
 
 ### Status selection
