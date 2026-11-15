@@ -747,7 +747,7 @@ fn npm_cli_package_layout(prefix: &Path, npm: &Path) -> bool {
         .is_ok_and(|path| path == Path::new("lib/node_modules/npm/bin/npm-cli.js"))
 }
 
-fn first_path_executable(path: &OsStr, name: &str) -> Option<PathBuf> {
+pub(crate) fn first_path_executable(path: &OsStr, name: &str) -> Option<PathBuf> {
     for directory in std::env::split_paths(path) {
         // Relative and empty PATH entries depend on the launch cwd. Preserve
         // the existing selector if that earlier lookup cannot be resolved.
