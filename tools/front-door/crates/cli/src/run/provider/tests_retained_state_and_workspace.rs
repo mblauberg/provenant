@@ -419,6 +419,7 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
     Ok(())
 }
 
+// Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
 #[test]
 fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -428,19 +429,69 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
     let home = root.join("home");
     let source = root.join("source");
     let state = root.join("state");
-    let foreign_common = root.join("other-project/.git");
+    let foreign_project = root.join("other-project");
+    let metadata = root.join("metadata");
+    let foreign_common = metadata.join("external.git");
     let foreign = root.join("external-owned-checkout");
-    for path in [
-        &home,
-        &source,
-        &state,
-        &foreign,
-        &foreign_common.join("objects"),
-    ] {
+    let unowned = root.join("unowned");
+    for path in [&home, &source, &state, &foreign_project, &metadata] {
         std::fs::create_dir_all(path)?;
     }
     std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
-    std::fs::write(foreign_common.join("HEAD"), "ref: refs/heads/main\n")?;
+    let init = provenant_os::fixture::git_command()
+        .args(["init", "--quiet", "--separate-git-dir"])
+        .arg(&foreign_common)
+        .arg(&foreign_project)
+        .output()?;
+    assert!(
+        init.status.success(),
+        "separate Git directory init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    provenant_os::fixture::run_git(
+        &foreign_project,
+        &["commit", "--allow-empty", "-qm", "fixture"],
+    )?;
+    let foreign_arg = foreign.to_string_lossy();
+    let unowned_arg = unowned.to_string_lossy();
+    provenant_os::fixture::run_git(
+        &foreign_project,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            foreign_arg.as_ref(),
+            "HEAD",
+        ],
+    )?;
+    provenant_os::fixture::run_git(
+        &foreign_project,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            unowned_arg.as_ref(),
+            "HEAD",
+        ],
+    )?;
+    let mut project_ports = provenant_config::PortTable::builtin();
+    project_ports.worktree_layout.roots = vec![PathBuf::from("project-writers")];
+    project_ports.worktree_layout.default = PathBuf::from("project-writers/<branch>");
+    std::fs::create_dir(foreign_project.join(".provenant"))?;
+    std::fs::write(
+        foreign_project.join(provenant_config::PORTS_CONFIG),
+        serde_json::to_vec(&project_ports)?,
+    )?;
+    let mut unrelated_ports = provenant_config::PortTable::builtin();
+    unrelated_ports.worktree_layout.roots = vec![PathBuf::from("unrelated-writers")];
+    unrelated_ports.worktree_layout.default = PathBuf::from("unrelated-writers/<branch>");
+    std::fs::create_dir(metadata.join(".provenant"))?;
+    std::fs::write(
+        metadata.join(provenant_config::PORTS_CONFIG),
+        serde_json::to_vec(&unrelated_ports)?,
+    )?;
     let mut inputs = provenant_core::RootInputs::new(home.clone(), source.clone());
     inputs.state_dir = Some(state.clone());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
@@ -448,8 +499,11 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
         &roots,
         provenant_config::ProjectLocation::new(&foreign_common)?,
     )?;
-    let registration = foreign_common.join("worktrees/external");
-    std::fs::create_dir_all(&registration)?;
+    let private = String::from_utf8(provenant_os::fixture::run_git(
+        &foreign,
+        &["rev-parse", "--absolute-git-dir"],
+    )?)?;
+    let private = PathBuf::from(private.trim());
     let owner = WorktreeOwner {
         attempt_id: None,
         operation_id: None,
@@ -462,20 +516,10 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
         reference: None,
     };
     std::fs::write(
-        registration.join("provenant-owner.json"),
+        private.join("provenant-owner.json"),
         serde_json::to_vec(&owner)?,
     )?;
-    std::fs::write(
-        registration.join("gitdir"),
-        format!("{}\n", foreign.join(".git").display()),
-    )?;
     // An unowned sibling's name is not an extra mandatory source boundary.
-    let unowned = foreign_common.join("worktrees/unowned");
-    std::fs::create_dir(&unowned)?;
-    std::fs::write(
-        unowned.join("gitdir"),
-        format!("{}\n", root.join("unowned/.git").display()),
-    )?;
     let registry = Registry {
         roots: Some(&roots),
         ..Default::default()
@@ -494,21 +538,28 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
     };
     let inventory = inventory_for(&source)?;
     let protected = inventory.protected().to_vec();
+    assert!(!foreign_project.join("project-writers").exists());
     assert!(protected.iter().any(|root| root.path == foreign));
     assert!(protected.iter().any(|root| root.path == foreign_common));
     assert!(
+        protected
+            .iter()
+            .any(|root| root.path == foreign_project.join("project-writers")),
+        "project allocation root under separate Gitdir owner is protected"
+    );
+    assert!(
         !protected
             .iter()
-            .any(|entry| entry.path == root.join("unowned"))
+            .any(|entry| entry.path == metadata.join("unrelated-writers")),
+        "the common directory parent is not a project layout owner"
     );
+    assert!(!protected.iter().any(|entry| entry.path == unowned));
     // A human checkout with active/retained writer custody is protected even
     // when it has no lane-provenance marker. Empty retired slots grant none.
-    let custody_slot = PathBuf::from(provenant_confinement::worktrees::state_dir_name(
-        &root.join("unowned"),
-    ));
+    let custody_slot = PathBuf::from(provenant_confinement::worktrees::state_dir_name(&unowned));
     assert!(
         provenant_confinement::worktrees::owned_worktree_paths(&foreign_common, &[custody_slot])?
-            .contains(&root.join("unowned"))
+            .contains(&unowned)
     );
     assert!(
         !inventory_for(&foreign)?
@@ -549,6 +600,7 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
         &foreign_common,
         &foreign.join("nested"),
         &foreign_common.join("refs"),
+        &foreign_project.join("project-writers/future-writer"),
     ] {
         assert!(matches!(
             mandatory.validate_extra_write(&PathGrant {
@@ -566,8 +618,17 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
             })
             .is_ok()
     );
+    assert!(
+        mandatory
+            .validate_extra_write(&PathGrant {
+                path: metadata.join("unrelated-writers/future-writer"),
+                scope: PathScope::Subtree,
+            })
+            .is_ok(),
+        "unrelated Git metadata parent must not inherit project allocation roots"
+    );
     // A checkout pruned after ownership was recorded is still denied by name.
-    std::fs::remove_dir(&foreign)?;
+    std::fs::remove_dir_all(&foreign)?;
     assert!(
         inventory_for(&source)?
             .protected()

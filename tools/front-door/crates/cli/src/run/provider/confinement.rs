@@ -647,6 +647,38 @@ pub(super) fn protected_worktrees(
                 .map_err(|error| error.to_string())?,
         );
     }
+    for binding in provenant_config::registered_projects(roots)
+        .map_err(|error| format!("cannot read registered project inventory: {error}"))?
+    {
+        let common = binding.common_dir();
+        let is_git = common.file_name() == Some(std::ffi::OsStr::new(".git"))
+            || (common.join("HEAD").is_file() && common.join("objects").is_dir());
+        if !is_git {
+            continue;
+        }
+        let layout = provenant_confinement::worktrees::project_layout_for_common(
+            &executor,
+            common,
+            git,
+            &requester_git_environment(),
+            std::time::Duration::from_secs(5),
+            &cancel,
+        )
+        .map_err(|error| {
+            format!(
+                "cannot verify registered Git project layout at {}: {error}",
+                common.display()
+            )
+        })?;
+        let ports = provenant_config::PortTable::read_for(layout.project(), roots.state.as_path())
+            .map_err(|error| {
+                format!(
+                    "cannot read worktree allocation settings for {}: {error}",
+                    common.display()
+                )
+            })?;
+        paths.extend(ports.worktree_roots_under(layout.root()));
+    }
     let mut protected = Vec::new();
     for path in paths {
         let alias = resolve_policy_path(&path).map_err(|error| error.to_string())?;
