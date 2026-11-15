@@ -4837,9 +4837,16 @@ mod tests {
             ));
             assert_eq!(store.prepare_steer_continuation(id, &call)?, None);
             assert_eq!(store.record(id, &call)?.superseded_by, None);
+            let ledger = store.steer_ledger(id, &call)?;
+            assert_eq!(ledger.len(), 1);
+            assert_eq!(ledger[0].0.text.as_str(), "Keep the existing session.");
+            assert!(ledger[0].1, "a non-continuable stop resolves the intent");
             assert_eq!(
-                store.steer_intent(id, &call)?[0].text,
-                "Keep the existing session."
+                store
+                    .steering_status(id, &call)?
+                    .ok_or("steering status missing")?
+                    .state,
+                provenant_records::run::SteeringState::NotContinued
             );
         }
         Ok(())
