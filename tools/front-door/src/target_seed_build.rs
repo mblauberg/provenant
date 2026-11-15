@@ -1,6 +1,6 @@
 //! Build from a pinned remote-tracking commit in a disposable host checkout.
 use provenant_core::Clock;
-use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+use provenant_os::exec::{ExecError, ExecOptions, Executor, SystemExecutor, Termination};
 use provenant_run::target_seed::{self, Manifest};
 use sha2::{Digest, Sha256};
 use std::{
@@ -13,6 +13,29 @@ use std::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
+
+fn seed_error(stage: &str, error: &(dyn Error + 'static)) -> io::Error {
+    let mut cause = Some(error);
+    while let Some(error) = cause {
+        if let Some(ExecError::Io { operation, source }) = error.downcast_ref::<ExecError>() {
+            return io::Error::other(format!("{stage}: utility {operation} failed: {source}"));
+        }
+        cause = error.source();
+    }
+    io::Error::other(format!("{stage}: {error}"))
+}
+
+#[cfg(test)]
+#[test]
+fn seed_spawn_failures_keep_the_os_cause() {
+    let error = ExecError::Io {
+        operation: "spawn",
+        source: io::Error::from_raw_os_error(2),
+    };
+    let message = seed_error("opening repository", &error).to_string();
+    assert!(message.contains("opening repository: utility spawn failed"));
+    assert!(message.contains("os error 2"));
+}
 
 struct Staging(PathBuf);
 impl Drop for Staging {
@@ -119,7 +142,7 @@ fn checkout_commit(project: &Path, checkout: &Path, commit: &str) -> Result<()> 
 /// The pinned remote-tracking commit every seed build starts from: the
 /// project's declared verify base (`verify.base` in the port table), so a
 /// repository with another remote or default branch needs no `origin/main`.
-fn verify_base(host_state: &Path, project: &Path) -> Result<String> {
+fn verify_base(host_state: &Path, project: &Path) -> Result<(String, String)> {
     use provenant_confinement::{
         repo::GitRefName,
         utility::{UtilityBudget, UtilityRuntime},
@@ -131,15 +154,20 @@ fn verify_base(host_state: &Path, project: &Path) -> Result<String> {
     let executor = SystemExecutor::new(1)?;
     let budget = UtilityBudget::bounded(Duration::from_secs(4 * 60 * 60))?;
     let cancel = provenant_core::CancelToken::new();
-    let repo = utility.open_read_repo(&executor, project, budget, &cancel)?;
+    let repo = utility
+        .open_read_repo(&executor, project, budget, &cancel)
+        .map_err(|error| seed_error("opening repository", &error))?;
+    let project_key = project_key(repo.common_git_dir());
     let facts = RepoFacts::default();
     let base = provenant_config::PortTable::read_for(Some(project), host_state)?
         .verify
         .base;
     let reference = GitRefName::remote_tracking(&base)?;
-    Ok(facts
-        .resolve_read_commit(&repo, &executor, &utility, budget, reference, &cancel)?
-        .to_string())
+    let commit = facts
+        .resolve_read_commit(&repo, &executor, &utility, budget, reference, &cancel)
+        .map_err(|error| seed_error("resolving verify base", &error))?
+        .to_string();
+    Ok((commit, project_key))
 }
 
 /// What a refresh did.
@@ -169,8 +197,7 @@ pub fn refresh(state: &Path, project: &Path) -> Result<Refresh> {
     if target_seed::cargo_build_directory(project, state)?.is_none() {
         return Ok(Refresh::NotCargo);
     }
-    let commit = verify_base(state, project)?;
-    let project_key = project_key(project)?;
+    let (commit, project_key) = verify_base(state, project)?;
     refresh_with(state, &project_key, &commit, |stage| {
         build_into(stage, project, state, &commit, &project_key)
     })
@@ -187,13 +214,12 @@ impl std::fmt::Display for AlreadyCurrent {
 }
 impl Error for AlreadyCurrent {}
 
-/// Stable local identity for one canonical repository root. The target seed
-/// store is shared across repositories, but currentness belongs to one repo.
-fn project_key(project: &Path) -> Result<String> {
-    let canonical = project.canonicalize()?;
-    Ok(provenant_core::hex(&Sha256::digest(
-        canonical.as_os_str().as_encoded_bytes(),
-    )))
+/// Stable identity for one verified canonical Git common directory. Linked
+/// worktrees therefore share currentness with their primary checkout.
+fn project_key(common_git_dir: &Path) -> String {
+    provenant_core::hex(&Sha256::digest(
+        common_git_dir.as_os_str().as_encoded_bytes(),
+    ))
 }
 
 fn refresh_with(
@@ -277,8 +303,7 @@ fn refuse_in_lane() -> Result<()> {
 
 pub fn build(state: &Path, project: &Path) -> Result<String> {
     refuse_in_lane()?;
-    let commit = verify_base(state, project)?;
-    let project_key = project_key(project)?;
+    let (commit, project_key) = verify_base(state, project)?;
     publish(state, |stage| {
         build_into(stage, project, state, &commit, &project_key)
     })
@@ -459,7 +484,23 @@ mod checkout_tests {
         assert_ne!(pinned, local.trim());
         let state = temp.path().join("state");
         fs::create_dir(&state).unwrap();
-        assert_eq!(verify_base(&state, &project).unwrap(), pinned);
+        let (primary_commit, primary_key) = verify_base(&state, &project).unwrap();
+        assert_eq!(primary_commit, pinned);
+        let linked = temp.path().join("linked");
+        git(
+            &project,
+            &[
+                "worktree".into(),
+                "add".into(),
+                "--detach".into(),
+                linked.as_os_str().into(),
+                pinned.into(),
+            ],
+        )
+        .unwrap();
+        let (linked_commit, linked_key) = verify_base(&state, &linked).unwrap();
+        assert_eq!(linked_commit, pinned);
+        assert_eq!(linked_key, primary_key);
         checkout_commit(&project, &checkout, pinned).unwrap();
         assert_eq!(fs::read_to_string(checkout.join("file")).unwrap(), "second");
         let actual =
@@ -544,16 +585,16 @@ mod tests {
     #[test]
     fn another_repositorys_newer_generation_does_not_rebuild_this_repository() {
         let state = tempfile::tempdir().unwrap();
-        let project_a = state.path().join("repo-a");
-        let project_b = state.path().join("repo-b");
-        fs::create_dir(&project_a).unwrap();
-        fs::create_dir(&project_b).unwrap();
-        let key_a = project_key(&project_a).unwrap();
-        let key_b = project_key(&project_b).unwrap();
+        let common_a = state.path().join("repo-a/.git");
+        let common_b = state.path().join("repo-b/.git");
+        fs::create_dir_all(&common_a).unwrap();
+        fs::create_dir_all(&common_b).unwrap();
+        let key_a = project_key(&common_a.canonicalize().unwrap());
+        let key_b = project_key(&common_b.canonicalize().unwrap());
         assert_ne!(key_a, key_b);
         let alias_a = state.path().join("repo-a-alias");
-        std::os::unix::fs::symlink(&project_a, &alias_a).unwrap();
-        assert_eq!(project_key(&alias_a).unwrap(), key_a);
+        std::os::unix::fs::symlink(&common_a, &alias_a).unwrap();
+        assert_eq!(project_key(&alias_a.canonicalize().unwrap()), key_a);
         for (project_key, commit) in [(&key_a, "aaa"), (&key_b, "bbb")] {
             assert!(matches!(
                 refresh_with(state.path(), project_key, commit, |stage| {

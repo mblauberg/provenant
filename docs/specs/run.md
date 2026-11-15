@@ -44,8 +44,9 @@ seed generations.
 ## Cargo target seed
 
 A target seed store is shared across registered repositories on the host. Each
-generation records the canonical repository identity and verify-base commit so
-one repository's newer generation does not force other repositories to rebuild.
+generation records the canonical shared Git directory and verify-base commit,
+so linked checkouts share identity and one repository's newer generation does
+not force other repositories to rebuild.
 Lanes clone a seed only for a matching compiler and target; Cargo still checks
 the build fingerprints before reusing its artifacts. A published generation is
 immutable, and collection cannot race an active clone. When refresh fails, the
