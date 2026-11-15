@@ -378,7 +378,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .all(|r| r["wait"]["waiting_for"].is_string())
+                .all(|r| r["wait"]["waiting_for"]["kind"].is_string())
         );
         let selected = read(&roots, Some(project), false, 100, None)?;
         let selected_page = read(&roots, Some(project), false, 50, None)?;

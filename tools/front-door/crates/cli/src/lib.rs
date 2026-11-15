@@ -2290,7 +2290,13 @@ mod tests {
                 command_at(&model, &path)
             };
             if !path.is_empty() && current.is_none() {
-                if !retired_command(&path) {
+                // Under an external-subcommand command (provider hook events)
+                // the words are dispatched by declaration, not clap members.
+                let dispatched = (1..path.len()).any(|end| {
+                    command_at(&model, &path[..end])
+                        .is_some_and(clap::Command::is_allow_external_subcommands_set)
+                });
+                if !retired_command(&path) && !dispatched {
                     missing.push(format!("command {}", path.join(" ")));
                 }
                 continue;
@@ -2299,10 +2305,12 @@ mod tests {
             for child in columns[1].split_whitespace() {
                 let mut child_path = path.clone();
                 child_path.push(child);
-                if !current.get_subcommands().any(|command| {
-                    command.get_name() == child
-                        || command.get_all_aliases().any(|alias| alias == child)
-                }) && !retired_command(&child_path)
+                if !current.is_allow_external_subcommands_set()
+                    && !current.get_subcommands().any(|command| {
+                        command.get_name() == child
+                            || command.get_all_aliases().any(|alias| alias == child)
+                    })
+                    && !retired_command(&child_path)
                 {
                     missing.push(format!("command {}", child_path.join(" ")));
                 }
@@ -2875,7 +2883,7 @@ mod tests {
             }
         ));
         assert!(matches!(
-            parsed(&["hook", "claude", "pre-tool-use", "--help", "--json"]),
+            parsed(&["hook", "git", "pre-push", "--help", "--json"]),
             ParseOutcome::Help {
                 globals: Globals { json: true, .. },
                 ..
