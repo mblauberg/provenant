@@ -53,9 +53,15 @@ provenant cloud collect <key>
 For Claude, collect looks for the named branch on `origin`. Hosted Claude may
 push a `claude/*` branch instead, so collect then looks for the `claude/*`
 branch whose head carries the launch's trailer. It fetches that branch and
-adds a worktree at `.worktrees/<branch>` beside the main checkout (`--path` to
-choose another). For Codex, collect applies the session's diff, staged but
-not committed, to a new worktree at the launch commit.
+adds a worktree at the configured default, normally `.worktrees/<branch>`
+beside the verified primary checkout (`--path` to choose another). The
+destination and repository worktree-layout settings come from the verified
+project layout, even when Git stores its metadata outside the checkout.
+Project-specific settings are read from the verified primary checkout; when
+no primary is available, host settings apply and destinations use the verified
+common Git directory as their layout root. A relative `--path` is resolved
+from the verified layout root. For Codex, collect applies the session's diff,
+staged but not committed, to a new worktree at the launch commit.
 
 When nothing has been pushed yet, collect fails and prints the session link.
 Open it to see progress, then run collect again. The collected branch goes
