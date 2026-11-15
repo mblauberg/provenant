@@ -260,7 +260,7 @@ pub struct RunCapabilities {
     pub events: bool,
 }
 
-/// Finalize every wait return through the same snapshot rule. At expiry the
+/// Finalise every wait return through the same snapshot rule. At expiry the
 /// owner may refresh local records; the callback must not start remote reads or
 /// grant another wait budget.
 pub fn finish_wait_snapshot(

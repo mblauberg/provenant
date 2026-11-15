@@ -168,10 +168,10 @@ mod tests {
 
     #[test]
     fn receipt_decoder_rejects_unknown_schema_version() {
-        let mut value = serde_json::to_value(sample()).expect("receipt serializes");
+        let mut value = serde_json::to_value(sample()).expect("receipt serialises");
         value["schema_version"] = serde_json::json!(3);
         let error = crate::decode::<PortCommandReceipt, _>(
-            Cursor::new(serde_json::to_vec(&value).expect("fixture serializes")),
+            Cursor::new(serde_json::to_vec(&value).expect("fixture serialises")),
             crate::Limits {
                 max_bytes: 4096,
                 max_depth: 8,

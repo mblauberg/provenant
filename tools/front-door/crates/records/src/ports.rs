@@ -66,7 +66,7 @@ mod tests {
     #[test]
     fn port_source_round_trips_and_rejects_unknown_values() {
         for source in [PortSource::Builtin, PortSource::Host, PortSource::Project] {
-            let encoded = serde_json::to_value(source).expect("source serializes");
+            let encoded = serde_json::to_value(source).expect("source serialises");
             assert_eq!(
                 serde_json::from_value::<PortSource>(encoded).expect("source decodes"),
                 source
@@ -78,7 +78,7 @@ mod tests {
     #[test]
     fn exit_disposition_round_trips_and_rejects_unknown_values() {
         for disposition in [ExitDisposition::Refused, ExitDisposition::Unknown] {
-            let encoded = serde_json::to_value(disposition).expect("disposition serializes");
+            let encoded = serde_json::to_value(disposition).expect("disposition serialises");
             assert_eq!(
                 serde_json::from_value::<ExitDisposition>(encoded).expect("disposition decodes"),
                 disposition
@@ -137,7 +137,7 @@ mod tests {
             },
         ];
         for case in cases {
-            let encoded = serde_json::to_value(&case).expect("command serializes");
+            let encoded = serde_json::to_value(&case).expect("command serialises");
             assert_eq!(
                 serde_json::from_value::<PortCommand>(encoded).expect("command decodes"),
                 case

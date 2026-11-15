@@ -523,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn login_expiry_metadata_never_synthesizes_a_routing_veto() {
+    fn login_expiry_metadata_never_synthesises_a_routing_veto() {
         let file = ReadinessFile {
             extra: Default::default(),
             login: Some(LoginObservation {

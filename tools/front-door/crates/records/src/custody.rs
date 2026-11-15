@@ -688,7 +688,7 @@ pub struct RetirementRecord {
 }
 
 impl RetirementRecord {
-    fn normalize_subjects(subjects: &[Subject]) -> Vec<Subject> {
+    fn normalise_subjects(subjects: &[Subject]) -> Vec<Subject> {
         let mut subjects = subjects.to_vec();
         subjects.sort_by(|left, right| {
             (left.kind.as_str(), &left.id).cmp(&(right.kind.as_str(), &right.id))
@@ -705,7 +705,7 @@ impl RetirementRecord {
         decision: &RetirementDecision,
     ) -> Result<String, crate::CanonicalError> {
         let subject = reference.custody_subject()?;
-        let related_subjects = Self::normalize_subjects(related_subjects);
+        let related_subjects = Self::normalise_subjects(related_subjects);
         Ok(crate::CanonicalV1::record_digest(
             "custody-retirement",
             2,
@@ -730,7 +730,7 @@ impl RetirementRecord {
     ) -> Result<Self, crate::CanonicalError> {
         let reference = reference.generation_identity()?;
         let subject = reference.custody_subject()?;
-        let related_subjects = Self::normalize_subjects(&related_subjects);
+        let related_subjects = Self::normalise_subjects(&related_subjects);
         let id = Self::identity(
             project,
             &related_subjects,

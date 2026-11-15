@@ -165,7 +165,7 @@ fn guard(
             deadline,
         );
     };
-    let parsed = normalize_guard_input(&input, event_name, protocol);
+    let parsed = normalise_guard_input(&input, event_name, protocol);
     let Some(event) = parsed else {
         return guard_abstain("hook event not recognised", protocol, deadline);
     };
@@ -217,7 +217,7 @@ fn provider_allow_response(protocol: Option<HookProtocol>) -> Option<&'static [u
     }
 }
 
-fn normalize_guard_input(
+fn normalise_guard_input(
     bytes: &[u8],
     event_name: &str,
     protocol: Option<HookProtocol>,
@@ -638,7 +638,7 @@ fn advisory(
             return 0;
         }
     };
-    let parsed = normalize_advisory_input(&input, moment, event_name, protocol);
+    let parsed = normalise_advisory_input(&input, moment, event_name, protocol);
     let Some(host) = parsed else {
         diagnostic("checkpoint unavailable: invalid hook input");
         return 0;
@@ -785,7 +785,7 @@ fn hook_additional_context(output: &[u8]) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn normalize_advisory_input(
+fn normalise_advisory_input(
     bytes: &[u8],
     moment: Moment,
     event_name: &str,
@@ -1784,7 +1784,7 @@ mod answer_delivery_tests {
     }
 
     #[test]
-    fn antigravity_hook_payloads_normalize_from_the_declared_event() -> Result<(), Error> {
+    fn antigravity_hook_payloads_normalise_from_the_declared_event() -> Result<(), Error> {
         let temp = tempfile::tempdir()?;
         let protocol = Some(HookProtocol::NamedGroups {
             timeout_unit: provenant_records::HookTimeoutUnit::Seconds,
@@ -1799,7 +1799,7 @@ mod answer_delivery_tests {
             "workspacePaths": [temp.path()]
         });
         let guard =
-            normalize_guard_input(&serde_json::to_vec(&tool_input)?, "PreToolUse", protocol)
+            normalise_guard_input(&serde_json::to_vec(&tool_input)?, "PreToolUse", protocol)
                 .ok_or("Antigravity PreToolUse did not normalize")?;
         assert_eq!(guard.hook_event_name, "PreToolUse");
         assert_eq!(guard.tool_name, "Bash");
@@ -1810,7 +1810,7 @@ mod answer_delivery_tests {
         let mut wrong_event = tool_input.clone();
         wrong_event["hook_event_name"] = "PostToolUse".into();
         assert!(
-            normalize_guard_input(&serde_json::to_vec(&wrong_event)?, "PreToolUse", protocol,)
+            normalise_guard_input(&serde_json::to_vec(&wrong_event)?, "PreToolUse", protocol,)
                 .is_none()
         );
 
@@ -1819,7 +1819,7 @@ mod answer_delivery_tests {
             "workspacePaths": [temp.path()],
             "transcriptPath": "/tmp/transcript.jsonl"
         });
-        let advisory = normalize_advisory_input(
+        let advisory = normalise_advisory_input(
             &serde_json::to_vec(&lifecycle)?,
             Moment::Restart,
             "SessionStart",
@@ -1837,7 +1837,7 @@ mod answer_delivery_tests {
     }
 
     #[test]
-    fn cursor_lifecycle_payload_and_provider_reply_shapes_are_normalized() -> Result<(), Error> {
+    fn cursor_lifecycle_payload_and_provider_reply_shapes_are_normalised() -> Result<(), Error> {
         let temp = tempfile::tempdir()?;
         let protocol = Some(HookProtocol::CursorCommands {
             timeout_unit: provenant_records::HookTimeoutUnit::Seconds,
@@ -1849,7 +1849,7 @@ mod answer_delivery_tests {
             "workspace_roots": [temp.path()],
             "transcript_path": null
         });
-        let advisory = normalize_advisory_input(
+        let advisory = normalise_advisory_input(
             &serde_json::to_vec(&lifecycle)?,
             Moment::Restart,
             "sessionStart",
@@ -1869,7 +1869,7 @@ mod answer_delivery_tests {
             "workspace_roots": [temp.path()]
         });
         let guard =
-            normalize_guard_input(&serde_json::to_vec(&guard_input)?, "preToolUse", protocol)
+            normalise_guard_input(&serde_json::to_vec(&guard_input)?, "preToolUse", protocol)
                 .ok_or("Cursor preToolUse did not normalize")?;
         assert_eq!(guard.hook_event_name, "PreToolUse");
         assert_eq!(guard.tool_name, "Bash");
@@ -1991,7 +1991,7 @@ mod answer_delivery_tests {
                 "source": source
             });
             assert!(
-                normalize_advisory_input(
+                normalise_advisory_input(
                     &serde_json::to_vec(&input)?,
                     Moment::Restart,
                     "SessionStart",
@@ -2008,7 +2008,7 @@ mod answer_delivery_tests {
             "source": "unknown"
         });
         assert!(
-            normalize_advisory_input(
+            normalise_advisory_input(
                 &serde_json::to_vec(&unrecognised)?,
                 Moment::Restart,
                 "SessionStart",

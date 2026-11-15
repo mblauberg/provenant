@@ -28,7 +28,7 @@ pub enum WaitOutcome {
     Woken,
 }
 
-/// A clonable cancellation signal that interrupts a blocking event wait.
+/// A cloneable cancellation signal that interrupts a blocking event wait.
 #[derive(Clone)]
 pub struct WakeHandle(Arc<UnixStream>);
 impl WakeHandle {

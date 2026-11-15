@@ -50,7 +50,7 @@ empty, and its status defaults to `as_written`: raising a concern does not imply
 permission to diverge. Object concerns require a non-empty claim; their other
 text may be empty. The `remaining`, `decisions` and `verify` fields also accept a
 single string as a one-item array. Handoff status accepts casing differences and
-surrounding whitespace, with the same three spellings. Serialization always
+surrounding whitespace, with the same three spellings. Serialisation always
 writes canonical arrays, lowercase status and concern objects.
 
 The immutable handoff artifact and the handoff inside a sealed stop store the

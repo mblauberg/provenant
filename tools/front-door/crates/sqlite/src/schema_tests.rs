@@ -329,7 +329,7 @@ fn owner_table_inserts_always_name_columns() -> Result<(), Box<dyn std::error::E
     violations.sort();
     assert!(
         violations.is_empty(),
-        "positional owner INSERTs:\n{}",
+        "positional owner INSERT statements:\n{}",
         violations.join("\n")
     );
     Ok(())

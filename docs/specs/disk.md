@@ -49,7 +49,7 @@ it warns and proceeds by default, for every lane class; `policy.DISK_FLOOR =
 "refuse"` holds new work and `"off"` silences it. Messages report available
 bytes, both thresholds, their configuration or shipped-default sources and the
 `provenant gc` remedy. Running builds continue. The build shim receives the
-host's serialized gate in `PROVENANT_BUILD_DISK_LIMITS` when `PortTable.build_admission`
+host's serialised gate in `PROVENANT_BUILD_DISK_LIMITS` when `PortTable.build_admission`
 selects builtin admission. The shim receives its selected backend and effective source
 in `PROVENANT_BUILD_ADMISSION_BACKEND` and `PROVENANT_BUILD_ADMISSION_SOURCE`.
 A command backend streams the repository wrapper around Cargo; `none` skips
