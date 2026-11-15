@@ -1,21 +1,16 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use super::*;
 use crate::{ArtifactDisposition, LEGACY_1X_ARTIFACTS, LegacyArtifact, STABLE_BINARY_NAME};
-use provenant_core::{PathResolver, RootInputs};
+use provenant_core::RootInputs;
 use provenant_os::clock::SystemClock;
 use provenant_records::{SourceInput, source_digest};
+use provenant_test_support::IdentityPathResolver;
 use std::{
     fs, io,
     os::unix::fs::{PermissionsExt, symlink},
 };
 fn no_drift(findings: &[InstallFinding]) -> bool {
     findings.iter().all(InstallFinding::is_advisory)
-}
-struct Resolver;
-impl PathResolver for Resolver {
-    fn resolve_existing_ancestor(&self, p: &Path) -> io::Result<PathBuf> {
-        Ok(p.into())
-    }
 }
 struct Fixture {
     _tmp: tempfile::TempDir,
@@ -49,7 +44,7 @@ impl Fixture {
         // Explicit captured HOME/PROVENANT_STATE_DIR/harness inputs, no process
         // environment mutation or access to real config/state.
         inputs.environment_state_dir = Some(base.join("state"));
-        let roots = inputs.resolve(&Resolver).unwrap();
+        let roots = inputs.resolve(&IdentityPathResolver).unwrap();
         let targets = Targets::new(roots, &home, &[Harness::Codex]);
         Self {
             _tmp: tmp,
@@ -92,7 +87,7 @@ enum AgentFixture {
 
 fn configured_agent(f: &mut Fixture, agent: AgentFixture) -> PathBuf {
     f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
+        .resolve(&IdentityPathResolver)
         .unwrap();
     match agent {
         AgentFixture::Peer => {
@@ -166,7 +161,7 @@ fn first_install_cleans_declared_legacy_names_and_foreign_release_links() {
     let mut inputs = RootInputs::new(f.home.clone(), f.base.join("checkout"));
     inputs.state_dir = Some(f.home.join(".local/share/provenant/v2"));
     f.targets = Targets::new(
-        inputs.resolve(&Resolver).unwrap(),
+        inputs.resolve(&IdentityPathResolver).unwrap(),
         &f.home,
         &[
             Harness::Codex,
@@ -402,7 +397,7 @@ fn first_install_cleans_declared_legacy_names_and_foreign_release_links() {
 fn peer_agent_accepts_a_symlinked_home() {
     let mut f = Fixture::new();
     f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
+        .resolve(&IdentityPathResolver)
         .unwrap();
     let alias = f.base.join("home-alias");
     symlink(&f.home, &alias).unwrap();
@@ -602,7 +597,7 @@ fn missing_peer_and_tick_agents_wait_for_the_last_harness() {
 fn uninstall_after_home_rename_never_acts_on_old_paths() {
     let mut f = Fixture::new();
     f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
+        .resolve(&IdentityPathResolver)
         .unwrap();
     f.targets.peer_agent = Some(b"old home plist\n".to_vec());
     fs::create_dir_all(f.source.join("instructions")).unwrap();
@@ -619,7 +614,7 @@ fn uninstall_after_home_rename_never_acts_on_old_paths() {
     fs::create_dir_all(f.link().parent().unwrap()).unwrap();
     symlink(&original_target, f.link()).unwrap();
     let roots = RootInputs::new(moved_home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
+        .resolve(&IdentityPathResolver)
         .unwrap();
     let mut targets = Targets::new(roots, &moved_home, &[Harness::Codex]);
     targets.peer_agent = Some(b"new home plist\n".to_vec());
@@ -708,7 +703,7 @@ fn home_rename_with_custom_state_layout_preserves_old_home_canaries() {
             };
             let mut inputs = RootInputs::new(f.home.clone(), f.base.join("checkout"));
             inputs.environment_state_dir = Some(state);
-            f.targets.roots = inputs.resolve(&Resolver).unwrap();
+            f.targets.roots = inputs.resolve(&IdentityPathResolver).unwrap();
             if custom_bin {
                 f.targets.bin_dir = f.home.join("tools/bin");
             }
@@ -767,7 +762,7 @@ fn home_rename_with_custom_state_layout_preserves_old_home_canaries() {
                 f.base.join("state")
             });
             let targets = Targets::new(
-                inputs.resolve(&Resolver).unwrap(),
+                inputs.resolve(&IdentityPathResolver).unwrap(),
                 &moved_home,
                 &[Harness::Codex],
             );
@@ -894,7 +889,7 @@ fn direct_reinstall_after_home_rename_drops_old_targets() {
 fn check_after_home_rename_never_inspects_old_config_paths() {
     let mut f = Fixture::new();
     f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
+        .resolve(&IdentityPathResolver)
         .unwrap();
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -911,7 +906,7 @@ fn check_after_home_rename_never_inspects_old_config_paths() {
     fs::create_dir_all(f.home.join(".codex")).unwrap();
     fs::write(f.home.join(".codex/config.toml"), b"invalid TOML\0").unwrap();
     let roots = RootInputs::new(moved_home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
+        .resolve(&IdentityPathResolver)
         .unwrap();
     let targets = Targets::new(roots, &moved_home, &[Harness::Codex]);
     let inspection = inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
@@ -939,7 +934,7 @@ fn reinstall_after_state_rename_requires_manual_link_cleanup() {
     fs::write(&old_binary, b"old release canary\n").unwrap();
     let mut inputs = RootInputs::new(f.home.clone(), f.base.join("checkout"));
     inputs.environment_state_dir = Some(moved_state);
-    f.targets.roots = inputs.resolve(&Resolver).unwrap();
+    f.targets.roots = inputs.resolve(&IdentityPathResolver).unwrap();
     let release = f.release();
     let snapshots = Snapshots::capture(&release, &f.targets).unwrap();
     assert!(matches!(
@@ -973,7 +968,7 @@ fn reinstall_after_state_rename_requires_manual_link_cleanup() {
 fn partial_uninstall_after_home_rename_retains_unselected_stale_entries() {
     let mut f = Fixture::new();
     let roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
+        .resolve(&IdentityPathResolver)
         .unwrap();
     f.targets = Targets::new(roots, &f.home, &[Harness::Claude, Harness::Codex]);
     f.targets.peer_agent = Some(b"old home plist\n".to_vec());
@@ -984,7 +979,7 @@ fn partial_uninstall_after_home_rename_retains_unselected_stale_entries() {
     let moved_home = f.base.join("home-moved");
     fs::rename(&f.home, &moved_home).unwrap();
     let roots = RootInputs::new(moved_home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
+        .resolve(&IdentityPathResolver)
         .unwrap();
     let targets = Targets::new(roots, &moved_home, &[Harness::Codex]);
     let mut environment_targets = targets.clone();
@@ -1067,7 +1062,7 @@ fn moved_receipt_rejects_entries_outside_both_state_roots() {
     fs::rename(f.targets.roots.state.as_path(), &moved_state).unwrap();
     let mut inputs = RootInputs::new(f.home.clone(), f.base.join("checkout"));
     inputs.environment_state_dir = Some(moved_state);
-    f.targets.roots = inputs.resolve(&Resolver).unwrap();
+    f.targets.roots = inputs.resolve(&IdentityPathResolver).unwrap();
     let skill = receipt
         .entries
         .iter_mut()
@@ -1320,7 +1315,7 @@ fn failed_peer_stop_keeps_the_plist_and_receipt_for_retry() {
     for missing in [false, true] {
         let mut f = Fixture::new();
         f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-            .resolve(&Resolver)
+            .resolve(&IdentityPathResolver)
             .unwrap();
         f.targets.peer_agent = Some(b"rendered plist\n".to_vec());
         let clock = SystemClock::new();
@@ -1369,7 +1364,7 @@ fn peer_agent_refuses_symlinked_plist_and_parent_before_writes() {
     for parent in [false, true] {
         let mut f = Fixture::new();
         f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-            .resolve(&Resolver)
+            .resolve(&IdentityPathResolver)
             .unwrap();
         f.targets.peer_agent = Some(b"rendered plist\n".to_vec());
         let plist = peer_agent_plist(f.targets.roots.state.as_path()).unwrap();
@@ -4236,7 +4231,7 @@ fn disabling_tick_agent_reinstall_stops_exact_or_missing_owned_plists() {
     for state in ["unchanged", "modified", "missing"] {
         let mut f = Fixture::new();
         f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-            .resolve(&Resolver)
+            .resolve(&IdentityPathResolver)
             .unwrap();
         f.targets.tick_agent = Some(b"rendered plist\n".to_vec());
         let clock = SystemClock::new();
@@ -4299,7 +4294,7 @@ fn disabling_tick_agent_reinstall_stops_exact_or_missing_owned_plists() {
 fn linux_tick_units_are_receipted_reinstalled_idempotently_and_removed() {
     let mut f = Fixture::new();
     f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
+        .resolve(&IdentityPathResolver)
         .unwrap();
     f.targets.tick_agent = Some(b"timer\n".to_vec());
     f.targets.tick_service = Some(b"service\n".to_vec());
