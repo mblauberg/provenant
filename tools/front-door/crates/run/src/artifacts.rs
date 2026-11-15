@@ -204,9 +204,12 @@ impl RunStore {
         let mut result = capture.finish();
         // One handoff rule: the settled attempt's sealed, sanitised snapshot,
         // not a re-reading of the text.
-        result.handoff = self
-            .handoff(&record)
-            .map_err(|_| "handoff snapshot unreadable");
+        result.handoff = self.handoff(&record).unwrap_or_else(|_| {
+            Err(provenant_records::handoff::HandoffError::new(
+                "$",
+                "handoff snapshot unreadable",
+            ))
+        });
         result.digest = digest.to_string();
         Ok(result)
     }

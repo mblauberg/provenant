@@ -311,7 +311,9 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
                     |number| json!(number),
                 );
             row["ci"] = json!(node.and_then(|node| node.ci.as_ref()));
-            row["handoff"] = json!(node.and_then(|node| node.handoff.as_ref()));
+            row["handoff"] = json!(Ok::<_, provenant_records::handoff::HandoffError>(
+                node.and_then(|node| node.handoff.as_ref())
+            ));
             row["result_summary"] = json!(
                 node.and_then(|node| node.outputs.as_ref())
                     .and_then(|out| out.result.as_ref())

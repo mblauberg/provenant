@@ -3914,7 +3914,7 @@ mod provisioned_writer_submission_tests {
             record.attempt_id,
             record.revision,
             &provenant_run::TerminalPublication {
-                handoff: None,
+                handoff: Ok(None),
                 terminal_cause: None,
                 terminal_note: None,
                 outcome: if quota {

@@ -471,6 +471,22 @@ pub(super) fn apply_attempt_observation(
                             .push("review_partial: selected review coverage is incomplete".into());
                     }
                 }
+                let malformed = result
+                    .as_ref()
+                    .is_some_and(|capture| capture.handoff.is_err());
+                let settlement_reason = if malformed
+                    && matches!(
+                        outcome,
+                        AttemptOutcome::Succeeded
+                            | AttemptOutcome::ReviewRequired
+                            | AttemptOutcome::DeclaredStop
+                            | AttemptOutcome::StoppedNoWork
+                    ) {
+                    attempt.stop = Some(provenant_records::StopCause::HandoffMalformed);
+                    Some(provenant_records::run::SettlementReason::HandoffMalformed)
+                } else {
+                    settlement_reason
+                };
                 let review_result = node.access == AccessMode::ReadOnly
                     && template::review_node(node)
                     && outputs.verdict.is_some()
@@ -543,7 +559,7 @@ pub(super) fn apply_attempt_observation(
                         && node.required_verdict.is_some()
                         && !(plans::writer(node)
                             && result.as_ref().is_some_and(|capture| {
-                                plans::handoff(capture).ok().flatten().is_some()
+                                matches!(plans::handoff(capture), Ok(Some(_)))
                             }))
                         && !result
                             .as_ref()
