@@ -556,21 +556,27 @@ mod tests {
     // Spec: docs/specs/supervisor.md#native-environment-and-sandbox-tool-stores
     #[test]
     fn npm_cache_binding_follows_first_path_selected_node_installation() {
+        use std::os::unix::fs::symlink;
+
         let root = tempfile::tempdir().expect("fixture root");
         let home = root.path().join("host-home");
         let account = root.path().join("account-home");
         let project = root.path().join("repo");
         let selected = root.path().join("nvm/versions/node/v24.0.1");
-        let later = root.path().join("later-node-prefix");
+        let later = root.path().join("homebrew");
         let selected_bin = selected.join("bin");
-        let later_bin = later.join("bin");
+        let later_cellar = later.join("Cellar/node@22/22.18.0");
+        let later_cellar_bin = later_cellar.join("bin");
+        let later_bin = later.join("opt/node@22/bin");
         std::fs::create_dir_all(&home).expect("host home");
         std::fs::create_dir_all(&account).expect("account home");
         std::fs::create_dir_all(project.join(".git")).expect("project root");
         executable(&selected_bin.join("node"));
         executable(&selected_bin.join("npm"));
-        executable(&later_bin.join("node"));
-        executable(&later_bin.join("npm"));
+        executable(&later_cellar_bin.join("node"));
+        executable(&later_cellar_bin.join("npm"));
+        std::fs::create_dir_all(later.join("opt")).expect("Homebrew opt directory");
+        symlink(&later_cellar, later.join("opt/node@22")).expect("Homebrew opt formula link");
         std::fs::create_dir_all(later.join("etc")).expect("later global config");
         std::fs::write(later.join("etc/npmrc"), "cache=/later-private-cache\n")
             .expect("later package config");
