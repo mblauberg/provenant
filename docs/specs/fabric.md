@@ -328,4 +328,8 @@ resent. Remote attempts bind the origin identity, and transferred Git objects
 are verified before use. Protocol mismatch is refused before decoding;
 credentials do not cross hosts.
 
+A peer locator identifies a registered Git common directory. Git's verified
+worktree inventory selects the checkout that owns project configuration; a
+bare common directory remains its own host-only layout root.
+
 - Why: a remote guess or resent mutation could free a live lane or apply twice.
