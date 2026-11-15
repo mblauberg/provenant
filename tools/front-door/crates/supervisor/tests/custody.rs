@@ -1078,6 +1078,32 @@ fn cancelled_reader_preserves_healthy_custody_and_cancel_escalates(root: &Path) 
     );
     Ok(())
 }
+// The guardian re-execs this harness with `internal supervise`, so this real
+// handoff belongs in the harness-false integration fixture, not a libtest
+// unit-test process.
+fn guardian_publishes_typed_steered_stop_and_delivery_ordering(root: &Path) -> Result<()> {
+    let socket = root.join("steered-stop.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let (_writer, handle) = start(
+        root,
+        "steered-stop",
+        "socket-blocked",
+        &[socket.into_os_string()],
+        CapturePlan {
+            root_flush_ms: 30,
+            descendant_grace_ms: 10,
+            ..CapturePlan::default()
+        },
+    )?;
+    let mut provider = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+    byte(&mut provider, b'R')?;
+    assert_eq!(stop(&handle, StopReason::Steered)?, StopReceipt::Requested);
+    let exit = exited(&handle)?;
+    assert_eq!(exit.stop_reason, Some(StopReason::Steered));
+    assert_eq!(exit.cancel_delivered_before_exit, Some(true));
+    assert!(exit.delivered_signals.contains(&libc::SIGTERM.into()));
+    Ok(())
+}
 fn held_stop_ignores_lane_written_summary_and_cancel_request(root: &Path) -> Result<()> {
     let socket = root.join("held.sock");
     let listener = UnixListener::bind(&socket)?;
@@ -3011,6 +3037,10 @@ const CASES: &[Case] = &[
     (
         "cancelled_reader_preserves_healthy_custody_and_cancel_escalates",
         cancelled_reader_preserves_healthy_custody_and_cancel_escalates,
+    ),
+    (
+        "guardian_publishes_typed_steered_stop_and_delivery_ordering",
+        guardian_publishes_typed_steered_stop_and_delivery_ordering,
     ),
     (
         "publication_failure_retains_the_lease_and_retries_without_overwrite",
