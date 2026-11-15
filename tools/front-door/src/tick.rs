@@ -1383,7 +1383,7 @@ mod tests {
         ));
         // Queueing never builds: the refresh closure is only reachable from
         // the detached worker.
-        let stale = WallTime::from_micros(now.as_micros() + SEED_WORK_RETRY_MICROS + 1);
+        let stale = WallTime::from_micros(now.as_micros() + SEED_WORK_RETRY_MICROS + 1).unwrap();
         let error =
             queue_seed(&directory, stale, None, || Err("no process budget".into())).unwrap_err();
         assert_eq!(error, "no process budget");
@@ -1393,7 +1393,7 @@ mod tests {
         );
         assert!(seed_retry_due(
             &directory,
-            WallTime::from_micros(stale.as_micros() + SEED_WORK_RETRY_MICROS)
+            WallTime::from_micros(stale.as_micros() + SEED_WORK_RETRY_MICROS).unwrap()
         ));
     }
 
@@ -1403,15 +1403,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let directory = provenant_config::private_directory(&root, true).unwrap();
-        let now = WallTime::from_micros(1_000_000);
+        let now = WallTime::from_micros(1_000_000).unwrap();
         let mut queue = SeedQueue::default();
         queue.retry = Some(SeedRequest::busy(
             vec!["project-a".into()],
             Some("project-b failed previously".into()),
         ));
-        queue.retry_at = Some(WallTime::from_micros(
-            now.as_micros() - SEED_WORK_RETRY_MICROS,
-        ));
+        queue.retry_at =
+            Some(WallTime::from_micros(now.as_micros() - SEED_WORK_RETRY_MICROS).unwrap());
         write_seed_queue(&directory, &queue).unwrap();
 
         // The daily full request arrives after a tick has observed the old
@@ -1443,7 +1442,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let directory = provenant_config::private_directory(&root, true).unwrap();
-        let now = WallTime::from_micros(1_500_000);
+        let now = WallTime::from_micros(1_500_000).unwrap();
         let mut queue = SeedQueue::default();
         queue.active = Some(SeedRequest::busy(
             vec!["project-a".into()],
@@ -1485,8 +1484,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let directory = provenant_config::private_directory(&root, true).unwrap();
-        let queued_at = WallTime::from_micros(1_000_000);
-        let stale = WallTime::from_micros(queued_at.as_micros() + SEED_WORK_RETRY_MICROS + 1);
+        let queued_at = WallTime::from_micros(1_000_000).unwrap();
+        let stale =
+            WallTime::from_micros(queued_at.as_micros() + SEED_WORK_RETRY_MICROS + 1).unwrap();
         queue_seed(&directory, queued_at, Some(SeedRequest::full()), || Ok(())).unwrap();
         assert!(seed_retry_due(&directory, stale));
         let mut respawns = 0;
@@ -1500,7 +1500,8 @@ mod tests {
         assert_eq!(request, SeedRequest::full());
         drop(worker); // Simulate a crash after claiming the job.
 
-        let active_stale = WallTime::from_micros(stale.as_micros() + SEED_WORK_RETRY_MICROS + 1);
+        let active_stale =
+            WallTime::from_micros(stale.as_micros() + SEED_WORK_RETRY_MICROS + 1).unwrap();
         assert!(seed_retry_due(&directory, active_stale));
         queue_seed(&directory, active_stale, None, || {
             respawns += 1;
@@ -1519,7 +1520,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let directory = provenant_config::private_directory(&root, true).unwrap();
-        let started = WallTime::from_micros(2_000_000);
+        let started = WallTime::from_micros(2_000_000).unwrap();
         queue_seed(
             &directory,
             started,
@@ -1537,7 +1538,8 @@ mod tests {
         );
         drop(worker); // Simulate a crash after the request became active.
 
-        let stale = WallTime::from_micros(started.as_micros() + SEED_WORK_RETRY_MICROS + 1);
+        let stale =
+            WallTime::from_micros(started.as_micros() + SEED_WORK_RETRY_MICROS + 1).unwrap();
         assert!(seed_retry_due(&directory, stale));
         queue_seed(&directory, stale, None, || Ok(())).unwrap();
         let queue = read_seed_queue(&directory).unwrap();
@@ -1559,7 +1561,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let directory = provenant_config::private_directory(&root, true).unwrap();
-        let now = WallTime::from_micros(3_000_000);
+        let now = WallTime::from_micros(3_000_000).unwrap();
         let mut queue = SeedQueue::default();
         queue.active = Some(SeedRequest::full());
         queue.active_at = Some(now);

@@ -149,18 +149,23 @@ enum TokenKind {
     AwsAccessKey,
 }
 
+// Keep delimiters in the stored table so adjacent markers cannot look like a token.
 const TOKEN_MARKERS: &[(&[u8], TokenKind)] = &[
-    (b"Bearer ", TokenKind::Bearer),
-    (b"ghp_", TokenKind::Generic),
-    (b"gho_", TokenKind::Generic),
-    (b"ghu_", TokenKind::Generic),
-    (b"ghs_", TokenKind::Generic),
-    (b"ghr_", TokenKind::Generic),
-    (b"github_pat_", TokenKind::Generic),
-    (b"sk-", TokenKind::Generic),
-    (b"AKIA", TokenKind::AwsAccessKey),
+    (b"Bearer \0", TokenKind::Bearer),
+    (b"ghp_\0", TokenKind::Generic),
+    (b"gho_\0", TokenKind::Generic),
+    (b"ghu_\0", TokenKind::Generic),
+    (b"ghs_\0", TokenKind::Generic),
+    (b"ghr_\0", TokenKind::Generic),
+    (b"github_pat_\0", TokenKind::Generic),
+    (b"sk-\0", TokenKind::Generic),
+    (b"AKIA\0", TokenKind::AwsAccessKey),
 ];
 const MAX_MARKER_LENGTH: usize = 11;
+
+fn marker_pattern(marker: &[u8]) -> &[u8] {
+    marker.strip_suffix(&[0]).unwrap_or(marker)
+}
 
 struct ActiveToken {
     marker: Vec<u8>,
@@ -451,18 +456,21 @@ fn marker_match(bytes: &[u8], marker: &[u8]) -> MarkerMatch {
 }
 
 fn token_marker_at(bytes: &[u8]) -> Option<(usize, TokenKind)> {
-    TOKEN_MARKERS
-        .iter()
-        .find_map(|(marker, kind)| match marker_match(bytes, marker) {
+    TOKEN_MARKERS.iter().find_map(|(marker, kind)| {
+        match marker_match(bytes, marker_pattern(marker)) {
             MarkerMatch::Complete(length) => Some((length, *kind)),
             _ => None,
-        })
+        }
+    })
 }
 
 fn token_marker_prefix(bytes: &[u8]) -> bool {
-    TOKEN_MARKERS
-        .iter()
-        .any(|(marker, _)| matches!(marker_match(bytes, marker), MarkerMatch::Partial))
+    TOKEN_MARKERS.iter().any(|(marker, _)| {
+        matches!(
+            marker_match(bytes, marker_pattern(marker)),
+            MarkerMatch::Partial
+        )
+    })
 }
 
 fn word_byte(byte: u8) -> bool {
@@ -1081,6 +1089,7 @@ mod tests {
 
     fn json_escaped_boundaries_redact_all_token_shapes_across_chunks() {
         for (marker, kind) in TOKEN_MARKERS {
+            let marker = marker_pattern(marker);
             let body = match kind {
                 TokenKind::AwsAccessKey => "0123456789ABCDEF",
                 _ => "abcdefghijklmnopqrst",
@@ -1116,6 +1125,7 @@ mod tests {
 
     fn raw_backslashes_before_tokens_do_not_disable_redaction_across_chunks() {
         for (marker, kind) in TOKEN_MARKERS {
+            let marker = marker_pattern(marker);
             let bodies: &[&str] = match kind {
                 TokenKind::AwsAccessKey => &["0123456789ABCDEF", r"01234567\u00389ABCDEF"],
                 _ => &["abcdefghijklmnopqrst", r"abcdefghij\u006blmnopqrst"],
@@ -1149,6 +1159,7 @@ mod tests {
 
     fn unicode_escapes_inside_tokens_are_redacted_across_chunks() {
         for (marker, kind) in TOKEN_MARKERS {
+            let marker = marker_pattern(marker);
             let body = match kind {
                 TokenKind::AwsAccessKey => r"01234567\u00389ABCDEF",
                 _ => r"abcdefghij\u006blmnopqrst",

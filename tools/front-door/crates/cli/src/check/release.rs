@@ -816,6 +816,24 @@ mod tests {
                 .any(|m| m.0 == "release.github-token")
         );
     }
+
+    #[test]
+    fn binary_release_scan_distinguishes_token_markers_from_token_values() {
+        // This models the NUL-separated production marker tables.
+        let marker_table = b"ghp_\0gho_\0ghu_\0ghs_\0ghr_\0github_pat_\0";
+        assert!(
+            !byte_matches(marker_table)
+                .iter()
+                .any(|finding| finding.0 == "release.github-token")
+        );
+
+        let token = b"ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        assert!(
+            byte_matches(token)
+                .iter()
+                .any(|finding| finding.0 == "release.github-token")
+        );
+    }
     #[test]
     fn tree_and_index_parsers_preserve_tabs_and_newlines_in_names() {
         let input = format!("100644 blob {} 2\tname\twith\nspaces\0", "a".repeat(40));
