@@ -1965,3 +1965,55 @@ fn launch_retry_knobs_are_listed_with_defaults_bounds_and_sources() {
         KnobSource::Override
     );
 }
+
+/// Every registered knob reports the layer that set it, so limits, receipts
+/// and status read one truthful source: the registry default, host
+/// configuration (its `[knobs]` table or its selected preset) or a launch.
+#[test]
+fn every_registered_knob_reports_the_layer_that_set_it() {
+    use provenant_records::LimitSource;
+    let registry = knobs::registry().unwrap();
+    let text = |value: &serde_json::Value| match value {
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    let configured = |edits: &[KnobEdit<'_>]| {
+        let mut doc = toml_edit::DocumentMut::new();
+        doc["schema_version"] = toml_edit::value(1);
+        for edit in edits {
+            edit.apply(&mut doc).unwrap();
+        }
+        load(&roots(), Some(doc.to_string().as_bytes())).unwrap()
+    };
+    let defaults = configured(&[]).dispatch_profile(&[]).unwrap();
+    assert!(!registry.knobs.is_empty());
+    for (name, spec) in &registry.knobs {
+        assert_eq!(knob_source(&defaults, name), LimitSource::Default, "{name}");
+        let value = text(&spec.default);
+        let host = configured(&[KnobEdit::Set {
+            name,
+            value: &value,
+        }]);
+        assert_eq!(
+            knob_source(&host.dispatch_profile(&[]).unwrap(), name),
+            LimitSource::Host,
+            "{name}"
+        );
+        if !spec.host_only {
+            let launched = host.dispatch_profile(&[format!("{name}={value}")]).unwrap();
+            assert_eq!(knob_source(&launched, name), LimitSource::Launch, "{name}");
+        }
+    }
+    for (preset, values) in &registry.presets {
+        let profile = configured(&[KnobEdit::Profile(preset)])
+            .dispatch_profile(&[])
+            .unwrap();
+        for name in values.knobs.keys() {
+            assert_eq!(
+                knob_source(&profile, name),
+                LimitSource::Host,
+                "{preset}: {name}"
+            );
+        }
+    }
+}

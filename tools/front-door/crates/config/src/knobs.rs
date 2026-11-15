@@ -51,12 +51,12 @@ pub(crate) struct Spec {
     #[serde(default)]
     safe: Option<Value>,
     #[serde(default)]
-    host_only: bool,
+    pub(crate) host_only: bool,
 }
 #[derive(Deserialize)]
 pub(crate) struct Preset {
     #[serde(default)]
-    knobs: BTreeMap<String, Value>,
+    pub(crate) knobs: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -145,18 +145,14 @@ impl<D> crate::ResolvedConfig<D> {
             .iter()
             .filter_map(|entry| entry.split_once('=').map(|(name, _)| name))
             .collect();
-        // The layer that set each knob whose source a lane reports: its
-        // limits, its CI scope and its gh budget.
-        let knob_sources = SOURCED_KNOBS
-            .into_iter()
-            .filter_map(|name| {
-                let knob = knobs.get(name)?;
-                let source = match knob.source {
-                    KnobSource::Override if launch_overrides.contains(name) => "launch",
-                    KnobSource::Override => "host",
-                    KnobSource::Default | KnobSource::Profile => "default",
-                };
-                Some((name.to_owned(), Value::String(source.into())))
+        // The layer that set every effective knob. A knob absent from the
+        // map took its registry default, so the map stays small.
+        let knob_sources = knobs
+            .iter()
+            .filter_map(|(name, knob)| {
+                let source = layer(knob.source, launch_overrides.contains(name.as_str()));
+                let value = serde_json::to_value(source).ok()?;
+                (source != provenant_records::LimitSource::Default).then(|| (name.clone(), value))
             })
             .collect::<serde_json::Map<_, _>>();
         let mut extra = provenant_records::ExtraFields::default();
@@ -189,20 +185,36 @@ impl<D> crate::ResolvedConfig<D> {
     }
 }
 
-/// Profile field naming the layer (`launch`, `host` or `default`) that set
-/// each of [`SOURCED_KNOBS`].
+/// Profile field naming the layer (`launch` or `host`) that set each
+/// effective knob not at its registry default. Read it with [`knob_source`].
 pub const KNOB_SOURCES: &str = "knob_sources";
 
-/// Knobs whose effective source a lane's receipt, status and preamble show.
-const SOURCED_KNOBS: [&str; 7] = [
-    "lanes.token_budget",
-    "lanes.budget_action",
-    "lanes.budget_grace",
-    "lanes.ci_scope",
-    "lanes.gh_budget",
-    "lanes.sandbox",
-    "lanes.sandbox_floor",
-];
+/// The layer a lane reports for a knob: a launch override, host
+/// configuration (its `[knobs]` table or the profile preset it selected), or
+/// the registry default.
+fn layer(source: KnobSource, launched: bool) -> provenant_records::LimitSource {
+    use provenant_records::LimitSource::{Default, Host, Launch};
+    match source {
+        KnobSource::Override if launched => Launch,
+        KnobSource::Override | KnobSource::Profile => Host,
+        KnobSource::Default => Default,
+    }
+}
+
+/// The layer that set knob `name` for a sealed profile, as
+/// [`crate::ResolvedConfig::dispatch_profile`] recorded it. Every limit,
+/// receipt and status line reads its source here.
+pub fn knob_source(
+    profile: &provenant_records::run::HarnessProfile,
+    name: &str,
+) -> provenant_records::LimitSource {
+    profile
+        .extra
+        .get(KNOB_SOURCES)
+        .and_then(|sources| sources.get(name))
+        .and_then(|source| serde_json::from_value(source.clone()).ok())
+        .unwrap_or(provenant_records::LimitSource::Default)
+}
 
 /// Parsed once; the embedded text is immutable.
 pub(crate) fn registry() -> Result<&'static Registry, ConfigError> {

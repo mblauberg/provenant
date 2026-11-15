@@ -70,7 +70,7 @@ pub use domains::{
 };
 pub use edit::{EditOptions, Edited, edit_config, revision_of, show};
 pub use history::{FieldChange, HistoryEntry, HistoryLimits, history};
-pub use knobs::{KNOB_SOURCES, KnobEdit, KnobSource, KnobValue};
+pub use knobs::{KNOB_SOURCES, KnobEdit, KnobSource, KnobValue, knob_source};
 pub use loader::{
     config_show, inspect_config, load, load_with_domains, read, read_knobs, read_with_domains,
 };
