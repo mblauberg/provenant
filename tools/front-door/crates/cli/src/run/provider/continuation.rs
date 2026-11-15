@@ -12,6 +12,10 @@ pub(super) enum ContinuationRequestError {
         "the prior attempt recorded no applied model; run provenant run with its result as context"
     )]
     MissingModel,
+    #[error(
+        "the prior attempt recorded no applied provider; run provenant run with its result as context"
+    )]
+    MissingProvider,
     #[error("{0}; run provenant run with the prior result as context")]
     InvalidModel(String),
     #[error(
@@ -20,12 +24,35 @@ pub(super) enum ContinuationRequestError {
     ProviderMismatch,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct RetainedIdentity<'a> {
+    pub(super) provider: &'a str,
+    pub(super) account_key: Option<&'a str>,
+}
+
+fn retained_identity<'a>(
+    applied: &'a run::RouteRecord,
+    enforcement: &provenant_records::policy::Policy,
+) -> Result<RetainedIdentity<'a>, ContinuationRequestError> {
+    let provider = applied.provider.as_deref().ok_or_else(|| {
+        enforcement.boundary_error(
+            "CONTINUATION_CONTINUATION_REQUEST_AUTHORITY",
+            provenant_records::policy::Facts::violation("prior attempt has no applied provider"),
+            ContinuationRequestError::MissingProvider,
+        )
+    })?;
+    Ok(RetainedIdentity {
+        provider,
+        account_key: applied.account_key.as_deref(),
+    })
+}
+
 /// Recheck current readiness for the exact route the provider session used.
 /// Resolving an exact model bypasses named-pool selection and quota redraws.
-pub(super) fn continuation_request(
-    prior: &run::AttemptRecord,
+pub(super) fn continuation_request<'a>(
+    prior: &'a run::AttemptRecord,
     enforcement: &provenant_records::policy::Policy,
-) -> Result<provenant_routing::RouteRequest, ContinuationRequestError> {
+) -> Result<(provenant_routing::RouteRequest, RetainedIdentity<'a>), ContinuationRequestError> {
     use provenant_routing::{Fallback, ModelId, RouteChoice};
 
     let applied = prior.applied_route.as_ref().ok_or_else(|| {
@@ -35,6 +62,7 @@ pub(super) fn continuation_request(
             ContinuationRequestError::MissingRoute,
         )
     })?;
+    let identity = retained_identity(applied, enforcement)?;
     let model = applied.model.as_deref().ok_or_else(|| {
         enforcement.boundary_error(
             "CONTINUATION_CONTINUATION_REQUEST_AUTHORITY",
@@ -49,7 +77,7 @@ pub(super) fn continuation_request(
             ContinuationRequestError::InvalidModel(error.to_string()),
         )
     })?;
-    if applied.provider.as_deref() != Some(model.adapter()) {
+    if identity.provider != model.adapter() {
         return Err(enforcement.boundary_error(
             "CONTINUATION_CONTINUATION_REQUEST_AUTHORITY",
             provenant_records::policy::Facts::violation(
@@ -58,13 +86,54 @@ pub(super) fn continuation_request(
             ContinuationRequestError::ProviderMismatch,
         ));
     }
-    Ok(provenant_routing::RouteRequest {
-        intent: Default::default(),
-        choice: RouteChoice::Model(model),
-        effort: applied.effort.clone(),
-        fallback: Fallback::None,
-        confidential: false,
-    })
+    Ok((
+        provenant_routing::RouteRequest {
+            intent: Default::default(),
+            choice: RouteChoice::Model(model),
+            effort: applied.effort.clone(),
+            fallback: Fallback::None,
+            confidential: false,
+        },
+        identity,
+    ))
+}
+
+// Spec: docs/specs/routing.md#accounts-and-credentials
+#[test]
+fn retained_identity_keeps_provider_and_optional_account_key_together() {
+    let applied = run::RouteRecord {
+        provider: Some("agy".into()),
+        account_key: Some("local".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        retained_identity(&applied, &Default::default()).unwrap(),
+        RetainedIdentity {
+            provider: "agy",
+            account_key: Some("local")
+        }
+    );
+
+    let no_account = run::RouteRecord {
+        provider: Some("cursor".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        retained_identity(&no_account, &Default::default()).unwrap(),
+        RetainedIdentity {
+            provider: "cursor",
+            account_key: None
+        }
+    );
+
+    let missing_provider = run::RouteRecord {
+        account_key: Some("local".into()),
+        ..Default::default()
+    };
+    assert!(matches!(
+        retained_identity(&missing_provider, &Default::default()),
+        Err(ContinuationRequestError::MissingProvider)
+    ));
 }
 
 #[derive(Debug, thiserror::Error)]

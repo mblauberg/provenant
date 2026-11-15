@@ -273,33 +273,8 @@ fn prepare(
     })
     .to_string();
     let package = package_grant(input.executable, &mut omitted_discovery, input.policy)?;
-    // Bypass Apple's Git shim, including when the selected binary is Homebrew's.
-    let bin = plan.scratch.path.join("bin");
-    let writer = access == Access::WorktreeWrite;
     let defaults = crate::launch::tool_search_path(input.home, true, input.policy)?;
-    let path = match std::env::join_paths(
-        std::iter::once(bin.clone()).chain(std::env::split_paths(&defaults)),
-    ) {
-        Ok(path) => path,
-        Err(_) if !writer => {
-            crate::launch::policy_warning(
-                input.policy,
-                "OPENCODE_PREPARE_NONE_2",
-                "the optional read-only Git launcher cannot be encoded in PATH; the selected Git remains explicitly granted",
-            )?;
-            defaults
-        }
-        Err(_) => {
-            return Err(input.policy.boundary_error(
-                "OPENCODE_PREPARE_GIT_ISOLATION",
-                provenant_records::policy::Facts::violation(
-                    "the private Git launcher cannot be placed first in PATH",
-                ),
-                ProviderError::InvalidPath,
-            ));
-        }
-    };
-    let mut env = base_env(input, &plan.scratch.path, path)?;
+    let mut env = base_env(input, &plan.scratch.path, defaults)?;
     let xdg = |key, fallback| {
         (input.host_var)(key)
             .map(PathBuf::from)
@@ -374,11 +349,6 @@ fn prepare(
         SetupStep::Symlink {
             link: data.join("auth.json"),
             target: host_data.join("auth.json"),
-        },
-        SetupStep::CreateDir(bin.clone()),
-        SetupStep::Symlink {
-            link: bin.join("git"),
-            target: input.provenant.git.to_owned(),
         },
     ];
     // Mirror ordinary provider settings as individual links. Lane-owned

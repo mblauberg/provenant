@@ -630,7 +630,8 @@ pub(crate) fn admit(
     Ok((access, session))
 }
 
-/// Preserve native tool paths and omit an optional entry that PATH cannot encode.
+/// Provide fixed tool-search fallbacks and omit an optional entry that PATH
+/// cannot encode.
 pub(crate) const SYSTEM_TOOL_SEARCH_PATH: &str = "/usr/bin:/bin";
 
 pub(crate) fn tool_search_path(
@@ -658,9 +659,9 @@ pub(crate) fn tool_search_path(
 
 /// Native launches inherit the host environment in memory; provider selectors
 /// are applied by each adapter. Sandboxed launches use a minimal environment:
-/// the user's identity, fixed tool directories followed by the filtered
-/// requester PATH, and TMPDIR
-/// under the attempt's private tmp directory. zsh ignores TMPDIR for the
+/// the user's identity, filtered requester PATH followed by fixed tool-search
+/// fallbacks, and TMPDIR under the attempt's private tmp directory. Required
+/// private wrappers are prepended during finalisation. zsh ignores TMPDIR for the
 /// temporary files behind here-documents and here-strings and defaults
 /// TMPPREFIX to `/tmp/zsh`, which a lane cannot write, so TMPPREFIX points
 /// into the same directory. Repository-specific Git object configuration
@@ -685,14 +686,13 @@ pub(crate) fn base_env(
         env.push((provenant_core::consumer_env::SANDBOX.into(), "off".into()));
         return Ok(env);
     }
-    let wrappers = path.as_ref();
+    let fallbacks = path.as_ref();
     let path = match (input.host_var)("PATH") {
-        Some(requester) if requester.is_empty() => wrappers.to_owned(),
-        Some(requester) => std::env::join_paths(
-            std::env::split_paths(wrappers).chain(std::env::split_paths(&requester)),
+        Some(requester) if !requester.is_empty() => std::env::join_paths(
+            std::env::split_paths(&requester).chain(std::env::split_paths(fallbacks)),
         )
         .map_err(|_| ProviderError::InvalidPath)?,
-        None => wrappers.to_owned(),
+        _ => fallbacks.to_owned(),
     };
     let mut env = vec![
         (provenant_core::consumer_env::SANDBOX.into(), "on".into()),

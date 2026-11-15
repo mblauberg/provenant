@@ -672,10 +672,28 @@ fn provider_scope_filters_pools_and_refuses_explicit_pins() -> Result<(), Box<dy
         choice: RouteChoice::NamedRoute(RouteName::parse("owner-cursor")?),
         ..request("cursor/auto")?
     };
+    let mut route_with_fallback = RouteRequest {
+        choice: RouteChoice::NamedRoute(RouteName::parse("senior")?),
+        ..request("cursor/auto")?
+    };
+    route_with_fallback.fallback = Fallback::Models(BoundedModels::new(vec![legacy.clone()])?);
+    config
+        .provider_scopes
+        .get_mut("cursor")
+        .expect("compiled Cursor scope exists")
+        .out_of_scope_pin = provenant_config::OutOfScopePin::Refuse;
     let ctx = context(&catalogue, &config, now()?);
     let selected = resolve_with_seed(&owner_pool, &ctx, "owner-cursor", 0)?;
     assert_eq!(selected.adapter, "cursor");
     assert_eq!(selected.model, legacy.model());
+    let route = resolve_with_seed(&route_with_fallback, &ctx, "scope-fallback", 0)?;
+    assert!(route.alternatives.as_slice().iter().any(|alternative| {
+        alternative.adapter == "cursor" && alternative.model == legacy.model()
+    }));
+    assert!(matches!(
+        resolve(&request(legacy.as_str())?, &ctx),
+        Err(RoutingError::UnsupportedLaunch(_))
+    ));
 
     config.provider_scopes.insert(
         "cursor".into(),
@@ -691,12 +709,18 @@ fn provider_scope_filters_pools_and_refuses_explicit_pins() -> Result<(), Box<dy
         choice: RouteChoice::NamedRoute(RouteName::parse("senior")?),
         ..request("cursor/auto")?
     };
+    let mut restricted_fallback = pool.clone();
+    restricted_fallback.fallback = Fallback::Models(BoundedModels::new(vec![legacy.clone()])?);
     let pin = request("cursor/grok-4.7")?;
     {
         let ctx = context(&catalogue, &config, now()?);
         // No selected pool candidate may escape the configured scope.
         let result = resolve_with_seed(&pool, &ctx, "scope", 0)?;
         assert!(result.adapter != "cursor" || result.model == "auto");
+        let result = resolve_with_seed(&restricted_fallback, &ctx, "scope-fallback", 0)?;
+        assert!(result.alternatives.as_slice().iter().all(|alternative| {
+            alternative.adapter != "cursor" || alternative.model != legacy.model()
+        }));
         assert!(resolve(&pin, &ctx).is_ok());
         assert!(matches!(
             resolve(&owner_pool, &ctx),

@@ -1,7 +1,8 @@
 //! Build from a pinned remote-tracking commit in a disposable host checkout.
 use provenant_core::Clock;
-use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+use provenant_os::exec::{ExecError, ExecOptions, Executor, SystemExecutor, Termination};
 use provenant_run::target_seed::{self, Manifest};
+use sha2::{Digest, Sha256};
 use std::{
     error::Error,
     ffi::OsString,
@@ -12,6 +13,29 @@ use std::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
+
+fn seed_error(stage: &str, error: &(dyn Error + 'static)) -> io::Error {
+    let mut cause = Some(error);
+    while let Some(error) = cause {
+        if let Some(ExecError::Io { operation, source }) = error.downcast_ref::<ExecError>() {
+            return io::Error::other(format!("{stage}: utility {operation} failed: {source}"));
+        }
+        cause = error.source();
+    }
+    io::Error::other(format!("{stage}: {error}"))
+}
+
+#[cfg(test)]
+#[test]
+fn seed_spawn_failures_keep_the_os_cause() {
+    let error = ExecError::Io {
+        operation: "spawn",
+        source: io::Error::from_raw_os_error(2),
+    };
+    let message = seed_error("opening repository", &error).to_string();
+    assert!(message.contains("opening repository: utility spawn failed"));
+    assert!(message.contains("os error 2"));
+}
 
 struct Staging(PathBuf);
 impl Drop for Staging {
@@ -118,7 +142,7 @@ fn checkout_commit(project: &Path, checkout: &Path, commit: &str) -> Result<()> 
 /// The pinned remote-tracking commit every seed build starts from: the
 /// project's declared verify base (`verify.base` in the port table), so a
 /// repository with another remote or default branch needs no `origin/main`.
-fn verify_base(host_state: &Path, project: &Path) -> Result<String> {
+fn verify_base(host_state: &Path, project: &Path) -> Result<(String, String)> {
     use provenant_confinement::{
         repo::GitRefName,
         utility::{UtilityBudget, UtilityRuntime},
@@ -130,15 +154,20 @@ fn verify_base(host_state: &Path, project: &Path) -> Result<String> {
     let executor = SystemExecutor::new(1)?;
     let budget = UtilityBudget::bounded(Duration::from_secs(4 * 60 * 60))?;
     let cancel = provenant_core::CancelToken::new();
-    let repo = utility.open_read_repo(&executor, project, budget, &cancel)?;
+    let repo = utility
+        .open_read_repo(&executor, project, budget, &cancel)
+        .map_err(|error| seed_error("opening repository", &error))?;
+    let project_key = project_key(repo.common_git_dir());
     let facts = RepoFacts::default();
     let base = provenant_config::PortTable::read_for(Some(project), host_state)?
         .verify
         .base;
     let reference = GitRefName::remote_tracking(&base)?;
-    Ok(facts
-        .resolve_read_commit(&repo, &executor, &utility, budget, reference, &cancel)?
-        .to_string())
+    let commit = facts
+        .resolve_read_commit(&repo, &executor, &utility, budget, reference, &cancel)
+        .map_err(|error| seed_error("resolving verify base", &error))?
+        .to_string();
+    Ok((commit, project_key))
 }
 
 /// What a refresh did.
@@ -146,18 +175,15 @@ fn verify_base(host_state: &Path, project: &Path) -> Result<String> {
 pub enum Refresh {
     /// This project has no selected Cargo workspace; nothing to seed.
     NotCargo,
-    /// The newest complete generation already builds this verify base commit.
+    /// A complete generation for this repository already builds this verify base commit.
     Current,
     /// Another host seed build holds the build lock; nothing was started.
     Busy,
     /// A new generation was published.
     Built(String),
-    /// The last build of this commit (named here) failed for this project; it
-    /// is not retried until the verify base moves.
-    BackedOff(String),
 }
 
-/// Rebuild the seed when the verify base has moved past the newest complete
+/// Rebuild this repository's seed when its verify base has no complete
 /// generation, at most one build at a time. Call after a fetch that may have
 /// advanced the base; it does nothing when the seed is current or a build
 /// is running, and never builds from a lane checkout (the build uses a scratch
@@ -171,9 +197,9 @@ pub fn refresh(state: &Path, project: &Path) -> Result<Refresh> {
     if target_seed::cargo_build_directory(project, state)?.is_none() {
         return Ok(Refresh::NotCargo);
     }
-    let commit = verify_base(state, project)?;
-    refresh_with(state, &marker_name(project), &commit, |stage| {
-        build_into(stage, project, state, &commit)
+    let (commit, project_key) = verify_base(state, project)?;
+    refresh_with(state, &project_key, &commit, |stage| {
+        build_into(stage, project, state, &commit, &project_key)
     })
 }
 
@@ -188,63 +214,46 @@ impl std::fmt::Display for AlreadyCurrent {
 }
 impl Error for AlreadyCurrent {}
 
-/// The back-off marker file for one project, so one project's broken build
-/// neither blocks nor clears another's.
-fn marker_name(project: &Path) -> String {
-    use std::hash::{Hash, Hasher};
-    // A toolchain change may rename every marker, which only ends a back-off.
-    let mut hasher = std::hash::DefaultHasher::new();
-    project.hash(&mut hasher);
-    format!("last-failed-{:012x}", hasher.finish() & 0xffff_ffff_ffff)
-}
-
-/// The commit whose build last failed for this project, so a broken
-/// verify base is not rebuilt every tick. A new commit differs and so clears
-/// the back-off.
-fn failed_commit(state: &Path, marker: &str) -> Option<String> {
-    fs::read_to_string(target_seed::store_path(state).join(marker))
-        .ok()
-        .map(|text| text.trim().to_owned())
+/// Stable identity for one verified canonical Git common directory. Linked
+/// worktrees therefore share currentness with their primary checkout.
+fn project_key(common_git_dir: &Path) -> String {
+    provenant_core::hex(&Sha256::digest(
+        common_git_dir.as_os_str().as_encoded_bytes(),
+    ))
 }
 
 fn refresh_with(
     state: &Path,
-    marker: &str,
+    project_key: &str,
     head: &str,
     build: impl FnOnce(&Path) -> Result<Manifest>,
 ) -> Result<Refresh> {
-    refresh_racing(state, marker, head, || {}, build)
+    refresh_racing(state, project_key, head, || {}, build)
 }
 
 /// `between` runs after the unlocked staleness check and before the build
 /// lock: the window another refresher can publish in.
 fn refresh_racing(
     state: &Path,
-    marker: &str,
+    project_key: &str,
     head: &str,
     between: impl FnOnce(),
     build: impl FnOnce(&Path) -> Result<Manifest>,
 ) -> Result<Refresh> {
-    if newest_generation_commit(state).as_deref() == Some(head) {
+    if has_generation(state, project_key, head) {
         return Ok(Refresh::Current);
-    }
-    if failed_commit(state, marker).as_deref() == Some(head) {
-        return Ok(Refresh::BackedOff(head.to_owned()));
     }
     // Another refresher may publish this commit between the check above and
     // our taking the build lock, so look again once we hold it.
     between();
     let result = publish(state, |stage| {
-        if newest_generation_commit(state).as_deref() == Some(head) {
+        if has_generation(state, project_key, head) {
             return Err(AlreadyCurrent.into());
         }
         build(stage)
     });
     match result {
-        Ok(id) => {
-            let _ = fs::remove_file(target_seed::store_path(state).join(marker));
-            Ok(Refresh::Built(id))
-        }
+        Ok(id) => Ok(Refresh::Built(id)),
         Err(error) if error.is::<AlreadyCurrent>() => Ok(Refresh::Current),
         Err(error)
             if matches!(
@@ -254,32 +263,34 @@ fn refresh_racing(
         {
             Ok(Refresh::Busy)
         }
-        Err(error) => {
-            let _ = fs::write(
-                target_seed::store_path(state).join(marker),
-                format!("{head}\n"),
-            );
-            Err(error)
-        }
+        Err(error) => Err(error),
     }
 }
 
-/// The commit the newest complete generation was built from.
-fn newest_generation_commit(state: &Path) -> Option<String> {
+/// Check every complete generation because a newer generation may belong to
+/// another repository in the shared seed store.
+fn has_generation(state: &Path, project_key: &str, commit: &str) -> bool {
     let generations = target_seed::store_path(state).join("generations");
-    let mut names: Vec<_> = fs::read_dir(generations)
-        .ok()?
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
-        .map(|entry| entry.path())
-        .collect();
-    names.sort();
-    names.into_iter().rev().find_map(|path| {
-        (fs::read(path.join("complete")).ok()? == b"complete\n")
-            .then(|| fs::read(path.join("manifest.json")).ok())
-            .flatten()
+    let Ok(entries) = fs::read_dir(generations) else {
+        return false;
+    };
+    entries.filter_map(std::result::Result::ok).any(|entry| {
+        let path = entry.path();
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir())
+            || entry.file_name().to_string_lossy().starts_with('.')
+            || !fs::read(path.join("complete")).is_ok_and(|data| data == b"complete\n")
+            || !entry
+                .metadata()
+                .is_ok_and(|metadata| metadata.permissions().mode() & 0o222 == 0)
+        {
+            return false;
+        }
+        fs::read(path.join("manifest.json"))
+            .ok()
             .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok())
-            .map(|manifest| manifest.commit)
+            .is_some_and(|manifest| {
+                manifest.project_key == project_key && manifest.commit == commit
+            })
     })
 }
 
@@ -292,11 +303,19 @@ fn refuse_in_lane() -> Result<()> {
 
 pub fn build(state: &Path, project: &Path) -> Result<String> {
     refuse_in_lane()?;
-    let commit = verify_base(state, project)?;
-    publish(state, |stage| build_into(stage, project, state, &commit))
+    let (commit, project_key) = verify_base(state, project)?;
+    publish(state, |stage| {
+        build_into(stage, project, state, &commit, &project_key)
+    })
 }
 
-fn build_into(stage: &Path, project: &Path, host_state: &Path, commit: &str) -> Result<Manifest> {
+fn build_into(
+    stage: &Path,
+    project: &Path,
+    host_state: &Path,
+    commit: &str,
+    project_key: &str,
+) -> Result<Manifest> {
     let checkout = stage.join("checkout");
     checkout_commit(project, &checkout, commit)?;
     let worktree = target_seed::cargo_build_directory(&checkout, host_state)?
@@ -336,6 +355,7 @@ fn build_into(stage: &Path, project: &Path, host_state: &Path, commit: &str) -> 
     }
     fs::remove_dir_all(checkout)?;
     Ok(Manifest {
+        project_key: project_key.into(),
         rustc_vv,
         host_triple,
         commit: commit.to_owned(),
@@ -464,7 +484,23 @@ mod checkout_tests {
         assert_ne!(pinned, local.trim());
         let state = temp.path().join("state");
         fs::create_dir(&state).unwrap();
-        assert_eq!(verify_base(&state, &project).unwrap(), pinned);
+        let (primary_commit, primary_key) = verify_base(&state, &project).unwrap();
+        assert_eq!(primary_commit, pinned);
+        let linked = temp.path().join("linked");
+        git(
+            &project,
+            &[
+                "worktree".into(),
+                "add".into(),
+                "--detach".into(),
+                linked.as_os_str().into(),
+                pinned.into(),
+            ],
+        )
+        .unwrap();
+        let (linked_commit, linked_key) = verify_base(&state, &linked).unwrap();
+        assert_eq!(linked_commit, pinned);
+        assert_eq!(linked_key, primary_key);
         checkout_commit(&project, &checkout, pinned).unwrap();
         assert_eq!(fs::read_to_string(checkout.join("file")).unwrap(), "second");
         let actual =
@@ -496,8 +532,9 @@ mod tests {
         );
     }
     #[allow(dead_code)] // The harness-free target includes this module without its tests.
-    fn manifest(commit: &str) -> Manifest {
+    fn manifest(project_key: &str, commit: &str) -> Manifest {
         Manifest {
+            project_key: project_key.into(),
             rustc_vv: "version".into(),
             host_triple: "host".into(),
             commit: commit.into(),
@@ -507,9 +544,9 @@ mod tests {
         }
     }
     #[allow(dead_code)] // The harness-free target includes this module without its tests.
-    fn built(stage: &Path, commit: &str) -> Result<Manifest> {
+    fn built(stage: &Path, project_key: &str, commit: &str) -> Result<Manifest> {
         fs::create_dir(stage.join("target"))?;
-        Ok(manifest(commit))
+        Ok(manifest(project_key, commit))
     }
     #[allow(dead_code)] // The harness-free target includes this module without its tests.
     fn freeze(state: &Path) {
@@ -519,49 +556,88 @@ mod tests {
         }
     }
 
+    /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
-    fn refresh_builds_only_when_origin_main_has_advanced() {
+    fn refresh_checks_all_generations_for_this_repository() {
         let state = tempfile::tempdir().unwrap();
         let builds = std::cell::Cell::new(0);
         let run = |head: &str| {
-            refresh_with(state.path(), "p", head, |stage| {
+            refresh_with(state.path(), "repo-a", head, |stage| {
                 builds.set(builds.get() + 1);
-                built(stage, head)
+                built(stage, "repo-a", head)
             })
             .unwrap()
         };
         assert!(matches!(run("aaa"), Refresh::Built(_)));
         assert_eq!(run("aaa"), Refresh::Current);
         assert_eq!(builds.get(), 1, "a current seed is not rebuilt");
-        // An incomplete newer generation does not count as current.
+        // An incomplete generation cannot establish currentness.
         let generations = target_seed::store_path(state.path()).join("generations");
         fs::create_dir(generations.join("99999999999999999999-partial")).unwrap();
-        assert_eq!(
-            newest_generation_commit(state.path()).as_deref(),
-            Some("aaa")
-        );
+        assert!(has_generation(state.path(), "repo-a", "aaa"));
         assert!(matches!(run("bbb"), Refresh::Built(_)));
         assert_eq!(run("bbb"), Refresh::Current);
         assert_eq!(builds.get(), 2);
         freeze(state.path());
     }
 
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn another_repositorys_newer_generation_does_not_rebuild_this_repository() {
+        let state = tempfile::tempdir().unwrap();
+        let common_a = state.path().join("repo-a/.git");
+        let common_b = state.path().join("repo-b/.git");
+        fs::create_dir_all(&common_a).unwrap();
+        fs::create_dir_all(&common_b).unwrap();
+        let key_a = project_key(&common_a.canonicalize().unwrap());
+        let key_b = project_key(&common_b.canonicalize().unwrap());
+        assert_ne!(key_a, key_b);
+        let alias_a = state.path().join("repo-a-alias");
+        std::os::unix::fs::symlink(&common_a, &alias_a).unwrap();
+        assert_eq!(project_key(&alias_a.canonicalize().unwrap()), key_a);
+        for (project_key, commit) in [(&key_a, "aaa"), (&key_b, "bbb")] {
+            assert!(matches!(
+                refresh_with(state.path(), project_key, commit, |stage| {
+                    built(stage, project_key, commit)
+                })
+                .unwrap(),
+                Refresh::Built(_)
+            ));
+        }
+        assert_eq!(
+            refresh_with(state.path(), &key_a, "aaa", |_| {
+                panic!("repo A already has a complete matching generation")
+            })
+            .unwrap(),
+            Refresh::Current
+        );
+        assert_eq!(
+            refresh_with(state.path(), &key_b, "bbb", |_| {
+                panic!("repo B already has a complete matching generation")
+            })
+            .unwrap(),
+            Refresh::Current
+        );
+        freeze(state.path());
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
     #[allow(clippy::disallowed_methods)] // A real deadline bounds the fork-race retry.
-    fn refresh_runs_one_build_at_a_time_and_failure_publishes_nothing() {
+    fn refresh_retries_failed_commits_and_serializes_builds() {
         let state = tempfile::tempdir().unwrap();
         {
             // Another host build holds the build lock: no second build starts.
             target_seed::lock_store(state.path()).map(drop).unwrap();
             let _running = target_seed::lock_build(state.path()).unwrap();
-            let outcome = refresh_with(state.path(), "p", "aaa", |_| panic!("must not build"));
+            let outcome = refresh_with(state.path(), "repo", "aaa", |_| panic!("must not build"));
             assert_eq!(outcome.unwrap(), Refresh::Busy);
         }
         // A sibling test thread can fork while the lock above is released and
         // briefly hold a copy of its descriptor, so retry for at most 2 s.
         let retry_deadline = std::time::Instant::now() + Duration::from_secs(2);
         let failed = loop {
-            let attempt = refresh_with(state.path(), "p", "aaa", |_| {
+            let attempt = refresh_with(state.path(), "repo", "aaa", |_| {
                 Err(io::Error::other("build failed").into())
             });
             if !matches!(attempt, Ok(Refresh::Busy)) || std::time::Instant::now() >= retry_deadline
@@ -571,49 +647,15 @@ mod tests {
             std::thread::yield_now();
         };
         assert!(failed.is_err(), "{failed:?}");
-        assert_eq!(newest_generation_commit(state.path()), None);
-        // The failed commit is backed off; a newer commit builds again.
+        assert!(!has_generation(state.path(), "repo", "aaa"));
+        // The next scheduled refresh retries the same commit after an
+        // infrastructure failure has been repaired.
         assert_eq!(
-            refresh_with(state.path(), "p", "aaa", |_| panic!(
-                "must not rebuild a failed commit"
+            refresh_with(state.path(), "repo", "aaa", |stage| built(
+                stage, "repo", "aaa"
             ))
             .unwrap(),
-            Refresh::BackedOff("aaa".into())
-        );
-        assert!(matches!(
-            refresh_with(state.path(), "p", "bbb", |stage| built(stage, "bbb")).unwrap(),
             Refresh::Built(_)
-        ));
-        assert_eq!(
-            failed_commit(state.path(), "p"),
-            None,
-            "success clears the back-off"
-        );
-        freeze(state.path());
-    }
-
-    #[test]
-    fn one_projects_failure_never_clears_another_projects_back_off() {
-        let state = tempfile::tempdir().unwrap();
-        let (a, b) = (marker_name(Path::new("/a")), marker_name(Path::new("/b")));
-        assert_ne!(a, b);
-        let fail = |marker: &str, head: &str| {
-            refresh_with(state.path(), marker, head, |_| {
-                Err(io::Error::other("build failed").into())
-            })
-            .unwrap_err()
-        };
-        fail(&a, "aaa");
-        // B is not backed off by A's failure, and B's success leaves A's marker.
-        assert!(matches!(
-            refresh_with(state.path(), &b, "bbb", |stage| built(stage, "bbb")).unwrap(),
-            Refresh::Built(_)
-        ));
-        assert_eq!(failed_commit(state.path(), &a).as_deref(), Some("aaa"));
-        assert_eq!(failed_commit(state.path(), &b), None);
-        assert_eq!(
-            refresh_with(state.path(), &a, "aaa", |_| panic!("backed off")).unwrap(),
-            Refresh::BackedOff("aaa".into())
         );
         freeze(state.path());
     }
@@ -623,16 +665,15 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         let outcome = refresh_racing(
             state.path(),
-            "p",
+            "repo",
             "aaa",
             || {
-                publish(state.path(), |stage| built(stage, "aaa")).unwrap();
+                publish(state.path(), |stage| built(stage, "repo", "aaa")).unwrap();
             },
             |_| panic!("the racing publisher already built this commit"),
         )
         .unwrap();
         assert_eq!(outcome, Refresh::Current);
-        assert_eq!(failed_commit(state.path(), "p"), None);
         freeze(state.path());
     }
 
@@ -643,6 +684,7 @@ mod tests {
             fs::create_dir(stage.join("target"))?;
             fs::write(stage.join("target/artifact"), b"built")?;
             Ok(Manifest {
+                project_key: "repo".into(),
                 rustc_vv: "version".into(),
                 host_triple: "host".into(),
                 commit: "commit".into(),

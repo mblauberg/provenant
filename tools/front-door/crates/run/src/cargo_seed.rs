@@ -575,6 +575,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("target")).unwrap();
         std::fs::write(dir.join("complete"), b"complete\n").unwrap();
         let manifest = crate::target_seed::Manifest {
+            project_key: String::new(),
             rustc_vv: version.into(),
             host_triple: triple.into(),
             commit: "abc".into(),

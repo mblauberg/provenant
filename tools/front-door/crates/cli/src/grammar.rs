@@ -958,7 +958,7 @@ pub struct PipelineOptions {
 }
 #[derive(Debug, Subcommand)]
 pub enum Worktree {
-    /// Build and publish a host-owned Cargo target seed from origin/main
+    /// Build and publish a host-owned Cargo target seed from the configured verify base
     SeedBuild,
     /// Create a worktree on a new branch
     Create {

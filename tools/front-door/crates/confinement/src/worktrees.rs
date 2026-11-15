@@ -144,8 +144,8 @@ pub fn managed_writer_branch(
 
 /// Context-free allocation roots for a registered Git common directory.
 /// Without a verified layout owner, only host declarations may be applied and
-/// they remain anchored at the common directory. Permission callers with Git
-/// inventory add project-owned roots after resolving their actual owner.
+/// they remain anchored at the common directory. Git-aware permission callers
+/// add project-owned roots after resolving their actual owner.
 pub(crate) fn allocation_directories(
     common: &Path,
     host_state: &Path,
@@ -1105,13 +1105,15 @@ mod worktree_layout_tests {
         );
     }
 
+    // Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
     #[test]
-    fn context_free_allocation_roots_do_not_guess_project_owner() {
+    fn context_free_allocation_roots_do_not_guess_a_project_owner() {
         let project = tempfile::tempdir().unwrap();
         std::fs::create_dir(project.path().join(".git")).unwrap();
         std::fs::create_dir(project.path().join(".provenant")).unwrap();
         let mut ports = provenant_config::PortTable::builtin();
-        ports.worktree_layout.default = PathBuf::from("custom-worktrees");
+        ports.worktree_layout.roots = vec![PathBuf::from("project-writers")];
+        ports.worktree_layout.default = PathBuf::from("project-writers/<branch>");
         std::fs::write(
             project.path().join(provenant_config::PORTS_CONFIG),
             serde_json::to_vec(&ports).unwrap(),
@@ -1122,12 +1124,7 @@ mod worktree_layout_tests {
         let host_ports = provenant_config::PortTable::read_for(None, project.path()).unwrap();
         assert_eq!(
             allocation_directories(&common, project.path()).unwrap(),
-            host_ports
-                .worktree_layout
-                .roots
-                .iter()
-                .map(|root| common.join(root))
-                .collect::<Vec<_>>(),
+            host_ports.worktree_roots_under(&common),
         );
     }
 }

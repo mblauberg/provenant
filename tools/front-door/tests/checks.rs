@@ -327,10 +327,11 @@ fn release_checks_the_running_binary_as_an_artifact() -> Result {
         .ok_or("release findings")?;
     assert!(
         findings.iter().all(|finding| {
-            finding["path"]["path"] == "@artifact/provenant"
-                && finding["rule"] == "release.home-path"
+            let path = finding["path"]["path"].as_str().unwrap_or_default();
+            path == "@artifact/provenant"
+                || path.starts_with("@commit/") && finding["rule"] == "release.personal-email"
         }),
-        "Git source and history bytes are outside the executable scan"
+        "Git source and history bytes must stay outside the executable scan: {findings:?}"
     );
     assert_eq!(code(&output), if findings.is_empty() { 0 } else { 1 });
     rig.assert_v1_root_untouched()

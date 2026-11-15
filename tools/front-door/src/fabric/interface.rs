@@ -2295,7 +2295,9 @@ impl Factory {
         }
         let id = target.graph.clone();
         let brief_given = input.get("brief").is_some_and(|value| !value.is_null());
-        let requester_path = self.requester_lane_path();
+        // Fail before opening the retry transaction. A capture error leaves
+        // the last valid requester PATH binding untouched.
+        let requester_path = self.requester_lane_path()?;
         let mut journal = FileJournal::open(
             &self.context.roots.state,
             self.context.identity.project,
@@ -3375,7 +3377,7 @@ mod tests {
         let mut requester = supervisor.clone();
         requester.lane_path = None;
         requester.executable_search_path = vec![q_directory];
-        factory.host_launch = Some(requester);
+        factory.host_launch = Some(requester.clone());
         // The subsequent resume may refuse for unrelated fixture reasons; the
         // retry request must have persisted its PATH before that advance.
         let _ = factory.graph_document(
@@ -3390,6 +3392,38 @@ mod tests {
             &mut supervisor,
         )?;
         assert_eq!(supervisor.lane_path.as_deref(), Some(q.as_slice()));
+
+        let before = FileJournal::execution(
+            &factory.context.roots.state,
+            factory.context.identity.project,
+            &document.graph_id,
+        )?
+        .ok_or("bound graph execution")?;
+        let mut unavailable_git = requester.clone();
+        unavailable_git.git = rig.root.join("missing-git");
+        factory.host_launch = Some(unavailable_git);
+        let error = factory
+            .graph_document(
+                json!({"op":"retry", "id":document.graph_id}),
+                budget,
+                &cancel,
+            )
+            .expect_err("PATH capture failure must refuse retry");
+        assert!(matches!(
+            error,
+            FacadeError::Io { ref operation, .. } if operation == "capture requester PATH"
+        ));
+        let after = FileJournal::execution(
+            &factory.context.roots.state,
+            factory.context.identity.project,
+            &document.graph_id,
+        )?
+        .ok_or("bound graph execution after refused retry")?;
+        assert_eq!(after, before);
+
+        requester.lane_path = Some(Vec::new());
+        factory.host_launch = Some(requester);
+        assert!(factory.requester_lane_path()?.is_empty());
         Ok(())
     }
 

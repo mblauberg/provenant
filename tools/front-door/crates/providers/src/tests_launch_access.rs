@@ -1026,17 +1026,18 @@ fn native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation()
     Ok(())
 }
 
+// Spec: docs/specs/supervisor.md#native-environment-and-sandbox-tool-stores
 #[test]
-fn sandbox_launch_path_keeps_private_tools_and_adds_requester_path_without_grants()
+fn sandbox_path_keeps_requester_env_interpreter_ahead_of_fallbacks()
 -> Result<(), Box<dyn std::error::Error>> {
     use std::os::unix::fs::PermissionsExt;
 
     let temp = tempfile::tempdir()?;
     let requester_bin = temp.path().join("requester-bin");
     std::fs::create_dir(&requester_bin)?;
-    let helper = requester_bin.join("helper");
-    std::fs::write(&helper, "#!/bin/sh\nexit 0\n")?;
-    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700))?;
+    let preferred_shell = requester_bin.join("sh");
+    std::fs::write(&preferred_shell, "#!/bin/sh\nexit 0\n")?;
+    std::fs::set_permissions(&preferred_shell, std::fs::Permissions::from_mode(0o700))?;
     let requester_path = std::env::join_paths([requester_bin.as_path()])?;
     let host_var = |name: &str| match name {
         "PATH" => Some(requester_path.clone()),
@@ -1044,8 +1045,11 @@ fn sandbox_launch_path_keeps_private_tools_and_adds_requester_path_without_grant
         _ => None,
     };
     let prompt = Prompt::new("fixture".into());
-    let route = route("codex", "fixture-model");
+    let mut route = route("codex", "fixture-model");
+    // This fixture uses local login; it has no registered Codex identity.
+    route.account_key = None;
     let plan = fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
+    let private_wrapper = plan.permissions().scratch.path.join("bin");
     let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
     input.host_var = &host_var;
     let spec = codex::Codex.prepare(input)?;
@@ -1060,6 +1064,26 @@ fn sandbox_launch_path_keeps_private_tools_and_adds_requester_path_without_grant
     assert!(entries.contains(&std::path::PathBuf::from("/usr/bin")));
     assert!(entries.contains(&std::path::PathBuf::from("/bin")));
     assert!(entries.contains(&requester_bin));
+    let requester_index = entries.iter().position(|entry| entry == &requester_bin).unwrap();
+    let cargo_index = entries
+        .iter()
+        .position(|entry| entry == Path::new("/fixture/home/.cargo/bin"))
+        .unwrap();
+    let system_index = entries
+        .iter()
+        .position(|entry| entry == Path::new("/usr/bin"))
+        .unwrap();
+    let bin_index = entries
+        .iter()
+        .position(|entry| entry == Path::new("/bin"))
+        .unwrap();
+    assert_eq!(entries.first(), Some(&private_wrapper));
+    assert!(requester_index < cargo_index && cargo_index < system_index && system_index < bin_index);
+    let env_shell = entries
+        .iter()
+        .map(|directory| directory.join("sh"))
+        .find(|candidate| candidate.is_file());
+    assert_eq!(env_shell.as_deref(), Some(preferred_shell.as_path()));
     assert!(spec.profile.spec.tool_exec_roots.iter().all(|grant| {
         !grant.path.starts_with(&requester_bin)
     }));

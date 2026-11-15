@@ -589,21 +589,6 @@ strength = "refuse"
 justification = "When a Git-context prompt refers to scratch, OpenCode must receive an exact matching path for that authorised context."
 
 [[rule]]
-code = "OPENCODE_PREPARE_NONE_2"
-site = "providers/src/opencode.rs#prepare"
-boundary = "none"
-strength = "warn"
-knob = "policy.OPENCODE_PREPARE_NONE_2"
-justification = "A read-only Git launcher whose directory cannot be encoded in PATH is omitted with a warning."
-
-[[rule]]
-code = "OPENCODE_PREPARE_GIT_ISOLATION"
-site = "providers/src/opencode.rs#prepare"
-boundary = "git_isolation"
-strength = "refuse"
-justification = "A writer must be able to place its private Git launcher in PATH before its Git binding can be enforced."
-
-[[rule]]
 code = "COMMAND_PREPARE_CREDENTIALS"
 site = "providers/src/command.rs#prepare"
 boundary = "credentials"

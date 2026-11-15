@@ -2402,21 +2402,22 @@ fn resolve_inner(
     if models.contains(&primary_model) {
         return Err(RoutingError::Alternatives);
     }
-    let named_route = matches!(request.choice, RouteChoice::NamedRoute(_));
     let alternatives = models
         .iter()
         .filter(|model| excluded_members.family_reason(model).is_none())
         .filter(|model| privacy_allowed(model, request.confidential, context.catalogue))
-        // The owner's explicit scope constrains every automatic fallback,
-        // including one attached to a pin. Model pins also retain the
-        // provider's configured out-of-scope policy. Named-route fallbacks keep
-        // to the pool's scheduled exclusions.
+        // Fallbacks are automatic alternatives even when attached to a model
+        // pin. They use automatic-model scope; pin policy applies only to the
+        // primary `RouteChoice::Model`. Named-route fallbacks keep to the
+        // pool's scheduled exclusions.
         .filter(|model| {
             context
                 .config
                 .permits_automatic_model(model, AutomaticModelSource::OwnerConfiguration)
-                && check_pin_scope(model, context).is_ok()
-                && (!named_route || excluded_members.reason(model, context).is_none())
+                && match &request.choice {
+                    RouteChoice::Model(_) => true,
+                    RouteChoice::NamedRoute(_) => excluded_members.reason(model, context).is_none(),
+                }
         })
         .map(|model| {
             candidate(

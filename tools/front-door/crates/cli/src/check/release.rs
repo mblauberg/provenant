@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 const MAX_FILE: u64 = 5 * 1024 * 1024;
 const MAX_CACHED_SYMLINK_BYTES: usize = 1024 * 1024;
+const MAX_RELEASE_BLOB_BATCH_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_RELEASE_BLOB_BATCH_OBJECTS: usize = 512;
 const PUBLIC: &[&str] = &[
     "ACKNOWLEDGEMENTS.md",
     "README.md",
@@ -78,6 +80,7 @@ pub(super) fn inspect(
         .iter()
         .map(|(path, (mode, _))| (path.clone(), mode.clone()))
         .collect::<BTreeMap<_, _>>();
+    let indexed_directories = tracked_directories(tracked_modes.keys().map(String::as_str));
     for required in LEGAL {
         if !tracked.contains_key(*required) {
             scan.finding(
@@ -113,9 +116,11 @@ pub(super) fn inspect(
                 return Err(CheckError::Evidence("publication blob exceeds 5 MiB"));
             }
             scan.note(format!("release:index-symlink:{path}"), &target);
-            if let Some(message) =
-                symlink_problem(&symlink_destination(path, &target), &tracked_modes)
-            {
+            if let Some(message) = symlink_problem(
+                &symlink_destination(path, &target),
+                &tracked_modes,
+                &indexed_directories,
+            ) {
                 scan.finding("release.symlink", Path::new(path), 1, message)?;
             }
         }
@@ -156,8 +161,9 @@ pub(super) fn inspect(
             }
         }
     }
+    let working_directories = tracked_directories(working_modes.keys().map(String::as_str));
     for (path, destination) in working_links {
-        if let Some(message) = symlink_problem(&destination, &working_modes) {
+        if let Some(message) = symlink_problem(&destination, &working_modes, &working_directories) {
             scan.finding("release.symlink", Path::new(&path), 1, message)?;
         }
     }
@@ -186,6 +192,7 @@ pub(super) fn inspect(
             .iter()
             .map(|entry| (entry.path.clone(), entry.mode.clone()))
             .collect::<BTreeMap<_, _>>();
+        let directories = tracked_directories(modes.keys().map(String::as_str));
         // Legal-file completeness applies to publication heads, not every
         // intermediate historical snapshot in a range.
         if commit == head || range.is_some_and(|(_, tip)| tip == commit) {
@@ -207,7 +214,9 @@ pub(super) fn inspect(
                 }
             }
         }
-        for entry in entries {
+        let mut requested_blobs = HashMap::<GitOid, u64>::new();
+        let mut symlinks = HashMap::<GitOid, Vec<&Entry>>::new();
+        for entry in &entries {
             path_rules(&mut scan, &entry.path, &worktree_roots)?;
             if !entry.regular() && entry.mode != "120000" {
                 return Err(CheckError::Evidence(
@@ -218,50 +227,76 @@ pub(super) fn inspect(
                 return Err(CheckError::Evidence("publication blob exceeds 5 MiB"));
             }
             if entry.mode == "120000" {
-                let raw = if let Some(raw) = symlink_target_cache.get(&entry.oid) {
-                    raw.clone()
+                symlinks.entry(entry.oid).or_default().push(entry);
+                if !symlink_target_cache.contains_key(&entry.oid) {
+                    insert_blob_size(&mut requested_blobs, entry.oid, entry.size)?;
+                }
+            } else if !seen_blobs.contains(&entry.oid) {
+                if let Some(raw) = symlink_target_cache.get(&entry.oid) {
+                    if raw.len() as u64 != entry.size {
+                        return Err(CheckError::Evidence(
+                            "publication blob size does not match tree",
+                        ));
+                    }
+                    scan.note(format!("release:blob:{}", entry.oid), raw);
+                    seen_blobs.insert(entry.oid);
                 } else {
-                    release_read(
-                        git,
-                        GitRead::RawObject {
-                            kind: GitObjectKind::Blob,
-                            oid: entry.oid,
-                        },
-                    )?
-                };
-                if raw.len() as u64 != entry.size {
+                    insert_blob_size(&mut requested_blobs, entry.oid, entry.size)?;
+                }
+            }
+        }
+        for (oid, links) in &symlinks {
+            if let Some(raw) = symlink_target_cache.get(oid) {
+                if seen_blobs.insert(*oid) {
+                    scan.note(format!("release:blob:{oid}"), raw);
+                }
+                for entry in links {
+                    if raw.len() as u64 != entry.size {
+                        return Err(CheckError::Evidence(
+                            "publication blob size does not match tree",
+                        ));
+                    }
+                    if let Some(message) = symlink_problem(
+                        &symlink_destination(&entry.path, raw),
+                        &modes,
+                        &directories,
+                    ) {
+                        scan.finding("release.symlink", Path::new(&entry.path), 1, message)?;
+                    }
+                }
+            }
+        }
+        for batch in blob_batches(requested_blobs) {
+            let raw_by_oid = read_blob_batch(git, &batch)?;
+            for (oid, size) in batch {
+                let raw = raw_by_oid.get(&oid).ok_or(CheckError::Evidence(
+                    "Git returned an incomplete blob batch",
+                ))?;
+                if raw.len() as u64 != size {
                     return Err(CheckError::Evidence(
                         "publication blob size does not match tree",
                     ));
                 }
-                if !symlink_target_cache.contains_key(&entry.oid)
-                    && raw.len() <= MAX_CACHED_SYMLINK_BYTES - cached_symlink_bytes
-                {
-                    cached_symlink_bytes += raw.len();
-                    symlink_target_cache.insert(entry.oid, raw.clone());
+                if seen_blobs.insert(oid) {
+                    scan.note(format!("release:blob:{oid}"), raw);
                 }
-                if let Some(message) =
-                    symlink_problem(&symlink_destination(&entry.path, &raw), &modes)
-                {
-                    scan.finding("release.symlink", Path::new(&entry.path), 1, message)?;
+                if let Some(links) = symlinks.get(&oid) {
+                    if !symlink_target_cache.contains_key(&oid)
+                        && raw.len() <= MAX_CACHED_SYMLINK_BYTES - cached_symlink_bytes
+                    {
+                        cached_symlink_bytes += raw.len();
+                        symlink_target_cache.insert(oid, raw.clone());
+                    }
+                    for entry in links {
+                        if let Some(message) = symlink_problem(
+                            &symlink_destination(&entry.path, raw),
+                            &modes,
+                            &directories,
+                        ) {
+                            scan.finding("release.symlink", Path::new(&entry.path), 1, message)?;
+                        }
+                    }
                 }
-                if seen_blobs.insert(entry.oid) {
-                    scan.note(format!("release:blob:{}", entry.oid), &raw);
-                }
-            } else if seen_blobs.insert(entry.oid) {
-                let raw = release_read(
-                    git,
-                    GitRead::RawObject {
-                        kind: GitObjectKind::Blob,
-                        oid: entry.oid,
-                    },
-                )?;
-                if raw.len() as u64 != entry.size {
-                    return Err(CheckError::Evidence(
-                        "publication blob size does not match tree",
-                    ));
-                }
-                scan.note(format!("release:blob:{}", entry.oid), &raw);
             }
         }
     }
@@ -286,6 +321,112 @@ pub(super) fn inspect(
 
 fn release_read(git: &GitContext<'_>, operation: GitRead) -> Result<Vec<u8>, CheckError> {
     checked_bytes(git.read_release(operation)?)
+}
+
+fn insert_blob_size(
+    requested: &mut HashMap<GitOid, u64>,
+    oid: GitOid,
+    size: u64,
+) -> Result<(), CheckError> {
+    if requested
+        .insert(oid, size)
+        .is_some_and(|previous| previous != size)
+    {
+        return Err(CheckError::Evidence(
+            "publication blob size does not match tree",
+        ));
+    }
+    Ok(())
+}
+
+fn blob_batches(blobs: HashMap<GitOid, u64>) -> Vec<Vec<(GitOid, u64)>> {
+    let mut batches = Vec::new();
+    let mut batch = Vec::new();
+    let mut batch_bytes = 0_u64;
+    let mut blobs = blobs.into_iter().collect::<Vec<_>>();
+    blobs.sort_by_key(|(oid, _)| oid.to_string());
+    for blob in blobs {
+        if !batch.is_empty()
+            && (batch.len() == MAX_RELEASE_BLOB_BATCH_OBJECTS
+                || batch_bytes.saturating_add(blob.1) > MAX_RELEASE_BLOB_BATCH_BYTES)
+        {
+            batches.push(std::mem::take(&mut batch));
+            batch_bytes = 0;
+        }
+        batch_bytes = batch_bytes.saturating_add(blob.1);
+        batch.push(blob);
+    }
+    if !batch.is_empty() {
+        batches.push(batch);
+    }
+    batches
+}
+
+fn read_blob_batch(
+    git: &GitContext<'_>,
+    expected: &[(GitOid, u64)],
+) -> Result<HashMap<GitOid, Vec<u8>>, CheckError> {
+    let bytes = release_read(
+        git,
+        GitRead::BlobBatch {
+            oids: expected.iter().map(|(oid, _)| *oid).collect(),
+        },
+    )?;
+    parse_blob_batch(&bytes, expected)
+}
+
+fn parse_blob_batch(
+    bytes: &[u8],
+    expected: &[(GitOid, u64)],
+) -> Result<HashMap<GitOid, Vec<u8>>, CheckError> {
+    let mut cursor = 0_usize;
+    let mut blobs = HashMap::with_capacity(expected.len());
+    for (oid, expected_size) in expected {
+        let header_end = cursor
+            + bytes[cursor..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .ok_or(CheckError::Evidence("malformed Git blob batch"))?;
+        let header = utf8(&bytes[cursor..header_end])?;
+        let mut fields = header.split_ascii_whitespace();
+        let expected_oid = oid.to_string();
+        if fields.next() != Some(expected_oid.as_str()) || fields.next() != Some("blob") {
+            return Err(CheckError::Evidence(
+                "Git returned an unexpected blob batch entry",
+            ));
+        }
+        let size = fields
+            .next()
+            .and_then(|field| field.parse::<u64>().ok())
+            .ok_or(CheckError::Evidence("malformed Git blob batch size"))?;
+        if fields.next().is_some() || size != *expected_size || size > MAX_FILE {
+            return Err(CheckError::Evidence(
+                "Git blob batch size does not match tree",
+            ));
+        }
+        cursor = header_end + 1;
+        let length = usize::try_from(size)
+            .map_err(|_| CheckError::Evidence("Git blob batch size is not representable"))?;
+        let data_end = cursor
+            .checked_add(length)
+            .ok_or(CheckError::Evidence("malformed Git blob batch"))?;
+        if bytes.get(data_end) != Some(&b'\n') {
+            return Err(CheckError::Evidence("truncated Git blob batch"));
+        }
+        if blobs
+            .insert(*oid, bytes[cursor..data_end].to_vec())
+            .is_some()
+        {
+            return Err(CheckError::Evidence("duplicate Git blob batch entry"));
+        }
+        cursor = data_end + 1;
+    }
+    if cursor != bytes.len() {
+        return Err(CheckError::Evidence(
+            "Git returned trailing blob batch data",
+        ));
+    }
+    Ok(blobs)
 }
 
 fn is_ancestor(git: &GitContext<'_>, base: GitOid, head: GitOid) -> Result<bool, CheckError> {
@@ -414,6 +555,7 @@ fn symlink_destination(path: &str, target: &[u8]) -> SymlinkDestination {
 fn symlink_problem(
     destination: &SymlinkDestination,
     tracked_modes: &BTreeMap<String, String>,
+    tracked_directories: &BTreeSet<String>,
 ) -> Option<&'static str> {
     match destination {
         Err(message) => Some(*message),
@@ -426,7 +568,7 @@ fn symlink_problem(
                         );
                     }
                     Some(_) => return Some("symlink target traverses a tracked non-directory"),
-                    None if !has_tracked_descendant(directory, tracked_modes) => {
+                    None if !has_tracked_descendant(directory, tracked_directories) => {
                         return Some("symlink target traverses an untracked directory");
                     }
                     None => {}
@@ -444,12 +586,18 @@ fn symlink_problem(
     }
 }
 
-fn has_tracked_descendant(path: &str, tracked_modes: &BTreeMap<String, String>) -> bool {
-    let prefix = format!("{path}/");
-    tracked_modes
-        .range(prefix.clone()..)
-        .next()
-        .is_some_and(|(candidate, _)| candidate.starts_with(&prefix))
+fn tracked_directories<'a>(paths: impl IntoIterator<Item = &'a str>) -> BTreeSet<String> {
+    let mut directories = BTreeSet::new();
+    for path in paths {
+        for (separator, _) in path.match_indices('/') {
+            directories.insert(path[..separator].to_owned());
+        }
+    }
+    directories
+}
+
+fn has_tracked_descendant(path: &str, tracked_directories: &BTreeSet<String>) -> bool {
+    tracked_directories.contains(path)
 }
 
 struct Entry {
