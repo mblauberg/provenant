@@ -699,6 +699,19 @@ fn incremental_ingest_resumes_complete_lines_and_recovers_replacements() -> Resu
     };
     assert_eq!(run()?.added, 1);
     assert_eq!(run()?.bytes_read, 0);
+    let segment_path = f.base.join("state/ingest/2026-10-01.jsonl");
+    let segment_bytes = std::fs::read(&segment_path)?;
+    let mut stored_row: serde_json::Value = serde_json::from_slice(
+        segment_bytes
+            .split(|byte| *byte == b'\n')
+            .next()
+            .ok_or_else(|| std::io::Error::other("missing row"))?,
+    )?;
+    stored_row["reply"]["future_reply_row"] = serde_json::json!(13);
+    let mut encoded_segment = serde_json::to_vec(&stored_row)?;
+    encoded_segment.push(b'\n');
+    std::fs::write(&segment_path, encoded_segment)?;
+
     let update = message("m1", at, 10, 0, 0, 9);
     let second = message("m2", at, 2, 0, 0, 3);
     let split = second.len() / 2;
@@ -710,11 +723,48 @@ fn incremental_ingest_resumes_complete_lines_and_recovers_replacements() -> Resu
     let partial = run()?;
     assert_eq!((partial.added, partial.already_present), (0, 1));
     assert_eq!(read_rows(&f.roots, &RowFilter::default())?[0].output, 9);
+    let segment_bytes = std::fs::read(&segment_path)?;
+    let rewritten_row: serde_json::Value = serde_json::from_slice(
+        segment_bytes
+            .split(|byte| *byte == b'\n')
+            .next()
+            .ok_or_else(|| std::io::Error::other("missing row"))?,
+    )?;
+    assert_eq!(rewritten_row["reply"]["future_reply_row"], 13);
     file.write_all(&second.as_bytes()[split..])?;
     let appended = run()?;
     assert_eq!(appended.added, 1);
     assert_eq!(appended.bytes_read, second.len() as u64);
     assert_eq!(run()?.bytes_read, 0);
+    let cursor_store = f.base.join("state/ingest-cursors.json");
+    let mut cursor_value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&cursor_store)?)?;
+    cursor_value["future_cursor_store"] = serde_json::json!(10);
+    let cursor = cursor_value["files"]
+        .as_object_mut()
+        .and_then(|files| files.values_mut().next())
+        .ok_or_else(|| std::io::Error::other("missing persisted cursor"))?;
+    let cursor_identity = (
+        cursor["device"]
+            .as_u64()
+            .ok_or_else(|| std::io::Error::other("missing cursor device"))?,
+        cursor["inode"]
+            .as_u64()
+            .ok_or_else(|| std::io::Error::other("missing cursor inode"))?,
+    );
+    cursor["future_cursor"] = serde_json::json!(11);
+    cursor["reply"]["future_reply"] = serde_json::json!(12);
+    std::fs::write(&cursor_store, serde_json::to_vec(&cursor_value)?)?;
+    assert_eq!(run()?.bytes_read, 0);
+    let rewritten_cursors: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&cursor_store)?)?;
+    assert_eq!(rewritten_cursors["future_cursor_store"], 10);
+    let rewritten_cursor = rewritten_cursors["files"]
+        .as_object()
+        .and_then(|files| files.values().next())
+        .ok_or_else(|| std::io::Error::other("missing rewritten cursor"))?;
+    assert_eq!(rewritten_cursor["future_cursor"], 11);
+    assert_eq!(rewritten_cursor["reply"]["future_reply"], 12);
     drop(file);
     // Replacing a transcript invalidates its cursor, even when it grows.
     let replacement = message("m3", at, 5, 0, 0, 7);
@@ -722,6 +772,35 @@ fn incremental_ingest_resumes_complete_lines_and_recovers_replacements() -> Resu
     f.write("claude", path, &replacement)?;
     assert_eq!(run()?.added, 1);
     assert_eq!(read_rows(&f.roots, &RowFilter::default())?.len(), 3);
+    let rewritten: serde_json::Value = serde_json::from_slice(&std::fs::read(&cursor_store)?)?;
+    let rewritten_cursor = rewritten["files"]
+        .as_object()
+        .and_then(|files| files.values().next())
+        .ok_or_else(|| std::io::Error::other("missing rewritten cursor"))?;
+    let replacement_identity = (
+        rewritten_cursor["device"]
+            .as_u64()
+            .ok_or_else(|| std::io::Error::other("missing replacement device"))?,
+        rewritten_cursor["inode"]
+            .as_u64()
+            .ok_or_else(|| std::io::Error::other("missing replacement inode"))?,
+    );
+    assert_eq!(rewritten["future_cursor_store"], 10);
+    if cursor_identity == replacement_identity {
+        assert_eq!(rewritten_cursor["future_cursor"], 11);
+        assert_eq!(rewritten_cursor["reply"]["future_reply"], 12);
+    } else {
+        assert!(rewritten_cursor.get("future_cursor").is_none());
+        assert!(rewritten_cursor["reply"].get("future_reply").is_none());
+    }
+    let segment_bytes = std::fs::read(&segment_path)?;
+    let rewritten_row: serde_json::Value = serde_json::from_slice(
+        segment_bytes
+            .split(|byte| *byte == b'\n')
+            .next()
+            .ok_or_else(|| std::io::Error::other("missing row"))?,
+    )?;
+    assert_eq!(rewritten_row["reply"]["future_reply_row"], 13);
     // A removed store must not leave valid cursors pointing past its contents.
     for name in segment_files(&f)? {
         std::fs::remove_file(f.base.join("state/ingest").join(name))?;

@@ -456,6 +456,13 @@ impl SessionIdentityOverride {
     }
 }
 
+/// Compare declared attribution fields without interpreting opaque extensions.
+fn same_identity_scope(left: &AccountIdentity, right: &AccountIdentity) -> bool {
+    left.identity == right.identity
+        && left.epoch == right.epoch
+        && left.evidence_source == right.evidence_source
+}
+
 fn empty_cursor_store(store_digest: &str) -> CursorStore {
     CursorStore {
         schema_version: 2,
@@ -509,10 +516,11 @@ fn read_transcript(
         return Err(());
     }
     let (device, inode) = identity(&meta);
+    let same_transcript =
+        cursor.is_some_and(|cursor| cursor.device == device && cursor.inode == inode);
     let start = cursor
         .filter(|cursor| {
-            cursor.device == device
-                && cursor.inode == inode
+            same_transcript
                 && cursor.offset <= meta.len()
                 && tail_digest(&mut file, cursor.offset).ok().as_ref() == Some(&cursor.tail)
         })
@@ -533,10 +541,18 @@ fn read_transcript(
     let mut last_reply = cursor
         .filter(|_| start > 0)
         .and_then(|cursor| cursor.last_reply.clone());
-    let mut reply = cursor
-        .filter(|_| start > 0)
-        .map(|cursor| cursor.reply.clone())
-        .unwrap_or_default();
+    let mut reply = if start > 0 {
+        cursor
+            .map(|cursor| cursor.reply.clone())
+            .unwrap_or_default()
+    } else {
+        let mut reply = crate::signals::ReplyContext::default();
+        if same_transcript && let Some(cursor) = cursor {
+            // Reset known transcript state, while retaining opaque extensions.
+            reply.extra = cursor.reply.extra.clone();
+        }
+        reply
+    };
     let mut line = Vec::new();
     'read_loop: loop {
         if expired(request.deadline, clock) {
@@ -671,7 +687,15 @@ fn read_transcript(
         tail,
         reply,
         last_reply,
-        extra: Default::default(),
+        // Extensions survive a cursor reset while the transcript identity is
+        // stable; a replaced file starts a new cursor record.
+        extra: if same_transcript {
+            cursor
+                .map(|cursor| cursor.extra.clone())
+                .unwrap_or_default()
+        } else {
+            Default::default()
+        },
     })
 }
 
@@ -767,7 +791,10 @@ pub fn ingest_with_clock(
             }
         ) {
             if !valid_session(session)
-                || identity != &AccountIdentity::conflicting_provider_observations()
+                || !same_identity_scope(
+                    identity,
+                    &AccountIdentity::conflicting_provider_observations(),
+                )
             {
                 return Err(IngestError::IdentityOverrideStore);
             }
@@ -872,7 +899,7 @@ pub fn ingest_with_clock(
                 segment.changed = true;
             }
             if let Some(identity) = identity_overrides.get(&row.session) {
-                if row.identity != *identity {
+                if !same_identity_scope(&row.identity, identity) {
                     row.identity = identity.clone();
                     segment.changed = true;
                 }
@@ -924,7 +951,18 @@ pub fn ingest_with_clock(
                 .as_ref()
                 .is_none_or(|reply| reply.recorded.is_empty())
             {
+                // Keep reply metadata only within the same declared account scope.
+                let previous_reply_extra =
+                    if same_identity_scope(&previous.identity, &current.identity) {
+                        previous.reply.as_ref().map(|reply| reply.extra.clone())
+                    } else {
+                        None
+                    };
                 previous.reply = current.reply;
+                if let (Some(extra), Some(reply)) = (previous_reply_extra, previous.reply.as_mut())
+                {
+                    reply.extra = extra;
+                }
             }
             if previous.agent_id.is_none() {
                 previous.agent_id = current.agent_id;
@@ -1151,7 +1189,10 @@ fn read_identity_overrides(
         if record.schema_version != IDENTITY_OVERRIDE_SCHEMA_VERSION
             || record.provider != PROVIDER
             || !valid_session(&record.session)
-            || record.identity != AccountIdentity::conflicting_provider_observations()
+            || !same_identity_scope(
+                &record.identity,
+                &AccountIdentity::conflicting_provider_observations(),
+            )
             || name != identity_override_name(&record.provider, &record.session)
             || overrides.insert(record.session, record.identity).is_some()
         {
