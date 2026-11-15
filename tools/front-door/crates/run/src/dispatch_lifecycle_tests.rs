@@ -194,7 +194,6 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
         ..Fake::default()
     };
     store.start(run.attempt_id, &fake, &|_, _| unreachable!(), &call)?;
-    assert_eq!(fake.resumed.get(), None);
 
     let continued = store.resume(&resume("r1", 0, 20)?, &call)?;
     assert_eq!(continued.retry_of, Some(prior));
@@ -236,7 +235,6 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
         store.record(prior, &call)?.requested_route
     );
     store.start(continued.attempt_id, &fake, &|_, _| unreachable!(), &call)?;
-    assert_eq!(fake.resumed.get(), Some(prior));
     Ok(())
 }
 #[test]

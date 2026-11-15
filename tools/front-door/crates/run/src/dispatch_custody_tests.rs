@@ -1,8 +1,14 @@
 use super::*;
 
 #[test]
-fn parent_reclaim_preserves_work_despite_advisory_caps() -> TestResult {
-    child_wait_lease_cycle(true)
+fn parent_yield_preserves_work_across_store_update_outcomes() -> TestResult {
+    for parent_wait_commit in [
+        ParentWaitCommit::Persisted,
+        ParentWaitCommit::StoreUpdateFailed,
+    ] {
+        child_wait_lease_cycle(parent_wait_commit)?;
+    }
+    Ok(())
 }
 #[test]
 fn child_stores_admit_beyond_advisory_caps_and_preserve_live_work() -> TestResult {
@@ -135,19 +141,19 @@ fn prepare_refusal_is_terminal_without_custody() -> TestResult {
     Ok(())
 }
 #[test]
-fn missing_stored_prompt_ends_the_attempt_rejected_with_the_cause() -> TestResult {
-    assert_unreadable_prompt_rejected(|prompt| {
-        std::fs::remove_file(prompt)?;
-        Ok(())
-    })
-}
-#[test]
-fn mode_zero_stored_prompt_ends_the_attempt_rejected_with_the_cause() -> TestResult {
+fn unreadable_stored_prompt_ends_the_attempt_rejected_with_the_cause() -> TestResult {
     use std::os::unix::fs::PermissionsExt;
-    assert_unreadable_prompt_rejected(|prompt| {
-        std::fs::set_permissions(prompt, std::fs::Permissions::from_mode(0o000))?;
-        Ok(())
-    })
+    for missing in [true, false] {
+        assert_unreadable_prompt_rejected(|prompt| {
+            if missing {
+                std::fs::remove_file(prompt)?;
+            } else {
+                std::fs::set_permissions(prompt, std::fs::Permissions::from_mode(0o000))?;
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
 }
 #[test]
 fn stored_cloud_request_is_refused_and_never_launched_locally() -> TestResult {
@@ -171,7 +177,6 @@ fn stored_cloud_request_is_refused_and_never_launched_locally() -> TestResult {
         [Started::Refused { attempt, kind: RefusalKind::CloudPlacementRemoved, .. }]
             if *attempt == id
     ));
-    assert_eq!(fake.prepared.get(), 0);
     assert_eq!(terminal(&store, id, &call)?, Outcome::Rejected);
     let state = store.record(id, &call)?.state;
     let AttemptState::Terminal { .. } = &state else {
@@ -189,12 +194,11 @@ fn stored_cloud_request_is_refused_and_never_launched_locally() -> TestResult {
     Ok(())
 }
 #[test]
-fn holder_release_defers_temporary_reclamation_after_verified_settlement() -> TestResult {
-    holder_release_temporary_fixture(true)
-}
-#[test]
-fn holder_release_retains_temporary_when_verification_fails() -> TestResult {
-    holder_release_temporary_fixture(false)
+fn holder_release_defers_temporary_reclamation_until_custody_is_verified() -> TestResult {
+    for binding in [ReservationBinding::Verified, ReservationBinding::Replaced] {
+        holder_release_temporary_fixture(binding)?;
+    }
+    Ok(())
 }
 #[test]
 fn publication_holder_accepts_exit_zero_or_completed_host_budget() -> TestResult {

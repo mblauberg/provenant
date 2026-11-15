@@ -19,8 +19,13 @@ fn write_grants_wire_bound_and_git_digest_are_preserved() -> TestResult {
         path: provenant_records::AbsolutePath::new(std::path::Path::new("/fixture/cache"))?,
         scope: PathScope::Subtree,
     };
+    let max_grant_bytes = provenant_records::run::MAX_WRITE_GRANT_BYTES as usize;
+    let one_grant_bytes = provenant_records::CanonicalV1::bytes(std::slice::from_ref(&grant))?
+        .as_bytes()
+        .len();
+    let grant_count = max_grant_bytes / one_grant_bytes.saturating_add(1) - 1;
     let mut applied = admission::AppliedWriteGrants {
-        grants: vec![grant.clone(); 1025],
+        grants: vec![grant.clone(); grant_count],
         git_grants_digest: Some(provenant_core::Digest::from_bytes([7; 32])),
     };
     let mut record = store.record(id, &call)?;
@@ -31,12 +36,12 @@ fn write_grants_wire_bound_and_git_digest_are_preserved() -> TestResult {
         provenant_records::CanonicalV1::bytes(&applied.grants)?
             .as_bytes()
             .len()
-            < provenant_records::run::MAX_WRITE_GRANT_BYTES as usize
+            < max_grant_bytes
     );
     // Native bytes double in the wire encoding, exceeding the cap even
     // though the raw path is smaller. Existing records remain readable.
     let mut path = b"/fixture/".to_vec();
-    path.extend(vec![b'x'; 128 * 1024]);
+    path.extend(vec![b'x'; max_grant_bytes / 2]);
     path.push(0xff);
     applied.grants = vec![WriteGrantRecord {
         path: provenant_records::AbsolutePath::new(std::path::Path::new(
@@ -48,7 +53,7 @@ fn write_grants_wire_bound_and_git_digest_are_preserved() -> TestResult {
         provenant_records::CanonicalV1::bytes(&applied.grants)?
             .as_bytes()
             .len()
-            > provenant_records::run::MAX_WRITE_GRANT_BYTES as usize
+            > max_grant_bytes
     );
     store.mark_starting(&record, &route(), &[], &applied, None, &call)?;
     record.write_grants = applied.grants.clone();
@@ -64,6 +69,9 @@ fn write_grants_wire_bound_and_git_digest_are_preserved() -> TestResult {
     // AbsolutePath retains PathWire's contained byte encoding. It cannot
     // deserialise a relative escape into an absolute grant.
     let mut invalid = serde_json::to_value(store.record(id, &call)?)?;
+    invalid["write_grants"][0]["path"] = serde_json::to_value(
+        provenant_records::AbsolutePath::new(std::path::Path::new("/fixture/contained"))?,
+    )?;
     invalid["write_grants"][0]["path"]["relative_to_root"]["path"] = serde_json::json!("../escape");
     assert!(serde_json::from_value::<AttemptRecord>(invalid).is_err());
     Ok(())
@@ -117,21 +125,26 @@ fn cancel_and_reconcile_return_promptly_while_writer_lock_is_held() -> TestResul
         panic!("a live settlement owner needs no detached worker");
     })?;
     drop(driver);
-    let mut launched = false;
+    let executable = std::env::current_exe()?.into_os_string();
+    let mut spawned_attempt = None;
     let queued = store.queue_reconcile_with(run.attempt_id, &call, |argv, cwd| {
-        assert_eq!(argv.len(), 4);
-        assert_eq!(argv[0], std::env::current_exe().unwrap().into_os_string());
-        assert_eq!(argv[1..3], ["internal", "settle"]);
-        assert_eq!(cwd, std::env::current_dir().unwrap());
-        let request: serde_json::Value = serde_json::from_str(argv[3].to_str().unwrap()).unwrap();
-        assert_eq!(
-            request["attempt"],
-            serde_json::to_value(run.attempt_id).unwrap()
+        assert_eq!(argv.first(), Some(&executable));
+        let command: Vec<_> = argv.iter().filter_map(|arg| arg.to_str()).collect();
+        assert!(
+            command
+                .windows(2)
+                .any(|pair| pair == ["internal", "settle"])
         );
-        launched = true;
+        assert_eq!(cwd, std::env::current_dir().unwrap());
+        let request = argv
+            .iter()
+            .filter_map(|argument| argument.to_str())
+            .find_map(|argument| crate::settlement::ResumeRequest::parse(argument).ok())
+            .expect("settle request is passed as a typed request");
+        spawned_attempt = Some(request.attempt());
         Ok(())
     })?;
-    assert!(launched);
+    assert_eq!(spawned_attempt, Some(run.attempt_id));
     store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
         panic!("an already queued settlement must not spawn another worker");
     })?;

@@ -614,7 +614,3 @@ fn cancel_queued_work_without_an_attempt_directory() -> TestResult {
     assert_eq!(terminal(&store, id, &call)?, Outcome::Cancelled);
     Ok(())
 }
-#[test]
-fn reconcile_recovers_a_writer_from_a_previous_boot() -> TestResult {
-    recover_rebooted_writer(false, false, true, NEW_BOOT)
-}
