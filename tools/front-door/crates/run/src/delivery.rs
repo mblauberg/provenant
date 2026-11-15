@@ -174,6 +174,15 @@ impl FilteredLanePath {
         project: &Path,
         worktree: &Path,
     ) -> std::io::Result<Self> {
+        Self::for_requester_excluding_roots(host, &[project, worktree])
+    }
+
+    /// Capture the requester PATH and remove every project, executor, and
+    /// worktree root that must not supply automatic tools to the lane.
+    pub fn for_requester_excluding_roots(
+        host: Option<&crate::HostLaunchContext>,
+        excluded_roots: &[&Path],
+    ) -> std::io::Result<Self> {
         let path = match host {
             Some(host) => match &host.lane_path {
                 Some(path) => OsString::from_vec(path.clone()),
@@ -182,13 +191,18 @@ impl FilteredLanePath {
             },
             None => std::env::var_os("PATH").unwrap_or_default(),
         };
-        Self::from_path(&path, project, worktree)
+        Self::from_path_excluding_roots(&path, excluded_roots)
     }
 
     /// Filter and retain a PATH value for a host-owned delivery operation.
     pub fn from_path(path: &OsStr, project: &Path, worktree: &Path) -> std::io::Result<Self> {
-        let mut excluded_roots = Vec::with_capacity(2);
-        for root in [project, worktree] {
+        Self::from_path_excluding_roots(path, &[project, worktree])
+    }
+
+    /// Filter a PATH value against every verified root owned by the request.
+    pub fn from_path_excluding_roots(path: &OsStr, roots: &[&Path]) -> std::io::Result<Self> {
+        let mut excluded_roots = Vec::with_capacity(roots.len());
+        for root in roots {
             let root = std::fs::canonicalize(root)?;
             if !excluded_roots.contains(&root) {
                 excluded_roots.push(root);
