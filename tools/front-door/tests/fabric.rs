@@ -217,6 +217,8 @@ fn chair_custody_matches_checkpoint_identity_for_harnesses_and_overrides() -> Re
             "workflow/projects/{project}/sessions/{session}/discovery.json"
         )))?)?;
         let identity = call(&rig, &["fabric", "identity"], 0)?["data"].clone();
+        assert_eq!(identity["client"], client);
+        assert_eq!(identity["inbox"]["agent"], agent.unwrap_or(client));
         assert_eq!(identity["inbox"]["actor"], discovery["chair_actor"]);
         if let Some(session_override) = session_override {
             rig.env
