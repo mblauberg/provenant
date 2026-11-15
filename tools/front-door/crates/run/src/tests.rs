@@ -469,6 +469,7 @@ fn raw_input() -> PreparedRun {
                 profile: HarnessProfile::default(),
                 prompt_digest: CanonicalV1::file_digest(b"exact prompt"),
                 route: RequestedRoute::Model {
+                    required_family: None,
                     extra: Default::default(),
                     provider: "fixture".into(),
                     model: "fixture/model".into(),
@@ -1697,6 +1698,7 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
     assert!(captured.harness_version.is_none());
     let trace = provenant_records::Trace {
         extra: record.trace.extra.clone(),
+        telemetry_context: record.trace.telemetry_context.clone(),
         host: None,
         project: Some(context.project_id),
         attempt: Some(id),

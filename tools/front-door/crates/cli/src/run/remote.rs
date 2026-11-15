@@ -164,10 +164,9 @@ pub(super) fn read_output_with(
         max_bytes: command.max_bytes,
     })?;
     let fallback = match &chunk {
-        OutputResult::Chunk { extra, .. } if matches!(command.part, Part::Result) => extra
-            .get(super::output::PLANNER_FALLBACK_KEY)
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        OutputResult::Chunk { peer, .. } if matches!(command.part, Part::Result) => {
+            peer.planner_fallback.clone()
+        }
         _ => None,
     };
     let chunk = if let Some(lines) = command.tail {
@@ -291,6 +290,7 @@ fn chunk_response(
 ) -> Result<(Value, String), Fail> {
     let OutputResult::Chunk {
         extra,
+        target,
         state,
         reason,
         offset,
@@ -303,7 +303,7 @@ fn chunk_response(
     else {
         return Err(corrupt());
     };
-    if extra.get("attempt_id").and_then(Value::as_str) != Some(attempt.to_string().as_str()) {
+    if target.attempt != attempt {
         return Err(corrupt());
     }
     let text = match &bytes {
@@ -318,6 +318,9 @@ fn chunk_response(
     if let Some(object) = data.as_object_mut() {
         object.extend(extra);
     }
+    // The typed target is the identity authority, including when a projected
+    // lane field arrives among the peer's forward extensions.
+    data["attempt_id"] = json!(target.attempt);
     Ok((data, text))
 }
 
@@ -396,4 +399,41 @@ fn collect(
         hosts.push(row);
     }
     (facts, hosts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_identity_comes_from_the_declared_target() {
+        let attempt = AttemptId::from_bytes([1; 16]);
+        let other = AttemptId::from_bytes([2; 16]);
+        let host = HostId::from_bytes([3; 16]);
+        for (returned, accepted) in [(attempt, true), (other, false)] {
+            let chunk = OutputResult::Chunk {
+                peer: Default::default(),
+                extra: [("future_peer_field".into(), json!(other))].into(),
+                target: AttemptTarget {
+                    extra: Default::default(),
+                    attempt: returned,
+                    host: Some(host),
+                },
+                part: OutputPart::Result,
+                state: "succeeded".into(),
+                reason: None,
+                offset: 0,
+                next_offset: 0,
+                eof: true,
+                digest: provenant_core::Digest::from_bytes([4; 32]),
+                bytes: OutputBytes::Utf8(String::new()),
+            };
+            let result = chunk_response(attempt, host, &Part::Result, chunk);
+            if accepted {
+                assert_eq!(result.unwrap().0["attempt_id"], json!(attempt));
+            } else {
+                assert!(result.is_err());
+            }
+        }
+    }
 }

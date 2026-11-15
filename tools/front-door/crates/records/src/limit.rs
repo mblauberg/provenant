@@ -5,10 +5,11 @@ use serde::{Deserialize, Serialize};
 /// Where a limit's value was set. The nearest setting to the work wins:
 /// `Launch`, then `Template`, then `Tier`, then `Project`, then `Host`, then `Default`
 /// (see [`Limit::resolve`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LimitSource {
     /// The built-in default.
+    #[default]
     Default,
     /// The host configuration.
     Host,
@@ -61,6 +62,9 @@ pub struct Limit {
     pub overrun: Option<BudgetOverrun>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wrap_up_refused: Option<BudgetWrapUpRefused>,
+    /// The pre-wrap-up target budget retained alongside a bounded continuation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrap_up_target: Option<Box<Limit>>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
 }
@@ -264,6 +268,7 @@ impl Limit {
             strength,
             overrun: None,
             wrap_up_refused: None,
+            wrap_up_target: None,
             extra: Default::default(),
         }
     }
@@ -293,11 +298,9 @@ impl Limit {
         if self.strength == LimitStrength::Ceiling {
             return Err(CeilingError { value: self.value });
         }
-        Ok(Self::new(
-            value.max(self.value),
-            LimitSource::Launch,
-            self.strength,
-        ))
+        let mut raised = Self::new(value.max(self.value), LimitSource::Launch, self.strength);
+        raised.wrap_up_target = self.wrap_up_target.clone();
+        Ok(raised)
     }
 }
 
@@ -431,6 +434,11 @@ mod tests {
                 "wrap_up_refused",
                 serde_json::json!({"schema_version":1,"reason":"admission refused"}),
                 serde_json::json!({"schema_version":1,"reason":false}),
+            ),
+            (
+                "wrap_up_target",
+                serde_json::json!({"value":200,"source":"template","strength":"default"}),
+                serde_json::json!({"value":"invalid","source":"template","strength":"default"}),
             ),
         ] {
             let mut wire =

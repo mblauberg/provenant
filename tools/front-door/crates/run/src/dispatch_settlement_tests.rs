@@ -920,6 +920,7 @@ fn skipped_fallback_candidates_are_recorded_on_the_attempt() -> TestResult {
         kind: SkipKind::AuthRequired,
         cause: None,
         detail: "account work: sign in again".into(),
+        ..Default::default()
     }];
     store.record_skipped_routes(id, &skipped, &call)?;
     let started = store.mark_starting(

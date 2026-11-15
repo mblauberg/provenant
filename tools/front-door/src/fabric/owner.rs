@@ -696,6 +696,7 @@ pub(crate) fn graph_attempt_usage(
         cost.and_then(|cost| cost.known_lower_bound.map(|money| money.microdollars));
     // Persist only reporting facts. Provider text, paths and traces never enter events.
     let mut extra = provenant_records::ExtraFields::default();
+    let mut resolved_route = None;
     let mut wall_time_seconds = record.provider_ms.map(|ms| ms.saturating_add(999) / 1000);
     if let Ok(fact) = provenant_run::fact(record.clone()) {
         if let Some(started) = fact.started_at {
@@ -721,12 +722,12 @@ pub(crate) fn graph_attempt_usage(
             .or(fact.applied_route.as_ref())
             .or(fact.resolved_route.as_ref())
         {
-            extra.insert(
-                "resolved_route".into(),
-                serde_json::json!({
-                    "provider": route.provider, "model": route.model, "effort": route.effort
-                }),
-            );
+            resolved_route = Some(provenant_fabric_runtime::graph::AttemptResolvedRoute {
+                extra: Default::default(),
+                provider: route.provider.clone(),
+                model: route.model.clone(),
+                effort: route.effort.clone(),
+            });
         }
         for (key, value) in [
             (
@@ -746,6 +747,7 @@ pub(crate) fn graph_attempt_usage(
     }
     provenant_fabric_runtime::graph::AttemptUsage {
         extra,
+        resolved_route,
         tokens,
         cost_micro_usd,
         wall_time_seconds,
@@ -840,11 +842,7 @@ impl BoundGraphOwner<'_> {
         &self,
         attempt: &provenant_fabric_runtime::graph::GraphAttempt,
     ) -> bool {
-        let Some(name) = attempt
-            .extra
-            .get("placement_host")
-            .and_then(serde_json::Value::as_str)
-        else {
+        let Some(name) = attempt.placement_host.as_deref() else {
             return false;
         };
         let local = self.factory.context.identity.host;
@@ -1204,13 +1202,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 )?;
         let raw = serde_json::to_value(document)
             .map_err(|_| "repair review document could not be encoded")?;
-        let mut request: provenant_routing::ReviewRequest = raw
-            .get("review")
-            .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|_| "repair review request is invalid; correct graph review settings")?
-            .unwrap_or_default();
+        let mut request = document.review.clone().unwrap_or_default();
         if request.kind.is_none() {
             request.kind = raw["context"]["task_kind"].as_str().map(str::to_owned);
         }
@@ -1868,6 +1860,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .snapshot(target, self.budget, self.cancel)?
             .applied_route
             .map(|route| provenant_fabric_runtime::graph::GraphRoute {
+                required_family: None,
+                peer_source_head: None,
+                peer_requested_route: None,
+                peer_network: None,
+                peer_retry_limit: None,
                 extra: Default::default(),
                 adapter: route.provider,
                 model: route.model,
@@ -2221,7 +2218,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         ))
     }
 
-    fn placement_host_id(&self, name: &str) -> Result<Option<String>, Self::Error> {
+    fn placement_host_id(&self, name: &str) -> Result<Option<provenant_core::HostId>, Self::Error> {
         let local = self.factory.context.identity.host;
         let host = if matches!(name, "local" | "localhost")
             || name
@@ -2235,7 +2232,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 .peer_host(name)
                 .ok_or(FacadeError::UnknownHost)?
         };
-        Ok(Some(host.to_string()))
+        Ok(Some(host))
     }
 
     fn stop_cancelled_attempt(
@@ -2624,10 +2621,7 @@ impl BoundGraphOwner<'_> {
             let mut writer_predecessor = None;
             let (mut source_head, mut successor_head) = if !accepted
                 && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
-                && let Some(previous) = key
-                    .extra
-                    .get("previous_attempt_ref")
-                    .and_then(serde_json::Value::as_str)
+                && let Some(previous) = key.previous_attempt_ref.as_deref()
             {
                 let (host, previous) = previous.split_once('/').ok_or(FacadeError::StateCorrupt)?;
                 if host != self.factory.context.identity.host.to_string() {
@@ -3002,14 +2996,9 @@ impl BoundGraphOwner<'_> {
                 &key.graph_id,
             )
             .map_err(graph_journal_error)?;
-            let review_subject_missing = execution.as_ref().is_some_and(|execution| {
-                execution
-                    .document
-                    .extra
-                    .get("review_subject_missing")
-                    .and_then(|v| v.as_bool())
-                    == Some(true)
-            });
+            let review_subject_missing = execution
+                .as_ref()
+                .is_some_and(|execution| execution.document.review_subject_missing);
             let review_launch = node.review_launch;
             let review_base = provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
                 &self.factory.context.roots.state,
@@ -3106,23 +3095,10 @@ impl BoundGraphOwner<'_> {
                     .as_mut()
                     .ok_or(FacadeError::StateCorrupt)?
                     .graph_template_launch = true;
-                source_head = route
-                    .extra
-                    .get("peer_source_head")
-                    .map(|value| {
-                        serde_json::from_value(value.clone()).map_err(|_| FacadeError::StateCorrupt)
-                    })
-                    .transpose()?
-                    .flatten();
+                source_head = route.peer_source_head.clone();
             }
             let accepted_route = accepted_route.or(if peer_root {
-                route
-                    .extra
-                    .get("peer_requested_route")
-                    .map(|value| {
-                        serde_json::from_value(value.clone()).map_err(|_| FacadeError::StateCorrupt)
-                    })
-                    .transpose()?
+                route.peer_requested_route.clone()
             } else {
                 None
             });
@@ -3158,12 +3134,8 @@ impl BoundGraphOwner<'_> {
                     route: accepted_route.unwrap_or(match route.selector() {
                         provenant_fabric_runtime::graph::GraphRouteSelector::Adapter(name) => {
                             provenant_records::run::RequestedRoute::Adapter {
-                                extra: route
-                                    .extra
-                                    .iter()
-                                    .filter(|(key, _)| key.as_str() == "required_family")
-                                    .map(|(key, value)| (key.clone(), value.clone()))
-                                    .collect(),
+                                extra: Default::default(),
+                                required_family: route.required_family.clone(),
                                 provider: route.adapter.clone().ok_or_else(|| {
                                     FacadeError::invalid(InvalidInputDetail::FieldDecode {
                                         field: "route.adapter".into(),
@@ -3181,12 +3153,8 @@ impl BoundGraphOwner<'_> {
                                 })
                             })?;
                             provenant_records::run::RequestedRoute::Model {
-                                extra: route
-                                    .extra
-                                    .iter()
-                                    .filter(|(key, _)| key.as_str() == "required_family")
-                                    .map(|(key, value)| (key.clone(), value.clone()))
-                                    .collect(),
+                                extra: Default::default(),
+                                required_family: route.required_family.clone(),
                                 provider: adapter.clone(),
                                 model: exact_model(Some(adapter), model),
                                 effort: route.effort.clone(),
@@ -3196,12 +3164,8 @@ impl BoundGraphOwner<'_> {
                             if !avoided_families.is_empty() =>
                         {
                             provenant_records::run::RequestedRoute::Review {
-                                extra: route
-                                    .extra
-                                    .iter()
-                                    .filter(|(key, _)| key.as_str() == "required_family")
-                                    .map(|(key, value)| (key.clone(), value.clone()))
-                                    .collect(),
+                                extra: Default::default(),
+                                required_family: route.required_family.clone(),
                                 name: route.alias.clone().ok_or_else(|| {
                                     FacadeError::invalid(InvalidInputDetail::FieldDecode {
                                         field: "route.alias".into(),
@@ -3217,12 +3181,8 @@ impl BoundGraphOwner<'_> {
                         }
                         provenant_fabric_runtime::graph::GraphRouteSelector::Alias(_) => {
                             provenant_records::run::RequestedRoute::Named {
-                                extra: route
-                                    .extra
-                                    .iter()
-                                    .filter(|(key, _)| key.as_str() == "required_family")
-                                    .map(|(key, value)| (key.clone(), value.clone()))
-                                    .collect(),
+                                extra: Default::default(),
+                                required_family: route.required_family.clone(),
                                 name: route.alias.clone().ok_or_else(|| {
                                     FacadeError::invalid(InvalidInputDetail::FieldDecode {
                                         field: "route.alias".into(),
@@ -3469,18 +3429,10 @@ impl BoundGraphOwner<'_> {
                 let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
                 self.launch_warnings.push(warning);
             }
-            if let Some(network) = route.extra.get("peer_network").filter(|_| peer_root) {
-                grants.network = serde_json::from_value(network.clone())
-                    .map_err(|_| FacadeError::StateCorrupt)?;
+            if peer_root && let Some(network) = route.peer_network {
+                grants.network = network;
             }
-            let peer_retry = route
-                .extra
-                .get("peer_retry_limit")
-                .filter(|_| peer_root)
-                .map(|value| {
-                    serde_json::from_value(value.clone()).map_err(|_| FacadeError::StateCorrupt)
-                })
-                .transpose()?;
+            let peer_retry = peer_root.then_some(route.peer_retry_limit).flatten();
             let retry_limit =
                 accepted_retry_limit.unwrap_or(peer_retry.unwrap_or(node.settlement_retries));
             let mut attempt = accepted_attempt.unwrap_or_else(|| {
@@ -4862,6 +4814,7 @@ mod recovery_rebuild_tests {
                                     base: None,
                                     base_ref: None,
                                     route: provenant_records::run::RequestedRoute::Named {
+                                        required_family: None,
                                         extra: Default::default(),
                                         name: "junior".into(),
                                         effort: None,

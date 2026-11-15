@@ -528,7 +528,10 @@ fn quota_stopped_task_and_composite_member_keep_the_same_lineage() -> Result {
             );
             assert_eq!(node.attempts.len(), 1);
             let successor = &node.attempts[0];
-            assert_eq!(successor.key.extra["previous_attempt_ref"], "h/quota");
+            assert_eq!(
+                successor.key.previous_attempt_ref.as_deref(),
+                Some("h/quota")
+            );
             assert_eq!(successor.key.extra["retry_generation"], 1);
             assert_eq!(
                 successor.key.route_index, 0,
@@ -604,7 +607,7 @@ fn quota_stopped_task_and_composite_member_keep_the_same_lineage() -> Result {
                     .map(|attempt| {
                         json!({
                             "reference":attempt.attempt_ref,
-                            "predecessor":attempt.key.extra.get("previous_attempt_ref"),
+                            "predecessor":attempt.key.previous_attempt_ref,
                             "generation":attempt.key.extra.get("retry_generation"),
                             "attempt":attempt.key.attempt,
                             "route_index":attempt.key.route_index,

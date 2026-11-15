@@ -204,7 +204,7 @@ fn attempt_release_proven(
     {
         return Ok(false);
     }
-    let Some(binding) = &record.repository_admission_binding else {
+    let Some(binding) = record.repository_admission_binding.as_ref() else {
         return Ok(false);
     };
     if binding.lease_epoch != scope.lease_epoch {

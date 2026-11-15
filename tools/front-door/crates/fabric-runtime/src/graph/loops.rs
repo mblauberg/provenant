@@ -404,6 +404,8 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
             }
         }
         let body_document = GraphDocument {
+            review: None,
+            review_subject_missing: false,
             nodes: body,
             delivery: None,
             ..document.clone()

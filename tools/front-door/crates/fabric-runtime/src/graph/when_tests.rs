@@ -45,6 +45,8 @@ fn compile(
 
 fn document(nodes: Vec<GraphNode>) -> GraphDocument {
     GraphDocument {
+        review: None,
+        review_subject_missing: false,
         graph_id: "when".into(),
         submission_patch: None,
         template_library: Default::default(),

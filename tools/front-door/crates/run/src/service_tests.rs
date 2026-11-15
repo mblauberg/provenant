@@ -223,6 +223,7 @@ pub(super) fn submission(prompt: &str) -> DispatchRequest {
             head: None,
             source_head: None,
             route: RequestedRoute::Named {
+                required_family: None,
                 extra: Default::default(),
                 name: "senior".into(),
                 effort: None,
@@ -248,6 +249,7 @@ fn adapter_child_leaves_network_unset_so_the_parent_bound_applies() -> TestResul
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let mut input = submission("command-child");
     input.task.route = RequestedRoute::Adapter {
+        required_family: None,
         extra: Default::default(),
         provider: "command".into(),
         name: "fmt".into(),
@@ -490,6 +492,7 @@ fn command_write_is_refused_before_preparing_a_worktree() -> TestResult {
     let mut input = submission("run the configured command");
     let operation = input.operation_id.clone();
     input.task.route = RequestedRoute::Adapter {
+        required_family: None,
         extra: Default::default(),
         provider: "command".into(),
         name: "fmt-check".into(),
@@ -526,6 +529,7 @@ fn model_routes_are_canonical_before_replay_comparison() -> TestResult {
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let service = Service::new(&store);
     let model = |id: &str| RequestedRoute::Model {
+        required_family: None,
         extra: Default::default(),
         provider: "fixture".into(),
         model: id.into(),
@@ -557,6 +561,7 @@ fn model_routes_are_canonical_before_replay_comparison() -> TestResult {
 #[test]
 fn unsupported_launch_is_refused_before_any_run_exists() -> TestResult {
     let model = |provider: &str, effort: Option<&str>| RequestedRoute::Model {
+        required_family: None,
         extra: Default::default(),
         provider: provider.into(),
         model: format!("{provider}/m"),
@@ -614,6 +619,7 @@ fn preflight_refusal_replays_and_rejects_changed_inputs() -> TestResult {
             .knobs
             .insert("chair.refusal_notice".into(), serde_json::json!("off"));
         input.task.route = RequestedRoute::Model {
+            required_family: None,
             extra: Default::default(),
             provider: "cursor".into(),
             model: "cursor/m".into(),
@@ -718,6 +724,7 @@ fn refusal_only_chair_leaves_accepted_identity_and_settlement_unbound() -> TestR
             );
             input.parent_attempt = nested.then_some(provenant_core::AttemptId::from_bytes([9; 16]));
             input.task.route = RequestedRoute::Model {
+                required_family: None,
                 extra: Default::default(),
                 provider: "cursor".into(),
                 model: "cursor/m".into(),
@@ -759,6 +766,7 @@ fn nested_preflight_refusal_replays_and_rejects_changed_inputs() -> TestResult {
         input.parent_attempt = Some(provenant_core::AttemptId::from_bytes([9; 16]));
         input.lane_depth = 2;
         input.task.route = RequestedRoute::Model {
+            required_family: None,
             extra: Default::default(),
             provider: "cursor".into(),
             model: "cursor/m".into(),
@@ -825,12 +833,14 @@ fn explicit_skill_location_is_rechecked_before_dispatch() -> TestResult {
         input.task.profile.require_skill_location = required;
         input.task.route = if provider == "command" {
             RequestedRoute::Adapter {
+                required_family: None,
                 extra: Default::default(),
                 provider: provider.into(),
                 name: "fixture".into(),
             }
         } else {
             RequestedRoute::Model {
+                required_family: None,
                 extra: Default::default(),
                 provider: provider.into(),
                 model: "codex/m".into(),
@@ -863,6 +873,7 @@ fn the_task_is_checked_before_a_writer_is_prepared() -> TestResult {
     // with a different error than the route check.
     input.task.worktree = Some(temp.path().join("no-such-writer"));
     input.task.route = RequestedRoute::Model {
+        required_family: None,
         extra: Default::default(),
         provider: "cursor".into(),
         model: "cursor/m".into(),
@@ -1150,10 +1161,21 @@ fn writer_replay_preserves_current_request_and_authority() -> TestResult {
 
 #[test]
 fn route_normalisation_preserves_required_family() -> TestResult {
-    let invalid: RequestedRoute = serde_json::from_value(
-        serde_json::json!({"kind":"named", "name":"senior", "effort":null, "required_family":42}),
-    )?;
-    assert!(Service::route(invalid).is_err());
+    assert!(
+        serde_json::from_value::<RequestedRoute>(serde_json::json!({
+            "kind":"named", "name":"senior", "effort":null, "required_family":42
+        }))
+        .is_err()
+    );
+    assert!(
+        Service::route(RequestedRoute::Named {
+            extra: Default::default(),
+            required_family: Some(" ".into()),
+            name: "senior".into(),
+            effort: None,
+        })
+        .is_err()
+    );
     for value in [
         serde_json::json!({"kind":"named", "name":"senior", "effort":null, "required_family":"openai"}),
         serde_json::json!({"kind":"model", "provider":"codex", "model":"codex/gpt-5", "effort":null, "required_family":"openai"}),

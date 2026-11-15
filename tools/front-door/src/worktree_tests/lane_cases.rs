@@ -231,6 +231,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             .insert("lanes.publish".into(), serde_json::json!(publishing));
         // Catalogue models only: production refuses unverified exact IDs.
         task.route = provenant_run::RequestedRoute::Model {
+            required_family: None,
             extra: Default::default(),
             provider: adapter.into(),
             model: if adapter == "codex" {

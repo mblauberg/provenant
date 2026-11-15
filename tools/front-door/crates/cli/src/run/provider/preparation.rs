@@ -610,6 +610,8 @@ pub(super) enum PrepareError {
     #[error(transparent)]
     Provider(#[from] provenant_providers::ProviderError),
     #[error(transparent)]
+    Receipt(#[from] serde_json::Error),
+    #[error(transparent)]
     ReadOnly(#[from] ReadOnlyPlanError),
     #[error("write grants overlap a host index")]
     HostIndexOverlap,
@@ -961,12 +963,12 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     .into_refusal();
     assert_eq!(permission.boundary_class, BoundaryClass::LaneGit);
     assert_eq!(
-        permission.skipped_routes[0].extra["plan_error"],
-        "permission"
+        permission.skipped_routes[0].plan_error,
+        Some(provenant_records::diagnostic::PlanFailure::Permission)
     );
     assert_eq!(
-        permission.skipped_routes[0].extra["guard_boundary"],
-        "lane_git"
+        permission.skipped_routes[0].guard_boundary,
+        Some(BoundaryClass::LaneGit)
     );
     assert!(permission.terminal_note.is_some());
     let prompt = PrepareError::Prompt(LaunchPromptError::Provider(
@@ -1160,7 +1162,7 @@ fn mixed_candidate_guard_facts_survive_fallback_without_source_text()
     .into_iter()
     .collect();
     attach_candidate_guard_facts(&mut reasons, &boundaries, &resources)?;
-    assert_eq!(reasons[0].extra["guard_boundary"], "credentials");
+    assert_eq!(reasons[0].guard_boundary, Some(BoundaryClass::Credentials));
     assert!(
         reasons[0]
             .diagnostic()
@@ -1293,22 +1295,10 @@ impl PlanCheckError {
             Self::SourceHead(_) => PlanFailure::SourceHead,
         };
         let mut skipped = skip(route, SkipKind::Refused, failure.detail());
-        skipped
-            .extra
-            .insert("plan_error".into(), serde_json::json!(failure));
-        skipped.extra.insert(
-            "guard_boundary".into(),
-            serde_json::json!(self.boundary_class()),
-        );
-        if let Some(fact) = permission.and_then(PermissionError::resource_fact) {
-            skipped
-                .extra
-                .insert("guard_resource".into(), serde_json::json!(fact));
-        }
-        skipped.extra.insert(
-            "confinement_guard".into(),
-            serde_json::json!(self.guard_fact()),
-        );
+        skipped.plan_error = Some(failure);
+        skipped.guard_boundary = Some(self.boundary_class());
+        skipped.guard_resource = permission.and_then(PermissionError::resource_fact);
+        skipped.confinement_guard = Some(self.guard_fact());
         skipped.set_cause(provenant_records::RouteExclusionReason::ConfinementUnavailable);
         skipped
     }
@@ -1322,10 +1312,7 @@ impl PlanCheckError {
         refusal.boundary_class = self.boundary_class();
         refusal.policy_code = self.policy_code().map(str::to_owned);
         refusal.terminal_note = Some(skipped.detail.clone());
-        refusal.resource = skipped
-            .extra
-            .get("guard_resource")
-            .and_then(|fact| serde_json::from_value(fact.clone()).ok());
+        refusal.resource = skipped.guard_resource;
         refusal.skipped_routes.push(skipped);
         refusal
     }
@@ -2327,10 +2314,7 @@ pub(super) fn prepare_candidates(
             (
                 config.domains.run.argv_prompt_limit_bytes,
                 label,
-                origin.map_or_else(
-                    || serde_json::json!({"kind": "compiled"}),
-                    |value| serde_json::json!(value),
-                ),
+                origin_receipt(origin),
             )
         }
         Some(Err(error)) => {
@@ -2342,13 +2326,13 @@ pub(super) fn prepare_candidates(
             (
                 default_limit,
                 provenant_records::diagnostic::SettingSource::ShippedDefault,
-                serde_json::json!({"kind": "compiled"}),
+                origin_receipt(None),
             )
         }
         None => (
             default_limit,
             provenant_records::diagnostic::SettingSource::ShippedDefault,
-            serde_json::json!({"kind": "compiled"}),
+            origin_receipt(None),
         ),
     };
     if let run::RequestedRoute::Model { model, .. } = &task.route
@@ -2832,14 +2816,7 @@ pub(super) fn prepare_candidates(
         .to_string();
     let rules = crate::route::task_exclusion_rules(&task.profile, roots)
         .map_err(|error| error.to_string())?;
-    let required_family = match &task.route {
-        run::RequestedRoute::Adapter { extra, .. }
-        | run::RequestedRoute::Model { extra, .. }
-        | run::RequestedRoute::Named { extra, .. }
-        | run::RequestedRoute::Review { extra, .. } => extra
-            .get("required_family")
-            .and_then(serde_json::Value::as_str),
-    };
+    let required_family = task.route.required_family();
     let family_constraints = match &task.route {
         run::RequestedRoute::Review {
             excluded_families,
@@ -3673,14 +3650,21 @@ pub(super) fn prepare_candidates(
             .user_skills
             .unwrap_or_else(|| config.domains.lanes.user_skills_for(Some(&project_id_str)));
         let user_skills_origin = if model_policy.lane.user_skills.is_some() {
-            serde_json::json!({"route_policy": effective.sources})
+            provenant_records::run::UserSkillsSourceReceipt {
+                route_policy: Some(effective.sources.clone()),
+                ..Default::default()
+            }
         } else {
             let key = if project_override.is_some() {
                 project_key.as_str()
             } else {
                 "domains.lanes.user_skills"
             };
-            serde_json::json!({"key": key, "origin": config.origins.get(key)})
+            provenant_records::run::UserSkillsSourceReceipt {
+                key: Some(key.into()),
+                origin: Some(origin_receipt(config.origins.get(key))),
+                ..Default::default()
+            }
         };
         provider_route.set_user_skills(user_skills_mode.is_discover());
         let nonce = entropy_128().map_err(|error| error.to_string())?;
@@ -4173,65 +4157,56 @@ pub(super) fn prepare_candidates(
         if let Some(warning) = provider.availability_warning.as_deref() {
             let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
         }
-        provider.extra.insert(
-            "account_source".into(),
-            account_source(resume.is_some(), task.account.is_some()).into(),
-        );
+        provider.account_source = Some(if resume.is_some() {
+            provenant_records::run::AccountSource::Continuation
+        } else if task.account.is_some() {
+            provenant_records::run::AccountSource::Pin
+        } else {
+            provenant_records::run::AccountSource::Automatic
+        });
         if refreshed
             .as_ref()
             .is_some_and(|token| token.is_lane_token())
         {
-            provider.extra.insert("lane_token".into(), true.into());
-            provider
-                .extra
-                .insert("registered_lane_token".into(), true.into());
+            provider.lane_token = Some(true);
+            provider.registered_lane_token = Some(true);
         }
-        provider.extra.insert("project_paths".into(), project_paths);
-        provider.extra.insert(
-            "argv_prompt_limit".into(),
-            serde_json::json!({
-                "value": argv_limit, "key": ARGV_LIMIT_KEY, "origin": argv_origin_record.clone(),
-            }),
-        );
+        provider.project_paths = Some(serde_json::from_value(project_paths)?);
+        provider.argv_prompt_limit = Some(provenant_records::run::ArgvPromptLimitReceipt {
+            value: argv_limit,
+            key: ARGV_LIMIT_KEY.into(),
+            origin: argv_origin_record,
+            extra: Default::default(),
+        });
         if let Some(event) = &dependency_event {
-            provider
-                .extra
-                .insert("dependency_preparation".into(), event.clone());
+            provider.dependency_preparation = Some(serde_json::from_value(event.clone())?);
         }
         let mut skills =
             user_skills_exposure(user_skills_mode, user_skills_origin, &spec.user_skills);
-        skills["stage_max_bytes"] = serde_json::json!({
-            "value": config.domains.lanes.skill_stage_max_bytes,
-            "origin": config.origins.get("domains.lanes.skill_stage_max_bytes"),
-            "key": "domains.lanes.skill_stage_max_bytes",
+        skills.stage_max_bytes = Some(provenant_records::run::ArgvPromptLimitReceipt {
+            value: config.domains.lanes.skill_stage_max_bytes,
+            key: "domains.lanes.skill_stage_max_bytes".into(),
+            origin: origin_receipt(config.origins.get("domains.lanes.skill_stage_max_bytes")),
+            extra: Default::default(),
         });
-        provider.extra.insert("user_skills".into(), skills);
-        provider
-            .extra
-            .insert("cargo_home".into(), spec.cargo_home_receipt());
-        provider.extra.insert(
-            "tool_closure".into(),
-            serde_json::Value::Array(
-                spec.prepared_tools()
-                    .iter()
-                    .map(|tool| tool.receipt())
-                    .collect(),
-            ),
-        );
-        provider.extra.insert(
-            "applied_access".into(),
+        provider.user_skills = Some(skills);
+        provider.cargo_home = serde_json::from_value(spec.cargo_home_receipt())?;
+        provider.tool_closure = Some(serde_json::from_value(serde_json::Value::Array(
+            spec.prepared_tools()
+                .iter()
+                .map(|tool| tool.receipt())
+                .collect(),
+        ))?);
+        provider.applied_access = Some(serde_json::from_value(
             spec.applied_access()
                 .receipt(&home, spec.credential_roots()),
-        );
-        provider.extra.insert(
-            "discovery_warnings".into(),
-            serde_json::json!(discovery_warnings(
-                &spec.omitted_discovery,
-                &home,
-                spec.credential_roots(),
-                false,
-            )),
-        );
+        )?);
+        provider.discovery_warnings = Some(discovery_warnings(
+            &spec.omitted_discovery,
+            &home,
+            spec.credential_roots(),
+            false,
+        ));
         let cargo_home = spec
             .cargo_home()
             .cloned()
@@ -4268,14 +4243,15 @@ pub(super) fn prepare_candidates(
             };
             gh_selection = super::gh_auth::Selection::new(delivery, false);
         }
-        provider
-            .extra
-            .insert("github_credential".into(), gh_selection.receipt());
+        provider.github_credential = Some(serde_json::from_value(gh_selection.receipt())?);
         if writer.is_some() {
-            provider.extra.insert(
-                "ci_scope".into(),
-                run::ResolvedCiScope::resolve(&task.profile).receipt(),
-            );
+            let scope = run::ResolvedCiScope::resolve(&task.profile);
+            provider.ci_scope = Some(provenant_records::run::CiScopeReceipt {
+                value: scope.value.as_str().into(),
+                source: scope.source,
+                key: "lanes.ci_scope".into(),
+                extra: Default::default(),
+            });
         }
         gh_selection.finalise_environment(&mut spec.env);
         if adapter_spec.is_some_and(|spec| {
@@ -4393,14 +4369,12 @@ pub(super) fn check_graph_inputs_root(
     Ok(())
 }
 
-fn account_source(continuation: bool, pinned: bool) -> &'static str {
-    if continuation {
-        "continuation"
-    } else if pinned {
-        "pin"
-    } else {
-        "automatic"
-    }
+fn origin_receipt(
+    origin: Option<&provenant_config::Origin>,
+) -> provenant_records::run::OriginReceipt {
+    origin
+        .map(provenant_config::Origin::receipt)
+        .unwrap_or_default()
 }
 
 /// Preserve the resolver's decision at the launch boundary.
@@ -4449,9 +4423,6 @@ mod receipt_tests {
 
     #[test]
     fn alias_effort_reaches_launch_record() -> Result<(), Box<dyn std::error::Error>> {
-        assert_eq!(account_source(true, true), "continuation");
-        assert_eq!(account_source(false, true), "pin");
-        assert_eq!(account_source(false, false), "automatic");
         let catalogue = Catalogue::bundled()?;
         let mut config = RoutingConfig::default();
         config.routes.insert(
@@ -4609,26 +4580,29 @@ fn materialise_user_skills(
 
 fn user_skills_exposure(
     mode: provenant_records::UserSkillsMode,
-    origin: serde_json::Value,
+    source: provenant_records::run::UserSkillsSourceReceipt,
     staged: &provenant_providers::StagedUserSkills,
-) -> serde_json::Value {
+) -> provenant_records::run::UserSkillsReceipt {
     let warnings: Vec<_> = staged
         .warnings
         .iter()
-        .map(|warning| {
-            serde_json::json!({
-                "code": "user_skill_skipped", "reason": warning.reason, "path": warning.path.to_string_lossy(),
-            })
+        .map(|warning| provenant_records::run::UserSkillWarningReceipt {
+            code: "user_skill_skipped".into(),
+            reason: warning.reason.into(),
+            path: warning.path.to_string_lossy().into_owned(),
+            extra: Default::default(),
         })
         .collect();
-    serde_json::json!({
-        "mode": mode,
-        "exposed": staged.root.is_some(),
-        "directory": staged.source,
-        "staged_file_count": staged.file_count,
-        "warnings": warnings,
-        "source": origin,
-    })
+    provenant_records::run::UserSkillsReceipt {
+        mode,
+        exposed: staged.root.is_some(),
+        directory: staged.source.clone(),
+        staged_file_count: staged.file_count,
+        warnings,
+        source,
+        stage_max_bytes: None,
+        extra: Default::default(),
+    }
 }
 
 #[cfg(test)]
@@ -4791,8 +4765,11 @@ mod user_skills_tests {
                     } else {
                         UserSkillsMode::Discover
                     };
-                    let receipt =
-                        user_skills_exposure(mode, serde_json::Value::Null, &spec.user_skills);
+                    let receipt = serde_json::to_value(user_skills_exposure(
+                        mode,
+                        Default::default(),
+                        &spec.user_skills,
+                    ))?;
                     assert_eq!(
                         receipt["exposed"],
                         state == "discover",
@@ -4880,11 +4857,12 @@ mod user_skills_tests {
                 .iter()
                 .any(|warning| warning.reason == "staging_failed")
         );
-        let record = user_skills_exposure(
+        let record = serde_json::to_value(user_skills_exposure(
             provenant_records::UserSkillsMode::Discover,
-            serde_json::Value::Null,
+            Default::default(),
             &staged,
-        );
+        ))
+        .unwrap();
         assert_eq!(record["exposed"], false);
         assert_eq!(record["warnings"][0]["reason"], "staging_failed");
     }
@@ -4911,11 +4889,12 @@ mod user_skills_tests {
                 reason,
             });
         }
-        let receipt = user_skills_exposure(
+        let receipt = serde_json::to_value(user_skills_exposure(
             provenant_records::UserSkillsMode::Discover,
-            serde_json::Value::Null,
+            Default::default(),
             &staged,
-        );
+        ))
+        .unwrap();
         assert_eq!(receipt["exposed"], true);
         for (warning, reason) in receipt["warnings"]
             .as_array()
@@ -4931,20 +4910,29 @@ mod user_skills_tests {
     #[test]
     fn receipt_uses_prepared_skill_facts() {
         let staged = provenant_providers::StagedUserSkills::default();
-        let origin = serde_json::json!({"key": "domains.lanes.user_skills", "origin": "compiled"});
-        let record = user_skills_exposure(
+        let origin = provenant_records::run::UserSkillsSourceReceipt {
+            key: Some("domains.lanes.user_skills".into()),
+            origin: Some(provenant_records::run::OriginReceipt::Compiled {
+                profile: None,
+                extra: Default::default(),
+            }),
+            ..Default::default()
+        };
+        let record = serde_json::to_value(user_skills_exposure(
             provenant_records::UserSkillsMode::Discover,
             origin.clone(),
             &staged,
-        );
+        ))
+        .unwrap();
         assert_eq!(record["exposed"], false);
         assert_eq!(record["staged_file_count"], 0);
         assert_eq!(record["source"], origin);
-        let off = user_skills_exposure(
+        let off = serde_json::to_value(user_skills_exposure(
             provenant_records::UserSkillsMode::Off,
-            serde_json::Value::Null,
+            Default::default(),
             &staged,
-        );
+        ))
+        .unwrap();
         assert_eq!(off["exposed"], false);
         assert_eq!(off["staged_file_count"], 0);
     }

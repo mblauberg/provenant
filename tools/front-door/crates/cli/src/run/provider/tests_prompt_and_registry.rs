@@ -20,7 +20,7 @@ fn launch_prompt_refuses_invalid_input_before_account_resolution()
             base_ref: None,
             profile: Default::default(),
             prompt_digest: provenant_records::CanonicalV1::file_digest(full.as_bytes()),
-            route: run::RequestedRoute::Model {
+            route: run::RequestedRoute::Model { required_family: None,
                 extra: Default::default(),
                 provider: adapter.into(),
                 model: format!("{adapter}/fixture-model"),
@@ -658,7 +658,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         base_ref: None,
         profile: Default::default(),
         prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
-        route: run::RequestedRoute::Model {
+        route: run::RequestedRoute::Model { required_family: None,
             extra: Default::default(),
             provider: adapter_name.into(),
             model,
@@ -851,7 +851,7 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
         base_ref: None,
         profile: Default::default(),
         prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
-        route: run::RequestedRoute::Model {
+        route: run::RequestedRoute::Model { required_family: None,
             extra: Default::default(),
             provider: "opencode".into(),
             model: "opencode/opencode-go/deepseek-v4.1-flash".into(),
@@ -1102,7 +1102,7 @@ fn prepare_with_partial_account_estimates(
         base_ref: None,
         profile: Default::default(),
         prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
-        route: run::RequestedRoute::Model {
+        route: run::RequestedRoute::Model { required_family: None,
             extra: Default::default(),
             provider: "opencode".into(),
             model: "opencode/opencode-go/deepseek-v4.1-flash".into(),

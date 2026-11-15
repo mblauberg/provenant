@@ -126,6 +126,7 @@ fn create_numbered_lane(rig: &TestRig, seed: u8) -> Result<Lane> {
                     profile: Default::default(),
                     prompt_digest: CanonicalV1::file_digest(b"existing lane"),
                     route: run::RequestedRoute::Named {
+                        required_family: None,
                         extra: Default::default(),
                         name: "utility".into(),
                         effort: None,

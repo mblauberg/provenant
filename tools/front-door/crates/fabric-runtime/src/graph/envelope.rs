@@ -576,6 +576,8 @@ fn node_bound(
     }
     for route in &node.routes {
         let attempt = GraphAttempt {
+            placement_host: None,
+            placement_host_id: None,
             extra: Default::default(),
             review_substitution: true,
             host_refused_before_acceptance: false,
@@ -602,6 +604,7 @@ fn node_bound(
             settled: u64::MAX,
             usage: Some(AttemptUsage {
                 extra: Default::default(),
+                resolved_route: None,
                 tokens: Some(u64::MAX),
                 cost_micro_usd: Some(u64::MAX),
                 wall_time_seconds: Some(u64::MAX),

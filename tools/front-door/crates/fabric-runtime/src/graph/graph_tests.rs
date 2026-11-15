@@ -258,6 +258,11 @@ impl AttemptOwner for FakeOwner {
     }
     fn applied_route(&mut self, attempt: &str) -> Result<Option<GraphRoute>, Self::Error> {
         Ok(self.models.get(attempt).map(|model| GraphRoute {
+            required_family: None,
+            peer_source_head: None,
+            peer_requested_route: None,
+            peer_network: None,
+            peer_retry_limit: None,
             extra: Default::default(),
             adapter: Some("fixture".into()),
             model: Some(model.clone()),
@@ -467,6 +472,11 @@ impl AttemptOwner for FakeOwner {
 
 fn route(adapter: &str) -> GraphRoute {
     GraphRoute {
+        required_family: None,
+        peer_source_head: None,
+        peer_requested_route: None,
+        peer_network: None,
+        peer_retry_limit: None,
         extra: Default::default(),
         account: None,
         adapter: Some(adapter.to_owned()),
@@ -480,6 +490,11 @@ fn route(adapter: &str) -> GraphRoute {
 
 fn pool_route(alias: &str) -> GraphRoute {
     GraphRoute {
+        required_family: None,
+        peer_source_head: None,
+        peer_requested_route: None,
+        peer_network: None,
+        peer_retry_limit: None,
         alias: Some(alias.into()),
         adapter: None,
         model: None,
@@ -542,6 +557,8 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
 
 fn graph(nodes: Vec<GraphNode>) -> GraphDocument {
     GraphDocument {
+        review: None,
+        review_subject_missing: false,
         exclude: Vec::new(),
         network: None,
         capability: Vec::new(),

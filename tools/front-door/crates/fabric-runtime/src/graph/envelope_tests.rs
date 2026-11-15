@@ -418,6 +418,8 @@ new_worktree_base: None,
                     .iter()
                     .enumerate()
                     .map(|(index, route)| GraphAttempt {
+                        placement_host: None,
+                        placement_host_id: None,
                         review_substitution: false,
                         extra: Default::default(),
 host_refused_before_acceptance: false,
@@ -446,7 +448,11 @@ host_refused_before_acceptance: false,
                             writer_head: plans::writer(node).then(|| "a".repeat(64)),
                             review_base: node.review_base.as_ref().map(|_| "a".repeat(64)),
                             graph_review_base: Some("a".repeat(64)), integration_base: Some("a".repeat(64)), integration_source: Some("a".repeat(64)),
-                            applied_route: Some(GraphRoute { extra: Default::default(), adapter: Some("a".repeat(256)), model: Some("m".repeat(256)), effort: Some("e".repeat(256)), account: Some("a".repeat(256)), name: None, alias: None, tier: None, }),
+                            applied_route: Some(GraphRoute {                                required_family: None,
+                                peer_source_head: None,
+                                peer_requested_route: None,
+                                peer_network: None,
+                                peer_retry_limit: None, extra: Default::default(), adapter: Some("a".repeat(256)), model: Some("m".repeat(256)), effort: Some("e".repeat(256)), account: Some("a".repeat(256)), name: None, alias: None, tier: None, }),
                             dependencies: Some(node.depends_on.iter().take(MANIFEST_INPUT_LIMIT).cloned().collect()), dependencies_omitted: node.depends_on.len().saturating_sub(MANIFEST_INPUT_LIMIT),
                             inputs: node.inputs.iter().flat_map(|input| input.outputs.iter().map(move |kind| AttemptInputEvidence { extra: Default::default(), producer_node: input.node.clone(), producer_attempt: Some(AttemptKey { extra: Default::default(), retry_generation: None, previous_attempt_ref: None, graph_id: plan.graph_id.clone(), node_id: input.node.clone(), route_index: u16::MAX, attempt: 1 }), kind: *kind, required: true, producer_result_digest: Some("a".repeat(71)), commit: Some("a".repeat(64)), delivery: InputDelivery::Delivered, file_delivery: InputDelivery::Delivered })).take(MANIFEST_INPUT_LIMIT).collect(),
                             omitted: node.inputs.iter().map(|input| input.outputs.len()).sum::<usize>().saturating_sub(MANIFEST_INPUT_LIMIT),
@@ -454,6 +460,7 @@ host_refused_before_acceptance: false,
                         settled: u64::MAX,
                         usage: Some(AttemptUsage {
                             extra: Default::default(),
+                            resolved_route: None,
                             tokens: Some(u64::MAX),
                             cost_micro_usd: Some(u64::MAX),
                             wall_time_seconds: Some(u64::MAX),
@@ -925,6 +932,8 @@ fn usage_warnings_keep_the_most_recently_settled_attempts() {
         let attempt = checkpoint.nodes[node].attempts[0].clone();
         checkpoint.nodes[node].attempts = (0..copies as u64)
             .map(|i| GraphAttempt {
+                placement_host: None,
+                placement_host_id: None,
                 review_substitution: false,
                 settled: first + i,
                 ..attempt.clone()

@@ -160,12 +160,7 @@ fn graph_continuation_matches(attempts: &[&GraphAttempt], index: usize) -> bool 
         .rev()
         .find(|attempt| attempt.attempt_ref.is_some())
         .and_then(|attempt| attempt.attempt_ref.as_deref());
-    current
-        .key
-        .extra
-        .get("previous_attempt_ref")
-        .and_then(serde_json::Value::as_str)
-        == expected
+    current.key.previous_attempt_ref.as_deref() == expected
 }
 
 fn parse_reference(reference: &str) -> Option<AttemptTarget> {
@@ -182,24 +177,16 @@ fn placement_host(
     attempt: &GraphAttempt,
 ) -> Result<Option<provenant_core::HostId>, ()> {
     let local = factory.context.identity.host;
-    let stable = match attempt.extra.get("placement_host_id") {
-        Some(value) => {
-            let host = value
-                .as_str()
-                .ok_or(())?
-                .parse::<provenant_core::HostId>()
-                .map_err(|_| ())?;
-            Some(
-                (host == local || factory.context.peer_host(&host.to_string()) == Some(host))
-                    .then_some(host)
-                    .ok_or(())?,
-            )
-        }
+    let stable = match attempt.placement_host_id {
+        Some(host) => Some(
+            (host == local || factory.context.peer_host(&host.to_string()) == Some(host))
+                .then_some(host)
+                .ok_or(())?,
+        ),
         None => None,
     };
-    let alias = match attempt.extra.get("placement_host") {
-        Some(value) => {
-            let name = value.as_str().ok_or(())?;
+    let alias = match attempt.placement_host.as_deref() {
+        Some(name) => {
             let host = if matches!(name, "local" | "localhost")
                 || name
                     .parse::<provenant_core::HostId>()

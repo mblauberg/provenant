@@ -876,6 +876,7 @@ pub fn events(
                 }
             };
             let EventsResult::Read {
+                observation,
                 page: records,
                 cursor,
                 unknown_hosts,
@@ -893,6 +894,7 @@ pub fn events(
                 return Ok((
                     EventsResult::Read {
                         extra: Default::default(),
+                        observation,
                         page: records,
                         cursor,
                         timed_out,

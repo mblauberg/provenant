@@ -399,6 +399,8 @@ pub enum PeerAction {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
         input: crate::coordination::facade::RunInput,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        peer_subtree_after: Option<usize>,
     },
     Submit {
         #[serde(flatten)]
@@ -1103,6 +1105,31 @@ mod tests {
 
     fn project_key(home: &Path) -> CrossHostProjectKey {
         CrossHostProjectKey::from_home(home, &home.join("repo/.git")).unwrap()
+    }
+
+    #[test]
+    fn peer_run_subtree_cursor_round_trips_and_rejects_wrong_types() {
+        let action = PeerAction::Run {
+            extra: [("future_action_fact".into(), serde_json::json!(true))].into(),
+            input: facade::RunInput::Status {
+                extra: Default::default(),
+                target: facade::AttemptTarget {
+                    extra: Default::default(),
+                    attempt: AttemptId::from_bytes([9; 16]),
+                    host: None,
+                },
+            },
+            peer_subtree_after: Some(3),
+        };
+        let encoded = serde_json::to_value(&action).unwrap();
+        assert_eq!(encoded["peer_subtree_after"], 3);
+        let decoded: PeerAction = serde_json::from_value(encoded.clone()).unwrap();
+        let round_trip = serde_json::to_value(decoded).unwrap();
+        assert_eq!(round_trip["peer_subtree_after"], 3);
+        assert_eq!(round_trip["future_action_fact"], true);
+        let mut malformed = encoded;
+        malformed["peer_subtree_after"] = serde_json::json!("three");
+        assert!(serde_json::from_value::<PeerAction>(malformed).is_err());
     }
 
     #[test]

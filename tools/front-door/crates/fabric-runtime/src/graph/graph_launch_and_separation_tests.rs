@@ -25,8 +25,10 @@ fn node_attempt_spec_reaches_the_launch() {
     )
     .unwrap();
     assert_eq!(
-        run.checkpoint.nodes[0].attempts[0].extra["placement_host"],
-        "workshop"
+        run.checkpoint.nodes[0].attempts[0]
+            .placement_host
+            .as_deref(),
+        Some("workshop")
     );
     assert_eq!(owner.attempt_specs, vec![Some(spec)]);
     assert_eq!(owner.capabilities, vec![Some(vec!["postgres".into()])]);
@@ -258,7 +260,11 @@ fn family_group_replay_keeps_launch_peers() {
 #[test]
 fn alias_retry_receives_the_prior_model() {
     let mut member = node("lens", route("first"));
-    let alias = GraphRoute {
+    let alias = GraphRoute {        required_family: None,
+        peer_source_head: None,
+        peer_requested_route: None,
+        peer_network: None,
+        peer_retry_limit: None,
         extra: Default::default(),
         adapter: None,
         name: None,
@@ -424,7 +430,11 @@ fn synthesis_input_reports_same_family_reviewers() {
 
 #[test]
 fn panel_with_one_usage_limited_member_reaches_synthesis() {
-    let alias = GraphRoute {
+    let alias = GraphRoute {        required_family: None,
+        peer_source_head: None,
+        peer_requested_route: None,
+        peer_network: None,
+        peer_retry_limit: None,
         extra: Default::default(),
         adapter: None,
         name: None,

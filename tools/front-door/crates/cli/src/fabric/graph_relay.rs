@@ -512,14 +512,7 @@ fn provision_added_writers(
         .expansions
         .iter()
         .flat_map(|expansion| &expansion.nodes)
-        .filter(|node| {
-            node.access == AccessMode::WorktreeWrite
-                && node
-                    .extra
-                    .get("provision_worktree")
-                    .and_then(Value::as_bool)
-                    == Some(true)
-        })
+        .filter(|node| node.access == AccessMode::WorktreeWrite && node.provision_worktree)
         .map(|node| (relay::provisioning_owner(checkpoint, &node.id), node))
         .filter(|(owner, node)| {
             (added.is_empty() || added.contains(&node.id) || added.contains(owner))
@@ -542,8 +535,7 @@ fn provision_added_writers(
             .nodes
             .iter()
             .find(|progress| progress.id == owner)
-            .and_then(|progress| progress.extra.get("provisioned_source"))
-            .and_then(Value::as_str)
+            .and_then(|progress| progress.provisioned_source.as_deref())
         {
             source.to_owned()
         } else {
@@ -581,9 +573,7 @@ fn provision_added_writers(
             .iter_mut()
             .find(|progress| progress.id == owner)
         {
-            progress
-                .extra
-                .insert("provisioned_source".into(), source.clone().into());
+            progress.provisioned_source = Some(source.clone());
         }
         relay::fence_provisioning(checkpoint, &owner, path, &source);
         fresh.push(owner);
@@ -891,18 +881,7 @@ pub fn launch_resolvers_at_roots(
     review: &provenant_routing::ReviewConfig,
     document: &provenant_fabric_runtime::graph::GraphDocument,
 ) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
-    let exclude: Vec<String> = document
-        .extra
-        .get("exclude")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default();
+    let exclude = document.exclude.clone();
     launch_resolvers_with(review, document, |slot, family| {
         crate::route::resolve_review_family(roots, &slot.tier, family, &exclude)
     })
@@ -913,14 +892,7 @@ fn launch_resolvers_with(
     document: &provenant_fabric_runtime::graph::GraphDocument,
     eligible: impl FnMut(&provenant_routing::ResolvedSlot, Option<&str>) -> Result<String, String>,
 ) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
-    let mut request: provenant_routing::ReviewRequest = document
-        .extra
-        .get("review")
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|error| format!("invalid graph review request: {error}"))?
-        .unwrap_or_default();
+    let mut request = document.review.clone().unwrap_or_default();
     if let Some(context) = &document.context {
         request.risk_tier = request.risk_tier.or_else(|| context.risk_tier.clone());
         request.kind = request.kind.or_else(|| context.task_kind.clone());

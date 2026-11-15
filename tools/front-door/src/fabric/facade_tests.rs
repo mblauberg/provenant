@@ -343,6 +343,7 @@ fn peer_output_binding_is_consumed_before_the_cli_projection() {
         "part":"result", "state":"succeeded", "reason":null, "offset":0,
         "next_offset":2, "eof":true, "digest":provenant_core::Digest::from_bytes([2; 32]),
         "bytes":{"encoding":"utf8","data":"ok"}, "length":2,
+        "planner_fallback":"bounded planner failure",
         "peer_origin_work_key":origin,
         "peer_graph":{"host":provenant_core::HostId::from_bytes([3;16]),"graph_id":"peer-graph"},
         "peer_origin_context":{"graph_id":"origin","node_id":"worker","attempt":1},
@@ -357,6 +358,7 @@ fn peer_output_binding_is_consumed_before_the_cli_projection() {
     };
     assert!(extra.is_empty());
     assert_eq!(peer.length, Some(2));
+    assert_eq!(peer.planner_fallback.as_deref(), Some("bounded planner failure"));
     assert_eq!(peer.graph, Default::default());
     assert!(
         extra
@@ -900,7 +902,7 @@ pub(crate) mod peer_tests {
                         pinned_base: None,
                         head: None,
                         profile: Default::default(),
-                        route: provenant_run::RequestedRoute::Model {
+                        route: provenant_run::RequestedRoute::Model { required_family: None,
                             extra: Default::default(),
                             provider: "fixture".into(),
                             model: "fixture/model".into(),
@@ -1009,7 +1011,7 @@ pub(crate) mod peer_tests {
                         pinned_base: None,
                         head: None,
                         profile: Default::default(),
-                        route: provenant_run::RequestedRoute::Model {
+                        route: provenant_run::RequestedRoute::Model { required_family: None,
                             extra: Default::default(),
                             provider: "fixture".into(),
                             model: "fixture/model".into(),
@@ -1281,7 +1283,7 @@ pub(crate) mod peer_tests {
                     pinned_base: None,
                     head: Some(node_source.to_string()),
                     profile: Default::default(),
-                    route: provenant_run::RequestedRoute::Model {
+                    route: provenant_run::RequestedRoute::Model { required_family: None,
                         extra: Default::default(),
                         provider: "claude".into(),
                         model: "claude/test-model".into(),
@@ -1381,10 +1383,7 @@ pub(crate) mod peer_tests {
 
         // This fixture creates a current graph; legacy pending executions must
         // still be drained before the host admits a new dependent attempt.
-        document.extra.insert(
-            "template_library".into(),
-            serde_json::to_value(graph::TemplateLibrary::bundled().snapshot())?,
-        );
+        document.template_library = graph::TemplateLibrary::bundled().snapshot();
 
         let mut journal = graph::FileJournal::open(
             &fixture.roots.state,
@@ -1516,6 +1515,10 @@ fn fallback_cause_uses_only_unanimous_typed_facts() {
         extra: Default::default(),
         route: "/private/token".into(),
         kind: SkipKind::Unavailable,
+        plan_error: None,
+        guard_boundary: None,
+        guard_resource: None,
+        confinement_guard: None,
         cause,
         detail: "prompt token \u{1b} /private/secret".into(),
     };

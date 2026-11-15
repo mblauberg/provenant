@@ -616,6 +616,8 @@ fn launch_wake_is_capped_by_the_original_deadline() {
 #[test]
 fn nonterminal_observation_transitions_need_no_owner_or_journal() {
     let mut attempt = GraphAttempt {
+        placement_host: None,
+        placement_host_id: None,
         extra: Default::default(),
         review_substitution: false,
         key: AttemptKey {

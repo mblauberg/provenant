@@ -19,7 +19,7 @@ pub struct HashedBytes {
 }
 
 /// Stored inside the existing attempt trace, without a second identity index.
-/// All fields are optional so pending and historical attempts remain readable.
+/// Missing observations remain unknown; malformed observations fail decoding.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TelemetryContext {
@@ -37,9 +37,7 @@ pub struct TelemetryContext {
 }
 
 impl TelemetryContext {
-    pub const TRACE_KEY: &'static str = "telemetry_context";
-
     pub fn from_trace(trace: &crate::Trace) -> Option<Self> {
-        serde_json::from_value(trace.extra.get(Self::TRACE_KEY)?.clone()).ok()
+        trace.telemetry_context.clone()
     }
 }

@@ -14,6 +14,28 @@ use std::{
     path::{Path, PathBuf},
 };
 
+fn sandbox_mode_receipt(
+    mode: &provenant_confinement::run_config::SandboxMode,
+) -> provenant_records::run::SandboxModeReceipt {
+    use provenant_confinement::run_config::SandboxSource;
+    use provenant_records::run::SandboxSourceReceipt as ReceiptSource;
+    let source = match mode.source {
+        SandboxSource::Parent => ReceiptSource::Parent,
+        SandboxSource::Route => ReceiptSource::Route,
+        SandboxSource::Restriction => ReceiptSource::Restriction,
+        SandboxSource::Platform => ReceiptSource::Platform,
+        SandboxSource::Knob => ReceiptSource::Knob,
+        SandboxSource::Default => ReceiptSource::Default,
+    };
+    provenant_records::run::SandboxModeReceipt {
+        requested: mode.requested,
+        effective: mode.effective,
+        source,
+        warning: mode.warning.clone(),
+        extra: Default::default(),
+    }
+}
+
 /// An explicit dispatch argument wins over the effective profile default. A
 /// batch with no writer defaults from `lanes.max_concurrency_read_only`
 /// (16); any batch with a writer defaults from `lanes.max_concurrency` (8).
@@ -138,11 +160,7 @@ impl PreparedLaunch {
         self.environment.retain(|(name, _)| name != SANDBOX);
         self.environment
             .push((SANDBOX.into(), mode.env_value().into()));
-        self.route.extra.insert(
-            provenant_records::run::SANDBOX_ROUTE_FIELD.into(),
-            serde_json::to_value(mode)
-                .map_err(|_| RunError::Validation("invalid resolved sandbox mode"))?,
-        );
+        self.route.sandbox = Some(sandbox_mode_receipt(mode));
         Ok(())
     }
 }
@@ -292,10 +310,7 @@ impl PrepareRefusal {
         if let Some(route) = self.skipped_routes.iter().find(|route| {
             route.cause == Some(provenant_records::RouteExclusionReason::PacingReserve)
         }) {
-            match route.extra.get("guard_resource").and_then(|value| {
-                serde_json::from_value::<provenant_records::diagnostic::ResourceFact>(value.clone())
-                    .ok()
-            }) {
+            match route.guard_resource {
                 Some(fact @ provenant_records::diagnostic::ResourceFact::PacingReserve { .. }) => {
                     RefusalKind::PacingReserveResource(fact)
                 }
@@ -334,6 +349,7 @@ fn pacing_refusal_retains_the_selected_reserve_fact() {
         kind: SkipKind::Unavailable,
         cause: Some(provenant_records::RouteExclusionReason::PacingReserve),
         detail: "opaque source".into(),
+        ..Default::default()
     };
     skipped.set_guard_facts(None, Some(fact)).unwrap();
     let mut refusal = PrepareRefusal::boxed(TerminalCause::RouteResolutionRefused, "opaque source");
@@ -659,9 +675,7 @@ impl RunStore {
                     kind: ErrorKind::ContinuationUnsupported,
                     message: error.to_string(),
                 })?;
-                plan.route
-                    .extra
-                    .insert("write_grant_limit".into(), limit.receipt());
+                plan.route.write_grant_limit = Some(limit.receipt());
                 Ok(plan)
             })?;
         *ready.plan.get_mut() = Some(plan);
@@ -705,8 +719,21 @@ impl WriteGrantLimit {
             Self::default()
         }
     }
-    fn receipt(self) -> serde_json::Value {
-        serde_json::json!({"key": "domains.run.write_grant_limit_bytes", "value": self.bytes, "origin": match self.origin { provenant_records::diagnostic::SettingSource::Configuration => "host configuration", provenant_records::diagnostic::SettingSource::ShippedDefault => "compiled default" }})
+    fn receipt(self) -> provenant_records::run::WriteGrantLimitReceipt {
+        use provenant_records::run::WriteGrantLimitOrigin;
+        provenant_records::run::WriteGrantLimitReceipt {
+            key: "domains.run.write_grant_limit_bytes".into(),
+            value: self.bytes,
+            origin: match self.origin {
+                provenant_records::diagnostic::SettingSource::Configuration => {
+                    WriteGrantLimitOrigin::Configuration
+                }
+                provenant_records::diagnostic::SettingSource::ShippedDefault => {
+                    WriteGrantLimitOrigin::CompiledDefault
+                }
+            },
+            extra: Default::default(),
+        }
     }
 }
 
@@ -2129,9 +2156,7 @@ impl RunStore {
             let limits = plan.limits.clone();
             set_lane_environment(&mut plan.environment, request.lane_depth.unwrap_or(1), id);
             let limit = providers.write_grant_limit(&policy).checked(&policy);
-            plan.route
-                .extra
-                .insert("write_grant_limit".into(), limit.receipt());
+            plan.route.write_grant_limit = Some(limit.receipt());
             let write_grants = applied_write_grants(&plan, limit, &policy);
             let write_grants = match write_grants {
                 Ok(grants) => grants,
@@ -2657,10 +2682,13 @@ mod policy_reporting_tests {
             let parent = input();
             store.create(&parent, &call)?;
             let mut applied = route();
-            applied.extra.insert(
-                provenant_records::run::SANDBOX_ROUTE_FIELD.into(),
-                serde_json::json!({"requested":true,"effective":true,"source":"knob"}),
-            );
+            applied.sandbox = Some(provenant_records::run::SandboxModeReceipt {
+                requested: true,
+                effective: true,
+                source: provenant_records::run::SandboxSourceReceipt::Knob,
+                warning: None,
+                extra: Default::default(),
+            });
             let starting = store.mark_starting(
                 &store.record(parent.attempt_id, &call)?,
                 &applied,
@@ -2810,13 +2838,11 @@ mod policy_reporting_tests {
         #[cfg(not(target_os = "macos"))]
         {
             prepared.bind_sandbox_backend(&cancel, &Default::default())?;
-            let value = prepared
+            let mode = prepared
                 .route
-                .extra
-                .get(provenant_records::run::SANDBOX_ROUTE_FIELD)
+                .sandbox
+                .as_ref()
                 .ok_or("missing sandbox receipt")?;
-            let mode: provenant_confinement::run_config::SandboxMode =
-                serde_json::from_value(value.clone())?;
             assert!(mode.warning.is_some());
             assert_eq!(
                 mode.effective,
@@ -2849,11 +2875,8 @@ mod policy_reporting_tests {
             claimed
                 .applied_route
                 .as_ref()
-                .and_then(|route| route.extra.get(provenant_records::run::SANDBOX_ROUTE_FIELD)),
-            prepared
-                .route
-                .extra
-                .get(provenant_records::run::SANDBOX_ROUTE_FIELD),
+                .and_then(|route| route.sandbox.as_ref()),
+            prepared.route.sandbox.as_ref(),
             "the claim must persist the actual backend warning and effective mode",
         );
         // Another launcher can have prepared from the same queued record.

@@ -1105,7 +1105,7 @@ pub(super) fn admit_attempt(
 
 pub(super) struct LaunchFacts {
     pub input_cap: usize,
-    pub placement_host_id: Option<String>,
+    pub placement_host_id: Option<provenant_core::HostId>,
     pub launch_actor: String,
     pub input_cap_source: InputCapSource,
     pub timing: Option<LaunchTiming>,
@@ -1146,19 +1146,13 @@ pub(super) fn begin_attempt(
         // Persist placement before the launch can lose its reply.
         // Recovery must not treat an absent local operation as
         // proof that a configured peer accepted nothing.
-        extra: node
+        extra: Default::default(),
+        placement_host: node
             .attempt
             .as_ref()
             .and_then(|spec| spec.host.as_ref())
-            .map(|host| {
-                let mut extra: provenant_records::ExtraFields =
-                    [("placement_host".into(), serde_json::json!(host))].into();
-                if let Some(stable) = placement_host_id {
-                    extra.insert("placement_host_id".into(), stable.into());
-                }
-                extra
-            })
-            .unwrap_or_default(),
+            .cloned(),
+        placement_host_id,
         review_substitution,
         key: key.clone(),
         route: route.clone(),

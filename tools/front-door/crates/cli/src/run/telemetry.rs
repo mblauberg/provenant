@@ -601,24 +601,15 @@ pub(super) fn pipeline_report(
             .last()
             .ok_or_else(|| invalid("empty node evidence".into()))?;
         let context = latest.context.as_ref();
-        let extra = |key: &str| {
-            context
-                .and_then(|c| c.extra.get(key))
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        };
         let checkpoint = graph
             .as_ref()
             .and_then(|g| checkpoints.get(g))
             .and_then(Option::as_ref);
-        let pr = context
-            .and_then(|c| c.extra.get("pr"))
-            .and_then(Value::as_u64)
-            .or_else(|| {
-                checkpoint
-                    .and_then(|c| c.pull_request.as_deref())
-                    .and_then(|pr| pr.trim_end_matches('/').rsplit('/').next()?.parse().ok())
-            });
+        let pr = context.and_then(|c| c.pr).or_else(|| {
+            checkpoint
+                .and_then(|c| c.pull_request.as_deref())
+                .and_then(|pr| pr.trim_end_matches('/').rsplit('/').next()?.parse().ok())
+        });
         let issue = context
             .and_then(|c| c.work_item.as_deref())
             .and_then(|s| s.rsplit(['#', '/']).next())
@@ -630,14 +621,10 @@ pub(super) fn pipeline_report(
             pr,
             issue,
             pattern: context.and_then(|c| c.pattern.clone()),
-            lens: extra("lens").or_else(|| context.and_then(|c| c.role.clone())),
+            lens: context.and_then(|c| c.lens.clone().or_else(|| c.role.clone())),
             model: pipeline_node_model(&facts),
-            risk_tier: context
-                .and_then(|c| c.risk_tier.clone())
-                .or_else(|| extra("risk_tier")),
-            task_kind: context
-                .and_then(|c| c.task_kind.clone())
-                .or_else(|| extra("task_kind")),
+            risk_tier: context.and_then(|c| c.risk_tier.clone()),
+            task_kind: context.and_then(|c| c.task_kind.clone()),
             confirmed,
             false_positives,
         };

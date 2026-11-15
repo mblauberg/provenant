@@ -179,6 +179,11 @@ fn graph_target(route: &GraphRoute) -> Option<ladder::Target> {
 fn target_route(target: &ladder::Target, effort: Option<String>) -> GraphRoute {
     match target {
         ladder::Target::Route { model, account } => GraphRoute {
+            required_family: None,
+            peer_source_head: None,
+            peer_requested_route: None,
+            peer_network: None,
+            peer_retry_limit: None,
             extra: Default::default(),
             adapter: Some(model.adapter().to_owned()),
             name: None,
@@ -189,6 +194,11 @@ fn target_route(target: &ladder::Target, effort: Option<String>) -> GraphRoute {
             tier: None,
         },
         ladder::Target::HostNative { name } => GraphRoute {
+            required_family: None,
+            peer_source_head: None,
+            peer_requested_route: None,
+            peer_network: None,
+            peer_retry_limit: None,
             extra: Default::default(),
             adapter: Some(HOST_NATIVE.to_owned()),
             name: Some(name.clone()),

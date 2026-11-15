@@ -6,9 +6,10 @@ use std::path::{Component, Path};
 pub const MAX_DIAGNOSTIC_BYTES: usize = 1024;
 
 /// The hard boundary protected by a typed refusal, if any.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BoundaryClass {
+    #[default]
     None,
     LaneGit,
     Credentials,
@@ -745,6 +746,7 @@ mod tests {
             kind: SkipKind::Unavailable,
             cause: None,
             detail: "TOKEN_SENTINEL /private/source \u{1b}".into(),
+            ..Default::default()
         };
         let initial = serde_json::to_string(&route.diagnostic()).unwrap();
         assert!(!initial.contains("TOKEN_SENTINEL"));
@@ -754,28 +756,18 @@ mod tests {
         assert!(route.detail.contains("provenant quota tick"));
         assert!(!route.detail.contains("TOKEN_SENTINEL"));
         assert!(route.detail.len() <= 2 * MAX_DIAGNOSTIC_BYTES + 2);
-        route.extra.insert(
-            "guard_resource".into(),
-            serde_json::json!({"kind": "TOKEN_SENTINEL", "detail": "/private/source"}),
-        );
-        let invalid = serde_json::to_string(&route.diagnostic()).unwrap();
-        assert!(!invalid.contains("TOKEN_SENTINEL"));
-        assert!(!invalid.contains("/private/source"));
-        route.extra.insert(
-            "confinement_guard".into(),
-            serde_json::json!(ConfinementGuard::ProtectedPathOverlap),
-        );
+        let mut malformed = serde_json::to_value(&route).unwrap();
+        malformed["guard_resource"] =
+            serde_json::json!({"kind": "TOKEN_SENTINEL", "detail": "/private/source"});
+        assert!(serde_json::from_value::<SkippedRoute>(malformed).is_err());
+        route.confinement_guard = Some(ConfinementGuard::ProtectedPathOverlap);
         route.set_cause(RouteExclusionReason::ConfinementUnavailable);
         let projected = route.diagnostic();
         assert!(projected.detail.unwrap().contains("protected path overlap"));
         assert!(!route.detail.contains("TOKEN_SENTINEL"));
-        route.extra.insert(
-            "confinement_guard".into(),
-            serde_json::json!("TOKEN_SENTINEL /private/source"),
-        );
-        let invalid = serde_json::to_string(&route.diagnostic()).unwrap();
-        assert!(!invalid.contains("TOKEN_SENTINEL"));
-        assert!(!invalid.contains("/private/source"));
+        let mut malformed = serde_json::to_value(&route).unwrap();
+        malformed["confinement_guard"] = serde_json::json!("TOKEN_SENTINEL /private/source");
+        assert!(serde_json::from_value::<SkippedRoute>(malformed).is_err());
     }
 
     #[test]

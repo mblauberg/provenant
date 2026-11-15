@@ -606,10 +606,6 @@ fn output_read_part(
     Ok((data, text))
 }
 
-/// Wire key under which a serving peer carries the fallback reason in its
-/// output chunk, so `output --host` reports what the peer's graph recorded.
-pub const PLANNER_FALLBACK_KEY: &str = "planner_fallback";
-
 /// Name the planner fallback and its reason in an output reply; one rendering
 /// for local and peer output.
 pub(super) fn add_planner_fallback(data: &mut Value, text: &mut String, reason: String) {

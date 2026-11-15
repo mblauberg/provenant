@@ -791,10 +791,7 @@ mod graph_writer_admission_tests {
         }))?;
         // This is a newly compiled graph, rather than a legacy pending execution
         // that the graph cutover must drain before admitting new attempts.
-        document.extra.insert(
-            "template_library".into(),
-            serde_json::to_value(graph::TemplateLibrary::bundled().snapshot())?,
-        );
+        document.template_library = graph::TemplateLibrary::bundled().snapshot();
         let mut journal = graph::FileJournal::open(
             &roots.state,
             project,
@@ -918,6 +915,10 @@ mod graph_writer_admission_tests {
                 extra: Default::default(),
                 route: "codex/gpt-6-luna".into(),
                 kind: provenant_records::run::SkipKind::Unavailable,
+                plan_error: None,
+                guard_boundary: None,
+                guard_resource: None,
+                confinement_guard: None,
                 cause: Some(provenant_records::RouteExclusionReason::PacingReserve),
                 detail: "pacing reserve".into(),
             });
@@ -3103,17 +3104,17 @@ mod result_tests {
         assert_eq!(facts.extra["queue_time_ms"], 1500);
         assert_eq!(facts.extra["tier"], "principal");
         assert_eq!(facts.extra["template"], "review.security");
-        assert_eq!(
-            facts.extra["resolved_route"],
-            json!({"provider":"observed", "model":"actual", "effort":"high"})
-        );
+        let route = facts.resolved_route.as_ref().unwrap();
+        assert_eq!(route.provider.as_deref(), Some("observed"));
+        assert_eq!(route.model.as_deref(), Some("actual"));
+        assert_eq!(route.effort.as_deref(), Some("high"));
         assert!(
-            !serde_json::to_string(&facts.extra)
+            !serde_json::to_string(route)
                 .unwrap()
                 .contains("private account")
         );
         assert!(
-            !serde_json::to_string(&facts.extra)
+            !serde_json::to_string(route)
                 .unwrap()
                 .contains("private provider reason")
         );
@@ -4008,8 +4009,8 @@ mod provisioned_writer_submission_tests {
             let node = &continued.checkpoint.nodes[0];
             let successor = node.attempts.last().ok_or("successor")?;
             assert_eq!(
-                successor.key.extra.get("previous_attempt_ref"),
-                Some(&serde_json::json!(reference)),
+                successor.key.previous_attempt_ref.as_deref(),
+                Some(reference.as_str()),
                 "{node:?}"
             );
             let successor_ref = successor

@@ -29,6 +29,8 @@ class ExtraFieldsOwnership(unittest.TestCase):
             'fn f() { let mut fields = ExtraFields::default(); fields.insert(r#"owned"#.into(), true.into()); }',
             'fn f(record: Record) { let copied = record.extra.clone(); copied.get(OWNED); }',
             'fn f(record: Record) { record.extra /* comment */ .get ("owned"); }',
+            'fn f(record: Record) { let preceding = ""; record.extra.get("owned"); }',
+            'fn f(record: Record) { let preceding = b""; record.extra.get("owned"); }',
         ]
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "production.rs"

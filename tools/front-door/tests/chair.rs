@@ -661,6 +661,7 @@ fn chair_snapshot_preserves_active_lanes_while_a_writer_is_open() -> Result {
                     profile: Default::default(),
                     prompt_digest: CanonicalV1::file_digest(b"existing lane"),
                     route: run::RequestedRoute::Named {
+                        required_family: None,
                         extra: Default::default(),
                         name: "utility".into(),
                         effort: None,

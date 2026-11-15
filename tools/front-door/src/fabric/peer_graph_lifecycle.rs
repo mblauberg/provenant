@@ -979,9 +979,7 @@ fn graph_peer_without_receipt_keeps_launch_and_cancellation_uncertain()
     }))?;
     // Even a removed peer cannot turn missing local state into proof that
     // the remote operation was refused or has stopped.
-    attempt
-        .extra
-        .insert("placement_host".into(), serde_json::json!("removed-peer"));
+    attempt.placement_host = Some("removed-peer".into());
     assert!(!owner.launch_accepted(&attempt)?);
     assert!(!owner.launch_refused_before_acceptance(&attempt)?);
     assert!(!owner.cancelled_attempt_settled(&attempt)?);
@@ -990,12 +988,7 @@ fn graph_peer_without_receipt_keeps_launch_and_cancellation_uncertain()
         Some("local".to_owned()),
         Some(factory.context.identity.host.to_string()),
     ] {
-        attempt.extra.remove("placement_host");
-        if let Some(placement) = placement {
-            attempt
-                .extra
-                .insert("placement_host".into(), serde_json::json!(placement));
-        }
+        attempt.placement_host = placement;
         assert!(!owner.launch_accepted(&attempt)?);
         assert!(owner.launch_refused_before_acceptance(&attempt)?);
         assert!(owner.cancelled_attempt_settled(&attempt)?);

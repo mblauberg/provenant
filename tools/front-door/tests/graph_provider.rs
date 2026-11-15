@@ -1247,6 +1247,7 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
     }))?;
     let mut absent = task.clone();
     absent.route = provenant_run::RequestedRoute::Adapter {
+        required_family: None,
         extra: Default::default(),
         provider: "host-native".into(),
         name: "absent".into(),
@@ -1264,6 +1265,7 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
     assert_eq!(fs::read_dir(&paths.temporary)?.count(), 0);
     let mut unsupported = task.clone();
     unsupported.route = provenant_run::RequestedRoute::Adapter {
+        required_family: None,
         extra: Default::default(),
         provider: "cursor".into(),
         name: "fixture".into(),
@@ -1274,6 +1276,7 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
     assert_eq!(error.to_string(), "cursor has no named model-less entries");
     assert_eq!(fs::read_dir(&paths.temporary)?.count(), 0);
     unsupported.route = provenant_run::RequestedRoute::Adapter {
+        required_family: None,
         extra: Default::default(),
         provider: "command".into(),
         name: "fixture".into(),
@@ -1294,6 +1297,7 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
     )?;
     let mut named = task.clone();
     named.route = provenant_run::RequestedRoute::Named {
+        required_family: None,
         extra: Default::default(),
         name: "receipt-fixture".into(),
         effort: None,
@@ -1323,6 +1327,7 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
     )?;
     let mut pooled = task.clone();
     pooled.route = provenant_run::RequestedRoute::Review {
+        required_family: None,
         extra: Default::default(),
         name: "secret-fixture".into(),
         effort: None,
@@ -2486,6 +2491,7 @@ fn persisted_attempt_with(
         account_key: Some(key.into()),
         source: Some("fixture_route".into()),
         pool_selection: None,
+        ..Default::default()
     };
     let prompt = "reply OK";
     let mut prepared = PreparedRun {
@@ -2514,6 +2520,7 @@ fn persisted_attempt_with(
                 profile: HarnessProfile::default(),
                 prompt_digest: CanonicalV1::file_digest(prompt.as_bytes()),
                 route: RequestedRoute::Model {
+                    required_family: None,
                     extra: Default::default(),
                     provider: provider.into(),
                     model: model.into(),

@@ -1787,20 +1787,12 @@ impl Factory {
                 document.review_base = Some(base);
                 document.schema_version = document.schema_version.max(2);
             } else {
-                document
-                    .extra
-                    .insert("review_subject_missing".into(), json!(true));
+                document.review_subject_missing = true;
             }
         }
-        document
-            .extra
-            .insert("template_layers".into(), json!(library.snapshot_layers()));
-        document
-            .extra
-            .insert("template_library".into(), json!(library.snapshot()));
-        document
-            .extra
-            .insert("template_resolvers".into(), json!(resolver));
+        document.template_layers = library.snapshot_layers();
+        document.template_library = library.snapshot();
+        document.template_resolvers = resolver;
         if let Some(raw) = raw {
             let mut compiled = encode(&document)?;
             for key in [
@@ -2978,15 +2970,11 @@ fn override_tier(node: &mut provenant_fabric_runtime::graph::GraphNode, choice: 
             .route
             .iter()
             .chain(node.routes.iter().flatten())
-            .map(|existing| existing.extra.get("required_family").cloned())
+            .map(|existing| existing.required_family.clone())
             .collect();
-        let replace = |family: Option<&Value>| {
+        let replace = |family: Option<&String>| {
             let mut replacement = route.clone();
-            if let Some(family) = family {
-                replacement
-                    .extra
-                    .insert("required_family".into(), family.clone());
-            }
+            replacement.required_family = family.cloned();
             replacement
         };
         if constraints.windows(2).any(|pair| pair[0] != pair[1]) {
@@ -3039,7 +3027,7 @@ mod tests {
             super::override_tier(&mut node, &override_route);
             let route = node.route.unwrap();
             assert_eq!(route.alias.as_deref(), Some("senior"));
-            assert_eq!(route.extra.get("required_family"), Some(&json!("openai")));
+            assert_eq!(route.required_family.as_deref(), Some("openai"));
         }
     }
 
@@ -4475,14 +4463,10 @@ mod tests {
         )?;
         let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
         assert_eq!(
-            document.extra["template_library"]["review.local"]["brief"],
+            document.template_library["review.local"].brief,
             "Review local invariants"
         );
-        assert!(
-            document.extra["template_resolvers"]
-                .get("review-panel")
-                .is_some()
-        );
+        assert!(document.template_resolvers.contains_key("review-panel"));
         let expanded = document.expanded(&factory.context.config.graph.limits)?;
         let prompts: Vec<_> = expanded
             .nodes
@@ -5780,7 +5764,7 @@ mod tests {
         let response = factory.graph_document(input.clone(), budget, &cancel)?;
         let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
         let record: provenant_routing::PanelResolution = serde_json::from_str(
-            document.extra["template_resolvers"]["review-family-resolution"][0]
+            document.template_resolvers["review-family-resolution"][0]
                 .as_str()
                 .ok_or("family resolution")?,
         )?;
@@ -5803,9 +5787,9 @@ mod tests {
                     .map(|routes| routes.iter().collect())
                     .unwrap_or_else(|| node.route.iter().collect());
                 !routes.is_empty()
-                    && routes.iter().all(|route| {
-                        route.extra.get("required_family").and_then(Value::as_str) == Some(family)
-                    })
+                    && routes
+                        .iter()
+                        .all(|route| route.required_family.as_deref() == Some(family))
             })
             .count();
         assert_eq!(
@@ -5828,7 +5812,7 @@ mod tests {
         let response = factory.graph_document(advisory, budget, &cancel)?;
         let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
         let record: provenant_routing::PanelResolution = serde_json::from_str(
-            document.extra["template_resolvers"]["review-family-resolution"][0]
+            document.template_resolvers["review-family-resolution"][0]
                 .as_str()
                 .ok_or("family resolution")?,
         )?;

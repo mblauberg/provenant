@@ -117,7 +117,7 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         base_ref: None,
         profile: Default::default(),
         prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
-        route: run::RequestedRoute::Model {
+        route: run::RequestedRoute::Model { required_family: None,
             extra: Default::default(),
             provider: "cursor".into(),
             model: "cursor/gpt-5.3-codex-low".into(),

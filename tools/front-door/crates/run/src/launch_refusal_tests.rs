@@ -78,6 +78,7 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
         let store = RunStore::open(&context, &call)?;
         let mut run = input();
         run.request.task.route = RequestedRoute::Model {
+            required_family: None,
             extra: Default::default(),
             provider: model.split_once('/').ok_or("adapter")?.0.into(),
             model: model.into(),

@@ -274,3 +274,37 @@ recovers it, even with no receipt. There are no rollback journals.
 - Test: `crates/config/src/managed_tests.rs::crash_after_any_publication_reapplies_without_a_receipt`;
   `crates/config/src/managed_tests.rs::receipt_publish_failure_reports_partial_actions_and_reapplies`
 - Owner: `crates/config/src/managed.rs`
+
+
+## Typed host metadata in format 2
+
+`Trace.telemetry_context` owns launch-time `TelemetryContext` observations.
+Capture passes the declared value directly into the trace; readers never decode
+it from an extension map. Port receipt retention reads the attempt's declared
+`repository_admission_binding`, including its validated command digest and lease
+epoch, rather than maintaining a second admission-binding wire shape.
+Known fields with the wrong JSON type fail record decoding. Missing optional
+observations remain unknown. Unknown forward fields alone remain in extension
+maps; there are no old-shape readers or key aliases.
+- Why: the 2.0 stored shape gives each host fact one shared writer/reader type.
+- Test: `crates/records/src/trace.rs::tests::typed_context_round_trips_and_rejects_malformed_values`;
+  `crates/fabric-runtime/src/runs.rs::tests::wait_observation_round_trips_and_rejects_wrong_types`;
+  `crates/cli/src/run/remote.rs::tests::output_identity_comes_from_the_declared_target`
+- Owner: `crates/records/src/trace.rs`; `crates/records/src/run.rs`;
+  `crates/fabric-runtime/src/graph/model.rs`; `crates/fabric-runtime/src/coordination/facade.rs`;
+  `crates/fabric-runtime/src/runs.rs`
+
+Sandbox mode and sandbox-admission receipts are declared route metadata. The
+confinement writer, launch writer and attempt readers share those typed fields;
+no shared string key or extension-map decode determines sandbox authority.
+Preparation failures, guard evidence, launch preparation observations and usage
+aggregation likewise belong to their declared run record owners. Optional facts
+may be absent; a present value with the wrong type fails decoding.
+
+Graph specifications, attempts and routes own provisioning, placement, review,
+peer and template metadata. Relay and interface callers pass the declared values
+directly. Peer output carries a typed planner-fallback reason, while its typed
+attempt target owns identity. Wait replies carry a typed observation report.
+Telemetry reads declared work-context PR, lens, task and risk fields. Every new
+persisted field is optional or defaulted; flattened extension maps retain
+unknown fields from newer minor writers without interpreting them as host facts.
