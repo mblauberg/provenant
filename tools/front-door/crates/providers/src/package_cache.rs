@@ -12,7 +12,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum Setting {
+pub(super) enum Setting {
     Missing,
     Present(Option<PathBuf>),
 }
@@ -145,7 +145,10 @@ fn project_settings(cwd: &Path, home: &Path) -> Result<ProjectSettings, ()> {
     Ok(settings)
 }
 
-fn npm_global_cache(home: &Path, host_var: &dyn Fn(&str) -> Option<OsString>) -> Setting {
+pub(super) fn npm_global_cache(
+    home: &Path,
+    host_var: &dyn Fn(&str) -> Option<OsString>,
+) -> Setting {
     let user = match host_config_file(host_var, "npm_config_userconfig", home.join(".npmrc")) {
         Ok(path) => path,
         Err(()) => return Setting::Present(None),
@@ -205,7 +208,7 @@ fn absolute_config_path(value: OsString) -> Result<PathBuf, ()> {
     path.is_absolute().then_some(path).ok_or(())
 }
 
-fn pnpm_global_path(
+pub(super) fn pnpm_global_path(
     home: &Path,
     host_var: &dyn Fn(&str) -> Option<OsString>,
     yaml_key: &str,
@@ -353,7 +356,7 @@ fn preserve_explicit(
     false
 }
 
-fn explicit_host_value(
+pub(super) fn explicit_host_value(
     host_var: &dyn Fn(&str) -> Option<OsString>,
     names: &[&str],
 ) -> Option<OsString> {
@@ -364,7 +367,7 @@ fn explicit_host_value(
     })
 }
 
-fn npm_default_cache(home: &Path) -> PathBuf {
+pub(super) fn npm_default_cache(home: &Path) -> PathBuf {
     if cfg!(target_os = "windows") {
         home.join("AppData/Local/npm-cache")
     } else {
@@ -372,7 +375,10 @@ fn npm_default_cache(home: &Path) -> PathBuf {
     }
 }
 
-fn pnpm_default_cache(home: &Path, host_var: &dyn Fn(&str) -> Option<OsString>) -> PathBuf {
+pub(super) fn pnpm_default_cache(
+    home: &Path,
+    host_var: &dyn Fn(&str) -> Option<OsString>,
+) -> PathBuf {
     if let Some(cache_home) = xdg_optional_host(host_var, "XDG_CACHE_HOME") {
         return cache_home.join("pnpm");
     }
@@ -385,7 +391,10 @@ fn pnpm_default_cache(home: &Path, host_var: &dyn Fn(&str) -> Option<OsString>) 
     }
 }
 
-fn pnpm_default_store(home: &Path, host_var: &dyn Fn(&str) -> Option<OsString>) -> PathBuf {
+pub(super) fn pnpm_default_store(
+    home: &Path,
+    host_var: &dyn Fn(&str) -> Option<OsString>,
+) -> PathBuf {
     if let Some(pnpm_home) = explicit_host_value(host_var, &["PNPM_HOME"]) {
         let path = PathBuf::from(pnpm_home);
         if path.is_absolute() {

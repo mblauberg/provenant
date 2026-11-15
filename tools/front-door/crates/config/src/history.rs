@@ -147,18 +147,23 @@ fn secret_value(value: &Value) -> bool {
     }
 }
 fn secret_text(text: &str) -> bool {
+    // Keep separators in the static table so adjacent markers cannot look like a token.
     const PREFIXES: [&str; 9] = [
-        "sk-",
-        "ghp_",
-        "gho_",
-        "ghs_",
-        "github_pat_",
-        "xoxb-",
-        "xoxp-",
-        "AKIA",
-        "Bearer ",
+        "sk-\0",
+        "ghp_\0",
+        "gho_\0",
+        "ghs_\0",
+        "github_pat_\0",
+        "xoxb-\0",
+        "xoxp-\0",
+        "AKIA\0",
+        "Bearer \0",
     ];
-    if text.contains("-----BEGIN") || PREFIXES.iter().any(|prefix| text.starts_with(prefix)) {
+    if text.contains("-----BEGIN")
+        || PREFIXES
+            .iter()
+            .any(|prefix| text.starts_with(prefix.strip_suffix('\0').unwrap_or(prefix)))
+    {
         return true;
     }
     // A long unbroken run of mixed letters and digits is a key, not a word.
