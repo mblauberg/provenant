@@ -123,7 +123,7 @@ the file set may change in any release.
 Channels: `lane` variables are set in every lane process, `lane_or_caller`
 ones are also read from the caller, `port_command` ones are given to repository
 port commands, and `caller` ones are read only from the caller. `HOME` is
-listed because a lane's home is never the caller's.
+listed because a sandboxed lane's home is not the caller's.
 
 | Variable | Channel | Stability | Meaning | When |
 |---|---|---|---|---|
