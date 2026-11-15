@@ -123,18 +123,24 @@ mod tests {
     }
 
     #[test]
-    fn file_source_is_bounded_and_accepts_stdin_spelling() {
-        let path = std::env::temp_dir().join(format!("provenant-brief-{}", std::process::id()));
-        std::fs::write(&path, b"brief").unwrap();
-        assert_eq!(
-            read_brief(BriefSource::File(path.clone()), 5).unwrap(),
-            "brief"
-        );
-        assert!(matches!(
-            read_brief(BriefSource::File(path.clone()), 4),
-            Err(BriefError::TooLarge { limit: 4 })
-        ));
-        let _ = std::fs::remove_file(path);
+    fn file_source_obeys_the_declared_byte_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("brief.md");
+        for (content, limit, accepted) in [(b"brief".as_slice(), 5, true), (b"brief", 4, false)] {
+            std::fs::write(&path, content).unwrap();
+            let result = read_brief(BriefSource::File(path.clone()), limit);
+            if accepted {
+                assert_eq!(result.unwrap(), "brief");
+            } else {
+                assert!(
+                    matches!(result, Err(BriefError::TooLarge { limit: found }) if found == limit)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dash_selects_stdin() {
         assert_eq!(BriefSource::file(PathBuf::from("-")), BriefSource::Stdin);
     }
 }

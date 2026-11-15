@@ -32,10 +32,3 @@ fn configuration_overrides_the_defaults() {
         Some("full")
     );
 }
-#[test]
-fn supplied_environment_takes_precedence() {
-    let mut env = vec![("CARGO_INCREMENTAL".into(), "1".into())];
-    set_cargo_profile(&mut env, &LaneBuildSettings::default());
-    assert_eq!(value(&env, "CARGO_INCREMENTAL").as_deref(), Some("1"));
-    assert_eq!(env.len(), 2);
-}

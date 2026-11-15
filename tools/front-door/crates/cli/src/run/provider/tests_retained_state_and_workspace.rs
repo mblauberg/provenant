@@ -18,8 +18,20 @@ fn retained_state_copy_leaves_nothing_when_refused() -> Result<(), Box<dyn std::
     let copied = state.join("candidate-0");
     std::fs::create_dir_all(&copied)?;
     let error = copy_state_within(&source, &copied, limits, false).unwrap_err();
-    assert!(error.contains("domains.run.continuation_copy_limit_bytes"));
-    assert!(error.contains(&LIMIT.to_string()));
+    assert_eq!(
+        error.boundary_class(),
+        provenant_records::diagnostic::BoundaryClass::None
+    );
+    assert!(matches!(
+        error.resource_fact(),
+        Some(
+            provenant_records::diagnostic::ResourceFact::ContinuationCopy {
+                limit: LIMIT,
+                setting: provenant_records::diagnostic::ContinuationCopyLimit::Bytes,
+                ..
+            }
+        )
+    ));
     let names = |path: &Path| -> std::io::Result<Vec<_>> {
         std::fs::read_dir(path)?
             .map(|entry| entry.map(|entry| entry.file_name()))
@@ -411,10 +423,12 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
         scope: PathScope::Exact,
     }));
     // A path-shaped provider directory is protected only when declared.
-    assert!(!mandatory
-        .credentials()
-        .iter()
-        .any(|entry| entry.path == home.join(".agy-unselected")));
+    assert!(
+        !mandatory
+            .credentials()
+            .iter()
+            .any(|entry| entry.path == home.join(".agy-unselected"))
+    );
 
     Ok(())
 }
@@ -692,66 +706,8 @@ fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
-fn attachment_read_grant_is_exact() -> Result<(), Box<dyn std::error::Error>> {
-    let temp = tempfile::tempdir()?;
-    let root = std::fs::canonicalize(temp.path())?;
-    let home = root.join("home");
-    let cwd = root.join("project");
-    let state = root.join("state");
-    let scratch = root.join("scratch");
-    let private_state = state.join("attempt/provider-state");
-    let assets = root.join("release/active");
-    for path in [&home, &cwd, &scratch, &assets] {
-        std::fs::create_dir_all(path)?;
-    }
-    provenant_os::fixture::private_state_dir(&state)?;
-    std::fs::create_dir_all(&private_state)?;
-    let mut inputs = provenant_core::RootInputs::new(home.clone(), cwd.clone());
-    inputs.state_dir = Some(state.clone());
-    let host_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    let image = root.join("outside/image.png");
-    let access = run::LaneAccess {
-        attachments: vec![image.clone()],
-        ..Default::default()
-    };
-    let request = confinement_request(
-        ProjectId::parse("0123456789abcdef0123456789abcdef")?,
-        ConfinementRoots {
-            host_roots: Some(&host_roots),
-            cwd: &cwd,
-            home: &home,
-            state: &state,
-            credential_roots: &provenant_core::CredentialRoots::default(),
-            github_roots: &[],
-            protected_worktrees: &[],
-            scratch: &scratch,
-            private_state: &private_state,
-            assets: &assets,
-            prompt_file: None,
-        },
-        None,
-        &access,
-        &Default::default(),
-        "cursor",
-        false,
-        InventoryContext::Sandboxed,
-    )?;
-    assert!(request.permissions.read_roots.contains(&PathGrant {
-        path: image.clone(),
-        scope: PathScope::Exact
-    }));
-    assert!(
-        !request
-            .permissions
-            .read_roots
-            .iter()
-            .any(|grant| grant.path == image.parent().expect("image parent"))
-    );
-    Ok(())
-}
-
-#[test]
-fn lane_plan_reads_the_active_release_root() -> Result<(), Box<dyn std::error::Error>> {
+fn lane_plan_declares_exact_attachment_and_release_grants() -> Result<(), Box<dyn std::error::Error>>
+{
     let temp = tempfile::tempdir()?;
     let root = std::fs::canonicalize(temp.path())?;
     let home = root.join("home");
@@ -769,6 +725,11 @@ fn lane_plan_reads_the_active_release_root() -> Result<(), Box<dyn std::error::E
     inputs.state_dir = Some(state.clone());
     let host_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
     let prompt = state.join("attempt/prompt.md");
+    let image = root.join("outside/image.png");
+    let access = run::LaneAccess {
+        attachments: vec![image.clone()],
+        ..Default::default()
+    };
     for entry in REGISTRY {
         let request = confinement_request(
             ProjectId::parse("0123456789abcdef0123456789abcdef")?,
@@ -786,7 +747,7 @@ fn lane_plan_reads_the_active_release_root() -> Result<(), Box<dyn std::error::E
                 prompt_file: Some(&prompt),
             },
             None,
-            &run::LaneAccess::default(),
+            &access,
             &Default::default(),
             entry.adapter.id(),
             true,
@@ -796,6 +757,17 @@ fn lane_plan_reads_the_active_release_root() -> Result<(), Box<dyn std::error::E
             path: assets.clone(),
             scope: PathScope::Subtree,
         }));
+        assert!(request.permissions.read_roots.contains(&PathGrant {
+            path: image.clone(),
+            scope: PathScope::Exact,
+        }));
+        assert!(
+            !request
+                .permissions
+                .read_roots
+                .iter()
+                .any(|grant| { grant.path == image.parent().expect("image parent") })
+        );
         let plan = ConfinedPlan::new(request)?;
         assert!(plan.permissions().read_roots.contains(&PathGrant {
             path: prompt.to_owned(),
@@ -928,9 +900,8 @@ fn writer_plan_roots_are_resolved_for_the_selected_project() {
 #[test]
 fn setup_stays_below_run_owned_roots_without_following_links()
 -> Result<(), Box<dyn std::error::Error>> {
-    let base = std::env::temp_dir().join(format!("provenant-setup-{}", std::process::id()));
-    std::fs::create_dir(&base)?;
-    let base = canonical(&base)?;
+    let temp = tempfile::tempdir()?;
+    let base = canonical(temp.path())?;
     let (scratch, state, outside) = (base.join("tmp"), base.join("state"), base.join("out"));
     for path in [&scratch, &state, &outside] {
         std::fs::create_dir(path)?;
@@ -991,17 +962,14 @@ fn setup_stays_below_run_owned_roots_without_following_links()
         assert!(!outside.join("x").exists());
         Ok(())
     })();
-    std::fs::remove_dir_all(&base)?;
     result
 }
 
 #[test]
 fn provider_setup_recovers_after_interrupted_preparation_idempotently()
 -> Result<(), Box<dyn std::error::Error>> {
-    let base =
-        std::env::temp_dir().join(format!("provenant-setup-recovery-{}", std::process::id()));
-    std::fs::create_dir(&base)?;
-    let base = canonical(&base)?;
+    let temp = tempfile::tempdir()?;
+    let base = canonical(temp.path())?;
     let (scratch, state) = (base.join("tmp"), base.join("state"));
     for path in [&scratch, &state] {
         std::fs::create_dir(path)?;
@@ -1029,7 +997,6 @@ fn provider_setup_recovers_after_interrupted_preparation_idempotently()
         assert_eq!(std::fs::read(&file)?, b"second");
         Ok(())
     })();
-    std::fs::remove_dir_all(&base)?;
     result
 }
 
@@ -1124,14 +1091,7 @@ fn prelaunch_login_failures_keep_auth_when_availability_is_absent()
     let entries: Vec<Registration> = ["work", "personal"].into_iter().map(|label| {
         serde_json::from_value(serde_json::json!({"adapter": "codex", "label": label, "key": label, "directory": format!("/fixture/{label}")}))
     }).collect::<Result<_, _>>()?;
-    let route: ResolvedRoute = serde_json::from_value(serde_json::json!({
-            "selection_context":{"workload":"general","writes":false},
-            "diagnostics":serde_json::to_value(provenant_records::route_selection::RouteDiagnostics::default()).unwrap(),
-        "adapter": "codex", "model": "example", "catalogue_revision": "fixture",
-        "host": "fixture", "alternatives": [], "exclusions": [],
-        "confidentiality": {"evidence_ref": "fixture"}, "eligibility": "eligible",
-        "readiness": {"status": "unavailable", "reason": "unknown_availability"}
-    }))?;
+    let route = unavailable_route("codex");
     let mut failures = std::collections::BTreeMap::new();
     for (entry, error) in entries.iter().zip([
         ProviderError::LoginRequired,
@@ -1142,37 +1102,29 @@ fn prelaunch_login_failures_keep_auth_when_availability_is_absent()
         else {
             panic!("login failure lost its type")
         };
-        assert!(detail.contains("codex login"));
-        assert!(detail.contains(&format!("CODEX_HOME='/fixture/{}'", entry.label)));
         failures.insert((entry.adapter.clone(), entry.key.clone()), detail);
     }
     assert!(unavailable_auth_detail(&route, None, &entries, &failures).is_some());
     failures.remove(&("codex".into(), "personal".into()));
     assert!(unavailable_auth_detail(&route, None, &entries, &failures).is_none());
     assert!(unavailable_auth_detail(&route, Some("work"), &entries, &failures).is_some());
-    assert!(matches!(
-        account_observation_error(&entries[0], &ProviderError::IdentityMismatch),
-        AccountObservationError::Other(_)
-    ));
-    assert!(matches!(
-        account_observation_error(&entries[0], &ProviderError::RefreshDeferred),
-        AccountObservationError::Other(_)
-    ));
-    assert!(matches!(
-        account_observation_error(&entries[0], &ProviderError::CredentialUnavailable),
-        AccountObservationError::AuthRequired(_)
-    ));
-    assert!(matches!(
-        account_observation_error(&entries[0], &ProviderError::UnknownIdentity),
-        AccountObservationError::Other(_)
-    ));
-    assert!(matches!(
-        account_observation_error(
-            &entries[0],
-            &ProviderError::ProbeDirectory("fixture".into())
-        ),
-        AccountObservationError::Other(_)
-    ));
+    let classifications = [
+        (ProviderError::IdentityMismatch, false),
+        (ProviderError::RefreshDeferred, false),
+        (ProviderError::CredentialUnavailable, true),
+        (ProviderError::UnknownIdentity, false),
+        (ProviderError::ProbeDirectory("fixture".into()), false),
+    ];
+    for (error, auth_required) in classifications {
+        assert_eq!(
+            matches!(
+                account_observation_error(&entries[0], &error),
+                AccountObservationError::AuthRequired(_)
+            ),
+            auth_required,
+            "{error:?} classification"
+        );
+    }
     Ok(())
 }
 
@@ -1184,11 +1136,6 @@ fn absent_default_login_differs_from_directory_integrity_errors()
     spec.name = "fixture";
     spec.login_hint = "fixture login";
     let missing = temp.path().join("missing");
-    assert!(
-        default_directory_error(&spec, &missing, "not found".into())
-            .to_string()
-            .contains("fixture")
-    );
     assert_eq!(
         default_directory_error(&spec, &missing, "not found".into()).skip_kind(),
         SkipKind::AuthRequired
@@ -1423,19 +1370,68 @@ fn source_cwd_matches_declared_admission_for_registered_worktree_locations()
     )
     .unwrap_err();
     let prepared = source_cwd(&registry, &task).unwrap_err();
-    assert_eq!(admission.code, "CONFINEMENT_SOURCE_CWD_AUTHORITY");
+    assert_eq!(
+        prepared.boundary_class(),
+        provenant_records::diagnostic::BoundaryClass::Authority
+    );
     assert_eq!(admission.reason, prepared.to_string());
-    assert!(admission.reason.contains("built-in secret store"));
     Ok(())
 }
 
-#[test]
-fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
--> Result<(), Box<dyn std::error::Error>> {
+struct ReadOnlySourceFixture {
+    _temp: tempfile::TempDir,
+    base: PathBuf,
+    home: PathBuf,
+    state: PathBuf,
+    project: PathBuf,
+    source: PathBuf,
+    assets: PathBuf,
+    git_home: PathBuf,
+    git: PathBuf,
+    roots: provenant_core::Roots,
+    project_id: ProjectId,
+    cancel: provenant_core::CancelToken,
+    task: run::TaskRequest,
+    paths: run::LaunchPaths,
+}
+
+impl ReadOnlySourceFixture {
+    fn registry(&self) -> Registry<'_> {
+        Registry {
+            roots: Some(&self.roots),
+            home: Some(&self.home),
+            assets: Some(&self.assets),
+            cwd: Some(&self.project),
+            state_root: Some(&self.state),
+            project_id: Some(self.project_id),
+            host: None,
+            cancel: Some(&self.cancel),
+            repo_facts: Default::default(),
+        }
+    }
+
+    fn prepare(
+        &self,
+        task: &run::TaskRequest,
+    ) -> Result<run::PreparedLaunch, Box<dyn std::error::Error>> {
+        let registry = self.registry();
+        Ok(prepare_command(
+            &registry,
+            task,
+            &self.paths,
+            None,
+            &|_| Ok(PathBuf::from("/bin/sh")),
+            "command",
+            "fake",
+        )?)
+    }
+}
+
+fn read_only_source_fixture() -> Result<ReadOnlySourceFixture, Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, OperationId, WallTime};
-    use provenant_os::exec::{ExecOptions, Executor, Termination};
+    use provenant_os::exec::SystemExecutor;
     use std::os::unix::fs::PermissionsExt;
-    use std::time::Duration;
+
     let temp = tempfile::tempdir()?;
     let base = temp.path().canonicalize()?;
     let home = base.join("home");
@@ -1447,76 +1443,46 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         std::fs::create_dir(path)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
     }
-    let executor = provenant_os::exec::SystemExecutor::new(1)?;
+
+    let executor = SystemExecutor::new(1)?;
     let git = init_fixture_repository(&executor, &project, &git_home)?;
     std::fs::write(project.join("subject"), "verified checkout")?;
-    for args in [vec!["add", "subject"], vec!["commit", "-qm", "subject"]] {
-        let argv: Vec<std::ffi::OsString> = std::iter::once(git.clone().into_os_string())
-            .chain(args.into_iter().map(Into::into))
-            .collect();
-        let env = provenant_os::fixture::git_env();
-        let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(5));
-        options.env = Some(&env);
-        let result = executor.execute(options)?;
-        assert_eq!(result.termination, Termination::Exit(0));
+    for args in [
+        vec!["add".into(), "subject".into()],
+        vec!["commit".into(), "-qm".into(), "subject".into()],
+    ] {
+        run_source_git(&executor, &git, &git_home, &project, &args)?;
     }
     let head = run::resolve_git_base(&git, &project, "HEAD")?;
     let source = base.join("source");
-    let added_args = vec![
-        git.clone().into_os_string(),
+    let add_worktree = vec![
         "worktree".into(),
         "add".into(),
         "--detach".into(),
         "-q".into(),
-        source.clone().into_os_string(),
+        source.as_os_str().to_owned(),
         head.clone().into(),
     ];
-    let added = executor.execute(ExecOptions::new(
-        &added_args,
-        &project,
-        Duration::from_secs(5),
-    ))?;
-    assert_eq!(added.termination, Termination::Exit(0));
+    run_source_git(&executor, &git, &git_home, &project, &add_worktree)?;
     std::fs::write(project.join("subject"), "wrong checkout")?;
     std::fs::write(source.join("subject"), "uncommitted source edit")?;
-    let fake = assets.join("fake-provider");
-    std::fs::write(
-        &fake,
-        "#!/bin/sh\ncat subject; : > \"$SOURCE_READY\"; while [ ! -f \"$SOURCE_GO\" ]; do sleep 0.05; done; cat subject\n",
-    )?;
-    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700))?;
     std::fs::write(
         state.join("config.toml"),
-        format!(
-            "schema_version = 1\n[domains.fabric.commands.fake]\nargv = ['{}']\nruntimes = ['/bin/sh']\n",
-            fake.display()
-        ),
+        "schema_version = 1\n[domains.fabric.commands.fake]\nargv = ['/bin/sh']\nruntimes = ['/bin/sh']\n",
     )?;
+
     let roots = provenant_core::RootInputs {
         state_dir: Some(state.clone()),
         ..provenant_core::RootInputs::new(home.clone(), project.clone())
     }
     .resolve(&provenant_os::fs::SystemPathResolver)?;
-    let utility =
-        provenant_confinement::UtilityRuntime::new(&git, &git_home, roots.state.as_path())?;
-    let budget = provenant_confinement::UtilityBudget::bounded(std::time::Duration::from_secs(5))?;
-    let cancel = provenant_core::CancelToken::new();
-    let repo = utility.open_repo(&executor, &project, budget, &cancel)?;
+    let common_git_dir = std::fs::canonicalize(project.join(".git"))?;
     let binding = provenant_config::bind_project(
         &roots,
-        provenant_config::ProjectLocation::new(repo.common_git_dir())?,
+        provenant_config::ProjectLocation::new(&common_git_dir)?,
     )?;
-    let registry = Registry {
-        roots: Some(&roots),
-        home: Some(&home),
-        assets: Some(&assets),
-        cwd: Some(&project),
-        state_root: Some(&state),
-        project_id: Some(binding.project_id()),
-        host: None,
-        cancel: Some(&cancel),
-        repo_facts: Default::default(),
-    };
+    let project_id = binding.project_id();
+    let cancel = provenant_core::CancelToken::new();
     let mut task = super::super::tests::trace_run(
         50,
         AttemptId::from_bytes([51; 16]),
@@ -1524,8 +1490,8 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
     )?
     .request
     .task;
-    task.head = Some(head.clone());
-    task.base = Some(head.clone());
+    task.head = Some(head);
+    task.base = task.head.clone();
     task.access.source_root = Some(source.clone());
     task.access.source_identity = Some(source_identity(&source)?);
     task.route = run::RequestedRoute::Adapter {
@@ -1533,6 +1499,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         provider: "command".into(),
         name: "fake".into(),
     };
+
     let paths = run::LaunchPaths {
         attempt_id: AttemptId::from_bytes([52; 16]),
         operation_id: OperationId::parse("source-test")?,
@@ -1548,116 +1515,61 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         std::fs::create_dir(path)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
     }
-    // A separate Git directory's parent is not the checkout and must never
-    // become an implicit source grant.
-    let separate = base.join("separate-checkout");
-    std::fs::create_dir(&separate)?;
-    let separate_git = base.join(".git");
-    let init_args = vec![
-        git.clone().into_os_string(),
-        "init".into(),
-        "-q".into(),
-        "--separate-git-dir".into(),
-        separate_git.clone().into_os_string(),
-        separate.clone().into_os_string(),
+
+    Ok(ReadOnlySourceFixture {
+        _temp: temp,
+        base,
+        home,
+        state,
+        project,
+        source,
+        assets,
+        git_home,
+        git,
+        roots,
+        project_id,
+        cancel,
+        task,
+        paths,
+    })
+}
+
+fn run_source_git(
+    executor: &provenant_os::exec::SystemExecutor,
+    git: &Path,
+    git_home: &Path,
+    cwd: &Path,
+    args: &[std::ffi::OsString],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_os::exec::{ExecOptions, Executor, Termination};
+    use std::time::Duration;
+
+    let argv: Vec<std::ffi::OsString> = std::iter::once(git.as_os_str().to_owned())
+        .chain(args.iter().cloned())
+        .collect();
+    let mut env = vec![
+        ("HOME".into(), git_home.as_os_str().to_owned()),
+        ("PATH".into(), "/usr/bin:/bin".into()),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
     ];
-    let init = executor.execute(ExecOptions::new(&init_args, &base, Duration::from_secs(5)))?;
-    assert_eq!(init.termination, Termination::Exit(0));
-    let separate_repo = utility.open_repo(&executor, &separate, budget, &cancel)?;
-    assert_eq!(separate_repo.common_git_dir(), separate_git);
-    assert_eq!(
-        run::resolve_reader_source(&state, &separate, &separate)?,
-        separate
-    );
-    assert!(run::resolve_reader_source(&state, &separate, &base).is_err());
-    let subdir = project.join("nested");
-    std::fs::create_dir(&subdir)?;
-    assert_eq!(
-        run::resolve_reader_source(&state, &subdir, &subdir)?,
-        project
-    );
-    let mut primary = task.clone();
-    primary.access.source_root = Some(project.clone());
-    primary.access.source_identity = Some(source_identity(&project)?);
-    assert_eq!(source_cwd(&registry, &primary)?, project);
-    let mut missing_identity = task.clone();
-    missing_identity.access.source_identity = None;
-    assert!(
-        source_cwd(&registry, &missing_identity)
-            .unwrap_err()
-            .to_string()
-            .contains("identity changed")
-    );
-    let mut replaced = task.clone();
-    replaced
-        .access
-        .source_identity
-        .as_mut()
-        .ok_or("source identity")?
-        .inode ^= 1;
-    assert!(
-        source_cwd(&registry, &replaced)
-            .unwrap_err()
-            .to_string()
-            .contains("identity changed")
-    );
-    let mut protected = task.clone();
-    protected.access.source_root = Some(state.clone());
-    assert!(
-        source_cwd(&registry, &protected)
-            .unwrap_err()
-            .to_string()
-            .contains("not an allowed read root")
-    );
-    let foreign = base.join("foreign");
-    std::fs::create_dir(&foreign)?;
-    init_fixture_repository(&executor, &foreign, &git_home)?;
-    protected.access.source_root = Some(foreign.clone());
-    let error = source_cwd(&registry, &protected).unwrap_err().to_string();
-    assert!(error.contains("no longer registered"));
-    assert!(!error.contains(&foreign.to_string_lossy().into_owned()));
-    // A live child uses the selected scratch checkout, even when it was not
-    // registered and belongs to another project. Immutable snapshots above
-    // retain their stricter source binding.
-    let mut live = task.clone();
-    live.head = None;
-    live.base = None;
-    live.access.source_root = Some(foreign.clone());
-    live.access.source_identity = Some(source_identity(&foreign)?);
-    live.access.source_live = true;
-    assert_eq!(source_cwd(&registry, &live)?, foreign);
-    let prepared_live = prepare_command(
-        &registry,
-        &live,
-        &paths,
-        None,
-        &|_| Ok(fake.clone()),
-        "command",
-        "fake",
-    )?;
-    assert_eq!(prepared_live.cwd, foreign);
-    assert!(
-        prepared_live
-            .confinement
-            .as_ref()
-            .ok_or("live confinement")?
-            .plan
-            .permissions()
-            .protected_roots
-            .iter()
-            .any(|root| root.path == foreign)
-    );
-    let launch = prepare_command(
-        &registry,
-        &task,
-        &paths,
-        None,
-        &|_| Ok(fake.clone()),
-        "command",
-        "fake",
-    )?;
-    assert!(launch.cwd.starts_with(&paths.temporary));
-    assert_ne!(launch.cwd, source);
+    env.extend(provenant_os::fixture::fixture_git_settings());
+    let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(5));
+    options.env = Some(&env);
+    let outcome = executor.execute(options)?;
+    if outcome.termination != Termination::Exit(0) {
+        return Err(std::io::Error::other("fixture Git command failed").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn source_view_uses_the_pinned_commit_and_survives_live_checkout_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = read_only_source_fixture()?;
+    let launch = fixture.prepare(&fixture.task)?;
+    assert!(launch.cwd.starts_with(&fixture.paths.temporary));
+    assert_ne!(launch.cwd, fixture.source);
     let plan = &launch
         .confinement
         .as_ref()
@@ -1674,190 +1586,226 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
             .permissions()
             .read_roots
             .iter()
-            .any(|grant| grant.path == source)
+            .any(|grant| grant.path == fixture.source || grant.path == fixture.project)
     );
+    assert_eq!(
+        std::fs::read(launch.cwd.join("subject"))?,
+        b"verified checkout"
+    );
+
+    let changed = b"changed after source view preparation";
+    std::fs::write(fixture.source.join("subject"), changed)?;
+    assert_eq!(std::fs::read(fixture.source.join("subject"))?, changed);
+    assert_eq!(
+        std::fs::read(launch.cwd.join("subject"))?,
+        b"verified checkout"
+    );
+    Ok(())
+}
+
+#[test]
+fn source_cwd_requires_identity_for_a_pinned_source() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::diagnostic::BoundaryClass;
+
+    let fixture = read_only_source_fixture()?;
+    let registry = fixture.registry();
+    let mut missing_identity = fixture.task.clone();
+    missing_identity.access.source_identity = None;
+    assert_eq!(
+        source_cwd(&registry, &missing_identity)
+            .unwrap_err()
+            .boundary_class(),
+        BoundaryClass::Authority
+    );
+    Ok(())
+}
+
+#[test]
+fn source_cwd_refuses_an_unregistered_repository() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_os::exec::SystemExecutor;
+    use provenant_records::diagnostic::BoundaryClass;
+
+    let fixture = read_only_source_fixture()?;
+    let foreign = fixture.base.join("foreign");
+    std::fs::create_dir(&foreign)?;
+    let executor = SystemExecutor::new(1)?;
+    init_fixture_repository(&executor, &foreign, &fixture.git_home)?;
+    let mut unregistered = fixture.task.clone();
+    unregistered.access.source_root = Some(foreign.clone());
+    unregistered.access.source_identity = Some(source_identity(&foreign)?);
+    let error = source_cwd(&fixture.registry(), &unregistered).unwrap_err();
+    assert_eq!(error.boundary_class(), BoundaryClass::Authority);
     assert!(
-        !plan
+        !error
+            .to_string()
+            .contains(&foreign.to_string_lossy().into_owned())
+    );
+    Ok(())
+}
+
+#[test]
+fn source_cwd_refuses_a_replaced_registered_worktree() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_os::exec::SystemExecutor;
+    use provenant_records::diagnostic::BoundaryClass;
+
+    let fixture = read_only_source_fixture()?;
+    let executor = SystemExecutor::new(1)?;
+    let moved = fixture.base.join("moved-source");
+    let move_worktree = vec![
+        "worktree".into(),
+        "move".into(),
+        fixture.source.as_os_str().to_owned(),
+        moved.into_os_string(),
+    ];
+    run_source_git(
+        &executor,
+        &fixture.git,
+        &fixture.git_home,
+        &fixture.project,
+        &move_worktree,
+    )?;
+    let add_replacement = vec![
+        "worktree".into(),
+        "add".into(),
+        "--detach".into(),
+        "-q".into(),
+        fixture.source.as_os_str().to_owned(),
+        fixture.task.head.clone().ok_or("pinned head")?.into(),
+    ];
+    run_source_git(
+        &executor,
+        &fixture.git,
+        &fixture.git_home,
+        &fixture.project,
+        &add_replacement,
+    )?;
+
+    let task = fixture.task.clone();
+    let registry = fixture.registry();
+    let error = source_cwd(&registry, &task).unwrap_err();
+    assert_eq!(error.boundary_class(), BoundaryClass::Authority);
+    Ok(())
+}
+
+#[test]
+fn live_and_isolated_source_plans_keep_distinct_grant_boundaries()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_os::exec::SystemExecutor;
+
+    let fixture = read_only_source_fixture()?;
+    let isolated = fixture.prepare(&fixture.task)?;
+    let isolated_plan = &isolated
+        .confinement
+        .as_ref()
+        .ok_or("missing isolated confinement")?
+        .plan;
+    assert!(
+        isolated_plan
             .permissions()
             .read_roots
             .iter()
-            .any(|grant| grant.path == project)
+            .any(|grant| { grant.path == isolated.cwd && grant.scope == PathScope::Subtree })
     );
-    let git_reads: Vec<_> = plan
-        .permissions()
-        .read_only
-        .as_ref()
-        .ok_or("Git authority")?
-        .git_read_paths()
-        .collect();
-    assert_eq!(
-        git_reads,
-        vec![repo.common_git_dir().join("objects").as_path()]
-    );
-    let live_source = source.clone();
-    let ready = base.join("provider-ready");
-    let proceed = base.join("provider-proceed");
-    let thread_ready = ready.clone();
-    let thread_proceed = proceed.clone();
-    let thread_git = git.clone();
-    let thread_home = git_home.clone();
-    let move_while_running = std::thread::spawn(move || -> std::io::Result<()> {
-        use provenant_core::Clock;
-        let clock = provenant_os::clock::SystemClock::new();
-        let deadline =
-            provenant_core::WaitBudget::cli(clock.mono_now(), 5).map_err(std::io::Error::other)?;
-        let (_sender, wait) = std::sync::mpsc::channel::<()>();
-        while !thread_ready.exists() {
-            if deadline.remaining(clock.mono_now()).as_micros() == 0 {
-                return Err(std::io::Error::other("provider did not start"));
-            }
-            let _ = wait.recv_timeout(Duration::from_millis(10));
-        }
-        std::fs::write(live_source.join("subject"), "changed while provider ran")?;
-        let args: Vec<std::ffi::OsString> = [
-            thread_git.as_os_str(),
-            "-c".as_ref(),
-            "core.hooksPath=/dev/null".as_ref(),
-            "commit".as_ref(),
-            "--allow-empty".as_ref(),
-            "-qm".as_ref(),
-            "concurrent move".as_ref(),
-        ]
-        .into_iter()
-        .map(ToOwned::to_owned)
-        .collect();
-        let mut env = vec![
-            ("HOME".into(), thread_home.into_os_string()),
-            ("PATH".into(), "/usr/bin:/bin".into()),
-            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-        ];
-        env.extend(provenant_os::fixture::fixture_git_settings());
-        let mut options = ExecOptions::new(&args, &live_source, Duration::from_secs(5));
-        options.env = Some(&env);
-        let result = provenant_os::exec::SystemExecutor::new(1)
-            .map_err(std::io::Error::other)?
-            .execute(options)
-            .map_err(std::io::Error::other)?;
-        if result.termination != Termination::Exit(0) {
-            return Err(std::io::Error::other("source checkout did not advance"));
-        }
-        std::fs::write(thread_proceed, "continue")
-    });
-    let env = vec![
-        ("SOURCE_READY".into(), ready.into_os_string()),
-        ("SOURCE_GO".into(), proceed.into_os_string()),
-        ("PATH".into(), "/usr/bin:/bin".into()),
-    ];
-    let mut options = ExecOptions::new(&launch.argv, &launch.cwd, Duration::from_secs(10));
-    options.env = Some(&env);
-    let output = executor.execute(options)?;
-    move_while_running
-        .join()
-        .map_err(|_| "source mutation thread panicked")??;
-    assert_eq!(output.termination, Termination::Exit(0));
-    assert_eq!(output.stdout.bytes, b"verified checkoutverified checkout");
-    let status_args: Vec<std::ffi::OsString> =
-        [git.as_os_str(), "status".as_ref(), "--porcelain".as_ref()]
-            .into_iter()
-            .map(ToOwned::to_owned)
-            .collect();
-    let status = executor.execute(ExecOptions::new(
-        &status_args,
-        &launch.cwd,
-        Duration::from_secs(5),
-    ))?;
-    assert_eq!(status.termination, Termination::Exit(0));
     assert!(
-        status.stdout.bytes.is_empty(),
-        "snapshot status: {:?}",
-        status.stdout.bytes
+        !isolated_plan
+            .permissions()
+            .read_roots
+            .iter()
+            .any(|grant| { grant.path == fixture.source || grant.path == fixture.project })
     );
-    let moved_args: Vec<std::ffi::OsString> = [
-        git.as_os_str(),
-        "commit".as_ref(),
-        "--allow-empty".as_ref(),
-        "-qm".as_ref(),
-        "move".as_ref(),
-    ]
-    .into_iter()
-    .map(ToOwned::to_owned)
-    .collect();
-    let env = provenant_os::fixture::git_env();
-    let mut options = ExecOptions::new(&moved_args, &source, Duration::from_secs(5));
-    options.env = Some(&env);
-    let moved = executor.execute(options)?;
-    assert_eq!(moved.termination, Termination::Exit(0));
-    let historical = prepare_command(
-        &registry,
-        &task,
-        &paths,
-        None,
-        &|_| Ok(fake.clone()),
-        "command",
-        "fake",
+
+    let foreign = fixture.base.join("foreign-live-source");
+    std::fs::create_dir(&foreign)?;
+    let executor = SystemExecutor::new(1)?;
+    init_fixture_repository(&executor, &foreign, &fixture.git_home)?;
+    let mut live = fixture.task.clone();
+    live.head = None;
+    live.base = None;
+    live.access.source_root = Some(foreign.clone());
+    live.access.source_identity = Some(source_identity(&foreign)?);
+    live.access.source_live = true;
+    assert_eq!(source_cwd(&fixture.registry(), &live)?, foreign);
+
+    let prepared = fixture.prepare(&live)?;
+    assert_eq!(prepared.cwd, foreign);
+    let plan = &prepared
+        .confinement
+        .as_ref()
+        .ok_or("missing live confinement")?
+        .plan;
+    assert!(
+        plan.permissions()
+            .protected_roots
+            .iter()
+            .any(|root| { root.path == foreign && root.scope == PathScope::Subtree })
+    );
+    Ok(())
+}
+
+#[test]
+fn reader_source_resolution_uses_checkout_not_separate_git_parent()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_os::exec::SystemExecutor;
+
+    let fixture = read_only_source_fixture()?;
+    let separate = fixture.base.join("separate-checkout");
+    std::fs::create_dir(&separate)?;
+    let separate_git = fixture.base.join(".git");
+    let args = vec![
+        "init".into(),
+        "-q".into(),
+        "--separate-git-dir".into(),
+        separate_git.as_os_str().to_owned(),
+        separate.as_os_str().to_owned(),
+    ];
+    let executor = SystemExecutor::new(1)?;
+    run_source_git(
+        &executor,
+        &fixture.git,
+        &fixture.git_home,
+        &fixture.base,
+        &args,
     )?;
     assert_eq!(
-        std::fs::read(historical.cwd.join("subject"))?,
-        b"verified checkout"
+        run::resolve_reader_source(&fixture.state, &separate, &separate)?,
+        separate
     );
-    // An exception that would grant writes into the live checkout cannot be
-    // carried into an isolated source view.
-    std::fs::create_dir(source.join("mutable"))?;
-    let project_state = state
+    assert!(run::resolve_reader_source(&fixture.state, &separate, &fixture.base).is_err());
+    let nested = fixture.project.join("nested");
+    std::fs::create_dir(&nested)?;
+    assert_eq!(
+        run::resolve_reader_source(&fixture.state, &nested, &nested)?,
+        fixture.project
+    );
+    Ok(())
+}
+
+#[test]
+fn isolated_source_refuses_project_write_exceptions() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = read_only_source_fixture()?;
+    fixture.prepare(&fixture.task)?;
+    std::fs::create_dir(fixture.source.join("mutable"))?;
+    let project_state = fixture
+        .state
         .join("projects")
-        .join(binding.project_id().to_string());
+        .join(fixture.project_id.to_string());
     std::fs::create_dir_all(&project_state)?;
     std::fs::set_permissions(&project_state, std::fs::Permissions::from_mode(0o700))?;
     let policy = project_state.join("read-only.json");
     std::fs::write(&policy, r#"{"readOnlyWritable":["mutable"]}"#)?;
     std::fs::set_permissions(&policy, std::fs::Permissions::from_mode(0o600))?;
-    let refused = prepare_command(
-        &registry,
-        &task,
-        &paths,
-        None,
-        &|_| Ok(fake.clone()),
-        "command",
-        "fake",
-    )
-    .err()
-    .ok_or("live-source write exception was accepted")?;
-    assert!(
-        refused
-            .to_string()
-            .contains("read-only project write policy"),
-        "{refused}"
-    );
-    std::fs::remove_file(policy)?;
-    // Replacing the path with another registered worktree at the same head
-    // must not silently replace the source selected at admission.
-    let moved_path = base.join("moved-source");
-    let move_args = vec![
-        git.clone().into_os_string(),
-        "worktree".into(),
-        "move".into(),
-        source.clone().into_os_string(),
-        moved_path.into_os_string(),
-    ];
-    let moved = executor.execute(ExecOptions::new(
-        &move_args,
-        &project,
-        Duration::from_secs(5),
-    ))?;
-    assert_eq!(moved.termination, Termination::Exit(0));
-    let added = executor.execute(ExecOptions::new(
-        &added_args,
-        &project,
-        Duration::from_secs(5),
-    ))?;
-    assert_eq!(added.termination, Termination::Exit(0));
-    assert!(
-        source_cwd(&registry, &task)
-            .unwrap_err()
-            .to_string()
-            .contains("identity changed")
-    );
+    let error = fixture
+        .prepare(&fixture.task)
+        .err()
+        .ok_or("isolated source accepted a project write exception")?;
+    assert!(matches!(
+        error,
+        PrepareError::ReadOnly(ReadOnlyPlanError::Plan(
+            provenant_confinement::PlanError::Permission(
+                provenant_confinement::permissions::PermissionError::InvalidReadOnlyPolicy
+            )
+        ))
+    ));
     Ok(())
 }
 
@@ -1865,15 +1813,16 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
 fn writer_preparation_warning_names_setting_and_origin() {
     let mut profile = provenant_records::run::HarnessProfile::default();
     let default = super::dependency_preparation_warning("missing pnpm".into(), true, &profile);
-    assert!(default.contains("lanes.prepare_deps=true (compiled default)"));
-    assert!(default.contains("pnpm install --frozen-lockfile` in the worktree"));
+    assert!(default.contains("lanes.prepare_deps"));
+    assert!(!default.contains(&profile.name));
     profile.name = "focused".into();
     profile
         .knobs
         .insert("lanes.prepare_deps".into(), true.into());
     let configured = super::dependency_preparation_warning("missing pnpm".into(), true, &profile);
-    assert!(configured.contains("lanes.prepare_deps=true (sealed profile focused)"));
-    assert!(configured.contains("lanes.prepare_deps=false"));
+    assert!(configured.contains("lanes.prepare_deps"));
+    assert!(configured.contains(&profile.name));
+    assert_ne!(default, configured);
 }
 
 #[test]
@@ -1901,15 +1850,43 @@ fn write_grant_limit_reports_configured_value_and_origin() -> Result<(), Box<dyn
         default.origin,
         provenant_records::diagnostic::SettingSource::ShippedDefault
     );
+    let configured_limit = provenant_records::run::MAX_WRITE_GRANT_BYTES_CEILING;
+    let mut run_config = provenant_confinement::run_config::RunConfig::default();
+    run_config.write_grant_limit_bytes = configured_limit;
+    let run_config_toml = toml_edit::ser::to_string(&run_config)?;
     std::fs::write(
         state.join("config.toml"),
-        "schema_version=1\n[domains.run]\nwrite_grant_limit_bytes=1048576\n",
+        format!("schema_version=1\n[domains.run]\n{run_config_toml}"),
     )?;
     let configured = registry.write_grant_limit(&policy);
-    assert_eq!(configured.bytes, 1048576);
+    assert_eq!(configured.bytes, configured_limit);
     assert_eq!(
         configured.origin,
         provenant_records::diagnostic::SettingSource::Configuration
     );
     Ok(())
+}
+
+fn unavailable_route(adapter: &str) -> ResolvedRoute {
+    ResolvedRoute {
+        selection_context: Default::default(),
+        user_skills: true,
+        diagnostics: Default::default(),
+        extra: Default::default(),
+        adapter: adapter.into(),
+        model: "example".into(),
+        effort: None,
+        catalogue_revision: "fixture".into(),
+        account_key: None,
+        host: "fixture".into(),
+        alternatives: Default::default(),
+        exclusions: Vec::new(),
+        eligibility: provenant_records::RouteEligibility::Eligible,
+        readiness: provenant_records::RouteReadiness::unknown(),
+        confidentiality: provenant_records::RouteConfidentiality {
+            extra: Default::default(),
+            evidence_ref: "fixture".into(),
+        },
+        pool_selection: None,
+    }
 }

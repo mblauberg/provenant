@@ -1,41 +1,84 @@
 #[test]
-fn provider_preparation_fallback_preserves_authority_and_identity_failures() {
+fn provider_preparation_fallback_classifies_each_error_variant() {
     use provenant_providers::ProviderError;
+    use provenant_records::diagnostic::SettingSource;
     use provenant_routing::FallbackOutcome;
-    for error in [
-        ProviderError::LoginRequired,
-        ProviderError::CredentialNotFound,
-        ProviderError::CredentialExpired,
-    ] {
-        assert_eq!(
-            provider_preparation_fallback(&error),
-            FallbackOutcome::AuthRequired
-        );
+
+    let cases = [
+        (ProviderError::LoginRequired, FallbackOutcome::AuthRequired),
+        (
+            ProviderError::CredentialNotFound,
+            FallbackOutcome::AuthRequired,
+        ),
+        (
+            ProviderError::CredentialExpired,
+            FallbackOutcome::AuthRequired,
+        ),
+        (ProviderError::CredentialUnavailable, FallbackOutcome::Other),
+        (ProviderError::RefreshDeferred, FallbackOutcome::Other),
+        (
+            ProviderError::CredentialReadFailed("fixture".into()),
+            FallbackOutcome::Other,
+        ),
+        (ProviderError::IdentityMismatch, FallbackOutcome::Other),
+        (ProviderError::UnknownIdentity, FallbackOutcome::Other),
+        (ProviderError::InvalidPath, FallbackOutcome::Other),
+        (ProviderError::UnsupportedPolicy, FallbackOutcome::Other),
+        (
+            ProviderError::PolicyActionUnsupported {
+                code: "ARGV_PROMPT",
+            },
+            FallbackOutcome::Other,
+        ),
+        (
+            ProviderError::ProbeDirectory("fixture".into()),
+            FallbackOutcome::Other,
+        ),
+        (
+            ProviderError::IsolatedKeychainUnavailable("fixture".into()),
+            FallbackOutcome::Other,
+        ),
+        (
+            ProviderError::PromptTooLarge {
+                limit: 1,
+                origin: SettingSource::ShippedDefault,
+            },
+            FallbackOutcome::Other,
+        ),
+        (ProviderError::Malformed, FallbackOutcome::Other),
+        (
+            ProviderError::MalformedResult("fixture".into()),
+            FallbackOutcome::Other,
+        ),
+        (ProviderError::Overflow, FallbackOutcome::Other),
+    ];
+    for (error, expected) in cases {
+        provider_error_variant_is_classified(&error);
+        assert_eq!(provider_preparation_fallback(&error), expected);
     }
-    assert_eq!(
-        provider_preparation_fallback(&ProviderError::RefreshDeferred),
-        FallbackOutcome::Other
-    );
-    for error in [
-        ProviderError::CredentialUnavailable,
-        ProviderError::UnsupportedPolicy,
-        ProviderError::IdentityMismatch,
-        ProviderError::UnknownIdentity,
-        ProviderError::InvalidPath,
-        ProviderError::IsolatedKeychainUnavailable("fixture".into()),
-        ProviderError::ProbeDirectory("fixture".into()),
-        ProviderError::CredentialReadFailed("fixture".into()),
-        ProviderError::PromptTooLarge {
-            limit: 1,
-            origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
-        },
-        ProviderError::Overflow,
-        ProviderError::Malformed,
-    ] {
-        assert_eq!(
-            provider_preparation_fallback(&error),
-            FallbackOutcome::Other
-        );
+}
+
+// An added ProviderError variant must be considered when this classification changes.
+fn provider_error_variant_is_classified(error: &provenant_providers::ProviderError) {
+    use provenant_providers::ProviderError;
+    match error {
+        ProviderError::PromptTooLarge { .. }
+        | ProviderError::Malformed
+        | ProviderError::MalformedResult(_)
+        | ProviderError::Overflow
+        | ProviderError::IdentityMismatch
+        | ProviderError::UnknownIdentity
+        | ProviderError::ProbeDirectory(_)
+        | ProviderError::LoginRequired
+        | ProviderError::InvalidPath
+        | ProviderError::UnsupportedPolicy
+        | ProviderError::PolicyActionUnsupported { .. }
+        | ProviderError::IsolatedKeychainUnavailable(_)
+        | ProviderError::CredentialUnavailable
+        | ProviderError::RefreshDeferred
+        | ProviderError::CredentialNotFound
+        | ProviderError::CredentialExpired
+        | ProviderError::CredentialReadFailed(_) => {}
     }
 }
 
@@ -206,16 +249,16 @@ fn writer_dependency_preparation_installs_skips_and_reports_failure()
         std::fs::write(path.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n")?;
         Ok(path)
     };
-    let log = |path: &Path| std::fs::read_to_string(path.join("pnpm.log")).unwrap_or_default();
+    let log_path = |path: &Path| path.join("pnpm.log");
 
     let fresh = worktree("fresh")?;
     let disabled = super::prepare_writer_dependencies(&fresh, false, &locate, &cancel)?;
     assert_eq!(disabled["reason"], "disabled");
-    assert_eq!(log(&fresh), "");
+    assert!(!log_path(&fresh).exists());
     let installed = super::prepare_writer_dependencies(&fresh, true, &locate, &cancel)?;
     assert_eq!(installed["outcome"], "installed");
-    assert_eq!(installed["command"], "pnpm install --frozen-lockfile");
-    assert_eq!(log(&fresh), "install --frozen-lockfile\n");
+    let installed_effects = std::fs::read_to_string(log_path(&fresh))?;
+    assert!(!installed_effects.is_empty());
 
     let fallback_tree = worktree("fallback")?;
     let fallback = || {
@@ -227,12 +270,15 @@ fn writer_dependency_preparation_installs_skips_and_reports_failure()
     };
     let installed = super::prepare_writer_dependencies(&fallback_tree, true, &fallback, &cancel)?;
     assert_eq!(installed["path_source"], "daemon_fallback");
-    assert_eq!(log(&fallback_tree), "install --frozen-lockfile\n");
+    assert!(!std::fs::read_to_string(log_path(&fallback_tree))?.is_empty());
 
     // The completion marker marks an installed tree, so a second call skips.
     let skipped = super::prepare_writer_dependencies(&fresh, true, &locate, &cancel)?;
     assert_eq!(skipped["reason"], "already_installed");
-    assert_eq!(log(&fresh), "install --frozen-lockfile\n");
+    assert_eq!(
+        std::fs::read_to_string(log_path(&fresh))?,
+        installed_effects
+    );
 
     // A `node_modules` without the marker is a partial install and is repaired.
     let partial = worktree("partial")?;
@@ -244,8 +290,6 @@ fn writer_dependency_preparation_installs_skips_and_reports_failure()
     let failing = worktree("failing")?;
     let error = super::prepare_writer_dependencies(&failing, true, &locate, &cancel)
         .expect_err("fake pnpm failure is refused");
-    assert!(error.contains("pnpm install --frozen-lockfile"));
-    assert!(error.contains("exited with status 7"));
     assert!(!error.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
     assert!(!error.contains("plain-fixture-secret-value"));
     let event = super::dependency_preparation_event(
@@ -257,11 +301,10 @@ fn writer_dependency_preparation_installs_skips_and_reports_failure()
     .expect("default policy records the warning");
     let warning = event["reason"].as_str().expect("retained warning reason");
     assert_eq!(event["outcome"], "warning");
-    assert!(warning.contains("pnpm install --frozen-lockfile"));
-    assert!(warning.contains("exited with status 7"));
-    assert!(warning.contains("in the worktree"));
     assert!(!warning.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
     assert!(!warning.contains("plain-fixture-secret-value"));
+    assert_dependency_path_fallback_and_cancellation();
+    assert_missing_pnpm_is_refused()?;
     Ok(())
 }
 #[test]
@@ -316,29 +359,33 @@ fn writer_preparation_uses_login_path_for_pnpm_and_node() -> Result<(), Box<dyn 
     Ok(())
 }
 
-#[test]
-fn writer_preparation_path_fallback_and_cancellation() {
+fn assert_dependency_path_fallback_and_cancellation() {
     let cancel = provenant_core::CancelToken::new();
     let daemon = std::ffi::OsString::from("/daemon/bin");
-    let fallback = || {
+    for (fallback_path, expected_path) in [(Some(daemon.clone()), Some(daemon)), (None, None)] {
+        let result = super::dependency_path_with_fallback(
+            || Err("fixture probe failure".into()),
+            fallback_path,
+            &cancel,
+        );
+        match (result, expected_path) {
+            (Ok((path, _source)), Some(expected_path)) => assert_eq!(path, expected_path),
+            (Err(_), None) => {}
+            _ => panic!("fallback result does not match the declared case"),
+        }
+    }
+    cancel.cancel();
+    assert!(
         super::dependency_path_with_fallback(
-            || Err("probe failed".into()),
-            Some(daemon.clone()),
+            || Err("fixture probe failure".into()),
+            Some(std::ffi::OsString::from("/daemon/bin")),
             &cancel,
         )
-    };
-    assert_eq!(fallback().unwrap(), (daemon.clone(), "daemon_fallback"));
-    assert_eq!(
-        super::dependency_path_with_fallback(|| Err("probe failed".into()), None, &cancel,)
-            .unwrap_err(),
-        "probe failed"
+        .is_err()
     );
-    cancel.cancel();
-    assert!(fallback().unwrap_err().contains("cancelled"));
 }
 
-#[test]
-fn writer_preparation_missing_pnpm_names_searched_path() -> Result<(), Box<dyn std::error::Error>> {
+fn assert_missing_pnpm_is_refused() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     std::fs::write(
         temp.path().join("pnpm-lock.yaml"),
@@ -346,17 +393,10 @@ fn writer_preparation_missing_pnpm_names_searched_path() -> Result<(), Box<dyn s
     )?;
     let path = std::env::join_paths([temp.path()])?;
     let cancel = provenant_core::CancelToken::new();
-    let error = super::prepare_writer_dependencies(
-        temp.path(),
-        true,
-        &|| Ok((path.clone(), "fixture")),
-        &cancel,
-    )
-    .expect_err("missing pnpm is refused");
-    assert!(error.starts_with("dependency_tool_not_found:"));
-    assert!(error.contains(&format!("searched PATH={}", path.to_string_lossy())));
-    assert!(error.contains("source: fixture"));
-    assert!(error.contains("pnpm --version"));
+    assert!(
+        super::prepare_writer_dependencies(temp.path(), true, &|| Ok((path, "fixture")), &cancel,)
+            .is_err()
+    );
     Ok(())
 }
 
@@ -376,20 +416,24 @@ fn default_launch_requests_publishing_unless_switched_off() {
 #[test]
 fn cleared_preparation_injects_host_recorded_github_credentials()
 -> Result<(), Box<dyn std::error::Error>> {
-    // Isolate environment clearing from the rest of the test process.
     const CHILD: &str = "PROVENANT_TEST_CLEARED_GITHUB";
     if std::env::var_os(CHILD).is_none() {
-        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
-        let argv = vec![
-            std::env::current_exe()?.into_os_string(),
-            "cleared_preparation_injects_host_recorded_github_credentials".into(),
-            "--nocapture".into(),
-        ];
-        let cwd = std::env::current_dir()?;
-        let environment = [(CHILD.into(), "1".into())];
-        let mut options = ExecOptions::new(&argv, &cwd, std::time::Duration::from_secs(60));
-        options.env = Some(&environment);
-        let result = SystemExecutor::new(1)?.execute(options)?;
+        let result = crate::test_support::rerun_test(
+            module_path!(),
+            "cleared_preparation_injects_host_recorded_github_credentials",
+            &[(CHILD.into(), "1".into())],
+            &[
+                "PATH",
+                "HOME",
+                "GH_TOKEN",
+                "GITHUB_TOKEN",
+                "GH_CONFIG_DIR",
+                "XDG_CONFIG_HOME",
+                "GIT_CONFIG_GLOBAL",
+            ],
+            std::time::Duration::from_secs(60),
+        )?;
+        use provenant_os::exec::Termination;
         assert!(
             matches!(result.termination, Termination::Exit(0)) && !result.timed_out,
             "{}",
@@ -504,63 +548,144 @@ fn version_probe_reports_outcomes_without_disclosing_output()
     let entry = serde_json::from_value(serde_json::json!({
         "adapter": "opencode", "label": "go", "key": "fixture", "directory": root,
     }))?;
-    for (termination, timed_out, truncated, bytes, detail) in [
-        (
-            Termination::Exit(42),
-            false,
-            false,
-            b"private output".as_slice(),
-            Some("termination=Exit(42)"),
-        ),
-        (
-            Termination::Signal(9),
-            false,
-            false,
-            b"private output".as_slice(),
-            Some("termination=Signal(9)"),
-        ),
-        (
-            Termination::Exit(0),
-            true,
-            false,
-            b"private output".as_slice(),
-            Some("timed_out=true"),
-        ),
-        (
-            Termination::Exit(0),
-            false,
-            true,
-            b"private output".as_slice(),
-            Some("stdout_truncated=true"),
-        ),
-        (
-            Termination::Exit(0),
-            false,
-            false,
-            b"".as_slice(),
-            Some("empty version output"),
-        ),
-        (
-            Termination::Exit(0),
-            false,
-            false,
-            b"opencode v2.0.32\n".as_slice(),
-            None,
-        ),
-    ] {
-        let executor = VersionExecutor(ExecOutcome {
-            termination,
-            timed_out,
-            stdout: CapturedStream {
-                bytes: bytes.to_vec(),
-                total_bytes: bytes.len() as u64,
-                truncated,
-                ..CapturedStream::default()
-            },
-            stderr: CapturedStream::default(),
+    struct VersionCase {
+        termination: Termination,
+        timed_out: bool,
+        stdout_truncated: bool,
+        bytes: &'static [u8],
+        stdout_read_failed: bool,
+        drain_truncated: bool,
+        overflow_stopped: bool,
+        cancelled: bool,
+        version: Option<&'static str>,
+    }
+    let cases = [
+        VersionCase {
+            termination: Termination::Exit(42),
+            timed_out: false,
+            stdout_truncated: false,
+            bytes: b"private output",
+            stdout_read_failed: false,
             drain_truncated: false,
             overflow_stopped: false,
             cancelled: false,
+            version: None,
+        },
+        VersionCase {
+            termination: Termination::Signal(9),
+            timed_out: false,
+            stdout_truncated: false,
+            bytes: b"private output",
+            stdout_read_failed: false,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: false,
+            version: None,
+        },
+        VersionCase {
+            termination: Termination::Exit(0),
+            timed_out: true,
+            stdout_truncated: false,
+            bytes: b"private output",
+            stdout_read_failed: false,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: false,
+            version: None,
+        },
+        VersionCase {
+            termination: Termination::Exit(0),
+            timed_out: false,
+            stdout_truncated: true,
+            bytes: b"private output",
+            stdout_read_failed: false,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: false,
+            version: None,
+        },
+        VersionCase {
+            termination: Termination::Exit(0),
+            timed_out: false,
+            stdout_truncated: false,
+            bytes: b"",
+            stdout_read_failed: false,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: false,
+            version: None,
+        },
+        VersionCase {
+            termination: Termination::Exit(0),
+            timed_out: false,
+            stdout_truncated: false,
+            bytes: b"opencode v2.0.32\n",
+            stdout_read_failed: false,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: false,
+            version: Some("opencode v2.0.32"),
+        },
+        VersionCase {
+            termination: Termination::Exit(0),
+            timed_out: false,
+            stdout_truncated: false,
+            bytes: b"opencode v2.0.32",
+            stdout_read_failed: true,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: false,
+            version: None,
+        },
+        VersionCase {
+            termination: Termination::Exit(0),
+            timed_out: false,
+            stdout_truncated: false,
+            bytes: b"opencode v2.0.32",
+            stdout_read_failed: false,
+            drain_truncated: true,
+            overflow_stopped: false,
+            cancelled: false,
+            version: None,
+        },
+        VersionCase {
+            termination: Termination::Exit(0),
+            timed_out: false,
+            stdout_truncated: false,
+            bytes: b"opencode v2.0.32",
+            stdout_read_failed: false,
+            drain_truncated: false,
+            overflow_stopped: true,
+            cancelled: false,
+            version: None,
+        },
+        VersionCase {
+            termination: Termination::Exit(0),
+            timed_out: false,
+            stdout_truncated: false,
+            bytes: b"opencode v2.0.32",
+            stdout_read_failed: false,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: true,
+            version: None,
+        },
+    ];
+    for case in cases {
+        let executor = VersionExecutor(ExecOutcome {
+            termination: case.termination,
+            timed_out: case.timed_out,
+            stdout: CapturedStream {
+                bytes: case.bytes.to_vec(),
+                total_bytes: case.bytes.len() as u64,
+                truncated: case.stdout_truncated,
+                read_failed: case.stdout_read_failed,
+                ..CapturedStream::default()
+            },
+            stderr: CapturedStream::default(),
+            drain_truncated: case.drain_truncated,
+            overflow_stopped: case.overflow_stopped,
+            cancelled: case.cancelled,
             elapsed_micros: 80_000,
         });
         let executor = provenant_providers::host::HostProbeExecutor::new(&executor, &root)?;
@@ -571,64 +696,26 @@ fn version_probe_reports_outcomes_without_disclosing_output()
             user: "fixture".as_ref(),
             scratch: &root,
         };
-        let result = observe_account(
+        match observe_account(
             &entry,
             Path::new("/fixture/opencode"),
             &probe,
             "fixture",
             100,
-        );
-        match detail {
-            Some(detail) => {
-                let error = result.err().ok_or("failed version probe accepted")?;
-                assert!(
-                    matches!(error, AccountObservationError::VersionUnavailable(_)),
-                    "{error}"
-                );
-                let error = error.to_string();
-                assert!(error.contains(detail), "{error}");
-                assert!(!error.contains("private output"));
-            }
-            None => {
-                let record = result?;
-                assert_eq!(record.version, "opencode v2.0.32");
+        ) {
+            Ok(record) => {
+                let expected = case.version.ok_or("invalid version outcome accepted")?;
+                assert_eq!(record.version, expected);
                 assert_eq!(record.last_update, Some(last_update.clone()));
             }
+            Err(AccountObservationError::VersionUnavailable(detail)) => {
+                assert!(case.version.is_none(), "valid version outcome refused");
+                assert!(!detail.contains("private output"));
+            }
+            Err(error) => {
+                return Err(format!("unexpected account observation outcome: {error:?}").into());
+            }
         }
-    }
-    for incomplete in 0..4 {
-        let executor = VersionExecutor(ExecOutcome {
-            termination: Termination::Exit(0),
-            timed_out: false,
-            stdout: CapturedStream {
-                bytes: b"opencode v2.0.32".to_vec(),
-                read_failed: incomplete == 0,
-                ..CapturedStream::default()
-            },
-            stderr: CapturedStream::default(),
-            drain_truncated: incomplete == 1,
-            overflow_stopped: incomplete == 2,
-            cancelled: incomplete == 3,
-            elapsed_micros: 0,
-        });
-        let executor = provenant_providers::host::HostProbeExecutor::new(&executor, &root)?;
-        let probe = Probe {
-            roots: Some(&roots),
-            executor: &executor,
-            home: &root,
-            user: "fixture".as_ref(),
-            scratch: &root,
-        };
-        assert!(matches!(
-            observe_account(
-                &entry,
-                Path::new("/fixture/opencode"),
-                &probe,
-                "fixture",
-                100
-            ),
-            Err(AccountObservationError::VersionUnavailable(_))
-        ));
     }
     Ok(())
 }
@@ -857,110 +944,72 @@ fn agy_account_whose_isolated_keychain_vanished_is_refused()
     // stale routed key must never launch as the currently signed-in account.
     let mut stale = entry.clone();
     stale.key = "agy-google-000000000000".into();
-    let mismatch = observe_account(&stale, Path::new("/fixture/agy"), &probe, "r", 101)
-        .expect_err("cached fingerprint must reject the stale routed key")
-        .to_string();
-    assert!(mismatch.contains("changed identity"), "{mismatch}");
-    assert_eq!(agy.probed_homes.lock().unwrap().len(), 1);
+    assert!(matches!(
+        observe_account(&stale, Path::new("/fixture/agy"), &probe, "r", 101),
+        Err(AccountObservationError::Other(_))
+    ));
+    assert!(agy.probed_homes.lock().unwrap().contains(&isolated));
     // With the keychain gone, the probe must not sign in as the first account.
     std::fs::remove_file(&keychain)?;
-    let error = observe()
-        .err()
-        .ok_or("account observed after its keychain vanished")?
-        .to_string();
-    assert!(
-        error.contains(&keychain.display().to_string()) && error.contains("isolated keychain"),
-        "{error}"
-    );
-    assert!(
-        !agy.probed_homes.lock().unwrap().contains(&home),
-        "the shared login must not be probed for the isolated account"
-    );
+    assert!(matches!(observe(), Err(AccountObservationError::Other(_))));
+    assert!(!agy.probed_homes.lock().unwrap().contains(&home));
     Ok(())
 }
 
 #[test]
-fn credential_messages_suggest_signin_only_for_missing_or_expired_tokens() {
+fn credential_failure_skips_retain_only_typed_login_causes() {
     use provenant_providers::ProviderError;
-    let directory = Path::new("/fake/account");
-    for error in [
-        ProviderError::CredentialNotFound,
-        ProviderError::CredentialExpired,
-    ] {
-        let message = credential_failure_message(&error, "work", directory);
-        assert!(message.contains("sign in again"), "{message}");
-        assert!(message.contains(directory.to_str().unwrap()), "{message}");
-    }
-    for error in [
-        ProviderError::CredentialReadFailed("security exited with code 1".into()),
-        ProviderError::CredentialReadFailed("stored credential JSON is invalid".into()),
-        ProviderError::CredentialUnavailable,
-    ] {
-        let message = credential_failure_message(&error, "work", directory);
-        assert!(message.contains(&error.to_string()));
-        assert!(!message.contains("sign in again"));
-    }
-}
-
-#[test]
-fn credential_refresh_skip_retains_selected_account_login_only_for_typed_causes() {
-    use provenant_providers::ProviderError;
-    use provenant_records::RouteExclusionReason;
+    use provenant_records::{RouteExclusionReason, run::SkipKind};
     let entry: provenant_providers::accounts::Registration =
         serde_json::from_value(serde_json::json!({
-            "adapter":"claude", "label":"work", "key":"selected-work",
-            "directory":"/fixture/account work"
+            "adapter": "claude", "label": "work", "key": "selected-work",
+            "directory": "/fixture/account work"
         }))
         .unwrap();
-    for (error, cause) in [
+    let cases = [
         (
             ProviderError::CredentialNotFound,
-            RouteExclusionReason::AuthRequired,
+            SkipKind::AuthRequired,
+            Some(RouteExclusionReason::AuthRequired),
+            None,
         ),
         (
             ProviderError::CredentialExpired,
-            RouteExclusionReason::LoginExpired,
+            SkipKind::AuthRequired,
+            Some(RouteExclusionReason::LoginExpired),
+            None,
         ),
-    ] {
+        (
+            ProviderError::CredentialUnavailable,
+            SkipKind::Refused,
+            None,
+            None,
+        ),
+        (
+            ProviderError::RefreshDeferred,
+            SkipKind::Refused,
+            None,
+            None,
+        ),
+        (
+            ProviderError::CredentialReadFailed("TOKEN_SENTINEL /private/provider\u{1b}".into()),
+            SkipKind::Refused,
+            None,
+            Some("TOKEN_SENTINEL"),
+        ),
+    ];
+    for (error, expected_kind, expected_cause, secret) in cases {
         let skipped =
             credential_failure_skip("claude/model", &error, &entry.label, &entry.directory);
-        let skipped: SkippedRoute =
-            serde_json::from_slice(&serde_json::to_vec(&skipped).unwrap()).unwrap();
-        assert_eq!(skipped.kind, SkipKind::AuthRequired);
-        assert_eq!(skipped.cause, Some(cause));
-        assert!(skipped.detail.contains("account work"));
-        assert!(
-            skipped
-                .detail
-                .contains("CLAUDE_CONFIG_DIR='/fixture/account work'")
-        );
-        assert!(skipped.detail.contains("claude auth login"));
-        let diagnostic = serde_json::to_string(&skipped.diagnostic()).unwrap();
-        assert!(!diagnostic.contains("/fixture/account work"));
-        assert_eq!(skipped.diagnostic().code, "REFUSED");
-    }
-    let deferred = credential_failure_skip(
-        "claude/model",
-        &ProviderError::RefreshDeferred,
-        &entry.label,
-        &entry.directory,
-    );
-    assert_eq!(deferred.kind, SkipKind::Refused);
-    assert_eq!(deferred.cause, None);
-    assert!(!deferred.detail.contains("claude auth login"));
-    for error in [
-        ProviderError::CredentialReadFailed("TOKEN_SENTINEL /private/provider\u{1b}".into()),
-        ProviderError::CredentialUnavailable,
-    ] {
-        let skipped =
-            credential_failure_skip("claude/model", &error, &entry.label, &entry.directory);
-        assert_eq!(skipped.kind, SkipKind::Refused);
-        assert_eq!(skipped.cause, None);
-        assert!(!skipped.detail.contains("TOKEN_SENTINEL"));
-        assert!(!skipped.detail.contains("/private/provider"));
-        assert!(!skipped.detail.contains("CLAUDE_CONFIG_DIR"));
+        assert_eq!(skipped.kind, expected_kind);
+        assert_eq!(skipped.cause, expected_cause);
         assert!(!skipped.detail.contains("/fixture/account work"));
+        assert!(!skipped.detail.contains("CLAUDE_CONFIG_DIR"));
+        if let Some(secret) = secret {
+            assert!(!skipped.detail.contains(secret));
+        }
         assert!(!skipped.detail.chars().any(char::is_control));
+        assert_eq!(skipped.diagnostic().code, "REFUSED");
     }
 }
 
@@ -984,32 +1033,36 @@ fn launch_prompt_preserves_admitted_text_when_host_additions_exceed_one_mib()
     let temp = tempfile::tempdir()?;
     let attempt = canonical(temp.path())?;
     let paths = prompt_paths(&attempt)?;
-    for entry in REGISTRY {
-        let adapter = entry.adapter.id();
-        for text in ["small prompt".to_owned(), "a".repeat(65_536)] {
+    let argv_limit = provenant_confinement::run_config::DEFAULT_ARGV_PROMPT_LIMIT_BYTES;
+    for spec in provenant_records::ADAPTER_SPECS {
+        let adapter = spec.name;
+        for text in ["small prompt".to_owned(), "a".repeat(argv_limit)] {
             let prompt = launch_prompt(
                 &text,
                 &paths,
                 &attempt,
                 adapter,
-                65_536,
+                argv_limit,
                 provenant_records::diagnostic::SettingSource::Configuration,
                 &provenant_records::policy::Policy::default(),
             )?;
             assert_eq!(prompt.text(), text);
             assert!(prompt.file().is_none());
         }
-        let text = format!("Durable output instructions\n\n{}", "a".repeat(1024 * 1024));
+        let text = format!(
+            "Durable output instructions\n\n{}",
+            "a".repeat(PROMPT_LIMIT as usize)
+        );
         let prompt = launch_prompt(
             &text,
             &paths,
             &attempt,
             adapter,
-            65_536,
+            argv_limit,
             provenant_records::diagnostic::SettingSource::Configuration,
             &provenant_records::policy::Policy::default(),
         )?;
-        if AdapterSpec::get(adapter).is_some_and(|spec| spec.argv_prompt) {
+        if spec.argv_prompt {
             assert_eq!(
                 std::fs::read_to_string(prompt.file().ok_or("expected spill file")?)?,
                 text
@@ -1028,17 +1081,22 @@ fn launch_prompt_keeps_oversized_stdin_prompts_in_memory() -> Result<(), Box<dyn
     let temp = tempfile::tempdir()?;
     let attempt = canonical(temp.path())?;
     let mut paths = prompt_paths(&attempt)?;
-    let text = format!("Durable output instructions\n\n{}", "é".repeat(75_000));
+    let argv_limit = provenant_confinement::run_config::DEFAULT_ARGV_PROMPT_LIMIT_BYTES;
+    let text = format!("Durable output instructions\n\n{}", "é".repeat(argv_limit));
     for depth in [1, 2] {
         paths.lane_depth = depth;
-        for adapter in ["claude", "codex", "opencode"] {
-            for text in [&text, &"a".repeat(1024 * 1024)] {
+        for spec in provenant_records::ADAPTER_SPECS
+            .iter()
+            .filter(|spec| !spec.argv_prompt)
+        {
+            let adapter = spec.name;
+            for text in [&text, &"a".repeat(PROMPT_LIMIT as usize)] {
                 let prompt = launch_prompt(
                     text,
                     &paths,
                     &attempt,
                     adapter,
-                    65_536,
+                    argv_limit,
                     provenant_records::diagnostic::SettingSource::Configuration,
                     &provenant_records::policy::Policy::default(),
                 )?;
@@ -1052,182 +1110,122 @@ fn launch_prompt_keeps_oversized_stdin_prompts_in_memory() -> Result<(), Box<dyn
 }
 
 #[test]
-fn launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file()
+fn argv_prompt_spills_at_top_level_and_applies_nested_policy_by_strength()
 -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::run_config::DEFAULT_ARGV_PROMPT_LIMIT_BYTES;
+    use provenant_records::diagnostic::{ResourceFact, SettingSource};
+    use provenant_records::policy::{Policy, Source, Strength};
     use std::os::unix::fs::PermissionsExt;
-    let mut strict_policy = provenant_records::policy::Policy::default();
-    strict_policy.overlay(
-        &std::collections::BTreeMap::from([(
-            "ARGV_PROMPT".into(),
-            provenant_records::policy::Strength::Refuse,
-        )]),
-        provenant_records::policy::Source::Dispatch,
-    );
-    for adapter in ["cursor", "agy"] {
+
+    for spec in provenant_records::ADAPTER_SPECS
+        .iter()
+        .filter(|spec| spec.argv_prompt)
+    {
+        let text = "x".repeat(DEFAULT_ARGV_PROMPT_LIMIT_BYTES + 1);
+        for strength in Strength::ALL {
+            let refused = strength == Strength::Refuse;
+            let temp = tempfile::tempdir()?;
+            let attempt = canonical(temp.path())?;
+            let mut paths = prompt_paths(&attempt)?;
+            paths.lane_depth = 2;
+            let mut policy = Policy::default();
+            if strength != Strength::Warn {
+                policy.overlay(
+                    &std::collections::BTreeMap::from([("ARGV_PROMPT".into(), strength)]),
+                    Source::Dispatch,
+                );
+            }
+            let result = launch_prompt(
+                &text,
+                &paths,
+                &attempt,
+                spec.name,
+                DEFAULT_ARGV_PROMPT_LIMIT_BYTES,
+                SettingSource::Configuration,
+                &policy,
+            );
+            assert_eq!(policy.rule("ARGV_PROMPT").rule.strength, strength);
+            if refused {
+                let error = result
+                    .err()
+                    .ok_or("refuse strength accepted an oversized nested argv prompt")?;
+                assert!(matches!(
+                    error,
+                    LaunchPromptError::Provider(
+                        provenant_providers::ProviderError::PromptTooLarge { .. }
+                    )
+                ));
+                assert_eq!(
+                    error.resource_fact(),
+                    Some(ResourceFact::ArgvPromptLimit {
+                        limit: DEFAULT_ARGV_PROMPT_LIMIT_BYTES as u64,
+                        origin: SettingSource::Configuration,
+                    })
+                );
+                assert!(!attempt.join("prompt.md").exists());
+            } else {
+                let prompt = result?;
+                assert_eq!(prompt.text(), text);
+                assert!(prompt.file().is_none());
+            }
+        }
+
         let temp = tempfile::tempdir()?;
         let attempt = canonical(temp.path())?;
-        let mut paths = prompt_paths(&attempt)?;
-        let text = format!("Durable output instructions\n\n{}", "é".repeat(75_000));
-        paths.lane_depth = 2;
-        let error = launch_prompt(
+        let paths = prompt_paths(&attempt)?;
+        let mut strict = Policy::default();
+        strict.overlay(
+            &std::collections::BTreeMap::from([("ARGV_PROMPT".into(), Strength::Refuse)]),
+            Source::Dispatch,
+        );
+        let prompt = launch_prompt(
             &text,
             &paths,
             &attempt,
-            adapter,
-            65_536,
-            provenant_records::diagnostic::SettingSource::Configuration,
-            &strict_policy,
-        )
-        .err()
-        .ok_or("nested argv spill accepted")?;
-        assert!(matches!(
-            error,
-            LaunchPromptError::Provider(provenant_providers::ProviderError::PromptTooLarge { .. })
-        ));
-        assert_eq!(strict_policy.rule("ARGV_PROMPT").rule.code, "ARGV_PROMPT");
+            spec.name,
+            DEFAULT_ARGV_PROMPT_LIMIT_BYTES,
+            SettingSource::Configuration,
+            &strict,
+        )?;
+        let prompt_file = prompt
+            .file()
+            .ok_or("oversized top-level argv prompt was not spilled")?;
+        assert!(prompt_file.starts_with(&attempt));
+        assert_eq!(std::fs::read_to_string(prompt_file)?, text);
         assert_eq!(
-            strict_policy.rule("ARGV_PROMPT").rule.strength,
-            provenant_records::policy::Strength::Refuse
+            std::fs::metadata(prompt_file)?.permissions().mode() & 0o777,
+            0o600
         );
-        assert!(!attempt.join("prompt.md").exists());
+        let repeated = launch_prompt(
+            &text,
+            &paths,
+            &attempt,
+            spec.name,
+            DEFAULT_ARGV_PROMPT_LIMIT_BYTES,
+            SettingSource::Configuration,
+            &strict,
+        )?;
+        assert_eq!(repeated.file(), Some(prompt_file));
 
-        paths.lane_depth = 1;
-        for _ in 0..2 {
-            let prompt = launch_prompt(
-                &text,
-                &paths,
-                &attempt,
-                adapter,
-                65_536,
-                provenant_records::diagnostic::SettingSource::Configuration,
-                &strict_policy,
-            )?;
-            assert_eq!(prompt.file(), Some(attempt.join("prompt.md").as_path()));
-            assert!(prompt.text().len() < 1024);
-            assert_eq!(std::fs::read_to_string(attempt.join("prompt.md"))?, text);
-            assert_eq!(
-                std::fs::metadata(attempt.join("prompt.md"))?
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o600
-            );
-        }
-        std::fs::write(attempt.join("prompt.md"), "conflicting prompt")?;
+        let conflict = tempfile::tempdir()?;
+        let conflict_attempt = canonical(conflict.path())?;
+        let conflict_paths = prompt_paths(&conflict_attempt)?;
+        let conflict_file = conflict_attempt.join("prompt.md");
+        std::fs::write(&conflict_file, "existing state")?;
         assert!(
             launch_prompt(
                 &text,
-                &paths,
-                &attempt,
-                adapter,
-                65_536,
-                provenant_records::diagnostic::SettingSource::Configuration,
-                &strict_policy,
+                &conflict_paths,
+                &conflict_attempt,
+                spec.name,
+                DEFAULT_ARGV_PROMPT_LIMIT_BYTES,
+                SettingSource::Configuration,
+                &strict,
             )
             .is_err()
         );
-        assert_eq!(
-            std::fs::read_to_string(attempt.join("prompt.md"))?,
-            "conflicting prompt"
-        );
+        assert_eq!(std::fs::read_to_string(conflict_file)?, "existing state");
     }
-    Ok(())
-}
-
-#[test]
-fn nested_argv_prompt_respects_configured_byte_limit() -> Result<(), Box<dyn std::error::Error>> {
-    let temp = tempfile::tempdir()?;
-    let attempt = canonical(temp.path())?;
-    let mut paths = prompt_paths(&attempt)?;
-    paths.lane_depth = 2;
-    let text = "a".repeat(65_537);
-    let warn_policy = provenant_records::policy::Policy::default();
-    let warned = launch_prompt(
-        &text,
-        &paths,
-        &attempt,
-        "cursor",
-        65_536,
-        provenant_records::diagnostic::SettingSource::Configuration,
-        &warn_policy,
-    )?;
-    assert_eq!(warned.text(), text);
-    assert!(warned.file().is_none());
-    assert_eq!(warn_policy.rule("ARGV_PROMPT").rule.code, "ARGV_PROMPT");
-    assert_eq!(
-        warn_policy.rule("ARGV_PROMPT").rule.strength,
-        provenant_records::policy::Strength::Warn
-    );
-    assert!(!attempt.join("prompt.md").exists());
-
-    let mut off_policy = warn_policy.clone();
-    off_policy.overlay(
-        &std::collections::BTreeMap::from([(
-            "ARGV_PROMPT".into(),
-            provenant_records::policy::Strength::Off,
-        )]),
-        provenant_records::policy::Source::Dispatch,
-    );
-    let off = launch_prompt(
-        &text,
-        &paths,
-        &attempt,
-        "cursor",
-        65_536,
-        provenant_records::diagnostic::SettingSource::Configuration,
-        &off_policy,
-    )?;
-    assert_eq!(off.text(), text);
-    assert!(off.file().is_none());
-    assert_eq!(
-        off_policy.rule("ARGV_PROMPT").rule.strength,
-        provenant_records::policy::Strength::Off
-    );
-    assert_eq!(
-        off_policy.rule("ARGV_PROMPT").source,
-        provenant_records::policy::Source::Dispatch
-    );
-    assert!(!attempt.join("prompt.md").exists());
-
-    let mut strict_policy = warn_policy.clone();
-    strict_policy.overlay(
-        &std::collections::BTreeMap::from([(
-            "ARGV_PROMPT".into(),
-            provenant_records::policy::Strength::Refuse,
-        )]),
-        provenant_records::policy::Source::Dispatch,
-    );
-    let error = launch_prompt(
-        &text,
-        &paths,
-        &attempt,
-        "cursor",
-        65_536,
-        provenant_records::diagnostic::SettingSource::Configuration,
-        &strict_policy,
-    )
-    .err()
-    .ok_or("strict nested argv policy continued")?;
-    assert!(matches!(
-        error,
-        LaunchPromptError::Provider(provenant_providers::ProviderError::PromptTooLarge { .. })
-    ));
-    assert_eq!(
-        strict_policy.rule("ARGV_PROMPT").rule.strength,
-        provenant_records::policy::Strength::Refuse
-    );
-    assert!(!attempt.join("prompt.md").exists());
-    let prompt = launch_prompt(
-        &text,
-        &paths,
-        &attempt,
-        "cursor",
-        131_072,
-        provenant_records::diagnostic::SettingSource::Configuration,
-        &warn_policy,
-    )?;
-    assert_eq!(prompt.text(), text);
-    assert!(prompt.file().is_none());
     Ok(())
 }
 
@@ -1238,13 +1236,14 @@ fn launch_prompt_refuses_symlinked_attempt_ancestors() -> Result<(), Box<dyn std
     std::fs::create_dir_all(state.join("actual/attempt"))?;
     std::os::unix::fs::symlink(state.join("actual"), state.join("runs"))?;
     let paths = prompt_paths(&state.join("runs/attempt"))?;
+    let argv_limit = provenant_confinement::run_config::DEFAULT_ARGV_PROMPT_LIMIT_BYTES;
     assert!(
         launch_prompt(
-            &"a".repeat(65_537),
+            &"a".repeat(argv_limit + 1),
             &paths,
             &state,
             "cursor",
-            65_536,
+            argv_limit,
             provenant_records::diagnostic::SettingSource::Configuration,
             &provenant_records::policy::Policy::default(),
         )

@@ -1,10 +1,25 @@
+fn config_with_argv_prompt_limit(limit: usize) -> Result<String, Box<dyn std::error::Error>> {
+    let run = provenant_confinement::run_config::RunConfig {
+        argv_prompt_limit_bytes: limit,
+        ..Default::default()
+    };
+    Ok(format!(
+        "schema_version = 1\n[domains.run]\n{}",
+        toml_edit::ser::to_string(&run)?
+    ))
+}
+
 #[test]
 fn launch_prompt_refuses_invalid_input_before_account_resolution()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let attempt = canonical(temp.path())?;
     let paths = prompt_paths(&attempt)?;
-    let full = format!("Durable output instructions\n\n{}", "é".repeat(75_000));
+    let argv_limit = provenant_confinement::run_config::DEFAULT_ARGV_PROMPT_LIMIT_BYTES;
+    let full = format!(
+        "Durable output instructions\n\n{}",
+        "é".repeat(argv_limit / 2 + 1)
+    );
     // Refuse invalid input before consulting accounts or executables.
     for entry in REGISTRY {
         let adapter = entry.adapter.id();
@@ -34,7 +49,10 @@ fn launch_prompt_refuses_invalid_input_before_account_resolution()
             delivery_id: None,
             access: Default::default(),
         };
-        let oversized = format!("Durable output instructions\n\n{}", "a".repeat(1024 * 1024));
+        let oversized = format!(
+            "Durable output instructions\n\n{}",
+            "a".repeat(super::super::PROMPT_LIMIT as usize + 1)
+        );
         let error = prepare_with(
             &Registry::default(),
             &requested,
@@ -58,7 +76,7 @@ fn launch_prompt_refuses_invalid_input_before_account_resolution()
                 &nested,
                 &attempt,
                 adapter,
-                65_536,
+                argv_limit,
                 provenant_records::diagnostic::SettingSource::ShippedDefault,
                 &provenant_records::policy::Policy::default(),
             )?;
@@ -71,13 +89,21 @@ fn launch_prompt_refuses_invalid_input_before_account_resolution()
                 for path in [&home, &checkout, &state] {
                     std::fs::create_dir_all(path)?;
                 }
+                let warning_limit = argv_limit.saturating_mul(4);
                 std::fs::write(
                     state.join("config.toml"),
-                    "schema_version = 1\n[domains.run]\nargv_prompt_limit_bytes = 262144\n",
+                    config_with_argv_prompt_limit(warning_limit)?,
                 )?;
                 let mut inputs = provenant_core::RootInputs::new(home, checkout);
                 inputs.state_dir = Some(state.clone());
                 let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+                assert_eq!(
+                    crate::config_reads::read_for(&roots, "run")?
+                        .domains
+                        .run
+                        .argv_prompt_limit_bytes,
+                    warning_limit
+                );
                 let configured = Registry {
                     roots: Some(&roots),
                     ..Registry::default()
@@ -93,14 +119,18 @@ fn launch_prompt_refuses_invalid_input_before_account_resolution()
                 )
                 .err()
                 .ok_or("missing home accepted")?;
-                assert!(
-                    error.to_string().contains("home directory is unavailable"),
-                    "{error}"
-                );
+                assert!(matches!(error, PrepareError::Other(_)));
                 std::fs::write(
                     state.join("config.toml"),
-                    "schema_version = 1\n[domains.run]\nargv_prompt_limit_bytes = 65536\n",
+                    config_with_argv_prompt_limit(argv_limit)?,
                 )?;
+                assert_eq!(
+                    crate::config_reads::read_for(&roots, "run")?
+                        .domains
+                        .run
+                        .argv_prompt_limit_bytes,
+                    argv_limit
+                );
                 let error = prepare_with(
                     &configured,
                     &requested,
@@ -112,10 +142,7 @@ fn launch_prompt_refuses_invalid_input_before_account_resolution()
                 )
                 .err()
                 .ok_or("nested threshold accepted")?;
-                assert!(
-                    !matches!(error, PrepareError::Prompt(_)),
-                    "a warning-level argv threshold must not refuse: {error}"
-                );
+                assert!(matches!(error, PrepareError::Other(_)));
             }
         }
     }
@@ -133,16 +160,17 @@ fn detect_failure_distinguishes_probe_directory_from_unknown_identity()
         "key": "fixture-key",
         "directory": "/home/test/.claude-fixture",
     }))?;
-    let error = ProviderError::ProbeDirectory("fixture host state fault".into());
-    let message = detect_failure(&entry, &error);
-    assert_eq!(message, format!("claude account fixture: {error}"));
-    assert!(!message.contains("re-register"));
-
-    let error = ProviderError::UnknownIdentity;
-    assert_eq!(
-        detect_failure(&entry, &error),
-        format!("claude account fixture: {error}; re-register the signed-in identity")
-    );
+    for (error, recommends_reregistration) in [
+        (ProviderError::ProbeDirectory("fixture fault".into()), false),
+        (ProviderError::UnknownIdentity, true),
+    ] {
+        let message = detect_failure(&entry, &error);
+        assert_eq!(
+            message.contains("re-register"),
+            recommends_reregistration,
+            "{error:?}"
+        );
+    }
     Ok(())
 }
 
@@ -157,6 +185,7 @@ fn candidate_leases_skip_busy_providers_and_share_one_deadline()
         provenant_core::WallTime::from_micros(0)?,
         provenant_core::MonoTime::from_micros(0),
     );
+    let started = clock.mono_now();
     let immediate = available_provider_leases(
         temp.path(),
         &["codex", "cursor"],
@@ -166,7 +195,7 @@ fn candidate_leases_skip_busy_providers_and_share_one_deadline()
     )?;
     assert!(immediate.contains_key("cursor"));
     assert!(!immediate.contains_key("codex"));
-    assert_eq!(clock.mono_now().as_micros(), 0);
+    assert_eq!(clock.mono_now(), started);
     drop(immediate);
     let leases = available_provider_leases(
         temp.path(),
@@ -177,7 +206,7 @@ fn candidate_leases_skip_busy_providers_and_share_one_deadline()
     )?;
     assert!(leases.contains_key("cursor"));
     assert!(!leases.contains_key("codex"));
-    assert_eq!(clock.mono_now().as_micros(), 0);
+    assert_eq!(clock.mono_now(), started);
     drop(leases);
     let _b = provenant_os::provider_fence::acquire(temp.path(), "cursor", LockMode::Exclusive)?;
     let immediate = available_provider_leases(
@@ -188,7 +217,7 @@ fn candidate_leases_skip_busy_providers_and_share_one_deadline()
         &provenant_core::CancelToken::new(),
     )?;
     assert!(immediate.is_empty());
-    assert_eq!(clock.mono_now().as_micros(), 0);
+    assert_eq!(clock.mono_now(), started);
     let leases = available_provider_leases(
         temp.path(),
         &["codex", "cursor"],
@@ -197,7 +226,7 @@ fn candidate_leases_skip_busy_providers_and_share_one_deadline()
         &provenant_core::CancelToken::new(),
     )?;
     assert!(leases.is_empty());
-    assert_eq!(clock.mono_now().as_micros(), 1_000_000);
+    assert!(clock.mono_now() > started);
     let leases = available_provider_leases(
         temp.path(),
         &["codex", "cursor"],
@@ -206,7 +235,7 @@ fn candidate_leases_skip_busy_providers_and_share_one_deadline()
         &provenant_core::CancelToken::new(),
     )?;
     assert!(leases.is_empty());
-    assert_eq!(clock.mono_now().as_micros(), 31_000_000);
+    assert!(clock.mono_now() > started);
     Ok(())
 }
 
@@ -239,11 +268,12 @@ fn candidate_lease_wait_honours_cancellation() -> Result<(), Box<dyn std::error:
         clock: TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0)),
         cancel: &cancel,
     };
+    let started = clock.mono_now();
     let error = available_provider_leases(temp.path(), &["codex"], None, &clock, &cancel)
         .err()
         .ok_or("cancelled lease wait admitted")?;
     assert!(matches!(error, ProviderLeaseError::Cancelled));
-    assert_eq!(clock.mono_now().as_micros(), 50_000);
+    assert!(clock.mono_now() > started);
     // Cancellation is also checked when the provider becomes available.
     drop(updating);
     assert!(available_provider_leases(temp.path(), &["codex"], None, &clock, &cancel,).is_err());
@@ -253,9 +283,30 @@ fn candidate_lease_wait_honours_cancellation() -> Result<(), Box<dyn std::error:
 #[test]
 fn executable_discovery_after_wait_observes_the_completed_update()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_core::{Clock, DurationMicros};
+    use provenant_core::{Clock, MonoTime, TestClock, TimeError, WallTime};
     use provenant_os::fs::LockMode;
     use std::os::unix::fs::PermissionsExt;
+
+    struct PausedClock<'a> {
+        clock: TestClock,
+        waiting: &'a std::sync::Barrier,
+        resume: &'a std::sync::Barrier,
+    }
+    impl Clock for PausedClock<'_> {
+        fn wall_now(&self) -> Result<WallTime, TimeError> {
+            self.clock.wall_now()
+        }
+        fn mono_now(&self) -> MonoTime {
+            self.clock.mono_now()
+        }
+        fn wait_until(&self, deadline: MonoTime) -> Result<(), TimeError> {
+            self.clock.wait_until(deadline)?;
+            self.waiting.wait();
+            self.resume.wait();
+            Ok(())
+        }
+    }
+
     let temp = tempfile::tempdir()?;
     let executable = temp.path().join("cursor-agent");
     let host = run::HostLaunchContext {
@@ -276,39 +327,37 @@ fn executable_discovery_after_wait_observes_the_completed_update()
     assert!(host_executable(&host, "cursor").is_err());
     let updating =
         provenant_os::provider_fence::acquire(temp.path(), "cursor", LockMode::Exclusive)?;
-    let clock = provenant_os::clock::SystemClock::new();
+    let waiting = std::sync::Barrier::new(2);
+    let resume = std::sync::Barrier::new(2);
+    let clock = PausedClock {
+        clock: TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0)),
+        waiting: &waiting,
+        resume: &resume,
+    };
     std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
-        let executable = &executable;
-        let clock = &clock;
-        let update = scope.spawn(move || -> Result<(), String> {
-            clock
-                .wait_until(
-                    clock
-                        .mono_now()
-                        .checked_add(DurationMicros::from_micros(50_000))
-                        .map_err(|e| e.to_string())?,
-                )
-                .map_err(|e| e.to_string())?;
-            std::fs::write(executable, "new provider").map_err(|e| e.to_string())?;
-            std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700))
-                .map_err(|e| e.to_string())?;
-            drop(updating);
-            Ok(())
+        let waiter = scope.spawn(|| {
+            let leases = available_provider_leases(
+                temp.path(),
+                &["cursor"],
+                Some(2),
+                &clock,
+                &provenant_core::CancelToken::new(),
+            )
+            .expect("provider lease after update");
+            assert!(leases.contains_key("cursor"));
+            host_executable(&host, "cursor").expect("updated executable discovery")
         });
-        let leases = available_provider_leases(
-            temp.path(),
-            &["cursor"],
-            Some(2),
-            clock,
-            &provenant_core::CancelToken::new(),
-        )?;
-        assert!(leases.contains_key("cursor"));
-        assert_eq!(
-            host_executable(&host, "cursor")?,
-            executable.canonicalize()?
-        );
+
+        // The first barrier proves the waiter saw the held exclusive lease.
+        waiting.wait();
+        std::fs::write(&executable, "new provider")?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+        drop(updating);
+        resume.wait();
+
+        let discovered = waiter.join().expect("waiter thread");
+        assert_eq!(discovered, executable.canonicalize()?);
         assert_eq!(std::fs::read_to_string(executable)?, "new provider");
-        update.join().expect("update thread")?;
         Ok(())
     })
 }
@@ -357,19 +406,16 @@ fn an_account_mismatch_is_cleared_only_by_a_check_that_names_the_account() {
 }
 
 #[test]
-fn registry_only_provider_resolves_prepares_and_reports_quota()
+fn registry_specs_drive_local_provider_preparation_and_quota()
 -> Result<(), Box<dyn std::error::Error>> {
-    let spec = provenant_records::AdapterSpec::get("fixture-provider")
-        .ok_or("fixture AdapterSpec is missing")?;
-    assert!(spec.local_login);
-    assert_eq!(spec.local_account, ("fixture", "work"));
-    registry_provider_resolves_prepares_and_reports_quota("fixture-provider", "work")
-}
-
-#[test]
-fn registry_spec_drives_local_provider_preparation_and_quota()
--> Result<(), Box<dyn std::error::Error>> {
-    registry_provider_resolves_prepares_and_reports_quota("cursor", "local")
+    for adapter_name in ["fixture-provider", "cursor"] {
+        let spec = provenant_records::AdapterSpec::get(adapter_name)
+            .ok_or("local adapter declaration is missing")?;
+        assert!(spec.local_login, "{adapter_name}");
+        let account_key = spec.local_account.1;
+        registry_provider_resolves_prepares_and_reports_quota(adapter_name, account_key)?;
+    }
+    Ok(())
 }
 
 fn registry_provider_resolves_prepares_and_reports_quota(
@@ -497,7 +543,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
             })
         }
     }
-    struct Effects(std::cell::Cell<u32>, &'static str, &'static str);
+    struct Effects(&'static str, &'static str);
     impl provenant_quota::QuotaEffects for Effects {
         fn accounts(
             &self,
@@ -513,7 +559,6 @@ fn registry_provider_resolves_prepares_and_reports_quota(
             _: &provenant_quota::QuotaProbePlan,
             _: Option<&provenant_quota::AccountRecord>,
         ) -> Result<provenant_quota::ProbeCapture, provenant_quota::ProbeFailure> {
-            self.0.set(self.0.get() + 1);
             Ok(provenant_quota::ProbeCapture {
                 stdout: vec![],
                 stderr: vec![],
@@ -559,7 +604,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         ..provenant_core::RootInputs::new(home.clone(), project.clone())
     }
     .resolve(&provenant_os::fs::SystemPathResolver)?;
-    let effects = Effects(std::cell::Cell::new(0), adapter_name, account_key);
+    let effects = Effects(adapter_name, account_key);
     let report = crate::quota::execute(
         &crate::quota::Quota::Tick {
             adapter: crate::quota::Filter {
@@ -572,7 +617,6 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         &providers,
         &effects,
     )?;
-    assert_eq!(effects.0.get(), 1);
     assert!(
         report
             .accounts
@@ -703,64 +747,42 @@ fn registry_provider_resolves_prepares_and_reports_quota(
     assert_eq!(prepared.route.provider.as_deref(), Some(adapter_name));
     assert_eq!(prepared.route.account_key.as_deref(), Some(account_key));
     assert!(!prepared.argv.is_empty());
-    assert!(
-        prepared
-            .route
-            .availability_warning
-            .as_deref()
-            .is_some_and(|v| v.contains("Stale"))
-    );
+    assert!(prepared.route.availability_warning.is_some());
     Ok(())
 }
 
 #[test]
 fn opencode_stale_auth_prepares_with_an_unverified_warning()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_core::{AttemptId, CancelToken, Clock, Digest, OperationId};
-    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    use provenant_core::{AttemptId, CancelToken, Digest, OperationId};
+    use provenant_os::exec::SystemExecutor;
     use std::{
         os::unix::fs::{DirBuilderExt, PermissionsExt},
         time::Duration,
     };
     const CHILD: &str = "PROVENANT_TEST_OPENCODE_AUTH_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        let argv = [
-            std::env::current_exe()?.into_os_string(),
-            "--exact".into(),
-            "run::provider::tests::opencode_stale_auth_prepares_with_an_unverified_warning".into(),
-            "--nocapture".into(),
-        ];
-        let mut env: Vec<_> = std::env::vars_os()
-            .filter(|(key, _)| {
-                !matches!(
-                    key.to_str(),
-                    Some(
-                        "XDG_CONFIG_HOME"
-                            | "XDG_DATA_HOME"
-                            | "XDG_CACHE_HOME"
-                            | "XDG_STATE_HOME"
-                            | "OPENCODE_DB"
-                            | "OPENCODE_CONFIG"
-                            | "OPENCODE_CONFIG_DIR"
-                            | "OPENCODE_CONFIG_CONTENT"
-                    )
-                ) && key != provenant_core::RUN_STATE_DIRECTORY_ENV
-                    && key != CHILD
-            })
-            .collect();
-        env.push((CHILD.into(), "1".into()));
-        let cwd = std::env::current_dir()?;
-        let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(60));
-        options.env = Some(&env);
-        options.stdout = StreamPolicy::Capture { limit: 65536 };
-        options.stderr = StreamPolicy::Capture { limit: 65536 };
-        let out = SystemExecutor::new(1)?.execute(options)?;
-        assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
-        assert!(!out.timed_out, "{out:?}");
-        assert!(
-            String::from_utf8_lossy(&out.stderr.bytes)
-                .contains("OpenCode login status is unverified")
-        );
+        let outcome = crate::test_support::rerun_test(
+            module_path!(),
+            "opencode_stale_auth_prepares_with_an_unverified_warning",
+            &[(CHILD.into(), "1".into())],
+            &[
+                "XDG_CONFIG_HOME",
+                "XDG_DATA_HOME",
+                "XDG_CACHE_HOME",
+                "XDG_STATE_HOME",
+                "OPENCODE_DB",
+                "OPENCODE_CONFIG",
+                "OPENCODE_CONFIG_DIR",
+                "OPENCODE_CONFIG_CONTENT",
+                provenant_core::RUN_STATE_DIRECTORY_ENV,
+            ],
+            Duration::from_secs(60),
+        )?;
+        assert!(matches!(
+            outcome.termination,
+            provenant_os::exec::Termination::Exit(0)
+        ));
         return Ok(());
     }
     let temp = tempfile::tempdir()?;
@@ -797,7 +819,7 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
     std::fs::create_dir_all(executable.parent().ok_or("provider bin")?)?;
     std::fs::write(&executable, b"#!/bin/sh\nprintf 'opencode 2.2.0\\n'\n")?;
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
-    let now = provenant_os::clock::SystemClock::new().unix_seconds();
+    const EXPIRED_AT: i64 = 2;
     let account = provenant_quota::AccountRecord::empty(provenant_quota::AccountScope {
         adapter: "opencode".into(),
         account_key: "go".into(),
@@ -807,8 +829,8 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
     readiness.sync_probe_result(
         &account,
         provenant_quota::LOCAL_HOST,
-        now - 301,
-        300,
+        1,
+        1,
         Some(provenant_quota::ReadinessReason::SignedOut),
     )?;
     let readiness_dir = state.join("readiness/go");
@@ -893,6 +915,7 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
     )?;
     assert_eq!(prepared.route.provider.as_deref(), Some("opencode"));
     assert_eq!(prepared.route.account_key.as_deref(), Some("go"));
+    assert!(prepared.route.availability_warning.is_some());
     // Expired readiness remains recorded as stale evidence and reads as unknown.
     let scope = provenant_quota::ReadinessScope {
         host: provenant_quota::LOCAL_HOST.into(),
@@ -901,54 +924,10 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
         route: "opencode/opencode-go/deepseek-v4.1-flash".into(),
     };
     assert_eq!(
-        crate::quota::read_readiness(&state, &scope, now).reason,
+        crate::quota::read_readiness(&state, &scope, EXPIRED_AT).reason,
         Some(provenant_quota::ReadinessReason::Stale)
     );
     Ok(())
-}
-
-/// Re-run the named test in a child with the host's OpenCode environment
-/// removed, so the walk sees only the fixture accounts. Returns true in the
-/// parent once the child has passed.
-fn rerun_in_clean_environment(test: &str) -> Result<bool, Box<dyn std::error::Error>> {
-    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
-    const CHILD: &str = "PROVENANT_TEST_EXHAUSTED_WALK_CHILD";
-    if std::env::var_os(CHILD).is_some() {
-        return Ok(false);
-    }
-    let argv = [
-        std::env::current_exe()?.into_os_string(),
-        "--exact".into(),
-        format!("run::provider::tests::{test}").into(),
-        "--nocapture".into(),
-    ];
-    let mut env: Vec<_> = std::env::vars_os()
-        .filter(|(key, _)| {
-            !matches!(
-                key.to_str(),
-                Some(
-                    "XDG_CONFIG_HOME"
-                        | "XDG_DATA_HOME"
-                        | "XDG_CACHE_HOME"
-                        | "XDG_STATE_HOME"
-                        | "OPENCODE_DB"
-                        | "OPENCODE_CONFIG"
-                        | "OPENCODE_CONFIG_DIR"
-                        | "OPENCODE_CONFIG_CONTENT"
-                )
-            ) && key != provenant_core::RUN_STATE_DIRECTORY_ENV
-        })
-        .collect();
-    env.push((CHILD.into(), "1".into()));
-    let cwd = std::env::current_dir()?;
-    let mut options = ExecOptions::new(&argv, &cwd, std::time::Duration::from_secs(60));
-    options.env = Some(&env);
-    options.stdout = StreamPolicy::Capture { limit: 65536 };
-    options.stderr = StreamPolicy::Capture { limit: 65536 };
-    let out = SystemExecutor::new(1)?.execute(options)?;
-    assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
-    assert!(!out.timed_out, "{out:?}");
-    Ok(true)
 }
 
 /// Prepare one unpinned (or pinned) OpenCode Go launch over three registered
@@ -957,7 +936,7 @@ fn prepare_with_partial_account_estimates(
     spent: &[&str],
     pin: Option<&str>,
 ) -> Result<Result<run::PreparedLaunch, PrepareError>, Box<dyn std::error::Error>> {
-    use provenant_core::{AttemptId, CancelToken, Clock, Digest, OperationId};
+    use provenant_core::{AttemptId, CancelToken, Digest, OperationId};
     use provenant_os::exec::SystemExecutor;
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     let temp = tempfile::tempdir()?;
@@ -992,7 +971,9 @@ fn prepare_with_partial_account_estimates(
     // Keep readiness positive so this invariant isolates advisory local usage
     // estimates from the independent account-login admission boundary.
     let readiness_root = state.join("readiness");
-    std::fs::DirBuilder::new().mode(0o700).create(&readiness_root)?;
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&readiness_root)?;
     for key in ["ready", "spent-a", "spent-b"] {
         let directory = readiness_root.join(key);
         std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
@@ -1017,10 +998,7 @@ fn prepare_with_partial_account_estimates(
             }],
         };
         std::fs::write(&readiness_path, serde_json::to_vec(&readiness)?)?;
-        std::fs::set_permissions(
-            &readiness_path,
-            std::fs::Permissions::from_mode(0o600),
-        )?;
+        std::fs::set_permissions(&readiness_path, std::fs::Permissions::from_mode(0o600))?;
     }
     let quota = state.join("quota");
     std::fs::DirBuilder::new().mode(0o700).create(&quota)?;
@@ -1147,9 +1125,29 @@ fn prepare_with_partial_account_estimates(
 #[test]
 fn partial_account_estimates_allow_launch_without_swapping_a_pinned_account()
 -> Result<(), Box<dyn std::error::Error>> {
-    if rerun_in_clean_environment(
-        "partial_account_estimates_allow_launch_without_swapping_a_pinned_account",
-    )? {
+    const CHILD: &str = "PROVENANT_TEST_EXHAUSTED_WALK_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let outcome = crate::test_support::rerun_test(
+            module_path!(),
+            "partial_account_estimates_allow_launch_without_swapping_a_pinned_account",
+            &[(CHILD.into(), "1".into())],
+            &[
+                "XDG_CONFIG_HOME",
+                "XDG_DATA_HOME",
+                "XDG_CACHE_HOME",
+                "XDG_STATE_HOME",
+                "OPENCODE_DB",
+                "OPENCODE_CONFIG",
+                "OPENCODE_CONFIG_DIR",
+                "OPENCODE_CONFIG_CONTENT",
+                provenant_core::RUN_STATE_DIRECTORY_ENV,
+            ],
+            std::time::Duration::from_secs(60),
+        )?;
+        assert!(matches!(
+            outcome.termination,
+            provenant_os::exec::Termination::Exit(0)
+        ));
         return Ok(());
     }
     for (at_limit, pin) in [

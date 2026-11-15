@@ -1,5 +1,5 @@
 //! Board envelope and opaque, filter-bound continuation tokens.
-use super::Error;
+use super::{Error, PAGE_SIZE_LIMIT};
 use provenant_core::{ActorId, CancelToken, Clock, ProjectId, Roots};
 use provenant_fabric_runtime::chairs::{ChairIndex, Request as ChairRequest};
 use provenant_os::clock::SystemClock;
@@ -7,6 +7,8 @@ use provenant_records::CanonicalV1;
 use provenant_run::{AttemptState, ExecutionContext, Outcome, RunStore};
 use serde_json::{Value, json};
 use std::os::unix::ffi::OsStrExt;
+
+const BOARD_SCHEMA_VERSION: u64 = 3;
 
 fn binding(high_water: u64, filters: &Value) -> Result<String, Error> {
     Ok(
@@ -47,7 +49,7 @@ pub(super) fn read(
     limit: u64,
     cursor: Option<&str>,
 ) -> Result<Value, Error> {
-    if !(1..=100).contains(&limit) {
+    if !(1..=PAGE_SIZE_LIMIT).contains(&limit) {
         return Err(provenant_run::RunError::Validation("board page bounds").into());
     }
     let clock = SystemClock::new();
@@ -216,7 +218,7 @@ pub(super) fn read(
         }
     }
     Ok(
-        json!({"schema_version":3,"snapshot":snapshot,"high_water":high_water,"generation":generation,
+        json!({"schema_version":BOARD_SCHEMA_VERSION,"snapshot":snapshot,"high_water":high_water,"generation":generation,
         "observed_at":clock.wall_now().map_err(|_| Error::Encode)?,"filters":filters,
         "lanes":lanes,"next_cursor":next,"truncated":next.is_some(),
         "coverage":{"scope":"local","host":host,"runs":if store.is_some() { "complete" } else { "empty" },"chairs":chair_coverage,
@@ -231,7 +233,12 @@ mod tests {
 
     #[test]
     fn board_paging_end_to_end() -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_core::{AttemptId, Digest, OperationId, RootInputs};
+        const PAGE: u64 = PAGE_SIZE_LIMIT / 2;
+        const ATTEMPTS: u8 = PAGE_SIZE_LIMIT as u8 + 1;
+        const SELECTED_ATTEMPTS: u64 = (ATTEMPTS as u64 + 1) / 2;
+        use provenant_core::{
+            AttemptId, Digest, MonoTime, OperationId, RootInputs, TestClock, WallTime,
+        };
         use provenant_run::{CanonicalRequest, PreparedRun};
         let temp = tempfile::tempdir()?;
         let base = temp.path().canonicalize()?;
@@ -240,9 +247,9 @@ mod tests {
         let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
         inputs.state_dir = Some(base.join("state"));
         let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-        assert_eq!(read(&roots, None, false, 50, None)?["lanes"], json!([]));
+        assert_eq!(read(&roots, None, false, PAGE, None)?["lanes"], json!([]));
         assert!(!roots.state.as_path().join("run.sqlite3").exists());
-        let clock = SystemClock::new();
+        let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
         let cancel = CancelToken::new();
         let call = provenant_run::Request {
             clock: &clock,
@@ -293,7 +300,7 @@ mod tests {
             })
         };
         let mut since = None;
-        for n in 1..=101u8 {
+        for n in 1..=ATTEMPTS {
             if n % 2 == 0 { &other } else { &store }.create(&prepared(n)?, &call)?;
             if n == 1 {
                 let changes = super::super::read(
@@ -329,8 +336,8 @@ mod tests {
         )?;
         assert!(upgraded["changed"]["runs"].is_null());
         super::super::write_fixture("changes-after-run-write", "console changes", changes, &base)?;
-        let first = read(&roots, None, false, 50, None)?;
-        assert_eq!(first["schema_version"], 3);
+        let first = read(&roots, None, false, PAGE, None)?;
+        assert_eq!(first["schema_version"], BOARD_SCHEMA_VERSION);
         assert!(first["lanes"][0]["lane_id"]["key"].is_object());
         assert!(first["lanes"][0]["lane_id"].get("run_id").is_none());
         assert!(first["lanes"][0]["lane_id"].get("task_id").is_none());
@@ -343,13 +350,13 @@ mod tests {
             &base,
         )?;
         let detail =
-            super::super::detail::read(&roots, &AttemptId::from_bytes([101; 16]).to_string())?;
+            super::super::detail::read(&roots, &AttemptId::from_bytes([ATTEMPTS; 16]).to_string())?;
         assert!(detail["lane_id"]["key"].is_object());
         assert!(detail["lane_id"].get("run_id").is_none());
         assert!(detail["lane_id"].get("task_id").is_none());
         super::super::write_fixture("detail", "console detail", detail, &base)?;
         assert_eq!(first["coverage"]["chairs"], "unavailable");
-        assert_eq!(first["lanes"].as_array().unwrap().len(), 50);
+        assert_eq!(first["lanes"].as_array().unwrap().len(), PAGE);
         assert_eq!(
             first["lanes"][0]["metadata"]["attempt"]["usage"]["uncached_input"],
             Value::Null
@@ -380,12 +387,15 @@ mod tests {
                 .iter()
                 .all(|r| r["wait"]["waiting_for"].is_string())
         );
-        let selected = read(&roots, Some(project), false, 100, None)?;
-        let selected_page = read(&roots, Some(project), false, 50, None)?;
+        let selected = read(&roots, Some(project), false, PAGE_SIZE_LIMIT, None)?;
+        let selected_page = read(&roots, Some(project), false, PAGE, None)?;
         let selected_cursor = selected_page["next_cursor"]
             .as_str()
             .ok_or("selected cursor")?;
-        assert_eq!(selected["lanes"].as_array().unwrap().len(), 51);
+        assert_eq!(
+            selected["lanes"].as_array().unwrap().len(),
+            SELECTED_ATTEMPTS as usize
+        );
         assert!(
             selected["lanes"]
                 .as_array()
@@ -394,7 +404,7 @@ mod tests {
                 .all(|r| r["metadata"]["attempt"]["project_id"] == json!(project))
         );
         use std::os::unix::fs::PermissionsExt;
-        let id = AttemptId::from_bytes([101; 16]);
+        let id = AttemptId::from_bytes([ATTEMPTS; 16]);
         let checkpoint = roots
             .state
             .as_path()
@@ -407,7 +417,7 @@ mod tests {
             )?,
         )?;
         std::fs::set_permissions(&checkpoint, std::fs::Permissions::from_mode(0o600))?;
-        let observed = read(&roots, None, false, 50, None)?;
+        let observed = read(&roots, None, false, PAGE, None)?;
         assert_eq!(observed["lanes"][0]["metadata"]["attempt"]["priority"], 15);
         assert_eq!(
             observed["lanes"][0]["metadata"]["attempt"]["last_output_at"],
@@ -422,8 +432,8 @@ mod tests {
             )?,
         ] {
             std::fs::write(&checkpoint, bytes)?;
-            let partial = read(&roots, None, false, 50, None)?;
-            assert_eq!(partial["lanes"].as_array().unwrap().len(), 50);
+            let partial = read(&roots, None, false, PAGE, None)?;
+            assert_eq!(partial["lanes"].as_array().unwrap().len(), PAGE);
             assert_eq!(partial["coverage"]["observations"], "partial");
             assert_eq!(partial["lanes"][0]["observation_coverage"], "unavailable");
             assert_eq!(
@@ -436,7 +446,7 @@ mod tests {
         std::fs::write(&checkpoint, checkpoint_bytes)?;
         std::fs::set_permissions(&checkpoint, std::fs::Permissions::from_mode(0o644))?;
         assert_eq!(
-            read(&roots, None, false, 50, None)?["coverage"]["observations"],
+            read(&roots, None, false, PAGE, None)?["coverage"]["observations"],
             "partial"
         );
         std::fs::set_permissions(&checkpoint, std::fs::Permissions::from_mode(0o600))?;
@@ -456,11 +466,11 @@ mod tests {
             &chair_call,
         )?;
         assert_eq!(
-            read(&roots, None, false, 50, None)?["coverage"]["chairs"],
+            read(&roots, None, false, PAGE, None)?["coverage"]["chairs"],
             "complete"
         );
         assert_eq!(
-            read(&roots, None, false, 50, None)?["lanes"][0]["chair"],
+            read(&roots, None, false, PAGE, None)?["lanes"][0]["chair"],
             json!(request.chair)
         );
         let chair_for = |board: &Value, graph: &str| {
@@ -486,46 +496,49 @@ mod tests {
                 &candidate,
                 &chair_call,
             )?;
-            let board = read(&roots, None, false, 50, None)?;
-            assert_eq!(chair_for(&board, "lane-100"), Value::Null);
+            let board = read(&roots, None, false, PAGE, None)?;
+            assert_eq!(chair_for(&board, &format!("lane-{ATTEMPTS}")), Value::Null);
             assert_eq!(board["coverage"]["chairs"], expected_coverage);
         }
         let cursor = first["next_cursor"].as_str().ok_or("missing cursor")?;
         for malformed in ["", "junk", "g:0", "g:-1", "g:18446744073709551615"] {
-            let error = read(&roots, None, false, 50, Some(malformed)).unwrap_err();
+            let error = read(&roots, None, false, PAGE, Some(malformed)).unwrap_err();
             assert!(matches!(error, Error::BoardCursor));
         }
-        let second = read(&roots, None, false, 50, Some(cursor))?;
+        let second = read(&roots, None, false, PAGE, Some(cursor))?;
         assert_ne!(first["lanes"][0]["lane_id"], second["lanes"][0]["lane_id"]);
         for (selected, all, limit) in [
-            (None, true, 50),
-            (Some(project), false, 50),
-            (None, false, 100),
+            (None, true, PAGE),
+            (Some(project), false, PAGE),
+            (None, false, PAGE_SIZE_LIMIT),
         ] {
             assert!(matches!(
                 read(&roots, selected, all, limit, Some(cursor)),
                 Err(Error::BoardCursor)
             ));
         }
-        let edited = cursor.replacen(".52.", ".51.", 1);
-        assert_ne!(edited, cursor);
-        assert!(matches!(
-            read(&roots, None, false, 50, Some(&edited)),
-            Err(Error::BoardCursor)
-        ));
         let mut other_inputs = inputs.clone();
         other_inputs.state_dir = Some(base.join("other-state"));
         let other_roots = other_inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-        let filters = json!({"state_root":CanonicalV1::file_digest(other_roots.state.as_path().as_os_str().as_bytes()),"host":null,"project_id":null,"all":false,"limit":50});
+        let filters = json!({"state_root":CanonicalV1::file_digest(other_roots.state.as_path().as_os_str().as_bytes()),"host":null,"project_id":null,"all":false,"limit":PAGE});
         assert!(matches!(
             cursor_position(cursor, &filters),
             Err(Error::BoardCursor)
         ));
-        let page = read(&roots, None, false, 100, None)?;
-        assert_eq!(page["lanes"].as_array().unwrap().len(), 100);
+        let invalid_position = token(&binding(0, &filters)?, 0, 0)?;
+        assert_ne!(invalid_position, cursor);
+        assert!(matches!(
+            read(&roots, None, false, PAGE, Some(&invalid_position)),
+            Err(Error::BoardCursor)
+        ));
+        let page = read(&roots, None, false, PAGE_SIZE_LIMIT, None)?;
+        assert_eq!(
+            page["lanes"].as_array().unwrap().len(),
+            PAGE_SIZE_LIMIT as usize
+        );
         assert!(serde_json::to_vec(&page)?.len() < crate::MAX_RESULT_BYTES);
-        let walk = read(&roots, None, true, 50, None)?;
-        other.create(&prepared(102)?, &call)?;
+        let walk = read(&roots, None, true, PAGE, None)?;
+        other.create(&prepared(ATTEMPTS + 1)?, &call)?;
         let before_terminal = super::super::read(
             &roots,
             None,
@@ -549,10 +562,10 @@ mod tests {
             },
         )?;
         assert_eq!(terminal_changes["changed"]["board"], true);
-        let resumed = read(&roots, None, false, 50, Some(cursor))?;
+        let resumed = read(&roots, None, false, PAGE, Some(cursor))?;
         assert_ne!(resumed["generation"], first["generation"]);
         assert_eq!(resumed["snapshot"], first["snapshot"]);
-        let empty = read(&roots, Some(project), false, 50, Some(selected_cursor))?;
+        let empty = read(&roots, Some(project), false, PAGE, Some(selected_cursor))?;
         assert_eq!(empty["lanes"], json!([]));
         assert!(empty["next_cursor"].is_null());
         assert_eq!(empty["coverage"]["observations"], "complete");
@@ -582,7 +595,7 @@ mod tests {
             let Some(cursor) = page["next_cursor"].as_str() else {
                 break;
             };
-            let next = read(&roots, None, true, 50, Some(cursor))?;
+            let next = read(&roots, None, true, PAGE, Some(cursor))?;
             assert_eq!(next["snapshot"], walk["snapshot"]);
             assert_eq!(next["high_water"], walk["high_water"]);
             assert_ne!(next["generation"], walk["generation"]);
@@ -590,12 +603,15 @@ mod tests {
         }
         assert_eq!(
             seen,
-            (1..=101)
+            (1..=ATTEMPTS)
                 .map(|n| AttemptId::from_bytes([n; 16]).to_string())
                 .collect()
         );
-        let active = read(&roots, None, false, 100, None)?;
-        assert_eq!(active["lanes"].as_array().unwrap().len(), 100);
+        let active = read(&roots, None, false, PAGE_SIZE_LIMIT, None)?;
+        assert_eq!(
+            active["lanes"].as_array().unwrap().len(),
+            PAGE_SIZE_LIMIT as usize
+        );
         assert!(
             active["lanes"]
                 .as_array()

@@ -421,7 +421,11 @@ mod tests {
             .map(|row| (row.unix_seconds().expect("timed"), row))
             .collect();
         // (after, until]: the row at `after` is out and the row at `until` is in.
-        let output = |after, until| interval(&timed, after, until, None).usage[4];
+        let output_bucket = ingest::BUCKETS
+            .iter()
+            .position(|bucket| *bucket == "output")
+            .expect("declared output bucket");
+        let output = |after, until| interval(&timed, after, until, None).usage[output_bucket];
         assert_eq!(output(0, 200), 2);
         assert_eq!(output(-1, 0), 1);
         assert_eq!(output(200, 200), 0);

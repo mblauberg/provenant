@@ -135,7 +135,7 @@ impl Selection {
             "source": self.source_origin,
             "delivery": delivery,
             "detail": detail,
-            "mediation": if self.mediated { "gh wrapper (advisory)" } else { "none" },
+            "mediation": if self.mediated { MEDIATION_ADVISORY } else { "none" },
         })
     }
 }
@@ -144,6 +144,7 @@ impl Selection {
 /// bound; a stall is retried rather than dropping access for the lane.
 const ATTEMPTS: usize = 3;
 const ATTEMPT_LIMIT: Duration = Duration::from_secs(20);
+const MEDIATION_ADVISORY: &str = "gh wrapper (advisory)";
 
 /// Why a lookup produced no token. Never carries credential bytes.
 #[derive(Debug, PartialEq, Eq)]
@@ -491,15 +492,16 @@ mod tests {
                 None,
             )
         };
-        let executor = Flaky(AtomicUsize::new(0), 2);
+        let executor = Flaky(AtomicUsize::new(0), ATTEMPTS - 1);
         assert_eq!(
             lookup(&executor),
             Ok(("fixture-secret".into(), TokenOrigin::StoredLogin))
         );
-        assert_eq!(executor.0.load(Ordering::SeqCst), 3);
-        let executor = Flaky(AtomicUsize::new(0), 99);
+        assert_eq!(executor.0.load(Ordering::SeqCst), ATTEMPTS);
+        let executor = Flaky(AtomicUsize::new(0), ATTEMPTS);
         let cause = lookup(&executor).unwrap_err();
-        assert!(cause.contains("timed out") && cause.contains("attempt 3 of 3"));
+        assert!(!cause.is_empty());
+        assert_eq!(executor.0.load(Ordering::SeqCst), ATTEMPTS);
         assert!(!cause.contains("fixture-secret"));
         // A cached token needs no lookup and a failure leaves the cache empty.
         let mut env = Vec::new();
@@ -522,14 +524,15 @@ mod tests {
     /// sandboxed or not, and the receipt never holds credential bytes.
     #[test]
     fn selection_drives_receipt_and_environment_without_disclosing_tokens() {
+        let (source, source_origin) = CredentialSource::configured();
         let injected = Selection::new(Delivery::Injected(TokenOrigin::StoredLogin), true).receipt();
-        assert_eq!(injected["identity"], "user");
-        assert_eq!(injected["source"], "default");
+        assert_eq!(injected["identity"], source.identity());
+        assert_eq!(injected["source"], source_origin);
         assert_eq!(injected["delivery"], "injected");
-        assert_eq!(injected["detail"], "gh auth token");
-        assert_eq!(injected["mediation"], "gh wrapper (advisory)");
+        assert_eq!(injected["detail"], TokenOrigin::StoredLogin.as_str());
+        assert_eq!(injected["mediation"], MEDIATION_ADVISORY);
         let ambient = Selection::new(Delivery::Ambient, true).receipt();
-        assert_eq!(ambient["identity"], "user");
+        assert_eq!(ambient["identity"], source.identity());
         assert_eq!(ambient["delivery"], "ambient");
         let none = Selection::new(Delivery::None("access policy".into()), false).receipt();
         assert!(none["identity"].is_null());

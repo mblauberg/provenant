@@ -1128,6 +1128,11 @@ fn timestamp(value: &str) -> Result<jiff::Timestamp, &'static str> {
 }
 /// A positive span (seconds, s, m, h or d) ago, a date or an RFC3339 timestamp.
 pub(crate) fn since(value: &str) -> Result<jiff::Timestamp, String> {
+    since_at(value, &provenant_os::clock::SystemClock::new())
+}
+
+fn since_at(value: &str, clock: &impl provenant_core::Clock) -> Result<jiff::Timestamp, String> {
+    use provenant_core::Clock;
     if value
         .bytes()
         .next()
@@ -1143,8 +1148,7 @@ pub(crate) fn since(value: &str) -> Result<jiff::Timestamp, String> {
         if seconds <= 0 {
             return Err("span must be positive".into());
         }
-        use provenant_core::Clock;
-        return provenant_os::clock::SystemClock::new()
+        return clock
             .wall_now()
             .map_err(|error| error.to_string())?
             .as_timestamp()
@@ -1159,31 +1163,28 @@ mod target_tests {
     use super::since;
 
     #[test]
-    fn since_accepts_spans() {
-        use provenant_core::Clock;
-        let clock = provenant_os::clock::SystemClock::new();
-        let before = clock.wall_now().unwrap().as_timestamp();
-        let start = since("86400").unwrap();
-        let after = clock.wall_now().unwrap().as_timestamp();
-        let duration = jiff::SignedDuration::from_secs(86_400);
-        assert!(start >= before.checked_sub(duration).unwrap());
-        assert!(start <= after.checked_sub(duration).unwrap());
+    fn since_spans_are_relative_to_the_injected_clock() {
+        use super::since_at;
+        use provenant_core::{MonoTime, TestClock, WallTime};
+
+        let now = WallTime::from_unix_seconds(2_000_000).unwrap();
+        let clock = TestClock::new(now, MonoTime::from_micros(0));
         for (value, seconds) in [
+            ("86400", 86_400),
             ("24h", 86_400),
             ("5s", 5),
             ("1m", 60),
             ("2d", 172_800),
             ("7d", 604_800),
         ] {
-            let before = clock.wall_now().unwrap().as_timestamp();
-            let result = since(value).unwrap();
-            let after = clock.wall_now().unwrap().as_timestamp();
-            let offset = jiff::SignedDuration::from_secs(seconds);
-            assert!(result >= before.checked_sub(offset).unwrap(), "{value}");
-            assert!(result <= after.checked_sub(offset).unwrap(), "{value}");
+            let expected = now
+                .as_timestamp()
+                .checked_sub(jiff::SignedDuration::from_secs(seconds))
+                .unwrap();
+            assert_eq!(since_at(value, &clock).unwrap(), expected, "{value}");
         }
         for invalid in ["0", "-1", ""] {
-            assert!(since(invalid).is_err(), "{invalid}");
+            assert!(since_at(invalid, &clock).is_err(), "{invalid}");
         }
     }
 

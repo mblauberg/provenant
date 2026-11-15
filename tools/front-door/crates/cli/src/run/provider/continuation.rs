@@ -499,6 +499,16 @@ pub(crate) struct StateCopyError {
     resource: Option<provenant_records::diagnostic::ResourceFact>,
 }
 impl StateCopyError {
+    #[cfg(test)]
+    pub(super) const fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
+        self.class
+    }
+
+    #[cfg(test)]
+    pub(super) fn resource_fact(&self) -> Option<&provenant_records::diagnostic::ResourceFact> {
+        self.resource.as_ref()
+    }
+
     fn authority(message: &str) -> Self {
         Self {
             message: message.into(),
@@ -536,7 +546,7 @@ impl From<&str> for StateCopyError {
 
 #[cfg(test)]
 pub(super) fn copy_state(from: &Path, to: &Path, sessions_only: bool) -> Result<(), String> {
-    copy_state_within(from, to, RETAINED_STATE, sessions_only)
+    copy_state_within(from, to, RETAINED_STATE, sessions_only).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -545,9 +555,8 @@ pub(super) fn copy_state_within(
     to: &Path,
     limits: StateLimits,
     sessions_only: bool,
-) -> Result<(), String> {
+) -> Result<(), StateCopyError> {
     copy_state_classified(from, to, StateCopyPolicy::shipped(limits), sessions_only)
-        .map_err(|error| error.to_string())
 }
 
 fn copy_state_classified(
@@ -716,33 +725,27 @@ fn copy_state_bounded(
 }
 
 #[test]
-#[allow(clippy::print_stderr, reason = "report an unavailable test fixture")]
 fn retained_state_hard_link_is_an_integrity_refusal() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_records::diagnostic::BoundaryClass;
+    use std::os::unix::fs::MetadataExt;
     let temp = tempfile::tempdir()?;
     let source = temp.path().join("source");
     std::fs::create_dir(&source)?;
     let external = temp.path().join("external");
     std::fs::write(&external, "state")?;
-    if let Err(error) = std::fs::hard_link(&external, source.join("link")) {
-        if error.kind() == std::io::ErrorKind::PermissionDenied {
-            eprintln!("hard-link fixture unavailable: {error}");
-            return Ok(());
-        }
-        return Err(error.into());
-    }
+    std::fs::hard_link(&external, source.join("link"))?;
+    assert!(std::fs::metadata(source.join("link"))?.nlink() > 1);
+    let destination = temp.path().join("copy");
     let error = copy_state_classified(
         &source,
-        &temp.path().join("copy"),
+        &destination,
         StateCopyPolicy::shipped(RETAINED_STATE),
         false,
     )
     .unwrap_err();
     assert_eq!(error.class, BoundaryClass::Integrity);
-    assert_eq!(
-        error.to_string(),
-        "retained provider state holds a hard-linked file"
-    );
+    assert!(error.resource.is_none());
+    assert!(!destination.exists());
     Ok(())
 }
 

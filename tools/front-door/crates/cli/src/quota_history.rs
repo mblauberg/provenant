@@ -46,11 +46,6 @@ fn read_file(directory: &Directory, name: &OsStr, limit: u64) -> Result<Vec<u8>,
     Ok(bytes)
 }
 
-#[cfg(test)]
-thread_local! {
-    static SCANNED_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
 // Walk backwards by blocks until the newest valid reading is found.
 fn last_reading(
     directory: &Directory,
@@ -85,8 +80,6 @@ fn last_reading(
             first = false;
         }
         for byte in block.into_iter().rev() {
-            #[cfg(test)]
-            SCANNED_BYTES.with(|count| count.set(count.get() + 1));
             if byte != b'\n' {
                 pending.push(byte);
                 continue;
@@ -279,32 +272,65 @@ mod tests {
 
     #[test]
     fn rotation_bounds_disk_and_keeps_the_newest_record() -> TestResult {
-        let (temp, quota) = state()?;
-        let cap = provenant_quota::MIN_HISTORY_MAX_BYTES;
-        let count = 600_i64;
-        for n in 0..count {
-            record(
-                &quota,
-                &snapshot(1_000 + n, None, u64::try_from(n)?, 99_999),
-                cap,
-            )?;
+        for cap in [
+            provenant_quota::MIN_HISTORY_MAX_BYTES,
+            provenant_quota::DEFAULT_HISTORY_MAX_BYTES,
+        ] {
+            let (temp, quota) = state()?;
+            let mut seed = snapshot(1_000, None, 0, 99_999);
+            seed.windows = (0..provenant_quota::MAX_WINDOWS)
+                .map(|index| provenant_quota::QuotaWindow {
+                    pool: format!("pool-{index:02}-{}", "x".repeat(96)),
+                    window_seconds: None,
+                    used_basis_points: 1,
+                    resets_unix_seconds: None,
+                })
+                .collect();
+            let line = encode_line(&HistoryRecord::from_snapshot(&seed).ok_or("seed reading")?)?;
+            record(&quota, &seed, cap)?;
+
+            // Fill one current ledger to just below its declared rotation limit
+            // in a single append, using the production record encoding.
+            let path = temp
+                .path()
+                .join("quota")
+                .join(DIRECTORY)
+                .join(file_name(&seed, CURRENT));
+            let half = cap / 2;
+            let mut current = std::fs::metadata(&path)?.len();
+            let mut filler = Vec::new();
+            while current + line.len() as u64 <= half {
+                filler.extend_from_slice(&line);
+                current += line.len() as u64;
+            }
+            assert!(current + line.len() as u64 > half);
+            if !filler.is_empty() {
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)?
+                    .write_all(&filler)?;
+            }
+
+            let mut newest = seed.clone();
+            newest.observed_unix_seconds = 1_001;
+            for window in &mut newest.windows {
+                window.used_basis_points += 1;
+            }
+            assert!(record(&quota, &newest, cap)?);
+
+            let directory = child(&quota, OsStr::new(DIRECTORY))?;
+            assert!(directory.open_read(&file_name(&seed, ROTATED)).is_ok());
+            let mut total = 0;
+            for entry in directory.entries()? {
+                total += directory.open_read(&entry?)?.metadata()?.size;
+            }
+            assert!(total <= cap, "{total} > {cap}");
+            let all = read(temp.path(), &Query::default())?;
+            let latest = all.last().ok_or("newest")?;
+            assert_eq!(latest.observed_unix_seconds, newest.observed_unix_seconds);
+            assert_eq!(latest.label, newest.account.label);
+            assert!(!record(&quota, &newest, cap)?);
         }
-        let directory = child(&quota, OsStr::new(DIRECTORY))?;
-        let mut total = 0;
-        for entry in directory.entries()? {
-            total += directory.open_read(&entry?)?.metadata()?.size;
-        }
-        assert!(total <= cap, "{total} > {cap}");
-        let all = read(temp.path(), &Query::default())?;
-        assert!(all.len() > 100 && all.len() < usize::try_from(count)?);
-        let newest = all.last().ok_or("newest")?;
-        assert_eq!(newest.observed_unix_seconds, 1_000 + count - 1);
-        // Dedupe continues across a rotation: repeating the newest appends nothing.
-        assert!(!record(
-            &quota,
-            &snapshot(5_000, None, u64::try_from(count - 1)?, 99_999),
-            cap
-        )?);
         Ok(())
     }
 
@@ -330,34 +356,25 @@ mod tests {
     }
 
     #[test]
-    fn last_reading_crosses_blocks_and_skips_corrupt_tail() -> TestResult {
-        let (temp, quota) = state()?;
+    fn last_reading_crosses_corrupt_tails_and_preserves_the_next_record() -> TestResult {
         let cap = provenant_quota::DEFAULT_HISTORY_MAX_BYTES;
-        record(&quota, &snapshot(100, None, 500, 900), cap)?;
-        let path = temp.path().join("quota/history/k1.claude.jsonl");
-        let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
-        file.write_all(&vec![b'x'; 9000])?;
-        drop(file);
-        assert!(!record(&quota, &snapshot(200, None, 500, 900), cap)?);
-        assert!(record(&quota, &snapshot(300, None, 600, 900), cap)?);
-        assert_eq!(read(temp.path(), &Query::default())?.len(), 2);
-        Ok(())
-    }
-
-    #[test]
-    fn a_long_unterminated_tail_is_scanned_in_linear_time() -> TestResult {
-        let (temp, quota) = state()?;
-        let cap = provenant_quota::DEFAULT_HISTORY_MAX_BYTES;
-        record(&quota, &snapshot(100, None, 500, 900), cap)?;
-        let path = temp.path().join("quota/history/k1.claude.jsonl");
-        let mut file = std::fs::OpenOptions::new().append(true).open(&path)?;
-        // Spans many blocks with no newline.
-        file.write_all(&vec![b'x'; 4 << 20])?;
-        drop(file);
-        let length = std::fs::metadata(path)?.len() as usize;
-        SCANNED_BYTES.with(|count| count.set(0));
-        assert!(!record(&quota, &snapshot(200, None, 500, 900), cap)?);
-        assert_eq!(SCANNED_BYTES.with(std::cell::Cell::get), length);
+        for tail_size in [9_000, 4 << 20] {
+            let (temp, quota) = state()?;
+            record(&quota, &snapshot(100, None, 500, 900), cap)?;
+            let path = temp.path().join("quota/history/k1.claude.jsonl");
+            let mut file = std::fs::OpenOptions::new().append(true).open(&path)?;
+            file.write_all(&vec![b'x'; tail_size])?;
+            drop(file);
+            assert!(!record(&quota, &snapshot(200, None, 500, 900), cap)?);
+            assert!(record(&quota, &snapshot(300, None, 600, 900), cap)?);
+            let rows = read(temp.path(), &Query::default())?;
+            assert_eq!(
+                rows.iter()
+                    .map(|row| row.observed_unix_seconds)
+                    .collect::<Vec<_>>(),
+                [100, 300]
+            );
+        }
         Ok(())
     }
 

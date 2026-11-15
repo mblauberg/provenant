@@ -167,8 +167,7 @@ mod tests {
         // Host-native delegates; the feature-gated fixture is injected by its test.
         let provider_specs: BTreeSet<_> = ADAPTER_SPECS
             .iter()
-            .filter(|spec| spec.id != provenant_records::Harness::HostNative)
-            .filter(|spec| spec.name != "fixture-provider")
+            .filter(|spec| spec.install.is_some())
             .map(|spec| spec.name)
             .collect();
         assert_eq!(providers, provider_specs);

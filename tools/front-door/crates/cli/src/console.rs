@@ -6,6 +6,8 @@ use provenant_records::CanonicalV1;
 use provenant_workflow::session::{HostSessionId, discover_sessions_bounded};
 use serde::Serialize;
 use serde_json::{Value, json};
+
+pub(super) const PAGE_SIZE_LIMIT: u64 = 100;
 use std::os::unix::ffi::OsStrExt;
 
 mod board;
@@ -519,7 +521,9 @@ mod tests {
         let roots = inputs
             .resolve(&provenant_os::fs::SystemPathResolver)
             .unwrap();
-        for name in ["one", "two"] {
+        let projects = ["one", "two"];
+        let invalid_sessions = ["!", "?"];
+        for name in projects {
             let common = base.join(name).join(".git");
             fs::create_dir_all(&common).unwrap();
             let binding = provenant_config::bind_project(
@@ -532,25 +536,24 @@ mod tests {
                 .join(binding.project_id().to_string())
                 .join("sessions");
             fs::create_dir_all(&sessions).unwrap();
-            for name in ["!", "?"] {
+            for name in invalid_sessions {
                 fs::write(sessions.join(name), b"").unwrap();
             }
         }
-        assert_eq!(
-            provenant_config::registered_projects(&roots).unwrap().len(),
-            2
-        );
+        let project_count = provenant_config::registered_projects(&roots).unwrap().len();
+        assert_eq!(project_count, projects.len());
+        let invalid_entry_count = project_count * invalid_sessions.len();
         let command = Console::Sessions {
             session: None,
             limit: 50,
             cursor: None,
         };
-        let truncated = read_with_budget(&roots, None, &command, 3).unwrap();
+        let truncated = read_with_budget(&roots, None, &command, invalid_entry_count - 1).unwrap();
         assert_eq!(truncated["sessions"], json!([]));
         assert_eq!(truncated["scan_truncated"], true);
         assert_eq!(truncated["truncated"], true);
         assert!(truncated["next_cursor"].is_null());
-        let complete = read_with_budget(&roots, None, &command, 5).unwrap();
+        let complete = read_with_budget(&roots, None, &command, invalid_entry_count + 1).unwrap();
         assert_eq!(complete["scan_truncated"], false);
         assert_eq!(complete["truncated"], false);
         assert_ne!(truncated["snapshot"], complete["snapshot"]);

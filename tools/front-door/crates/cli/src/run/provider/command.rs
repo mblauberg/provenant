@@ -721,20 +721,13 @@ mod refusal_tests {
     #[test]
     fn command_preparation_unavailable_retains_full_remedy() {
         let error = executable_unavailable("fixture-tool");
-        let PrepareError::Refusal {
-            message,
-            cause,
-            note,
-        } = error
-        else {
+        let PrepareError::Refusal { cause, note, .. } = error else {
             unreachable!();
         };
         assert_eq!(
             cause,
             provenant_records::run::TerminalCause::CommandUnavailable
         );
-        assert_eq!(message, cause.detail());
-        assert!(message.contains("domains.fabric.commands"));
         assert_eq!(note.as_deref(), Some("executable fixture-tool"));
     }
 

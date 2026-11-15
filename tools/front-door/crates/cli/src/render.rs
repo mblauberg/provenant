@@ -224,17 +224,7 @@ pub enum RenderError {
     Write(#[source] io::Error),
 }
 pub fn exit_status(outcome: &Outcome) -> u8 {
-    match outcome {
-        Outcome::Ok => 0,
-        Outcome::Failed | Outcome::Refused => 1,
-        Outcome::Invalid => 2,
-        Outcome::Error => 3,
-        Outcome::Unavailable => 4,
-        Outcome::Pending => 5,
-        Outcome::Waiting => 0,
-        Outcome::Timeout => 124,
-        Outcome::Cancelled => 130,
-    }
+    crate::external_contract::exit_code(outcome)
 }
 /// At most cap bytes are retained even if an owner's Serialize floods output.
 struct Buffer {
@@ -480,10 +470,30 @@ mod tests {
             },
             &mut bytes,
         )?;
+        let output = String::from_utf8(bytes)?;
+        let lines = output.lines().collect::<Vec<_>>();
         assert_eq!(
-            String::from_utf8(bytes)?,
-            "3 lanes: 1 failed, 2 running\naaaa failed\nbbbb running\nnext: provenant output aaaa\n"
+            lines.len(),
+            4,
+            "headline, summary rows, and one next: {output}"
         );
+        assert_eq!(
+            lines.get(..3),
+            Some(
+                [
+                    "3 lanes: 1 failed, 2 running",
+                    "aaaa failed",
+                    "bbbb running"
+                ]
+                .as_slice()
+            )
+        );
+        let next = lines
+            .iter()
+            .filter(|line| line.starts_with("next:"))
+            .collect::<Vec<_>>();
+        assert_eq!(next.as_slice(), &["next: provenant output aaaa"]);
+        assert!(!lines.iter().any(|line| line.contains("detail")));
         Ok(())
     }
     #[test]
@@ -576,18 +586,70 @@ mod tests {
     }
     #[test]
     fn terse_is_one_line_per_record() {
+        fn keys(line: &str) -> std::collections::BTreeSet<String> {
+            let mut keys = std::collections::BTreeSet::new();
+            let mut key = String::new();
+            let (mut reading_key, mut quoted, mut escaped) = (true, false, false);
+            for character in line.chars() {
+                if reading_key {
+                    if character == '=' {
+                        keys.insert(std::mem::take(&mut key));
+                        reading_key = false;
+                    } else {
+                        key.push(character);
+                    }
+                } else {
+                    match (quoted, escaped, character) {
+                        (true, true, _) => escaped = false,
+                        (true, false, '\\') => escaped = true,
+                        (_, false, '"') => quoted = !quoted,
+                        (false, _, ' ') => reading_key = true,
+                        _ => {}
+                    }
+                }
+            }
+            keys
+        }
+
         let value = serde_json::json!({
             "result": "read",
             "page": {"items": [{"seq": 1, "kind": "note", "body": "a b", "gone": null}, {"seq": 2}], "truncated": false},
             "unknown_hosts": []
         });
+        let text = terse(&value);
+        let lines = text.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 3, "one header and one line per record: {text}");
         assert_eq!(
-            terse(&value),
-            "truncated=false result=read\nbody=\"a b\" kind=note seq=1\nseq=2\n"
+            keys(lines[0]),
+            std::collections::BTreeSet::from(["result".to_owned(), "truncated".to_owned()])
         );
+        assert!(lines[0].contains("result=read"));
+        assert!(lines[0].contains("truncated=false"));
         assert_eq!(
-            terse(&serde_json::json!([{"a": 1}, {"a": [2]}])),
-            "a=1\na=\"[2]\"\n"
+            keys(lines[1]),
+            std::collections::BTreeSet::from([
+                "body".to_owned(),
+                "kind".to_owned(),
+                "seq".to_owned(),
+            ])
+        );
+        assert!(lines[1].contains("body=\"a b\""));
+        assert!(lines[1].contains("kind=note"));
+        assert!(lines[1].contains("seq=1"));
+        assert_eq!(
+            keys(lines[2]),
+            std::collections::BTreeSet::from(["seq".to_owned()])
+        );
+        assert!(lines[2].contains("seq=2"));
+
+        let rows = terse(&serde_json::json!([{"a": 1}, {"a": [2]}]));
+        let rows = rows.lines().collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].ends_with("=1"));
+        assert!(rows[1].ends_with("=\"[2]\""));
+        assert!(
+            rows.iter()
+                .all(|line| keys(line) == std::collections::BTreeSet::from(["a".to_owned()]))
         );
         assert_eq!(terse(&serde_json::json!([])), "");
     }
@@ -678,22 +740,7 @@ mod tests {
         assert!(out.is_empty());
     }
     #[test]
-    fn all_outcomes_and_partial_input_required_data_keep_their_contract()
-    -> Result<(), Box<dyn std::error::Error>> {
-        for (outcome, code) in [
-            (Outcome::Ok, 0),
-            (Outcome::Failed, 1),
-            (Outcome::Refused, 1),
-            (Outcome::Invalid, 2),
-            (Outcome::Error, 3),
-            (Outcome::Unavailable, 4),
-            (Outcome::Pending, 5),
-            (Outcome::Waiting, 0),
-            (Outcome::Timeout, 124),
-            (Outcome::Cancelled, 130),
-        ] {
-            assert_eq!(exit_status(&outcome), code);
-        }
+    fn partial_input_required_data_keeps_its_contract() -> Result<(), Box<dyn std::error::Error>> {
         #[derive(Serialize)]
         struct Data {
             partial: bool,

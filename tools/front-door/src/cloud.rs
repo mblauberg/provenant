@@ -187,6 +187,7 @@ fn launch_session(project: &Path, launch: &cloud::Launch) -> Result<(Value, Stri
         base,
         head,
         nonce,
+        extra: Default::default(),
     };
     let prompt = cloud::handoff_brief(&brief, &record);
     let (argv, stdin) = cloud::launch_argv(launch, &record, &prompt)?;
@@ -235,9 +236,8 @@ fn collect_result(
 ) -> Result<(Value, String), Error> {
     let key = cloud::record_key(&collect.id);
     let path = record_path(project, &key)?;
-    let record: LaunchRecord = serde_json::from_slice(
-        &std::fs::read(&path).map_err(|_| format!("no launch record for `{key}`"))?,
-    )?;
+    let file = std::fs::File::open(&path).map_err(|_| format!("no launch record for `{key}`"))?;
+    let record: LaunchRecord = provenant_records::decode(file, provenant_records::Limits::CONFIG)?;
     let link = record
         .url
         .as_deref()

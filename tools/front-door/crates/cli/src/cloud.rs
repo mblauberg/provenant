@@ -70,6 +70,8 @@ pub struct LaunchRecord {
     pub base: String,
     pub head: String,
     pub nonce: String,
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
 }
 
 /// The trailer the session ends its last commit message with, so `collect`
@@ -312,57 +314,91 @@ mod tests {
         );
     }
 
-    #[test]
-    fn launch_arguments_assemble_without_a_network_call() {
-        let record = LaunchRecord {
-            provider: Provider::Claude,
+    fn record(provider: Provider) -> LaunchRecord {
+        LaunchRecord {
+            provider,
             id: String::new(),
             url: None,
             branch: "cloud/abc".into(),
             base: "main".into(),
             head: "f".repeat(40),
             nonce: "abc".into(),
-        };
-        let mut launch = Launch {
+            extra: Default::default(),
+        }
+    }
+
+    fn launch(provider: Provider) -> Launch {
+        Launch {
             file: "brief.md".into(),
-            provider: Provider::Claude,
+            provider,
             environment: None,
-            model: Some("claude-sonnet-5-5".into()),
-            effort: Some(" ".into()),
+            model: Some("model-from-caller".into()),
+            effort: Some("high".into()),
             branch: None,
             base: None,
-        };
+        }
+    }
+
+    fn has_pair(argv: &[OsString], flag: &str, value: &str) -> bool {
+        argv.windows(2)
+            .any(|pair| pair[0] == flag && pair[1] == value)
+    }
+
+    #[test]
+    fn claude_cloud_launch_uses_its_declared_binary_and_closes_stdin() {
+        let record = record(Provider::Claude);
         let prompt = handoff_brief("Fix it.\n", &record);
-        assert!(prompt.contains(&trailer("abc")) && prompt.contains(&record.head));
-        let (argv, stdin) = launch_argv(&launch, &record, &prompt).unwrap();
+        let (argv, stdin) = launch_argv(&launch(Provider::Claude), &record, &prompt).unwrap();
         assert_eq!(
-            argv,
-            [
-                "claude",
-                "--cloud",
-                prompt.as_str(),
-                "--model",
-                "claude-sonnet-5-5"
-            ]
-            .map(OsString::from)
+            argv.first().and_then(|arg| arg.to_str()),
+            Some(provenant_records::Harness::Claude.spec().binary)
         );
+        assert!(argv.iter().any(|arg| arg == "--cloud"));
+        assert!(argv.iter().any(|arg| arg == &prompt));
+        assert!(has_pair(&argv, "--model", "model-from-caller"));
+        assert!(has_pair(&argv, "--effort", "high"));
         assert_eq!(stdin, Some(Vec::new()));
-        assert_eq!(
-            pty_wrap(argv.clone(), true)[..3],
-            ["script", "-q", "/dev/null"].map(OsString::from)
-        );
-        assert_eq!(pty_wrap(argv, false).len(), 4);
+    }
 
-        launch.provider = Provider::Codex;
-        assert!(launch_argv(&launch, &record, &prompt).is_err());
-        launch.environment = Some("env".into());
+    #[test]
+    fn codex_cloud_launch_requires_an_environment_and_reads_the_prompt_from_stdin() {
+        let record = record(Provider::Codex);
+        let prompt = handoff_brief("Fix it.\n", &record);
+        assert!(launch_argv(&launch(Provider::Codex), &record, &prompt).is_err());
+        let mut launch = launch(Provider::Codex);
+        launch.environment = Some("fixture-environment".into());
         let (argv, stdin) = launch_argv(&launch, &record, &prompt).unwrap();
         assert_eq!(
-            argv,
-            ["codex", "cloud", "exec", "--env", "env", "--branch", "main"].map(OsString::from)
+            argv.first().and_then(|arg| arg.to_str()),
+            Some(provenant_records::Harness::Codex.spec().binary)
         );
+        assert!(argv.iter().any(|arg| arg == "cloud"));
+        assert!(argv.iter().any(|arg| arg == "exec"));
+        assert!(has_pair(&argv, "--env", "fixture-environment"));
+        assert!(has_pair(&argv, "--branch", &record.base));
+        assert!(!argv.iter().any(|arg| arg == "--model"));
         assert_eq!(stdin.as_deref(), Some(prompt.as_bytes()));
+    }
 
+    #[test]
+    fn pty_wrapping_preserves_the_provider_command() {
+        let argv = vec!["provider".into(), "--flag".into(), "value".into()];
+        assert_eq!(
+            pty_wrap(argv.clone(), false).first(),
+            Some(&OsString::from("script"))
+        );
+        assert!(
+            pty_wrap(argv.clone(), false)
+                .iter()
+                .any(|arg| arg == "-qec")
+        );
+        let wrapped = pty_wrap(argv.clone(), true);
+        assert!(wrapped.starts_with(&["script".into(), "-q".into(), "/dev/null".into()]));
+        assert_eq!(&wrapped[3..], argv);
+    }
+
+    #[test]
+    fn cloud_session_identity_and_collection_paths_follow_their_inputs() {
         let printed = "\u{1b}[1mCreated cloud session: x\u{1b}[0m\r\nView: https://claude.ai/code/session_01X?from=cli\nResume with: claude --teleport session_01X\n";
         assert_eq!(
             parse_session(printed),
@@ -376,25 +412,45 @@ mod tests {
             record_key("https://chatgpt.com/codex/tasks/task_e_1?x=1"),
             "task_e_1"
         );
-        let (project, main) = (Path::new("/repo/sub"), Path::new("/repo"));
-        assert_eq!(
-            collect_path(project, project, main, Some(Path::new("wt")), "cloud/abc").unwrap(),
-            Path::new("/repo/sub/wt")
-        );
-        assert_eq!(
-            collect_path(
-                project,
-                project,
-                main,
+        let project = Path::new("/repo/sub");
+        let main = Path::new("/repo");
+        for (requested, branch, expected) in [
+            (
+                Some(Path::new("wt")),
+                "cloud/abc",
+                Path::new("/repo/sub/wt"),
+            ),
+            (
                 Some(Path::new("/elsewhere/wt")),
-                "x"
-            )
-            .unwrap(),
-            Path::new("/elsewhere/wt")
-        );
-        assert_eq!(
-            collect_path(project, project, main, None, "cloud/abc").unwrap(),
-            Path::new("/repo/.worktrees/cloud-abc")
-        );
+                "x",
+                Path::new("/elsewhere/wt"),
+            ),
+            (None, "cloud/abc", Path::new("/repo/.worktrees/cloud-abc")),
+        ] {
+            assert_eq!(
+                collect_path(project, project, main, requested, branch).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn stored_launch_records_round_trip_every_provider_and_newer_fields() {
+        use std::io::Cursor;
+
+        for &provider in <Provider as clap::ValueEnum>::value_variants() {
+            let record = record(provider);
+            let mut expected = serde_json::to_value(record).unwrap();
+            expected["future_extension"] = serde_json::json!({"owner": "newer"});
+            let bytes = serde_json::to_vec(&expected).unwrap();
+            let decoded: LaunchRecord =
+                provenant_records::decode(Cursor::new(bytes), provenant_records::Limits::default())
+                    .unwrap();
+            let encoded = provenant_records::encode(&decoded).unwrap();
+            let restored: serde_json::Value =
+                provenant_records::decode(encoded.as_slice(), provenant_records::Limits::default())
+                    .unwrap();
+            assert_eq!(restored, expected);
+        }
     }
 }

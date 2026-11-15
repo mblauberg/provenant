@@ -1,4 +1,4 @@
-use super::Error;
+use super::{Error, PAGE_SIZE_LIMIT};
 use provenant_core::{ActorId, CancelToken, Roots};
 use provenant_os::clock::SystemClock;
 use provenant_records::CanonicalV1;
@@ -24,7 +24,7 @@ pub(super) fn read(
     limit: u64,
     cursor: Option<&str>,
 ) -> Result<Value, Error> {
-    if query.is_empty() || query.len() > 1_024 || !(1..=100).contains(&limit) {
+    if query.is_empty() || query.len() > 1_024 || !(1..=PAGE_SIZE_LIMIT).contains(&limit) {
         return Err(provenant_run::RunError::Validation("search bounds").into());
     }
     let artifact_part = match part {
@@ -64,7 +64,7 @@ pub(super) fn read(
                 truncated = true;
                 break 'projects;
             }
-            let remaining = (FILE_LIMIT - scanned).min(100);
+            let remaining = (FILE_LIMIT - scanned).min(PAGE_SIZE_LIMIT as usize);
             let page = store.board_page(
                 Some(project.project_id()),
                 true,
@@ -190,12 +190,19 @@ pub(super) fn read(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_core::{AttemptId, Clock, Digest, OperationId, RootInputs};
+    use provenant_core::{
+        AttemptId, Clock, Digest, MonoTime, OperationId, RootInputs, TestClock, WallTime,
+    };
     use provenant_run::{CanonicalRequest, PreparedRun};
 
-    #[test]
-    #[allow(clippy::disallowed_methods)] // The fixture edits SQLite state directly.
-    fn search_bounds_and_detail() -> Result<(), Box<dyn std::error::Error>> {
+    struct SearchFixture {
+        _temp: tempfile::TempDir,
+        base: std::path::PathBuf,
+        roots: Roots,
+        ids: Vec<AttemptId>,
+    }
+
+    fn fixture(oversized: bool) -> Result<SearchFixture, Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let base = temp.path().canonicalize()?;
         let home = base.join("home");
@@ -213,7 +220,7 @@ mod tests {
             &roots,
             provenant_config::ProjectLocation::new(checkout.join(".git"))?,
         )?;
-        let clock = SystemClock::new();
+        let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
         let cancel = CancelToken::new();
         let call = provenant_run::Request {
             clock: &clock,
@@ -256,9 +263,44 @@ mod tests {
             )?;
             ids.push(attempt);
         }
+        if oversized {
+            let content = format!("oversizedmarker{}", "x".repeat(ARTIFACT_BYTES as usize));
+            let oversized = AttemptId::from_bytes([2; 16]);
+            let mut oversized_request = request.clone();
+            oversized_request.task.prompt_digest = CanonicalV1::file_digest(content.as_bytes());
+            oversized_request.task.context = Some(provenant_records::run::WorkContext {
+                graph_id: Some(format!("lane-{oversized}")),
+                node_id: Some("node".into()),
+                attempt: Some(1),
+                ..Default::default()
+            });
+            store.create(
+                &PreparedRun {
+                    attempt_id: oversized,
+                    operation_id: OperationId::parse("search-oversized")?,
+                    created_at: clock.wall_now()?,
+                    request: oversized_request,
+                    prompt: content,
+                },
+                &call,
+            )?;
+        }
+        Ok(SearchFixture {
+            _temp: temp,
+            base,
+            roots,
+            ids,
+        })
+    }
+
+    #[test]
+    fn search_pages_bind_the_query_and_respect_declared_bounds()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = fixture(false)?;
+        let roots = &fixture.roots;
         let page = read(&roots, "searchable", "prompt", None, 1, None)?;
         let matches = page["matches"].as_array().ok_or("matches")?;
-        assert!(!matches.is_empty() && matches.len() <= 1);
+        assert_eq!(matches.len(), 1);
         assert!(page["coverage"]["files_scanned"].as_u64().unwrap() > 0);
         assert_eq!(page["coverage"]["peers"], "not_searched");
         assert_eq!(page["truncated"], true);
@@ -269,14 +311,42 @@ mod tests {
             page["matches"][0]["lane_id"]["attempt_id"],
             second["matches"][0]["lane_id"]["attempt_id"]
         );
-        assert!(read(&roots, "searchable", "prompt", None, 101, None).is_err());
-        assert!(read(&roots, "searchable", "transcript", None, 50, None).is_err());
-        let id = ids.first().ok_or("missing search fixture")?;
+        assert!(
+            read(
+                &roots,
+                "searchable",
+                "prompt",
+                None,
+                PAGE_SIZE_LIMIT + 1,
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            read(
+                &roots,
+                "searchable",
+                "transcript",
+                None,
+                PAGE_SIZE_LIMIT,
+                None
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn search_reads_owned_artifacts_and_refuses_symlink_targets()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = fixture(false)?;
+        let roots = &fixture.roots;
+        let id = fixture.ids.first().ok_or("missing search fixture")?;
         assert_eq!(
             super::super::detail::read(&roots, &id.to_string())?["status"],
             "found"
         );
-        let result = read(&roots, "searchable", "prompt", None, 100, None)?;
+        let result = read(&roots, "searchable", "prompt", None, PAGE_SIZE_LIMIT, None)?;
         assert!(result["coverage"]["files_scanned"].as_u64().unwrap() > 0);
         assert!(result["matches"][0]["lane_id"]["key"].is_object());
         assert!(result["matches"][0]["lane_id"].get("run_id").is_none());
@@ -292,7 +362,7 @@ mod tests {
         let absent = super::super::detail::read(&roots, &last_attempt.to_string())?;
         assert_eq!(absent["artifacts"][0]["present"], false);
         std::os::unix::fs::symlink(&credential, &prompt)?;
-        let guarded = read(&roots, "searchable", "prompt", None, 100, None)?;
+        let guarded = read(&roots, "searchable", "prompt", None, PAGE_SIZE_LIMIT, None)?;
         assert!(
             guarded["coverage"]["artifact_errors"]
                 .as_array()
@@ -307,24 +377,21 @@ mod tests {
                 .iter()
                 .any(|item| item["lane_id"]["attempt_id"] == json!(last_attempt))
         );
-        std::fs::remove_file(&prompt)?;
-        std::fs::write(&prompt, "searchable fixture")?;
-        std::fs::set_permissions(&prompt, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
-        let oversized = ids.first().ok_or("missing search fixture")?;
-        let mut record = serde_json::to_value(store.record(*oversized, &call)?)?;
-        let content = format!("oversizedmarker{}", "x".repeat(ARTIFACT_BYTES as usize));
-        let path = state
-            .join("attempts")
-            .join(oversized.to_string())
-            .join("prompt.txt");
-        std::fs::write(&path, &content)?;
-        record["prompt"]["bytes"] = json!(content.len());
-        record["prompt"]["digest"] = json!(CanonicalV1::file_digest(content.as_bytes()));
-        rusqlite::Connection::open(state.join("run.sqlite3"))?.execute(
-            "UPDATE attempts SET record=?1 WHERE id=?2",
-            rusqlite::params![serde_json::to_vec(&record)?, oversized.to_string()],
+        Ok(())
+    }
+
+    #[test]
+    fn search_byte_budget_truncates_an_oversized_artifact() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let fixture = fixture(true)?;
+        let byte_limited = read(
+            &fixture.roots,
+            "oversizedmarker",
+            "prompt",
+            None,
+            PAGE_SIZE_LIMIT,
+            None,
         )?;
-        let byte_limited = read(&roots, "oversizedmarker", "prompt", None, 100, None)?;
         assert!(
             byte_limited["matches"]
                 .as_array()

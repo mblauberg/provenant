@@ -343,14 +343,14 @@ mod tests {
         );
         let account = AccountScope {
             adapter: "claude".into(),
-            account_key: "key".into(),
+            account_key: "private-account-key".into(),
             label: "work".into(),
         };
         let mut evidence = LoginObservation {
             scope: provenant_quota::ReadinessScope {
                 host: provenant_quota::LOCAL_HOST.into(),
                 adapter: "claude".into(),
-                account_key: "key".into(),
+                account_key: account.account_key.clone(),
                 route: provenant_quota::ACCOUNT_ROUTE.into(),
             },
             observed_unix_seconds: 100,
@@ -426,12 +426,21 @@ mod tests {
         else {
             panic!("mail result")
         };
-        assert_eq!(page.items.len(), 2);
+        let mut expiries = Vec::new();
         for item in page.items {
             assert!(item.message.body.contains("work [claude]"));
-            assert!(item.message.body.contains("1970-01-01T00:"));
-            assert!(!item.message.body.contains("fake-secret"));
-            assert!(!item.message.body.contains("raw-provider-output"));
+            assert!(!item.message.body.contains("private-account-key"));
+            for expiry in [140, 500] {
+                if item
+                    .message
+                    .body
+                    .contains(&jiff::Timestamp::from_second(expiry).unwrap().to_string())
+                {
+                    expiries.push(expiry);
+                }
+            }
         }
+        expiries.sort_unstable();
+        assert_eq!(expiries, [140, 500]);
     }
 }

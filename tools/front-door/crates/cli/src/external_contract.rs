@@ -14,14 +14,13 @@ use serde::{Deserialize, Serialize};
 
 /// Current outward interfaces, represented as data so documentation can be generated from one declaration.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ExternalContract {
     pub schema_version: u32,
     pub interfaces: Vec<ExternalInterface>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExternalInterface {
     Environment {
         variables: Vec<Variable>,
@@ -72,7 +71,6 @@ pub enum ExternalInterface {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Variable {
     pub name: String,
     pub channel: Channel,
@@ -82,7 +80,6 @@ pub struct Variable {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RepositoryPath {
     pub path: String,
     pub entry: provenant_config::repository_files::Entry,
@@ -92,10 +89,36 @@ pub struct RepositoryPath {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ExitCode {
     pub status: Outcome,
     pub code: u8,
+}
+/// One declaration generates both the published table and exhaustive renderer.
+macro_rules! exit_codes {
+    ($($status:ident => $code:literal),+ $(,)?) => {
+        pub const EXIT_CODES: [ExitCode; Outcome::ALL.len()] = [
+            $(ExitCode { status: Outcome::$status, code: $code },)+
+        ];
+
+        pub const fn exit_code(outcome: &Outcome) -> u8 {
+            match outcome {
+                $(Outcome::$status => $code,)+
+            }
+        }
+    };
+}
+
+exit_codes! {
+    Ok => 0,
+    Failed => 1,
+    Refused => 1,
+    Invalid => 2,
+    Error => 3,
+    Unavailable => 4,
+    Timeout => 124,
+    Cancelled => 130,
+    Pending => 5,
+    Waiting => 0,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,7 +142,6 @@ impl From<AttemptFileClass> for RunFileClass {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RunFile {
     pub name: String,
     pub directory: bool,
@@ -127,7 +149,7 @@ pub struct RunFile {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum JsonOutputSchema {
     CommandResult {
         envelope: SchemaReference,
@@ -147,7 +169,6 @@ pub enum SchemaOwner {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SchemaReference {
     pub owner: SchemaOwner,
     pub version: u64,
@@ -258,13 +279,7 @@ pub fn external_contract() -> ExternalContract {
             },
             ExternalInterface::ExitCodes {
                 stability: Stability::Stable,
-                codes: Outcome::ALL
-                    .into_iter()
-                    .map(|status| ExitCode {
-                        status,
-                        code: crate::exit_status(&status),
-                    })
-                    .collect(),
+                codes: EXIT_CODES.to_vec(),
             },
             ExternalInterface::Commands { stable, evolving },
             ExternalInterface::RunFiles {
@@ -339,6 +354,70 @@ mod tests {
             .into_iter()
             .map(|row| row.into_iter().collect())
             .collect()
+    }
+
+    #[test]
+    fn exit_codes_cover_each_declared_outcome_and_drive_rendering() {
+        let declaration = external_contract()
+            .interfaces
+            .into_iter()
+            .find_map(|interface| match interface {
+                ExternalInterface::ExitCodes { codes, .. } => Some(codes),
+                _ => None,
+            })
+            .expect("exit-code declaration");
+        assert_eq!(declaration.as_slice(), &EXIT_CODES[..]);
+        assert_eq!(EXIT_CODES.len(), Outcome::ALL.len());
+
+        for outcome in Outcome::ALL {
+            let matching: Vec<_> = EXIT_CODES
+                .iter()
+                .filter(|entry| entry.status == outcome)
+                .collect();
+            assert_eq!(matching.len(), 1, "{outcome:?}");
+            assert_eq!(crate::exit_status(&outcome), matching[0].code);
+        }
+        assert!(
+            EXIT_CODES
+                .iter()
+                .all(|entry| Outcome::ALL.contains(&entry.status))
+        );
+        assert_eq!(crate::exit_status(&Outcome::Invalid), 2);
+    }
+
+    #[test]
+    fn explicit_previous_major_root_is_refused_before_path_binding() {
+        struct Resolver;
+        impl provenant_core::PathResolver for Resolver {
+            fn resolve_existing_ancestor(
+                &self,
+                _path: &std::path::Path,
+            ) -> std::io::Result<std::path::PathBuf> {
+                panic!("a v1 root refusal must happen before path binding")
+            }
+        }
+
+        for environment in [false, true] {
+            let home = std::path::PathBuf::from("/fixture/home");
+            let previous_major = home.join(provenant_core::LEGACY_V1_STATE_SUFFIX);
+            let mut inputs = provenant_core::RootInputs::new(
+                home,
+                std::path::PathBuf::from("/fixture/checkout"),
+            );
+            let selected = if environment {
+                &mut inputs.environment_state_dir
+            } else {
+                &mut inputs.state_dir
+            };
+            *selected = Some(previous_major);
+            assert!(matches!(
+                inputs.resolve(&Resolver),
+                Err(provenant_core::RootError::Protected {
+                    boundary: provenant_core::RootBoundary::DataIntegrity,
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]

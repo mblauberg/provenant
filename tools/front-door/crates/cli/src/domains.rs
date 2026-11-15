@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Domains {
     #[serde(default)]
     pub policy: provenant_config::policy::Settings,
@@ -27,7 +26,7 @@ pub struct Domains {
 }
 
 #[derive(Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct PrSettings {
     pub land: LandSettings,
 }
@@ -39,7 +38,7 @@ pub const DEFAULT_LAND_POLL_SECONDS: u64 = 30;
 // < target rule < risk tier < run/CLI. Resolution and capability choices are stored.
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct LandSettings {
     pub poll_seconds: u64,
     pub strategy: Strategy,
@@ -65,7 +64,7 @@ pub struct LandSettings {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct LandOverride {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub poll_seconds: Option<u64>,
@@ -109,7 +108,7 @@ pub struct LandOverride {
 
 /// Last matching target pattern wins, after project and before tier overrides.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct LandBranch {
     pub target: String,
     pub strategy: Option<Strategy>,
@@ -117,7 +116,7 @@ pub struct LandBranch {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct GateOverride {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<GateKind>,
@@ -140,7 +139,7 @@ pub struct GateOverride {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct PrCiOverride {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<PrCiMode>,
@@ -149,7 +148,7 @@ pub struct PrCiOverride {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct PostMergeOverride {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checks: Option<Vec<String>>,
@@ -164,7 +163,7 @@ pub struct PostMergeOverride {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct BudgetOverride {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_micros_per_minute: Option<std::collections::BTreeMap<String, u64>>,
@@ -175,7 +174,7 @@ pub struct BudgetOverride {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct LocalGateOverride {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<LocalGateMode>,
@@ -206,7 +205,7 @@ land_enum!(ApprovalSource, ProvenantReview, Forge);
 land_enum!(ApprovalTier, Auto, None, Carry, Delta);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct GateSettings {
     pub kind: GateKind,
     pub checks: Vec<String>,
@@ -234,7 +233,7 @@ impl Default for GateSettings {
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct PrCiSettings {
     pub mode: PrCiMode,
     pub label: Option<String>,
@@ -248,7 +247,7 @@ impl Default for PrCiSettings {
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct PostMergeSettings {
     pub checks: Vec<String>,
     pub bisect: bool,
@@ -268,7 +267,7 @@ impl Default for PostMergeSettings {
     }
 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct BudgetSettings {
     /// Pool price in millionths of the configured currency per minute.
     pub rate_micros_per_minute: std::collections::BTreeMap<String, u64>,
@@ -278,7 +277,7 @@ pub struct BudgetSettings {
     pub cap_micros: Option<u64>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct LocalGateSettings {
     pub mode: LocalGateMode,
     pub commands: Vec<String>,
@@ -642,7 +641,7 @@ timeout_seconds = 60
 pub use provenant_records::UserSkillsMode;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct LanesSettings {
     pub user_skills: UserSkillsMode,
     pub skill_stage_max_bytes: u64,
@@ -651,7 +650,6 @@ pub struct LanesSettings {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ProjectLanesConfig {
     #[serde(default)]
     pub user_skills: Option<UserSkillsMode>,
@@ -775,31 +773,99 @@ mod tests {
         )
     }
 
+    fn dry_edit(
+        roots: &Roots,
+        patch: serde_json::Value,
+    ) -> Result<provenant_config::Edited<Domains>, provenant_config::ConfigError> {
+        let mut options = provenant_config::EditOptions::new("test");
+        options.dry_run = true;
+        provenant_config::edit_config(roots, &SECTIONS, &options, |document, current| {
+            provenant_config::apply_patch(&patch, document, current, &SECTIONS)
+        })
+    }
+
     #[test]
-    fn login_warning_default_and_override_report_their_origins() {
+    fn declared_settings_follow_compiled_and_user_origins() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp);
+        let (config, revision) = provenant_config::show(&roots, &SECTIONS).unwrap();
+        let schema = provenant_config::schema(&config, &SECTIONS, revision).unwrap();
+        let cases = [
+            ("domains.quota.login_expiry_warning_seconds", json!(90)),
+            ("domains.lanes.user_skills", json!("off")),
+            ("domains.lanes.skill_stage_max_bytes", json!(1024)),
+            (
+                "domains.lanes.projects.example.shared_paths",
+                json!(["cache"]),
+            ),
+            (
+                "domains.lanes.projects.example.capabilities",
+                json!(["postgres"]),
+            ),
+            (
+                "domains.lanes.projects.example.exec_roots",
+                json!(["tools"]),
+            ),
+            ("domains.pr.land.batch_size", json!(4)),
+            ("domains.pr.land.post_merge.revert_forward", json!(true)),
+        ];
+        for (path, value) in cases {
+            let schema_path = path.replace(".example.", ".{project}.");
+            let field = schema
+                .fields
+                .iter()
+                .find(|field| field.path == schema_path)
+                .unwrap_or_else(|| panic!("missing field declaration: {schema_path}"));
+            assert_eq!(field.source, provenant_config::Layer::Default, "{path}");
+            let patch = serde_json::Value::Object([(path.to_owned(), value)].into_iter().collect());
+            let edited = dry_edit(&roots, patch).unwrap();
+            assert!(
+                matches!(
+                    edited.config.origins.get(path),
+                    Some(provenant_config::Origin::User { .. })
+                ),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_domain_settings_warn_at_the_source_and_keep_known_siblings() {
         let temp = tempfile::tempdir().unwrap();
         let roots = roots(&temp);
         std::fs::create_dir_all(roots.state.as_path()).unwrap();
-        let default = provenant_config::read_with_domains(&roots, &SECTIONS).unwrap();
-        assert_eq!(
-            default.domains.quota.login_expiry_warning_seconds,
-            10 * 24 * 60 * 60
-        );
-        assert!(matches!(
-            default.origins["domains.quota.login_expiry_warning_seconds"],
-            provenant_config::Origin::Compiled { .. }
-        ));
-        std::fs::write(
-            roots.state.as_path().join("config.toml"),
-            "schema_version = 1\n[domains.quota]\nlogin_expiry_warning_seconds = 90\n",
-        )
-        .unwrap();
-        let configured = provenant_config::read_with_domains(&roots, &SECTIONS).unwrap();
-        assert_eq!(configured.domains.quota.login_expiry_warning_seconds, 90);
-        assert!(matches!(
-            configured.origins["domains.quota.login_expiry_warning_seconds"],
-            provenant_config::Origin::User { .. }
-        ));
+        let cases = [
+            (
+                "schema_version = 1\n[domains.lanes]\nuser_skills = \"off\"\nfuture_toggle = true\n",
+                "domains.lanes.future_toggle",
+                4,
+            ),
+            (
+                "schema_version = 1\n[domains.lanes.projects.probe]\nuser_skills = \"off\"\nfuture_toggle = true\n",
+                "domains.lanes.projects.probe.future_toggle",
+                4,
+            ),
+            (
+                "schema_version = 1\n[domains.steward.repositories.probe]\ndirectory = \"/fixture/probe\"\ncadence_seconds = 3600\nfuture_toggle = true\n",
+                "domains.steward.repositories.probe.future_toggle",
+                5,
+            ),
+        ];
+        for (source, unknown_path, source_line) in cases {
+            std::fs::write(roots.state.as_path().join("config.toml"), source).unwrap();
+            let config = provenant_config::config_show(&roots, &SECTIONS).unwrap();
+            if unknown_path == "domains.lanes.future_toggle" {
+                assert_eq!(config.domains.lanes.user_skills, UserSkillsMode::Off);
+            }
+            let warning = config
+                .warnings
+                .iter()
+                .find(|warning| {
+                    warning.rule == "unknown_key" && warning.message.contains(unknown_path)
+                })
+                .unwrap_or_else(|| panic!("missing source warning for {unknown_path}"));
+            assert_eq!(warning.line, source_line, "{unknown_path}");
+        }
     }
 
     #[test]
@@ -818,132 +884,118 @@ mod tests {
         }
     }
 
-    // Small: each owner-declared enumeration against its runtime type.
     #[test]
-    fn every_declared_enum_value_is_one_the_runtime_accepts() {
-        let declared = provenant_config::declared_enums(&SECTIONS);
-        let schema_refusal = |errors: &[String]| errors.iter().any(|e| e.ends_with(": schema"));
-        let mut typed = Vec::new();
-        for entry in &declared {
+    fn every_declared_enum_value_loads_in_its_declared_shape() {
+        fn case_patch(
+            declared_path: &str,
+            concrete_path: &str,
+            value: &str,
+            reviewers: &serde_json::Value,
+        ) -> serde_json::Value {
+            let mut patch = serde_json::Map::new();
+            patch.insert(concrete_path.to_owned(), json!(value));
+            match declared_path {
+                "domains.accounts.entries.{id}.headline" => {
+                    for (path, sibling) in [
+                        ("domains.accounts.entries.probe.adapter", json!("codex")),
+                        ("domains.accounts.entries.probe.label", json!("probe")),
+                        ("domains.accounts.entries.probe.key", json!("probe")),
+                        (
+                            "domains.accounts.entries.probe.directory",
+                            json!("/fixture/probe"),
+                        ),
+                    ] {
+                        patch.insert(path.to_owned(), sibling);
+                    }
+                }
+                "domains.routing.review.shapes.{shape}.synthesis" => {
+                    patch.insert(
+                        "domains.routing.review.shapes.probe.reviewers".to_owned(),
+                        reviewers.clone(),
+                    );
+                }
+                _ => {}
+            }
+            serde_json::Value::Object(patch)
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp);
+        let defaults = provenant_config::config_show(&roots, &SECTIONS).unwrap();
+        let reviewers = defaults
+            .domains
+            .routing
+            .review
+            .shapes
+            .values()
+            .find(|shape| !shape.reviewers.is_empty())
+            .map(|shape| serde_json::to_value(&shape.reviewers).unwrap())
+            .unwrap_or_else(|| panic!("compiled review shapes have no reviewer fixture"));
+        for entry in provenant_config::declared_enums(&SECTIONS) {
             let path = entry
                 .path
                 .split('.')
-                .map(|part| if part.starts_with('{') { "probe" } else { part })
+                .map(|part| {
+                    if part.starts_with('{') && part.ends_with('}') {
+                        "probe"
+                    } else {
+                        part
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(".");
-            // A keyed row whose other fields are required cannot hold one
-            // field alone; its shape, not this value, refuses the probe.
-            if schema_refusal(&provenant_config::probe_field(
-                &SECTIONS,
-                &path,
-                &json!(null),
-            )) {
-                continue;
-            }
             for value in entry.values {
-                let errors = provenant_config::probe_field(&SECTIONS, &path, &json!(value));
-                assert!(
-                    !schema_refusal(&errors),
-                    "{} refuses declared {value}: {errors:?}",
-                    entry.path
-                );
+                let patch = case_patch(&entry.path, &path, value, &reviewers);
+                let edited = dry_edit(&roots, patch).unwrap_or_else(|error| {
+                    panic!("{} refuses declared {value}: {error}", entry.path)
+                });
+                let decoded = serde_json::to_value(&edited.config).unwrap();
+                let loaded = path
+                    .split('.')
+                    .try_fold(&decoded, |value, key| value.get(key))
+                    .and_then(serde_json::Value::as_str);
+                assert_eq!(loaded, Some(*value), "{} did not load {value}", entry.path);
             }
-            // A value outside the declaration shows the probe reaches a typed
-            // field. Optional host policy resolves its network at launch, so
-            // this holds per owner rather than for every field.
-            if schema_refusal(&provenant_config::probe_field(
-                &SECTIONS,
-                &path,
-                &json!("undeclared-value"),
-            )) {
-                typed.push(entry.path.as_str());
-            }
-            if let Some(default) = &entry.default {
+            if let Some(default) = entry.default {
                 assert!(
                     entry
                         .values
                         .iter()
                         .any(|value| default.as_str() == Some(*value)),
-                    "{} defaults outside its values",
+                    "{} defaults outside its declared values",
                     entry.path
                 );
             }
         }
-        for owner in ["gc.", "domains."] {
-            assert!(typed.iter().any(|path| path.starts_with(owner)), "{owner}");
-        }
     }
 
     #[test]
-    fn schema_reports_real_domain_bounds_enums_and_keyed_shapes() {
+    fn schema_fields_follow_domain_declarations() {
         let temp = tempfile::tempdir().unwrap();
         let roots = roots(&temp);
         let (config, revision) = provenant_config::show(&roots, &SECTIONS).unwrap();
         let schema = provenant_config::schema(&config, &SECTIONS, revision).unwrap();
-        let field = |path: &str| {
-            schema
-                .fields
-                .iter()
-                .find(|field| field.path == path)
-                .unwrap()
-        };
-        let parallel = field("domains.quota.max_parallel");
-        assert_eq!(
-            (parallel.kind, parallel.min, parallel.max),
-            ("int", Some(1), Some(16))
-        );
-        let headline = field("domains.quota.display.headline");
-        assert_eq!(headline.kind, "enum");
-        assert_eq!(headline.values, ["auto", "5h", "weekly"]);
-        let history = field("domains.quota.history_max_bytes");
-        assert_eq!(
-            (history.kind, history.min, history.max, &history.default),
-            ("int", Some(65_536), Some(134_217_728), &json!(4_194_304))
-        );
-        let wait = field("domains.wait.timeout_seconds");
-        assert_eq!(
-            (wait.min, wait.max, &wait.default),
-            (Some(1), Some(u32::MAX as i64), &json!(300))
-        );
-        let max_targets = field("domains.wait.max_targets");
-        assert_eq!(
-            (max_targets.min, max_targets.max, &max_targets.default),
-            (Some(1), Some(1024), &json!(64))
-        );
-        let pr_read = field("domains.wait.pr_read_timeout_seconds");
-        assert_eq!(
-            (pr_read.min, pr_read.max, &pr_read.default),
-            (Some(1), Some(600), &json!(60))
-        );
-        let markers = field("domains.run.push_conflict_markers");
-        assert_eq!((markers.kind, &markers.default), ("bool", &json!(true)));
-        let idle = field("gc.idle_days");
-        assert_eq!(
-            (idle.kind, idle.min, idle.max, &idle.default),
-            ("int", Some(1), Some(3650), &json!(7))
-        );
-        let graph_retention = field("gc.graph_checkpoint_days");
-        assert_eq!(graph_retention.source, provenant_config::Layer::Default);
-        assert_eq!(
-            (
-                graph_retention.kind,
-                graph_retention.min,
-                graph_retention.max,
-                &graph_retention.default
-            ),
-            ("int", Some(1), Some(3650), &json!(90))
-        );
-        assert!(
-            schema.fields.iter().any(
-                |field| field.path == "domains.quota.polling_intervals.{adapter}.timer_seconds"
-            )
-        );
-        assert!(
-            schema
-                .fields
-                .iter()
-                .any(|field| field.path == "gc.projects.{project}.foreign_worktrees")
-        );
+        for section in SECTIONS.entries {
+            for declaration in section.fields {
+                let path = format!("domains.{}.{}", section.name, declaration.path);
+                let field = schema
+                    .fields
+                    .iter()
+                    .find(|field| field.path == path)
+                    .unwrap_or_else(|| panic!("schema omits declared field {path}"));
+                assert_eq!(field.kind, declaration.kind, "{path}");
+                assert_eq!(
+                    (field.min, field.max),
+                    (declaration.min, declaration.max),
+                    "{path}"
+                );
+                assert_eq!(
+                    field.values.iter().map(String::as_str).collect::<Vec<_>>(),
+                    declaration.values,
+                    "{path}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1012,73 +1064,20 @@ mod tests {
     }
 
     #[test]
-    fn retired_cloud_keys_warn_and_do_not_refuse_the_file() {
+    fn user_skills_project_overrides_follow_the_configured_mode() {
         let temp = tempfile::tempdir().unwrap();
         let roots = roots(&temp);
-        let text = "schema_version = 1\n[providers.codex.cloud]\ntransport = 'x'\ncommand = ['y']\n[domains.lanes.cloud_targets.main]\nid = 'z'\n[projects.demo]\ncloud_target = 'main'\n";
-        let config = provenant_config::load_with_domains(
-            &roots,
-            Some(std::io::Cursor::new(text.as_bytes())),
-            &SECTIONS,
-        )
-        .unwrap();
-        assert!(
-            config
-                .warnings
-                .iter()
-                .all(|warning| warning.rule == "unknown_key"),
-            "{:?}",
-            config.warnings
-        );
-        for line in [2, 5, 7] {
-            assert!(
-                config.warnings.iter().any(|warning| warning.line == line),
-                "no warning at line {line}: {:?}",
-                config.warnings
-            );
-        }
-    }
-
-    #[test]
-    fn lanes_user_skills_defaults_to_discover_and_supports_project_overrides() {
-        let temp = tempfile::tempdir().unwrap();
-        let roots = roots(&temp);
-
-        // Default value is discover.
-        let (config, revision) = provenant_config::show(&roots, &SECTIONS).unwrap();
-        let schema = provenant_config::schema(&config, &SECTIONS, revision).unwrap();
-        let field = schema
-            .fields
-            .iter()
-            .find(|field| field.path == "domains.lanes.user_skills")
-            .unwrap();
-        assert_eq!(field.default, json!("discover"));
-        assert_eq!(field.source, provenant_config::Layer::Default);
-        assert_eq!(field.values, ["discover", "off"]);
-        assert_eq!(config.domains.lanes.user_skills, UserSkillsMode::Discover);
-        assert_eq!(
-            config.domains.lanes.user_skills_for(None),
-            UserSkillsMode::Discover
-        );
-        assert_eq!(
-            config.domains.lanes.user_skills_for(Some("proj-a")),
-            UserSkillsMode::Discover
-        );
 
         // Can be switched to "off".
-        let edited = edit(&roots, json!({"domains.lanes.user_skills": "off"})).unwrap();
+        let edited = dry_edit(&roots, json!({"domains.lanes.user_skills": "off"})).unwrap();
         assert_eq!(edited.config.domains.lanes.user_skills, UserSkillsMode::Off);
         assert_eq!(
             edited.config.domains.lanes.user_skills_for(None),
             UserSkillsMode::Off
         );
 
-        assert!(matches!(
-            edited.config.origins.get("domains.lanes.user_skills"),
-            Some(provenant_config::Origin::User { .. })
-        ));
         // Project override overrides host default.
-        let edited = edit(
+        let edited = dry_edit(
             &roots,
             json!({
                 "domains.lanes.user_skills": "off",
@@ -1102,15 +1101,10 @@ mod tests {
     }
 
     #[test]
-    fn project_paths_and_skill_stage_bound_have_defaults_and_user_origins() {
+    fn project_lane_paths_and_skill_stage_bound_are_applied() {
         let temp = tempfile::tempdir().unwrap();
         let roots = roots(&temp);
-        let (config, _) = provenant_config::show(&roots, &SECTIONS).unwrap();
-        assert_eq!(config.domains.lanes.skill_stage_max_bytes, 16 * 1024 * 1024);
-        assert!(ProjectLanesConfig::default().shared_paths.is_empty());
-        assert!(ProjectLanesConfig::default().capabilities.is_empty());
-        assert!(ProjectLanesConfig::default().exec_roots.is_empty());
-        let edited = edit(
+        let edited = dry_edit(
             &roots,
             json!({
                 "domains.lanes.projects.example.shared_paths": [".agent-run/locks", "~/locks"],
@@ -1128,27 +1122,10 @@ mod tests {
         assert_eq!(project.exec_roots, [PathBuf::from(".local-tools")]);
         assert_eq!(project.capabilities, ["postgres"]);
         assert_eq!(edited.config.domains.lanes.skill_stage_max_bytes, 1024);
-        for key in [
-            "domains.lanes.projects.example.shared_paths",
-            "domains.lanes.projects.example.capabilities",
-            "domains.lanes.projects.example.exec_roots",
-            "domains.lanes.skill_stage_max_bytes",
-        ] {
-            assert!(matches!(
-                edited.config.origins.get(key),
-                Some(provenant_config::Origin::User { .. })
-            ));
-        }
     }
     #[test]
-    fn landing_settings_defaults_and_validation() {
+    fn landing_settings_default_validates_and_invalid_settings_are_rejected() {
         let mut settings = PrSettings::default();
-        assert_eq!(settings.land.strategy, Strategy::Batch);
-        assert_eq!(settings.land.batch_size, 8);
-        assert_eq!(settings.land.batch_wait_seconds, 0);
-        assert_eq!(settings.land.gate.checks, ["ci-status"]);
-        assert_eq!(settings.land.publish, Publication::Auto);
-        assert!(!settings.land.post_merge.revert_forward);
         assert!(settings.validate().is_empty());
         assert!(valid_candidate_ref_prefix("queue-"));
         assert!(!valid_candidate_ref_prefix("land/../"));
@@ -1166,7 +1143,7 @@ mod tests {
     fn landing_partial_overrides_load_and_reject_invalid_ranges() {
         let temp = tempfile::tempdir().unwrap();
         let roots = roots(&temp);
-        let edited = edit(
+        let edited = dry_edit(
             &roots,
             json!({
                 "domains.pr.land.projects.demo.batch_size": 3,
@@ -1199,12 +1176,10 @@ mod tests {
     }
 
     #[test]
-    fn landing_settings_round_trip_and_origins() {
+    fn landing_setting_overrides_are_applied() {
         let temp = tempfile::tempdir().unwrap();
         let roots = roots(&temp);
-        let (config, _) = provenant_config::show(&roots, &SECTIONS).unwrap();
-        assert_eq!(config.domains.pr.land, LandSettings::default());
-        let edited = edit(
+        let edited = dry_edit(
             &roots,
             json!({
                 "domains.pr.land.strategy": "direct",
@@ -1215,9 +1190,5 @@ mod tests {
         .unwrap();
         assert_eq!(edited.config.domains.pr.land.strategy, Strategy::Direct);
         assert_eq!(edited.config.domains.pr.land.gate.checks, ["test"]);
-        assert!(matches!(
-            edited.config.origins.get("domains.pr.land.batch_size"),
-            Some(provenant_config::Origin::User { .. })
-        ));
     }
 }

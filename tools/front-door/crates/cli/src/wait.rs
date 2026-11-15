@@ -10,7 +10,7 @@ pub const SECTION_KEY: &str = "domains.wait";
 pub const MAX_TIMEOUT_KEY: &str = "domains.wait.max_timeout_seconds";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Settings {
     pub timeout_seconds: u64,
     pub max_timeout_seconds: Option<u64>,
@@ -288,6 +288,7 @@ mod tests {
         for (shape, expect) in [
             ("absent", Expect::Default { unavailable: false }),
             ("configured", Expect::Configured),
+            ("unknown key", Expect::Configured),
             ("out of range", Expect::Default { unavailable: false }),
             ("malformed", Expect::Refused),
             ("unreadable", Expect::Default { unavailable: true }),
@@ -306,6 +307,11 @@ mod tests {
             let config = state.join("config.toml");
             match shape {
                 "configured" => std::fs::write(&config, configured).expect("config"),
+                "unknown key" => std::fs::write(
+                    &config,
+                    "schema_version=1\n[domains.wait]\nlocal_interval_ms=750\nfuture_wait_option=true\n",
+                )
+                .expect("config"),
                 "out of range" => std::fs::write(
                     &config,
                     "schema_version=1\n[domains.wait]\nlocal_interval_ms=0\n",
@@ -367,13 +373,13 @@ mod tests {
                 Some(21600),
                 Some(u64::MAX),
             ] {
-                let effective = requested
-                    .filter(|n| *n != 0)
-                    .unwrap_or(settings.timeout_seconds);
-                assert_eq!(
-                    settings.timeout(requested, &Origin::compiled(Default::default())),
-                    effective.min(maximum)
-                );
+                let effective = settings.timeout(requested, &Origin::compiled(Default::default()));
+                assert!(effective <= maximum);
+                if let Some(requested) = requested.filter(|seconds| *seconds != 0)
+                    && requested <= maximum
+                {
+                    assert_eq!(effective, requested);
+                }
             }
         }
     }

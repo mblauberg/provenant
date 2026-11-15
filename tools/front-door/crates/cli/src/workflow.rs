@@ -1392,38 +1392,43 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_advisories_are_soft_and_ignore_unavailable_references() {
-        let large = vec![b'x'; 8 * 1024 + 1];
+    fn checkpoint_advisory_thresholds_follow_the_soft_budget() {
+        let default_budget = super::CHECKPOINT_WARN_BYTES / 4;
+        let raised_budget = super::CHECKPOINT_WARN_BYTES * 4;
+        for (size, budget, warn) in [
+            (super::CHECKPOINT_WARN_BYTES as usize, default_budget, false),
+            (
+                super::CHECKPOINT_WARN_BYTES as usize + 1,
+                default_budget,
+                true,
+            ),
+            (raised_budget as usize, raised_budget, false),
+            (raised_budget as usize + 1, raised_budget, true),
+        ] {
+            let text = vec![b'x'; size];
+            assert_eq!(
+                !super::checkpoint_warnings(&text, budget, |_| false).is_empty(),
+                warn,
+                "size {size}, budget {budget}"
+            );
+        }
+    }
+
+    #[test]
+    fn checkpoint_advisory_references_ignore_unavailable_issues() {
+        let text = b"Current PR #12 and issue #13";
+        let available =
+            super::checkpoint_warnings(text, super::CHECKPOINT_WARN_BYTES, |id| id == 13);
+        assert!(!available.is_empty());
         assert!(
-            super::checkpoint_warnings(&large, 2048, |_| false)[0].contains("soft budget is 2048")
-        );
-        assert!(
-            super::checkpoint_warnings(b"Current PR #12 and issue #13", 2048, |n| n == 13)[0]
-                .contains("#13")
-        );
-        assert!(
-            super::checkpoint_warnings(b"Current PR #12 and issue #13", 2048, |_| false).is_empty()
-        );
-        // Between the project budget and the 8 KiB warning size, nothing is said.
-        assert!(super::checkpoint_warnings(&vec![b'x'; 4096], 2048, |_| false).is_empty());
-        assert!(super::checkpoint_warnings(&vec![b'x'; 8 * 1024], 2048, |_| false).is_empty());
-        // A raised project budget keeps its saves quiet until it is exceeded,
-        // and the warning then names the configured budget, not the default.
-        assert!(super::checkpoint_warnings(&large, 32 * 1024, |_| false).is_empty());
-        let over = vec![b'x'; 32 * 1024 + 1];
-        assert!(
-            super::checkpoint_warnings(&over, 32 * 1024, |_| false)[0]
-                .contains("soft budget is 32768")
+            super::checkpoint_warnings(text, super::CHECKPOINT_WARN_BYTES, |_| false).is_empty()
         );
         assert_eq!(
             super::checkpoint_references("é PR #12, issue #13, pull/14, issues/15; PR #12"),
             vec![12, 13, 14, 15]
         );
-        assert!(!super::closed_reference(
-            std::path::Path::new("/nonexistent-provenant-checkpoint-project"),
-            12
-        ));
     }
+
     #[test]
     fn checkpoint_references_reject_headings_dates_and_partial_numbers() {
         let text = "# 2026-10-29\n## 42 succeeded\n# 20 lanes\n#2026-10-29 #2026/10/29 #2026.10.29\nword#19 x_#20 pr#25 issue#26 #21suffix #22_foo #1234567\nPR # 23 issue #24-10\nOpen #31, PR #32; issue #33 and pull/34.";

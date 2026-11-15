@@ -1365,11 +1365,6 @@ mod tests {
             "options": [{"id": "repair", "label": "Repair", "description": "Fix the check"}]
         });
         assert!(request_content(&serde_json::to_vec(&value).unwrap()).is_ok());
-        for retired in ["run_id", "task_id"] {
-            let mut forged = value.clone();
-            forged["work"][retired] = serde_json::json!("02".repeat(16));
-            assert!(request_content(&serde_json::to_vec(&forged).unwrap()).is_err());
-        }
         for path in [
             "",
             "/supersedes",
@@ -1384,7 +1379,7 @@ mod tests {
                 .unwrap()
                 .as_object_mut()
                 .unwrap()
-                .insert("owner_host".into(), serde_json::json!("03".repeat(16)));
+                .insert("future_extension".into(), serde_json::json!("unknown"));
             assert!(
                 request_content(&serde_json::to_vec(&forged).unwrap()).is_err(),
                 "{path}"

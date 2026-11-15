@@ -210,7 +210,7 @@ mod tests {
     fn worker_does_not_require_a_git_checkout() {
         let argv = worker_argv(Path::new("/bin/provenant"), Path::new("/state"));
         assert!(!argv.iter().any(|arg| arg == "--project"));
-        assert_eq!(argv[3], "internal");
+        assert!(argv.iter().any(|arg| arg == "internal"));
     }
 
     #[test]
@@ -251,7 +251,7 @@ mod tests {
                 |_| installed,
                 |argv, cwd| {
                     assert_eq!(cwd, temp.path());
-                    assert_eq!(argv[3], "internal");
+                    assert!(argv.iter().any(|arg| arg == "internal"));
                     let _probe = provenant_os::provider_fence::acquire(
                         temp.path(),
                         "claude",

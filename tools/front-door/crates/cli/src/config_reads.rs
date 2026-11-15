@@ -249,13 +249,14 @@ mod tests {
         );
     }
     #[test]
-    fn operational_commands_resolve_compiled_defaults_without_project_or_provider_config() {
+    fn commands_without_domain_reads_use_compiled_defaults() {
         let temp = tempfile::tempdir().unwrap();
         let roots = roots(&temp);
-        for command in [
-            "worktree", "gc", "disk", "quota", "route", "tracker", "check", "pr", "land",
-        ] {
-            let config = read_for(&roots, command).unwrap();
+        for row in READS
+            .iter()
+            .filter(|row| row.domains.is_some_and(|domains| domains.is_empty()))
+        {
+            let config = read_for(&roots, row.command).unwrap();
             assert!(config.domains.accounts.entries.is_empty());
             assert!(
                 config

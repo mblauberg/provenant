@@ -453,17 +453,24 @@ mod tests {
                         .any(|grant| grant.path == primary.join(".claude"))
                 );
             }
-            for (index, reason) in [
-                (1, "outside_primary_checkout"),
-                (2, "outside_primary_checkout"),
-                (3, "outside_primary_checkout"),
-                (4, "missing_or_unreadable"),
-                (6, "protected_path"),
+            for (entry, reason) in [
+                (Path::new("../home"), "outside_primary_checkout"),
+                (home.as_path(), "outside_primary_checkout"),
+                (Path::new("escape"), "outside_primary_checkout"),
+                (Path::new("missing"), "missing_or_unreadable"),
+                (Path::new("protected"), "protected_path"),
             ] {
-                assert!(warnings.iter().any(|warning| warning["key"]
-                    == format!("domains.lanes.projects.example.exec_roots[{index}]")
-                    && warning["reason"] == reason
-                    && warning["code"] == "exec_root_ignored"));
+                let index = settings
+                    .exec_roots
+                    .iter()
+                    .position(|configured| configured.as_path() == entry)
+                    .ok_or("configured exec root")?;
+                let key = format!("domains.lanes.projects.example.exec_roots[{index}]");
+                assert!(warnings.iter().any(|warning| {
+                    warning["key"] == key
+                        && warning["reason"] == reason
+                        && warning["code"] == "exec_root_ignored"
+                }));
             }
             let credential_warning = warnings
                 .iter()

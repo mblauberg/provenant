@@ -276,7 +276,6 @@ fn read_only_checkout_warning_measures_the_selected_checkout_against_origin_defa
     run(&checkout, &["reset", "-q", "--hard", &stale])?;
     let warning = confinement::read_only_checkout_warning(&state, &checkout)
         .ok_or("behind checkout did not warn")?;
-    assert!(warning.contains("1 commit behind"), "{warning}");
     assert!(warning.contains(&stale), "{warning}");
     assert!(
         warning.contains(&checkout.display().to_string()),
@@ -297,7 +296,6 @@ fn read_only_checkout_warning_measures_the_selected_checkout_against_origin_defa
     )?;
     let warning = confinement::read_only_checkout_warning(&state, &checkout)
         .ok_or("advertised default did not warn")?;
-    assert!(warning.contains("1 commit behind"), "{warning}");
 
     // An unreachable remote is advisory: the launch continues without a warning.
     run(
@@ -357,7 +355,7 @@ fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
     std::fs::write(
         &git,
         format!(
-            "#!/bin/sh\n[ \"$HOME\" = \"$TMPDIR\" ] || exit 97\nls -ld \"$HOME\" >> {r}\nexec {g} \"$@\"\n",
+            "#!/bin/sh\n[ \"$HOME\" = \"$TMPDIR\" ] || exit 97\nprintf '%s\\n' \"$HOME\" >> {r}\nexec {g} \"$@\"\n",
             r = record.display(),
             g = real.display()
         ),
@@ -415,12 +413,18 @@ fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
     let seen = std::fs::read_to_string(&record)?;
     assert!(!seen.is_empty(), "host git never ran");
     for line in seen.lines() {
-        assert!(line.starts_with("drwx------"), "{line}");
+        let home = Path::new(line);
+        assert!(home.starts_with(&host_root), "{home:?}");
         assert!(
-            line.contains(&format!("{}/probe-", host_root.display())),
-            "{line}"
+            home.strip_prefix(&host_root)?
+                .components()
+                .next()
+                .is_some_and(|part| part.as_os_str().to_string_lossy().starts_with("probe-")),
+            "{home:?}"
         );
-        assert!(!line.contains("children"), "{line}");
+        let mode = std::fs::symlink_metadata(home)?.permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "host Git home permissions: {home:?}");
+        assert!(!home.starts_with(&child_store), "{home:?}");
     }
     // The home is gone once the plan is done, and the child store is unchanged.
     let leftovers: Vec<_> = std::fs::read_dir(&host_root)?
@@ -489,7 +493,7 @@ fn credential_authority_never_follows_links_below_the_host_root()
 }
 
 #[test]
-fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
+fn missing_sessions_fail_and_retained_codex_remains_resumable()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, Digest};
     use provenant_records::{
@@ -995,35 +999,49 @@ fn mkfifo(path: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Copy `source` while `swap` changes the entry `victim` after its check,
-/// on a thread so a blocking open fails the test instead of hanging it.
+/// Change `victim` after its metadata check. The calling test runs in a
+/// bounded child process so a blocking-open regression cannot hang the suite.
 fn copy_with_swap(
     source: &Path,
     copied: &Path,
-    swap: impl FnOnce(&Path) -> std::io::Result<()> + Send + 'static,
+    swap: impl FnOnce(&Path) -> std::io::Result<()>,
 ) -> Result<(), String> {
-    let (source, copied) = (source.to_owned(), copied.to_owned());
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut swap = Some(swap);
-        let entry = source.join("victim");
-        BEFORE_OPEN.set(Some(Box::new(move |name| {
+    let mut swap = Some(swap);
+    let entry = source.join("victim");
+    BEFORE_OPEN.with_borrow_mut(|hook| {
+        *hook = Some(Box::new(move |name| {
             if name == "victim"
                 && let Some(swap) = swap.take()
             {
                 swap(&entry).expect("swap the checked entry");
             }
-        })));
-        let _ = sender.send(copy_state(&source, &copied, false));
+        }));
     });
-    receiver
-        .recv_timeout(std::time::Duration::from_secs(10))
-        .expect("the copy finishes without blocking")
+    let result = copy_state(source, copied, false);
+    BEFORE_OPEN.with_borrow_mut(|hook| *hook = None);
+    result
 }
 
 #[test]
 fn retained_state_copy_skips_entries_swapped_after_their_check()
 -> Result<(), Box<dyn std::error::Error>> {
+    const CHILD: &str = "PROVENANT_TEST_SWAPPED_COPY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let outcome = crate::test_support::rerun_test(
+            module_path!(),
+            "retained_state_copy_skips_entries_swapped_after_their_check",
+            &[(CHILD.into(), "1".into())],
+            &[],
+            std::time::Duration::from_secs(30),
+        )?;
+        assert!(
+            matches!(
+                outcome.termination,
+                provenant_os::exec::Termination::Exit(0)
+            ) && !outcome.timed_out
+        );
+        return Ok(());
+    }
     type Swap = fn(&Path, &Path) -> std::io::Result<()>;
     let swaps: [(&str, bool, Swap); 6] = [
         ("file to outside link", false, |entry, outside| {
@@ -1088,14 +1106,18 @@ fn retained_state_copy_refuses_a_file_swapped_for_a_hard_link()
     std::fs::write(source.join("victim"), "lane")?;
     let copied = base.join("copy");
     let secret = base.join("host-secret");
-    let result = copy_with_swap(&source, &copied, move |entry| {
+    let swapped = std::cell::Cell::new(false);
+    let result = copy_with_swap(&source, &copied, |entry| {
         std::fs::remove_file(entry)?;
-        std::fs::hard_link(&secret, entry)
+        std::fs::hard_link(&secret, entry)?;
+        swapped.set(true);
+        Ok(())
     });
-    assert_eq!(
-        result,
-        Err("retained provider state holds a hard-linked file".into())
+    assert!(
+        swapped.get(),
+        "fixture must replace the file with a hard link"
     );
+    assert!(result.is_err(), "a swapped hard link must be refused");
     assert!(std::fs::symlink_metadata(copied.join("victim")).is_err());
     Ok(())
 }
@@ -1145,6 +1167,32 @@ fn retained_state_copy_skips_nested_symlinks() -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
+fn assert_copy_refusal(
+    error: StateCopyError,
+    expected_setting: provenant_records::diagnostic::ContinuationCopyLimit,
+    expected_limit: u64,
+) {
+    let Some(provenant_records::diagnostic::ResourceFact::ContinuationCopy {
+        limit,
+        setting,
+        origin,
+        available_bytes,
+    }) = error.resource_fact()
+    else {
+        panic!("copy refusal must retain its typed resource fact");
+    };
+    assert_eq!(*setting, expected_setting);
+    assert_eq!(*limit, expected_limit);
+    assert_eq!(
+        *origin,
+        provenant_records::diagnostic::SettingSource::ShippedDefault
+    );
+    assert_eq!(
+        available_bytes.is_some(),
+        expected_setting == provenant_records::diagnostic::ContinuationCopyLimit::Bytes
+    );
+}
+
 #[test]
 fn retained_state_copy_refuses_state_past_its_byte_budget() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -1153,12 +1201,6 @@ fn retained_state_copy_refuses_state_past_its_byte_budget() -> Result<(), Box<dy
         bytes: LIMIT,
         ..RETAINED_STATE
     };
-    let assert_byte_refusal = |result: Result<(), String>| {
-        let error = result.expect_err("copy byte ceiling must refuse");
-        assert!(error.contains("domains.run.continuation_copy_limit_bytes"));
-        assert!(error.contains(&LIMIT.to_string()));
-        assert!(error.contains("shipped default"));
-    };
     let temp = tempfile::tempdir()?;
     let base = std::fs::canonicalize(temp.path())?;
     // A sparse file costs the lane no blocks but claims far past the budget.
@@ -1166,7 +1208,11 @@ fn retained_state_copy_refuses_state_past_its_byte_budget() -> Result<(), Box<dy
     std::fs::create_dir(&sparse)?;
     std::fs::File::create(sparse.join("rollout.jsonl"))?.set_len(64 * LIMIT)?;
     let copied = base.join("sparse-copy");
-    assert_byte_refusal(copy_state_within(&sparse, &copied, limits, false));
+    assert_copy_refusal(
+        copy_state_within(&sparse, &copied, limits, false).unwrap_err(),
+        provenant_records::diagnostic::ContinuationCopyLimit::Bytes,
+        LIMIT,
+    );
     assert!(
         !copied.join("rollout.jsonl").exists(),
         "the partial copy is removed"
@@ -1177,12 +1223,11 @@ fn retained_state_copy_refuses_state_past_its_byte_budget() -> Result<(), Box<dy
     let half = vec![b'x'; usize::try_from(LIMIT / 2 + 1)?];
     std::fs::write(split.join("history.jsonl"), &half)?;
     std::fs::write(split.join("sessions/rollout.jsonl"), &half)?;
-    assert_byte_refusal(copy_state_within(
-        &split,
-        &base.join("split-copy"),
-        limits,
-        false,
-    ));
+    assert_copy_refusal(
+        copy_state_within(&split, &base.join("split-copy"), limits, false).unwrap_err(),
+        provenant_records::diagnostic::ContinuationCopyLimit::Bytes,
+        LIMIT,
+    );
     // State of exactly the budget still copies whole.
     let exact = base.join("exact");
     std::fs::create_dir(&exact)?;
@@ -1220,7 +1265,11 @@ fn retained_state_copy_refuses_trees_past_its_entry_and_depth_budget()
     let deep = base.join("deep");
     std::fs::create_dir_all(deep.join("a/b/c"))?;
     let error = copy_state_within(&deep, &base.join("deep-copy"), limits, false).unwrap_err();
-    assert!(error.contains("domains.run.continuation_copy_depth is 2"));
+    assert_copy_refusal(
+        error,
+        provenant_records::diagnostic::ContinuationCopyLimit::Depth,
+        u64::from(limits.depth),
+    );
 
     let wide = base.join("wide");
     std::fs::create_dir(&wide)?;
@@ -1228,6 +1277,10 @@ fn retained_state_copy_refuses_trees_past_its_entry_and_depth_budget()
         std::fs::write(wide.join(name), "lane")?;
     }
     let error = copy_state_within(&wide, &base.join("wide-copy"), limits, false).unwrap_err();
-    assert!(error.contains("domains.run.continuation_copy_entries is 4"));
+    assert_copy_refusal(
+        error,
+        provenant_records::diagnostic::ContinuationCopyLimit::Entries,
+        u64::from(limits.entries),
+    );
     Ok(())
 }

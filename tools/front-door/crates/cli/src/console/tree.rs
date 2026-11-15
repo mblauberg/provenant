@@ -1,5 +1,5 @@
 //! Bounded host-local composition of indexed run stores.
-use super::Error;
+use super::{Error, PAGE_SIZE_LIMIT};
 use provenant_core::{ActorId, AttemptId, CancelToken, Clock, ProjectId, Roots};
 use provenant_os::clock::SystemClock;
 use provenant_run::{ExecutionContext, RunStore};
@@ -24,7 +24,7 @@ pub(super) fn read_inner(
     detail: bool,
     include_store_path: bool,
 ) -> Result<Value, Error> {
-    if !(1..=16).contains(&max_depth) || !(1..=100).contains(&max_nodes) {
+    if !(1..=16).contains(&max_depth) || !(1..=PAGE_SIZE_LIMIT).contains(&max_nodes) {
         return Err(provenant_run::RunError::Validation("tree bounds").into());
     }
     let clock = SystemClock::new();
@@ -229,7 +229,7 @@ pub(super) fn read_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_core::{Digest, OperationId, RootInputs};
+    use provenant_core::{Digest, MonoTime, OperationId, RootInputs, TestClock, WallTime};
     use provenant_records::CanonicalV1;
     use provenant_run::{CanonicalRequest, PreparedRun};
 
@@ -251,13 +251,20 @@ mod tests {
             roots.state.as_path().join("children/old/run.sqlite3"),
             b"invalid database",
         )?;
-        let tree = read(&roots, None, 3, 100, false)?;
+        let tree = read(&roots, None, 3, PAGE_SIZE_LIMIT, false)?;
         assert_eq!(tree["nodes"], json!([]));
         assert_eq!(tree["unfetched_children"], json!([]));
         Ok(())
     }
-    #[test]
-    fn host_tree_preserves_lineage_detail_and_usage() -> Result<(), Box<dyn std::error::Error>> {
+    struct TreeFixture {
+        _temp: tempfile::TempDir,
+        roots: Roots,
+        other_project: ProjectId,
+        other_attempt: AttemptId,
+        expected_attempts: usize,
+    }
+
+    fn fixture() -> Result<TreeFixture, Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let base = temp.path().canonicalize()?;
         std::fs::create_dir(base.join("home"))?;
@@ -265,9 +272,7 @@ mod tests {
         let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
         inputs.state_dir = Some(base.join("state"));
         let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-        assert_eq!(read(&roots, None, 3, 100, false)?["nodes"], json!([]));
-        assert!(!roots.state.as_path().exists());
-        let clock = SystemClock::new();
+        let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
         let cancel = CancelToken::new();
         let call = provenant_run::Request {
             clock: &clock,
@@ -318,29 +323,51 @@ mod tests {
         )?;
         request.parent = None;
         request.parent_attempt = None;
+        let other_attempt = AttemptId::from_bytes([4; 16]);
         other_store.create(&prepared(4, request)?, &call)?;
-        // Historical provider data is stored in the current record shape.
-        let mut observed = store.record(AttemptId::from_bytes([1; 16]), &call)?;
-        observed.applied_route = Some(provenant_records::run::RouteRecord {
-            provider: Some("codex".into()),
-            ..Default::default()
-        });
-        observed.usage.uncached_input = Some(42);
-        let db = rusqlite::Connection::open(roots.state.as_path().join("run.sqlite3"))?;
-        db.execute(
-            "UPDATE attempts SET record=?1 WHERE id=?2",
-            rusqlite::params![
-                serde_json::to_vec(&observed)?,
-                observed.attempt_id.to_string()
-            ],
-        )?;
-        let tree = read(&roots, None, 3, 100, false)?;
+        Ok(TreeFixture {
+            _temp: temp,
+            roots,
+            other_project,
+            other_attempt,
+            expected_attempts: 4,
+        })
+    }
+
+    #[test]
+    fn empty_tree_read_does_not_create_the_state_root() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        std::fs::create_dir(base.join("home"))?;
+        std::fs::create_dir(base.join("checkout"))?;
+        let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
+        inputs.state_dir = Some(base.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        assert_eq!(
+            read(&roots, None, 3, PAGE_SIZE_LIMIT, false)?["nodes"],
+            json!([])
+        );
+        assert!(!roots.state.as_path().exists());
+        Ok(())
+    }
+
+    #[test]
+    fn host_tree_preserves_lineage_and_missing_usage() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = fixture()?;
+        let roots = &fixture.roots;
+        let tree = read(roots, None, 3, PAGE_SIZE_LIMIT, false)?;
         assert!(tree["nodes"][0]["lane_id"]["key"].is_object());
         assert!(tree["nodes"][0]["lane_id"].get("run_id").is_none());
         assert!(tree["nodes"][0]["lane_id"].get("task_id").is_none());
-        assert_eq!(tree["totals"]["usage"]["uncached_input"]["missing"], 4);
-        assert_eq!(tree["totals"]["attempts"], 4);
-        assert_eq!(tree["totals"]["usage"]["reasoning"]["missing"], 4);
+        assert_eq!(
+            tree["totals"]["usage"]["uncached_input"]["missing"],
+            fixture.expected_attempts
+        );
+        assert_eq!(tree["totals"]["attempts"], fixture.expected_attempts);
+        assert_eq!(
+            tree["totals"]["usage"]["reasoning"]["missing"],
+            fixture.expected_attempts
+        );
         assert_eq!(tree["identity_conflicts"], json!([]));
         assert_eq!(tree["unfetched_children"], json!([]));
         assert_eq!(tree["truncated"], false);
@@ -371,25 +398,47 @@ mod tests {
                 .iter()
                 .any(|n| n["children"].as_array().is_some_and(|c| !c.is_empty()))
         );
-        let detailed = read(&roots, None, 3, 100, true)?;
+        Ok(())
+    }
+
+    #[test]
+    fn host_tree_detail_and_project_scope_follow_the_selected_records()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = fixture()?;
+        let roots = &fixture.roots;
+        let tree = read(roots, None, 3, PAGE_SIZE_LIMIT, false)?;
+        let detailed = read(roots, None, 3, PAGE_SIZE_LIMIT, true)?;
         assert!(detailed["nodes"][0]["metadata"]["operation"].is_object());
         assert!(serde_json::to_vec(&tree)?.len() < serde_json::to_vec(&detailed)?.len());
         let detail =
-            super::super::detail::read(&roots, &AttemptId::from_bytes([2; 16]).to_string())?;
+            super::super::detail::read(roots, &AttemptId::from_bytes([2; 16]).to_string())?;
         assert_eq!(detail["status"], "found");
-        assert_eq!(detail["artifacts"][0]["bytes"], 4);
+        assert_eq!(detail["artifacts"][0]["bytes"], "body".len());
         assert_eq!(detail["artifacts"][0]["present"], true);
         assert_eq!(detail["usage"]["reasoning"], Value::Null);
-        let selected = read(&roots, Some(other_project), 3, 100, false)?;
+        let selected = read(
+            roots,
+            Some(fixture.other_project),
+            3,
+            PAGE_SIZE_LIMIT,
+            false,
+        )?;
         assert_eq!(selected["totals"]["attempts"], 1);
         assert!(
             selected["nodes"]
                 .as_array()
                 .ok_or("nodes")?
                 .iter()
-                .all(|n| n["lane_id"]["project_id"] == json!(other_project))
+                .all(|n| n["lane_id"]["project_id"] == json!(fixture.other_project))
         );
-        let limited = read(&roots, None, 3, 1, false)?;
+        assert!(
+            selected["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|node| { node["lane_id"]["attempt_id"] == json!(fixture.other_attempt) })
+        );
+        let limited = read(roots, None, 3, 1, false)?;
         assert_eq!(limited["truncated"], true);
         Ok(())
     }

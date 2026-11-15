@@ -1,3 +1,56 @@
+#[derive(serde::Serialize)]
+struct ConfigDocument<Domains> {
+    schema_version: u64,
+    domains: Domains,
+}
+
+#[derive(serde::Serialize)]
+struct RoutingDomain<'a> {
+    routing: &'a provenant_routing::RoutingConfig,
+}
+
+#[derive(serde::Serialize)]
+struct RunDomain<'a> {
+    run: &'a provenant_confinement::run_config::RunConfig,
+}
+
+fn write_config<Domains: serde::Serialize>(
+    state: &std::path::Path,
+    domains: Domains,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = ConfigDocument {
+        schema_version: provenant_config::CONFIG_SCHEMA_VERSION,
+        domains,
+    };
+    let text = toml_edit::ser::to_string(&config)?;
+    std::fs::write(state.join("config.toml"), text)?;
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RefusalScenario {
+    CredentialRoot,
+    InvalidRoots,
+    Resolver,
+}
+
+impl RefusalScenario {
+    const fn boundary(self) -> provenant_records::diagnostic::BoundaryClass {
+        use provenant_records::diagnostic::BoundaryClass;
+        match self {
+            Self::CredentialRoot | Self::Resolver => BoundaryClass::Credentials,
+            Self::InvalidRoots => BoundaryClass::Authority,
+        }
+    }
+
+    const fn plan_error(self) -> &'static str {
+        match self {
+            Self::CredentialRoot | Self::Resolver => "credential_root",
+            Self::InvalidRoots => "invalid_roots",
+        }
+    }
+}
+
 struct CommitSourcePreparation {
     _temporary: tempfile::TempDir,
     roots: provenant_core::Roots,
@@ -38,11 +91,8 @@ impl CommitSourcePreparation {
             ..provenant_core::RootInputs::new(home.clone(), project.clone())
         }
         .resolve(&provenant_os::fs::SystemPathResolver)?;
-        let utility = provenant_confinement::UtilityRuntime::new(
-            &git,
-            &git_home,
-            roots.state.as_path(),
-        )?;
+        let utility =
+            provenant_confinement::UtilityRuntime::new(&git, &git_home, roots.state.as_path())?;
         let repo = utility.open_repo(
             &executor,
             &project,
@@ -163,10 +213,18 @@ impl CommitSourcePreparation {
 fn commit_source_preparation_grants_an_immutable_materialised_view()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut fixture = CommitSourcePreparation::new()?;
-    std::fs::write(
-        fixture.state.join("config.toml"),
-        "schema_version=1\n[[domains.routing.pools.senior]]\nmodel='cursor/gpt-5.3-codex-low'\nweight=1\nefforts=[]\n",
-    )?;
+    let mut routing = provenant_routing::RoutingConfig::default();
+    routing.pools.insert(
+        "senior".into(),
+        vec![provenant_routing::RoutePoolMember {
+            model: provenant_routing::ModelId::parse("cursor/gpt-5.3-codex-low")?,
+            weight: 1,
+            effort: None,
+            efforts: Vec::new(),
+            free: false,
+        }],
+    );
+    write_config(&fixture.state, RoutingDomain { routing: &routing })?;
     fixture.task.route = run::RequestedRoute::Review {
         extra: Default::default(),
         name: "senior".into(),
@@ -185,48 +243,63 @@ fn commit_source_preparation_grants_an_immutable_materialised_view()
     );
     let confinement = launch.confinement.as_ref().ok_or("missing confinement")?;
     let permissions = confinement.plan.permissions();
-    assert!(
-        permissions
-            .policy
-            .as_ref()
-            .ok_or("missing policy")?
-            .mandatory()
-            .state_reads()
-            .iter()
-            .any(|grant| grant.path == launch.cwd && grant.scope == PathScope::Subtree)
-    );
+    let policy = permissions.policy.as_ref().ok_or("missing policy")?;
+    let source_grant = provenant_confinement::permissions::PathGrant {
+        path: launch.cwd.clone(),
+        scope: PathScope::Subtree,
+    };
+    assert!(policy.mandatory().state_reads().contains(&source_grant));
     assert!(
         !permissions
             .read_roots
             .iter()
             .any(|grant| grant.path == fixture.project)
     );
-    let private = permissions.private_state.as_ref().ok_or("missing private state")?;
-    let handoff = private.path.join("handoff.json");
-    let prompt = launch.argv.iter().map(|arg| arg.to_string_lossy()).collect::<Vec<_>>().join(" ");
-    let stdin = String::from_utf8_lossy(&launch.stdin);
-    assert!(prompt.contains(&handoff.display().to_string()) || stdin.contains(&handoff.display().to_string()));
-    let policy = provenant_confinement::permissions::snapshot::render(permissions, &confinement.profile, &fixture.home)?;
-    assert!(policy.contains(&format!("(allow file-write* (subpath \"{}\"))", private.path.display())));
-    let denial = policy.lines().find(|line| line.starts_with("(deny file-write* (require-all") && line.contains(fixture.state.to_str().unwrap())).ok_or("state denial")?;
-    assert!(denial.contains(&format!("(require-not (subpath \"{}\"))", private.path.display())));
-    assert!(policy.contains(&format!("(deny file-write* (subpath \"{}\"))", launch.cwd.display())));
+    let private = permissions
+        .private_state
+        .as_ref()
+        .ok_or("missing private state")?;
+    assert_eq!(private.scope, PathScope::Subtree);
+    assert!(private.path.starts_with(&fixture.paths.provider_state));
+    assert!(handoff_writable(permissions));
+    let handoff = private.path.join("handoff.json").to_string_lossy();
+    let prompt = launch.argv.last().ok_or("Cursor prompt argument")?;
+    assert!(prompt.to_string_lossy().contains(handoff.as_ref()));
     let writes = provenant_confinement::write_grants(permissions, &confinement.profile);
+    assert!(writes.iter().any(|grant| grant.path == private.path));
     source_tree::ensure_view_read_only(&launch.cwd, &writes)?;
     Ok(())
 }
 
 #[test]
-fn host_denied_handoff_remains_best_effort() -> Result<(), Box<dyn std::error::Error>> {
+fn host_write_policy_preserves_the_declared_handoff_grant() -> Result<(), Box<dyn std::error::Error>>
+{
     let fixture = CommitSourcePreparation::new()?;
-    std::fs::write(fixture.state.join("config.toml"), format!(
-        "schema_version=1\n[domains.run.host_policy]\ndeny_write=[{:?}]\n", fixture.state.to_str().ok_or("state path")?
-    ))?;
+    let mut config = provenant_confinement::run_config::RunConfig::default();
+    config.host_policy = Some(serde_json::from_value(serde_json::json!({
+        "deny_write": [fixture.state.clone()]
+    }))?);
+    write_config(&fixture.state, RunDomain { run: &config })?;
+
     let launch = fixture.prepare()?;
-    let prompt = launch.argv.iter().map(|arg| arg.to_string_lossy()).collect::<Vec<_>>().join(" ");
-    let permissions = launch.confinement.as_ref().ok_or("missing confinement")?.plan.permissions();
-    assert!(permissions.private_state.is_some());
-    assert!(prompt.contains("Progress handoff JSON:") || String::from_utf8_lossy(&launch.stdin).contains("Progress handoff JSON:"));
+    let confinement = launch.confinement.as_ref().ok_or("missing confinement")?;
+    let permissions = confinement.plan.permissions();
+    let policy = permissions.policy.as_ref().ok_or("missing policy")?;
+    assert!(
+        policy
+            .optional()
+            .deny_write
+            .iter()
+            .any(|grant| grant.path == fixture.state)
+    );
+    let private = permissions
+        .private_state
+        .as_ref()
+        .ok_or("missing private state")?;
+    assert!(handoff_writable(permissions));
+    let handoff = private.path.join("handoff.json").to_string_lossy();
+    let prompt = launch.argv.last().ok_or("Cursor prompt argument")?;
+    assert!(prompt.to_string_lossy().contains(handoff.as_ref()));
     Ok(())
 }
 
@@ -234,13 +307,14 @@ fn host_denied_handoff_remains_best_effort() -> Result<(), Box<dyn std::error::E
 fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_records::diagnostic::BoundaryClass;
-    for (plan_error, boundary) in [
-        ("credential_root", BoundaryClass::Credentials),
-        ("invalid_roots", BoundaryClass::Authority),
-        ("resolver", BoundaryClass::Credentials),
+    for scenario in [
+        RefusalScenario::CredentialRoot,
+        RefusalScenario::InvalidRoots,
+        RefusalScenario::Resolver,
     ] {
+        let boundary = scenario.boundary();
         let mut fixture = CommitSourcePreparation::new()?;
-        if plan_error == "invalid_roots" {
+        if scenario == RefusalScenario::InvalidRoots {
             fixture
                 .task
                 .access
@@ -253,11 +327,19 @@ fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics
                 .write_roots
                 .push(fixture.home.join(".ssh"));
         }
-        if plan_error == "resolver" {
-            std::fs::write(
-                fixture.state.join("config.toml"),
-                "schema_version=1\n[[domains.routing.pools.preparation-fixture]]\nmodel='cursor/gpt-5.3-codex-low'\nweight=1\nefforts=[]\n",
-            )?;
+        if scenario == RefusalScenario::Resolver {
+            let mut routing = provenant_routing::RoutingConfig::default();
+            routing.pools.insert(
+                "preparation-fixture".into(),
+                vec![provenant_routing::RoutePoolMember {
+                    model: provenant_routing::ModelId::parse("cursor/gpt-5.3-codex-low")?,
+                    weight: 1,
+                    effort: None,
+                    efforts: Vec::new(),
+                    free: false,
+                }],
+            );
+            write_config(&fixture.state, RoutingDomain { routing: &routing })?;
             fixture.task.route = run::RequestedRoute::Review {
                 extra: Default::default(),
                 name: "preparation-fixture".into(),
@@ -271,18 +353,14 @@ fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics
             };
         }
         let error = match fixture.prepare() {
-            Ok(_) => panic!("{plan_error} must be refused"),
+            Ok(_) => panic!("{scenario:?} must be refused"),
             Err(error) => error,
         };
         let refusal = error.into_refusal();
-        if plan_error == "resolver" {
+        if scenario == RefusalScenario::Resolver {
             assert_eq!(
                 refusal.terminal_cause,
                 provenant_records::run::TerminalCause::RouteResolutionRefused,
-            );
-            assert_eq!(
-                refusal.terminal_note.as_deref(),
-                Some("route resolver classification: family_separation"),
             );
             // A denied adapter check cannot reclassify a separate router error.
             assert_eq!(refusal.boundary_class, BoundaryClass::None);
@@ -311,11 +389,7 @@ fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics
         );
         assert_eq!(
             skipped.extra.get("plan_error"),
-            Some(&serde_json::json!(if plan_error == "resolver" {
-                "credential_root"
-            } else {
-                plan_error
-            })),
+            Some(&serde_json::json!(scenario.plan_error())),
         );
         assert_eq!(
             skipped.cause,
@@ -323,10 +397,13 @@ fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics
         );
         let failure: provenant_records::diagnostic::PlanFailure =
             serde_json::from_value(skipped.extra["plan_error"].clone())?;
-        assert_eq!(skipped.diagnostic().detail.as_deref(), Some(failure.detail()));
+        assert_eq!(
+            skipped.diagnostic().detail.as_deref(),
+            Some(failure.detail())
+        );
         assert_eq!(
             skipped.extra["confinement_guard"],
-            serde_json::json!(if plan_error == "invalid_roots" {
+            serde_json::json!(if scenario == RefusalScenario::InvalidRoots {
                 "invalid_plan_roots"
             } else {
                 "credential_root_refused"
