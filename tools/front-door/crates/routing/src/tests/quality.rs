@@ -134,7 +134,7 @@ fn catalogue_pool_members_each_have_a_prior_and_stay_eligible()
     ctx.access = &access;
     ctx.selection_evidence = Some(&evidence);
     let route = resolve_with_seed(&query, &ctx, "only-general", 0)?;
-    assert_eq!(route.model, high_model);
+    assert_eq!(format!("{}/{}", route.adapter, route.model), high_model);
     let receipt = route.pool_selection.ok_or("receipt")?;
     assert_eq!(
         receipt.candidates[0]

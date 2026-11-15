@@ -93,11 +93,13 @@ fn capacity_cooldowns_apply_only_to_draws_and_expire() -> Result<(), Box<dyn std
     ctx.capacity_cooldowns = &both;
     let fallback = resolve(&query, &ctx)?;
     let receipt = fallback.pool_selection.unwrap();
+    // Cooling is a preference, never a refusal: with every member cooling the
+    // pool is drawn normally and no candidate is excluded.
     assert!(
         receipt
             .candidates
             .iter()
-            .all(|candidate| candidate.exclusion.is_some())
+            .all(|candidate| candidate.exclusion.is_none())
     );
     ctx.now = provenant_core::WallTime::from_micros(110_000_000)?;
     let expired = resolve(&query, &ctx)?.pool_selection.unwrap();
@@ -153,11 +155,10 @@ fn cooling_ready_candidate_beats_unavailable_candidate() -> Result<(), Box<dyn s
     assert_eq!(selected.model, "gpt-6-luna");
     assert!(matches!(selected.readiness, RouteReadiness::Ready { .. }));
     let receipt = selected.pool_selection.ok_or("receipt")?;
-    assert!(
-        receipt.candidates.iter().any(|candidate| {
-            candidate.model == selected.model && candidate.exclusion.is_none()
-        })
-    );
+    assert!(receipt.candidates.iter().any(|candidate| {
+        candidate.model == format!("{}/{}", selected.adapter, selected.model)
+            && candidate.exclusion.is_none()
+    }));
     Ok(())
 }
 

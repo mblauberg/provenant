@@ -828,10 +828,13 @@ fn opencode_effort_normalisation_is_visible_in_exact_pool_and_launch_routes()
         }
         query.choice = RouteChoice::Model(entry.model.clone());
         query.effort = Some("invented".into());
-        assert!(matches!(
-            resolve(&query, &ctx),
-            Err(RoutingError::UnsupportedEffort { .. })
-        ));
+        // A well-formed effort the model does not record is dropped with a
+        // visible warning, never refused.
+        let route = resolve(&query, &ctx)?;
+        assert!(route.effort.is_none());
+        let warning = route.diagnostics.effort_warning.ok_or("effort warning")?;
+        assert_eq!(warning.requested, "invented");
+        assert!(warning.applied.is_none());
     }
     Ok(())
 }

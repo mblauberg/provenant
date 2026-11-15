@@ -150,12 +150,12 @@ fn all_exhausted_accounts_have_individual_remedies() -> Result<(), Box<dyn std::
     };
     let selected = resolve(&request("codex/gpt-6-luna")?, &context)?;
     let RouteReadiness::Unavailable {
-        reason: RouteExclusionReason::ProviderRefused,
+        reason: RouteExclusionReason::Exhausted,
         skipped_accounts,
         ..
     } = &selected.readiness
     else {
-        return Err("all exhausted accounts project to provider refusal".into());
+        return Err("all exhausted accounts project to an exhausted route".into());
     };
     let skipped = skipped_accounts
         .iter()
@@ -165,7 +165,7 @@ fn all_exhausted_accounts_have_individual_remedies() -> Result<(), Box<dyn std::
     assert!(
         skipped_accounts
             .iter()
-            .all(|account| account.reason == RouteExclusionReason::ProviderRefused)
+            .all(|account| account.reason == RouteExclusionReason::Exhausted)
     );
     Ok(())
 }
@@ -547,11 +547,12 @@ fn invalid_model_policy_inputs_that_can_lift_a_restriction_are_refused()
         "schema_version=1\n[[domains.routing.model_policy.rules]]\nschedule={ starts='1970-01-01T00:00:10Z', expires='1970-01-01T00:00:05Z' }\n[domains.routing.model_policy.rules.policy.lane]\nmax_turns=4\n",
     ] {
         let error = load_routing(text)?.err().ok_or(text)?;
-        assert!(matches!(
-            error,
-            provenant_config::ConfigError::Domain { source, .. }
-                if source.field.contains("model_policy") && !source.code.is_empty()
-        ));
+        // Refused at the offending key, whether the value is out of range
+        // (a domain error) or of the wrong type.
+        assert!(
+            error.to_string().contains("model_policy"),
+            "{text}: {error}"
+        );
     }
 
     let malformed_rule = load_routing(

@@ -360,9 +360,11 @@ fn candidate_errors_and_fallback_effort_match_request_fixtures()
             Expected::Adapter,
         ),
         (
+            // The route's own effort applies to its fallbacks: luna records no
+            // `max`, so the fallback is the candidate named in the refusal.
             r#"{"choice":{"kind":"named_route","value":"review"},"effort":null,"fallback":{"kind":"models","models":["codex/gpt-6-luna"]}}"#,
             Expected::Effort {
-                model: "codex/gpt-6.1-sol",
+                model: "codex/gpt-6-luna",
                 effort: "max",
             },
         ),
