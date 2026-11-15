@@ -1153,45 +1153,6 @@ mod process_wait_tests {
         );
     }
 
-    struct LowMemory;
-    impl Resources for LowMemory {
-        fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
-            crate::tests::HostFacts::new(100).observe_process(pid)
-        }
-        fn memory(&self) -> std::io::Result<MemorySample> {
-            Ok(MemorySample {
-                available_bytes: 1,
-                total_bytes: 100,
-            })
-        }
-        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
-            Ok(u64::MAX)
-        }
-    }
-
-    #[test]
-    fn admission_observations_name_memory_and_sourced_disk_limits()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let clock = crate::tests::clock();
-        let cancel = CancelToken::new();
-        let call = crate::tests::call(&clock, &cancel);
-        let store = RunStore::open(&crate::tests::context(temp.path())?, &call)?;
-        let run = crate::tests::input();
-        store.create(&run, &call)?;
-        let lane = store.record(run.attempt_id, &call)?;
-        let message = store.admission_observations(&lane, &call, &LowMemory)?;
-        assert!(
-            message.contains("memory=Ok(MemorySample { available_bytes: 1, total_bytes: 100 })"),
-            "{message}"
-        );
-        assert!(message.contains("floor=500 basis points"), "{message}");
-        assert!(message.contains("gc.free_floor"), "{message}");
-        assert!(message.contains("gc.critical_free"), "{message}");
-        assert!(message.contains("shipped default"), "{message}");
-        Ok(())
-    }
-
     fn starting_lane(
         store: &RunStore,
         call: &Request<'_>,

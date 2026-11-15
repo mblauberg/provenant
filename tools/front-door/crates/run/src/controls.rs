@@ -486,15 +486,14 @@ mod reboot_tests {
     }
 
     #[test]
-    fn unreadable_exit_is_not_reboot_proof() -> std::result::Result<(), Box<dyn std::error::Error>>
-    {
-        unavailable_reboot_evidence(false)
-    }
-
-    #[test]
-    fn corrupt_reservation_is_not_reboot_proof()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        unavailable_reboot_evidence(true)
+    fn unavailable_reboot_evidence_never_proves_a_reboot() -> TestResult {
+        for evidence in [
+            RebootEvidence::UnreadableExit,
+            RebootEvidence::CorruptReservation,
+        ] {
+            unavailable_reboot_evidence(evidence)?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -938,9 +937,13 @@ mod reboot_tests {
         Ok(())
     }
 
-    fn unavailable_reboot_evidence(
-        corrupt_reservation: bool,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    #[derive(Clone, Copy)]
+    enum RebootEvidence {
+        UnreadableExit,
+        CorruptReservation,
+    }
+
+    fn unavailable_reboot_evidence(evidence: RebootEvidence) -> TestResult {
         let temp = tempfile::tempdir()?;
         let clock = crate::tests::clock();
         let cancel = provenant_core::CancelToken::new();
@@ -963,12 +966,15 @@ mod reboot_tests {
         let evidence = path.join(id.to_string());
         std::fs::create_dir_all(&evidence)?;
         let reservation = evidence.join("reservation.json");
-        let cause = if corrupt_reservation {
-            std::fs::write(&reservation, b"corrupt reservation")?;
-            RebootProofCause::Other
-        } else {
-            std::fs::create_dir(path.join("process-exit.json"))?;
-            RebootProofCause::Filesystem
+        let cause = match evidence {
+            RebootEvidence::CorruptReservation => {
+                std::fs::write(&reservation, b"corrupt reservation")?;
+                RebootProofCause::Other
+            }
+            RebootEvidence::UnreadableExit => {
+                std::fs::create_dir(path.join("process-exit.json"))?;
+                RebootProofCause::Filesystem
+            }
         };
         let before = std::fs::read(&reservation).ok();
         assert!(matches!(store.settle_rebooted(
@@ -1034,7 +1040,7 @@ mod lineage_tests {
             std::fs::Permissions::from_mode(0o700),
         )?;
         init_base_repository(&project)?;
-        let clock = provenant_os::clock::SystemClock;
+        let clock = crate::tests::clock();
         let cancel = provenant_core::CancelToken::new();
         for (index, origin) in [
             None,
@@ -1354,7 +1360,7 @@ mod lineage_tests {
             std::fs::Permissions::from_mode(0o700),
         )?;
         init_base_repository(&project)?;
-        let clock = provenant_os::clock::SystemClock;
+        let clock = crate::tests::clock();
         let cancel = provenant_core::CancelToken::new();
         let mut original = crate::tests::input();
         original.request.task.deliver = Some(WriterDeliveryRequest {
@@ -1686,7 +1692,10 @@ fn lock_timeout_reports_a_concurrently_settled_attempt() {
     };
     assert_eq!(reconcile_failure(timeout(), || true), Reconciled::Finished);
     let wrapped = RunError::Io(std::io::Error::other(
-        "lock acquisition timed out for writer.lock",
+        provenant_os::fs::FsError::LockTimeout {
+            path: "writer.lock".into(),
+            timeout: std::time::Duration::from_secs(1),
+        },
     ));
     assert_eq!(reconcile_failure(wrapped, || true), Reconciled::Finished);
     assert!(matches!(
@@ -3661,7 +3670,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn interrupted_writer_preparation_keeps_generic_rejection_diagnostic()
+    fn interrupted_writer_preparation_projects_typed_rejection()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let clock = crate::tests::clock();
@@ -3715,17 +3724,12 @@ mod tests {
             terminal_cause,
             terminal_note,
             outcome,
-            reason,
             ..
         } = &terminal.state
         else {
             return Err("interrupted preparation did not settle".into());
         };
         assert_eq!(*outcome, Outcome::Rejected);
-        assert_eq!(
-            reason.as_deref(),
-            Some("launch interrupted: writer preparation never reached a guardian")
-        );
         assert_eq!(*terminal_cause, None);
         assert_eq!(*terminal_note, None);
         let projected =
@@ -3788,20 +3792,12 @@ mod tests {
             assert!(
                 matches!(
                     &found[0],
-                    (id, Reconciled::Uncertain { reason })
-                        if *id == bad && reason.to_string().contains("settlement progress")
+                    (id, Reconciled::Uncertain {
+                        reason: UncertainReason::ReconcileFailed { .. }
+                    }) if *id == bad
                 ),
                 "{failure}: {found:?}"
             );
-            if failure != "blocked" {
-                // Recovery reads settlement progress before it decides, so the
-                // unreadable journal is the reason rather than a queued outcome.
-                assert!(
-                    matches!(&found[0].1, Reconciled::Uncertain { reason }
-                        if reason.to_string().contains("settlement progress update failed")),
-                    "{failure}: {found:?}"
-                );
-            }
         }
         Ok(())
     }
@@ -3956,8 +3952,10 @@ mod tests {
         let Reconciled::Uncertain { reason } = found else {
             unreachable!()
         };
-        // The display text is the operator's recovery guidance.
-        assert!(reason.to_string().contains("chair recovery required"));
+        assert!(matches!(
+            reason,
+            UncertainReason::WriterCustodyUnconfirmed { .. }
+        ));
         let unit = serde_json::to_value(UncertainReason::GuardianNotObservable).unwrap();
         assert_eq!(
             unit,

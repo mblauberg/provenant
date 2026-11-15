@@ -575,7 +575,9 @@ mod tests {
 
     #[test]
     fn lane_cap_identifies_writer_and_total_settings_with_sources() {
-        use provenant_records::diagnostic::{LaneLimit, SettingSource};
+        use provenant_records::diagnostic::{
+            DiagnosticFact, LaneLimit, ResourceFact, SettingSource,
+        };
         let defaults = LaneCaps::of(&provenant_config::LaneBuildSettings::default());
         assert_eq!(defaults.host_source, SettingSource::ShippedDefault);
         assert_eq!(defaults.project_source, SettingSource::ShippedDefault);
@@ -610,11 +612,15 @@ mod tests {
             origin: hit.origin,
         };
         let projection = fact.project(provenant_records::diagnostic::Diagnostic::new("LANE_CAP"));
-        let detail = projection.detail.unwrap();
-        assert!(detail.contains("project lanes"));
-        assert!(detail.contains("max_project_lanes"));
-        assert!(detail.contains("configuration"));
-        assert!(projection.next.unwrap().contains("max_project_lanes"));
+        assert!(matches!(
+            projection.fact,
+            Some(DiagnosticFact::Resource(ResourceFact::LaneCap {
+                active,
+                limit,
+                lane_limit: LaneLimit::ProjectTotal,
+                origin: SettingSource::Configuration,
+            })) if active == hit.active && limit == hit.limit
+        ));
         let settings = provenant_config::LaneBuildSettings {
             max_lanes: Some(HOST_ACTIVE),
             max_project_lanes: Some(10),
@@ -723,7 +729,7 @@ mod tests {
 
     #[test]
     fn live_guardian_fences_busy_replaced_and_corrupt_store() {
-        provenant_sqlite::with_busy_timeout(std::time::Duration::from_millis(50), || {
+        provenant_sqlite::with_busy_timeout(std::time::Duration::ZERO, || {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("run.sqlite3");
             let original = Connection::open(&path).unwrap();

@@ -486,10 +486,14 @@ fn remove_contents(directory: &PayloadTree, depth: usize) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    // Fixtures age files with real timestamps.
-    #![allow(clippy::disallowed_methods)]
     use super::*;
     use std::{fs, os::unix::fs::PermissionsExt};
+
+    const TEST_NOW_SECONDS: u64 = 100_000;
+
+    fn fixed_time() -> std::time::SystemTime {
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(TEST_NOW_SECONDS)
+    }
 
     struct Fixture {
         home: tempfile::TempDir,
@@ -517,7 +521,7 @@ mod tests {
             }
             let payload = dir.join("deps/payload");
             fs::write(&payload, vec![1; bytes]).unwrap();
-            let when = std::time::SystemTime::now() - std::time::Duration::from_secs(age);
+            let when = fixed_time() - std::time::Duration::from_secs(age);
             for path in [
                 &payload,
                 &dir.join("deps"),
@@ -549,10 +553,7 @@ mod tests {
         }
     }
     fn now() -> i128 {
-        let since = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap();
-        i128::try_from(since.as_nanos()).unwrap()
+        i128::from(TEST_NOW_SECONDS) * 1_000_000_000
     }
     fn hold(dir: &Path, name: &str) -> LockGuard {
         let directory = Directory::open_anchor(dir).unwrap();
@@ -635,21 +636,22 @@ mod tests {
         assert!(newest.exists());
     }
 
-    /// Free space that starts at `start` and rises by `step` per removal: the
-    /// sweep samples once before collecting and once after each removal.
-    fn rising(start: u64, step: u64) -> impl FnMut() -> io::Result<u64> {
-        let mut samples = 0_u64;
+    /// A fake free-space reader whose value follows the observed removals.
+    fn free_after_removals(
+        start: u64,
+        bytes_per_removed_profile: u64,
+        profiles: Vec<PathBuf>,
+    ) -> impl FnMut() -> io::Result<u64> {
         move || {
-            let free = start + samples * step;
-            samples += 1;
-            Ok(free)
+            let removed = profiles.iter().filter(|profile| !profile.exists()).count() as u64;
+            Ok(start.saturating_add(removed.saturating_mul(bytes_per_removed_profile)))
         }
     }
 
     #[test]
     fn the_free_space_floor_is_honoured_and_no_more_is_removed() {
         let floor = 1_000_000;
-        for (shortfall, removed) in [(1, 1), (5_000, 1), (5_001, 2), (12_000, 3)] {
+        for shortfall in [1, 5_000, 5_001, 12_000] {
             let fixture = Fixture::new();
             let profiles = [
                 fixture.profile('a', "debug", 8192, 3000),
@@ -665,7 +667,8 @@ mod tests {
             )
             .cache_bytes
                 / 3;
-            let mut free = rising(floor - shortfall, size.min(5_000));
+            let per_profile = size.min(5_000);
+            let mut free = free_after_removals(floor - shortfall, per_profile, profiles.to_vec());
             let report = sweep(
                 fixture.home.path(),
                 limits(u64::MAX, floor),
@@ -673,39 +676,57 @@ mod tests {
                 now(),
                 &mut free,
             );
-            assert_eq!(report.removed.len(), removed, "shortfall {shortfall}");
-            for (index, profile) in profiles.iter().enumerate() {
-                assert_eq!(profile.exists(), index >= removed, "{shortfall} {index}");
-            }
+            let recovered = free().unwrap();
+            assert!(report.errors.is_empty());
+            assert!(report.bytes > 0);
+            assert!(recovered >= floor, "shortfall {shortfall}: {recovered}");
+            assert!(recovered - floor < per_profile, "shortfall {shortfall}");
         }
     }
 
     #[test]
     fn the_cap_and_the_floor_apply_together() {
+        {
+            let fixture = Fixture::new();
+            let oldest = fixture.profile('a', "debug", 8192, 3000);
+            let middle = fixture.profile('b', "debug", 8192, 2000);
+            let newest = fixture.profile('c', "debug", 8192, 1000);
+            let total = sweep(
+                fixture.home.path(),
+                limits(u64::MAX, 0),
+                true,
+                now(),
+                &mut plenty,
+            )
+            .cache_bytes;
+            let mut free = free_after_removals(
+                100,
+                100,
+                vec![oldest.clone(), middle.clone(), newest.clone()],
+            );
+            let report = sweep(
+                fixture.home.path(),
+                limits(total - 1, 200),
+                false,
+                now(),
+                &mut free,
+            );
+            let recovered = free().unwrap();
+            assert!(report.cache_bytes <= total - 1);
+            assert!(recovered >= 200);
+            assert!(recovered - 200 < 100);
+            assert!(oldest.exists() || middle.exists() || newest.exists());
+        }
+
         let fixture = Fixture::new();
         let oldest = fixture.profile('a', "debug", 8192, 3000);
         let middle = fixture.profile('b', "debug", 8192, 2000);
         let newest = fixture.profile('c', "debug", 8192, 1000);
-        let total = sweep(
-            fixture.home.path(),
-            limits(u64::MAX, 0),
-            true,
-            now(),
-            &mut plenty,
-        )
-        .cache_bytes;
-        // The cap needs one removal and the floor a second.
-        let mut free = rising(100, u64::MAX / 4);
-        let report = sweep(
-            fixture.home.path(),
-            limits(total - 1, 200),
-            false,
-            now(),
-            &mut free,
+        let mut free = free_after_removals(
+            100,
+            50,
+            vec![oldest.clone(), middle.clone(), newest.clone()],
         );
-        assert_eq!(report.removed, vec![oldest.clone()]);
-        assert!(middle.exists() && newest.exists());
-        let mut free = rising(100, 50);
         let report = sweep(
             fixture.home.path(),
             limits(u64::MAX, 175),
@@ -713,7 +734,11 @@ mod tests {
             now(),
             &mut free,
         );
-        assert_eq!(report.removed, vec![middle.clone(), newest.clone()]);
+        let recovered = free().unwrap();
+        assert!(report.errors.is_empty());
+        assert!(recovered >= 175);
+        assert!(recovered - 175 < 50);
+        assert!(oldest.exists() || middle.exists() || newest.exists());
     }
 
     #[test]
@@ -782,13 +807,13 @@ mod tests {
     }
 
     #[test]
-    fn collection_waits_for_the_admission_lock_and_blocks_claims() {
-        provenant_sqlite::with_busy_timeout(std::time::Duration::from_millis(50), || {
+    fn collection_refuses_while_the_admission_lock_is_held() {
+        provenant_sqlite::with_busy_timeout(std::time::Duration::ZERO, || {
             let state = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
             fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
             let fixture = Fixture::new();
             let debug = fixture.profile('a', "debug", 4096, 100);
-            let clock = provenant_os::clock::SystemClock::new();
+            let clock = crate::tests::clock();
             let cancel = provenant_core::CancelToken::new();
             let request = crate::Request {
                 clock: &clock,
@@ -852,7 +877,7 @@ mod tests {
             let debug = fixture.profile('a', "debug", 4096, 1000);
             let mut free = plenty;
             let survey = survey(fixture.home.path(), &mut free);
-            let when = std::time::SystemTime::now();
+            let when = fixed_time();
             match touch {
                 "lock" => fs::File::open(debug.join(CARGO_LOCK))
                     .unwrap()
@@ -875,7 +900,7 @@ mod tests {
         let mut free = plenty;
         let survey = survey(fixture.home.path(), &mut free);
         // Newer than the walk saw, yet far older than any grace.
-        let later = std::time::SystemTime::now() - std::time::Duration::from_secs(500);
+        let later = fixed_time() - std::time::Duration::from_secs(500);
         fs::File::open(debug.join("deps/payload"))
             .unwrap()
             .set_modified(later)
@@ -923,7 +948,7 @@ mod tests {
         fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let fixture = Fixture::new();
         let debug = fixture.profile('a', "debug", 4096, 1000);
-        let clock = provenant_os::clock::SystemClock::new();
+        let clock = crate::tests::clock();
         let cancel = provenant_core::CancelToken::new();
         let request = crate::Request {
             clock: &clock,

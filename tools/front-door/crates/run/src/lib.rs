@@ -355,6 +355,66 @@ impl std::fmt::Display for CausedSource {
 
 impl std::error::Error for CausedSource {}
 
+/// A declared stage in writer preparation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeliveryPrepareStep {
+    ForgePort,
+    IntegrationTarget,
+    RemoteUrl,
+    Head,
+    GitDir,
+    Worktree,
+    CredentialHelper,
+    LaneRoots,
+    Environment,
+    GitExecutable,
+    GhExecutable,
+    Fetch,
+    OriginRefresh,
+}
+
+impl DeliveryPrepareStep {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ForgePort => "forge port",
+            Self::IntegrationTarget => "integration target",
+            Self::RemoteUrl => "remote URL",
+            Self::Head => "HEAD",
+            Self::GitDir => "git dir",
+            Self::Worktree => "worktree",
+            Self::CredentialHelper => "credential helper",
+            Self::LaneRoots => "lane roots",
+            Self::Environment => "environment",
+            Self::GitExecutable => "git executable",
+            Self::GhExecutable => "gh executable",
+            Self::Fetch => "fetch",
+            Self::OriginRefresh => "origin refresh",
+        }
+    }
+}
+
+impl std::fmt::Display for DeliveryPrepareStep {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// A typed safety refusal associated with a preparation step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeliveryPrepareRefusal {
+    CredentialHelper(HelperSafety),
+}
+
+/// Why a configured credential helper cannot be used safely.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HelperSafety {
+    UnsupportedSshCommand,
+    OpaqueShellCommand,
+    NonPlainExecutable,
+    LaneLocalPath,
+    Unavailable,
+}
+
 #[derive(Debug, Error)]
 pub enum RunError {
     #[error("{}", .0.detail.as_deref().unwrap_or("dispatch was refused"))]
@@ -404,7 +464,11 @@ pub enum RunError {
         reason: String,
     },
     #[error("host writer delivery failed at Prepare ({step}): {reason}")]
-    DeliveryPrepare { step: &'static str, reason: String },
+    DeliveryPrepare {
+        step: DeliveryPrepareStep,
+        refusal: Option<DeliveryPrepareRefusal>,
+        reason: String,
+    },
     #[error(
         "host writer delivery failed at {stage:?}: {tool} {command} output exceeded the {limit}-byte host limit"
     )]
@@ -924,51 +988,50 @@ mod diagnostic_projection_tests {
     }
 
     #[test]
-    fn writer_refusal_without_named_edits_does_not_claim_edits() {
+    fn dirty_writer_projection_uses_typed_path_presence() {
         use provenant_confinement::worktrees::WorktreeError;
-        let error = RunError::Writer(WorktreeError::Dirty(String::new()));
-        let diagnostic = error.diagnostic(Destination::Local);
-        assert!(
-            !diagnostic
-                .detail
-                .as_deref()
-                .unwrap_or_default()
-                .contains("uncommitted")
-        );
-    }
-
-    #[test]
-    fn dirty_writer_projection_preserves_edits_without_source_text() {
-        use provenant_confinement::worktrees::WorktreeError;
-        let error = RunError::Writer(WorktreeError::Dirty("TOKEN_SENTINEL\u{1b}".into()));
-        let diagnostic = error.diagnostic(Destination::Remote {
-            repository: None,
-            home: None,
-        });
-        assert_eq!(diagnostic.code, "WRITER_SCOPE");
-        assert!(
-            diagnostic
-                .detail
-                .as_deref()
-                .unwrap()
-                .contains("uncommitted")
-        );
-        let action = diagnostic.next.as_deref().unwrap();
-        assert!(action.contains("commit") || action.contains("preserve"));
-        assert!(
-            !serde_json::to_string(&diagnostic)
-                .unwrap()
-                .contains("TOKEN_SENTINEL")
-        );
-    }
-
-    #[test]
-    fn raw_io_source_is_not_a_safe_fact() {
-        for source in [
-            "TOKEN_SENTINEL\u{1b}[31m".to_owned(),
-            format!("TOKEN_SENTINEL{}", "é".repeat(2048)),
+        for (paths, names_edits) in [
+            (String::new(), false),
+            ("TOKEN_SENTINEL\u{1b}".into(), true),
         ] {
-            let error = RunError::Io(std::io::Error::other(source));
+            let error = RunError::Writer(WorktreeError::Dirty(paths));
+            for destination in [
+                Destination::Local,
+                Destination::Remote {
+                    repository: None,
+                    home: None,
+                },
+            ] {
+                let diagnostic = error.diagnostic(destination);
+                assert_eq!(diagnostic.code, error.code());
+                assert_eq!(diagnostic.detail.is_some(), names_edits);
+                assert!(
+                    !serde_json::to_string(&diagnostic)
+                        .unwrap()
+                        .contains("TOKEN_SENTINEL")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn untrusted_error_sources_do_not_enter_diagnostics() {
+        use provenant_confinement::worktrees::WorktreeError;
+        use provenant_records::diagnostic::DiagnosticFact;
+        let cases = [
+            RunError::Io(std::io::Error::other("TOKEN_SENTINEL\u{1b}[31m")),
+            RunError::Writer(WorktreeError::BranchCollision {
+                existing: "TOKEN_SENTINEL\u{1b}".into(),
+            }),
+            RunError::Sqlite(rusqlite::Error::InvalidParameterName(
+                "TOKEN_SENTINEL".into(),
+            )),
+            RunError::Filesystem(provenant_os::fs::FsError::ReadIo {
+                path: "/private/host".into(),
+                source: std::io::Error::other("TOKEN_SENTINEL"),
+            }),
+        ];
+        for error in cases {
             for destination in [
                 Destination::Local,
                 Destination::Remote {
@@ -978,74 +1041,21 @@ mod diagnostic_projection_tests {
             ] {
                 let projection = error.diagnostic(destination);
                 let encoded = serde_json::to_string(&projection).unwrap();
+                assert_eq!(projection.code, error.code());
                 assert!(!encoded.contains("TOKEN_SENTINEL"));
                 assert!(encoded.len() < 4096);
                 assert!(!encoded.chars().any(char::is_control));
-                assert_eq!(projection.code, "IO");
-                assert!(projection.detail.is_none());
-                assert!(projection.next.is_some());
+                if matches!(&error, RunError::Filesystem(_)) {
+                    assert!(matches!(
+                        projection.fact,
+                        Some(DiagnosticFact::Filesystem {
+                            operation: "read file",
+                            cause: None,
+                        })
+                    ));
+                }
             }
         }
-    }
-
-    #[test]
-    fn branch_refusal_omits_untrusted_ref_text() {
-        use provenant_confinement::worktrees::WorktreeError;
-        let error = RunError::Writer(WorktreeError::BranchCollision {
-            existing: "TOKEN_SENTINEL\u{1b}".into(),
-        });
-        for destination in [
-            Destination::Local,
-            Destination::Remote {
-                repository: None,
-                home: None,
-            },
-        ] {
-            let diagnostic = error.diagnostic(destination);
-            assert_eq!(diagnostic.code, "WRITER_SCOPE");
-            assert!(diagnostic.detail.as_deref().unwrap().contains("collides"));
-            assert!(diagnostic.next.as_deref().unwrap().contains("branch"));
-            assert!(
-                !serde_json::to_string(&diagnostic)
-                    .unwrap()
-                    .contains("TOKEN_SENTINEL")
-            );
-        }
-    }
-
-    #[test]
-    fn source_errors_are_not_diagnostic_detail_even_locally() {
-        let error = RunError::Sqlite(rusqlite::Error::InvalidParameterName(
-            "TOKEN_SENTINEL".into(),
-        ));
-        let projection = error.diagnostic(Destination::Local);
-        let encoded = serde_json::to_string(&projection).unwrap();
-        assert!(!encoded.contains("TOKEN_SENTINEL"));
-        assert!(projection.next.is_some());
-    }
-
-    #[test]
-    fn filesystem_fact_keeps_operation_without_source() {
-        let error = RunError::Filesystem(provenant_os::fs::FsError::ReadIo {
-            path: "/private/host".into(),
-            source: std::io::Error::other("TOKEN_SENTINEL"),
-        });
-        let projection = error.diagnostic(Destination::Remote {
-            repository: None,
-            home: None,
-        });
-        assert!(matches!(
-            projection.fact,
-            Some(provenant_records::diagnostic::DiagnosticFact::Filesystem {
-                operation: "read file",
-                cause: None,
-            })
-        ));
-        assert!(
-            !serde_json::to_string(&projection)
-                .unwrap()
-                .contains("TOKEN_SENTINEL")
-        );
     }
 
     #[test]
@@ -1068,55 +1078,69 @@ mod diagnostic_projection_tests {
     }
 
     #[test]
-    fn credential_grant_does_not_echo_unknown_access_text() {
-        let error = RunError::Confinement(
-            provenant_confinement::permissions::PermissionError::CredentialGrant {
-                path: PathBuf::from("/private/root"),
-                access: "TOKEN_SENTINEL",
-            },
-        );
-        let diagnostic = error.diagnostic(Destination::Remote {
-            repository: None,
-            home: None,
-        });
-        assert_eq!(diagnostic.code, "CREDENTIAL_ROOT");
-        assert!(diagnostic.next.is_some());
-        let wire = serde_json::to_string(&diagnostic).unwrap();
-        assert!(!wire.contains("TOKEN_SENTINEL"));
-        assert!(!wire.contains("/private"));
-    }
-
-    #[test]
-    fn credential_grants_disclose_only_safe_anchored_paths() {
-        for access in ["read", "write"] {
+    fn credential_grants_keep_typed_access_and_disclose_only_anchored_paths() {
+        use provenant_records::diagnostic::DiagnosticFact;
+        let rows = [
+            (
+                "TOKEN_SENTINEL",
+                PathBuf::from("/private/root"),
+                None,
+                "requested",
+                None,
+            ),
+            (
+                "read",
+                PathBuf::from("/home/person/.config/private"),
+                Some(Path::new("/home/person")),
+                "read",
+                Some("~/.config/private"),
+            ),
+            (
+                "write",
+                PathBuf::from("/home/person/.config/private"),
+                Some(Path::new("/home/person")),
+                "write",
+                Some("~/.config/private"),
+            ),
+        ];
+        for (requested, path, anchor, expected_access, safe_path) in rows {
             let error = RunError::Confinement(
                 provenant_confinement::permissions::PermissionError::CredentialGrant {
-                    path: PathBuf::from("/home/person/.config/private"),
-                    access,
+                    path: path.clone(),
+                    access: requested,
                 },
             );
-            let remote = error.diagnostic(Destination::Remote {
-                repository: None,
-                home: Some(Path::new("/home/person")),
-            });
             assert_eq!(
                 ErrorKind::from(&error).boundary_class(),
                 BoundaryClass::Credentials
             );
-            assert!(
-                remote
-                    .detail
-                    .as_deref()
-                    .unwrap()
-                    .contains("~/.config/private")
-            );
-            assert!(remote.detail.as_deref().unwrap().contains(access));
-            let opaque = error.diagnostic(Destination::Remote {
-                repository: None,
-                home: None,
-            });
-            assert!(!opaque.detail.as_deref().unwrap().contains("/home/person"));
-            assert!(opaque.next.is_some());
+            let homes = if anchor.is_some() {
+                vec![anchor, None]
+            } else {
+                vec![None]
+            };
+            for home in homes {
+                let diagnostic = error.diagnostic(Destination::Remote {
+                    repository: None,
+                    home,
+                });
+                assert_eq!(diagnostic.code, "CREDENTIAL_ROOT");
+                assert!(diagnostic.next.is_some());
+                assert!(matches!(
+                    &diagnostic.fact,
+                    Some(DiagnosticFact::CredentialGrant { access })
+                        if *access == expected_access
+                ));
+                let wire = serde_json::to_string(&diagnostic).unwrap();
+                assert!(!wire.contains("TOKEN_SENTINEL"));
+                assert!(!wire.contains("/private/root"));
+                assert!(!wire.contains("/home/person"));
+                if home.is_some()
+                    && let Some(safe_path) = safe_path
+                {
+                    assert!(diagnostic.detail.as_deref().unwrap().contains(safe_path));
+                }
+            }
         }
     }
 

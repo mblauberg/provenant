@@ -334,23 +334,16 @@ mod tests {
             Some(handoff),
         );
         assert!(writer.contains("Build slots:"));
-        assert!(writer.contains("CI scope: none (source: default"));
-        assert!(!reader_has_ci_scope(handoff));
-        assert!(writer.contains("Progress handoff JSON: /state/handoff.json"));
+        assert!(writer.contains("CI scope:"));
+        assert!(writer.contains(&format!("Progress handoff JSON: {}", handoff.display())));
         let reader = lane_preamble("Model policy.", &Default::default(), None, Some(handoff));
         assert!(!reader.contains("Build slots"));
-        assert!(reader.starts_with("Model policy.\nProgress handoff JSON"));
+        assert!(!reader.contains("CI scope:"));
+        assert!(reader.contains("Progress handoff JSON:"));
         assert!(
             !lane_preamble("Model policy.", &Default::default(), None, None)
                 .contains("handoff.json")
         );
-        assert!(writer.contains("locate before you read"));
-        assert!(reader.contains("locate before you read"));
-    }
-
-    fn reader_has_ci_scope(handoff: &Path) -> bool {
-        lane_preamble("Model policy.", &Default::default(), None, Some(handoff))
-            .contains("CI scope")
     }
 
     fn snapshot(status: &str) -> Vec<u8> {

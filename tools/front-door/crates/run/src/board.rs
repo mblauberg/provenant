@@ -3,6 +3,9 @@ use crate::*;
 use provenant_core::ProjectId;
 use rusqlite::params;
 
+/// Upper bound for one run-board page.
+pub const MAX_BOARD_PAGE_SIZE: u64 = 100;
+
 #[derive(Debug, serde::Serialize)]
 pub struct BoardLane {
     #[serde(serialize_with = "provenant_records::run::serialize_public_attempt")]
@@ -45,7 +48,7 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<BoardPage> {
         call.check()?;
-        if !(1..=100).contains(&limit) {
+        if !(1..=MAX_BOARD_PAGE_SIZE).contains(&limit) {
             return Err(RunError::Validation("board page bounds"));
         }
         let after = crate::db::sql_int(after)?;
@@ -175,58 +178,86 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn board_paging_snapshot_and_metadata() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+    struct Fixture {
+        _temp: tempfile::TempDir,
+        context: ExecutionContext,
+        clock: provenant_core::TestClock,
+        cancel: CancelToken,
+        store: RunStore,
+    }
+
+    impl Fixture {
+        fn call(&self) -> Request<'_> {
+            call(&self.clock, &self.cancel)
+        }
+
+        fn add(&self, number: u8) -> TestResult<AttemptId> {
+            let mut run = input();
+            run.attempt_id = AttemptId::from_bytes([number; 16]);
+            run.operation_id = provenant_core::OperationId::parse(&format!("board-{number}"))?;
+            crate::tests::rekey(&mut run);
+            run.request.task.title = Some(format!("Task {number}"));
+            self.store.create(&run, &self.call())?;
+            Ok(run.attempt_id)
+        }
+    }
+
+    fn fixture() -> TestResult<Fixture> {
         let temp = tempfile::tempdir()?;
         let context = context(temp.path())?;
         let clock = clock();
         let cancel = CancelToken::new();
-        let call = call(&clock, &cancel);
-        let store = RunStore::open(&context, &call)?;
-        for n in 1u8..=5 {
-            let mut input = input();
-            input.attempt_id = AttemptId::from_bytes([n; 16]);
-            input.operation_id = provenant_core::OperationId::parse(&format!("board-{n}"))?;
-            input.attempt_id = AttemptId::from_bytes([n; 16]);
-            crate::tests::rekey(&mut input);
-            input.request.task.title = Some(format!("Task {n}"));
-            store.create(&input, &call)?;
-        }
-        let page = store.board_page(None, true, 2, 0, None, &call)?;
-        let expected: std::collections::HashSet<_> =
-            (1u8..=5).map(|n| AttemptId::from_bytes([n; 16])).collect();
-        let mut seen = std::collections::HashSet::new();
-        let mut current = page;
+        let store = RunStore::open(&context, &call(&clock, &cancel))?;
+        Ok(Fixture {
+            _temp: temp,
+            context,
+            clock,
+            cancel,
+            store,
+        })
+    }
+
+    #[test]
+    fn board_pages_cover_the_high_water_snapshot() -> TestResult {
+        let fixture = fixture()?;
+        let expected: std::collections::HashSet<_> = (1u8..=5)
+            .map(|number| fixture.add(number))
+            .collect::<TestResult<_>>()?;
+        let call = fixture.call();
+        let mut current = fixture.store.board_page(None, true, 2, 0, None, &call)?;
         let generation = current.generation.clone();
         let high_water = current.high_water;
+        let mut seen = std::collections::HashSet::new();
         let mut previous = None;
         loop {
             for lane in &current.lanes {
-                assert!(seen.insert(lane.attempt.attempt_id), "duplicate attempt");
+                assert!(seen.insert(lane.attempt.attempt_id));
                 assert_eq!(
                     lane.operation.operation_id.as_str(),
                     format!("board-{}", lane.attempt.attempt_id.as_bytes()[0])
-                );
-                assert_eq!(lane.attempt.usage, UsageRecord::default());
-                assert_eq!(
-                    lane.attempt.title,
-                    store.record(lane.attempt.attempt_id, &call)?.title
                 );
             }
             assert_eq!(current.generation, generation);
             let Some(next) = current.next else { break };
             assert!(next > 0 && previous.is_none_or(|prior| next < prior));
             previous = Some(next);
-            current = store.board_page(None, true, 2, next, Some(high_water), &call)?;
+            current = fixture
+                .store
+                .board_page(None, true, 2, next, Some(high_water), &call)?;
         }
         assert_eq!(seen, expected);
-        let mut later = input();
-        later.attempt_id = AttemptId::from_bytes([6; 16]);
-        later.operation_id = provenant_core::OperationId::parse("board-6")?;
-        later.attempt_id = AttemptId::from_bytes([6; 16]);
-        crate::tests::rekey(&mut later);
-        store.create(&later, &call)?;
-        let snapshot = store.board_page(None, true, 100, 0, Some(high_water), &call)?;
+        let later = fixture.add(6)?;
+        assert!(!expected.contains(&later));
+        let snapshot = fixture.store.board_page(
+            None,
+            true,
+            MAX_BOARD_PAGE_SIZE,
+            0,
+            Some(high_water),
+            &call,
+        )?;
         assert_eq!(
             snapshot
                 .lanes
@@ -235,80 +266,122 @@ mod tests {
                 .collect::<std::collections::HashSet<_>>(),
             expected
         );
-        let reopened = RunStore::open_read_only(&context, &call)?.ok_or("missing store")?;
+        Ok(())
+    }
+
+    #[test]
+    fn board_metadata_tracks_attempt_updates_in_read_only_views() -> TestResult {
+        let fixture = fixture()?;
+        let id = fixture.add(5)?;
+        let call = fixture.call();
+        let before = fixture
+            .store
+            .board_page(None, true, MAX_BOARD_PAGE_SIZE, 0, None, &call)?;
+        let reopened = RunStore::open_read_only(&fixture.context, &call)?.ok_or("missing store")?;
         assert_eq!(
             reopened
-                .board_page(None, true, 100, 0, None, &call)?
+                .board_page(None, true, MAX_BOARD_PAGE_SIZE, 0, None, &call)?
                 .generation,
-            snapshot.generation
+            before.generation
         );
-        let old = store.record(AttemptId::from_bytes([5; 16]), &call)?;
-        let mut mixed = old.clone();
-        mixed.usage.uncached_input = Some(0);
-        mixed.usage.reasoning = Some(7);
-        mixed.revision += 1;
-        store.write(&call, |tx| {
-            crate::admission::update_attempt(tx, &old, &mixed)
+        let old = fixture.store.record(id, &call)?;
+        let mut updated = old.clone();
+        updated.usage.uncached_input = Some(0);
+        updated.usage.reasoning = Some(7);
+        updated.revision += 1;
+        fixture.store.write(&call, |tx| {
+            crate::admission::update_attempt(tx, &old, &updated)
         })?;
-        let updated = store.board_page(None, true, 100, 0, None, &call)?;
-        assert_eq!(
-            updated
-                .lanes
-                .iter()
-                .find(|lane| lane.attempt.attempt_id == mixed.attempt_id)
-                .ok_or("missing updated attempt")?
-                .attempt
-                .usage,
-            mixed.usage
-        );
-        assert_ne!(updated.generation, snapshot.generation);
-        let mut corrupt = mixed.clone();
+        let after = fixture
+            .store
+            .board_page(None, true, MAX_BOARD_PAGE_SIZE, 0, None, &call)?;
+        let row = after
+            .lanes
+            .iter()
+            .find(|lane| lane.attempt.attempt_id == id)
+            .ok_or("updated attempt missing")?;
+        assert_eq!(row.attempt.usage, updated.usage);
+        assert_ne!(after.generation, before.generation);
+        Ok(())
+    }
+
+    #[test]
+    fn board_rejects_invalid_records_and_revisions() -> TestResult {
+        let fixture = fixture()?;
+        let id = fixture.add(5)?;
+        let call = fixture.call();
+        let record = fixture.store.record(id, &call)?;
+        let mut corrupt = record.clone();
         corrupt.usage.context_basis_points = Some(10_001);
-        for (record, revision) in [(&corrupt, mixed.revision), (&mixed, mixed.revision + 1)] {
-            store.db.execute(
-                "UPDATE attempts SET record=?1,revision=?2 WHERE id=?3",
-                params![
-                    serde_json::to_vec(record)?,
-                    revision as i64,
-                    mixed.attempt_id.to_string()
-                ],
-            )?;
+        fixture.store.db.execute(
+            "UPDATE attempts SET record=?1,revision=?2 WHERE id=?3",
+            params![
+                serde_json::to_vec(&corrupt)?,
+                record.revision as i64,
+                id.to_string()
+            ],
+        )?;
+        assert!(matches!(
+            fixture
+                .store
+                .board_page(None, true, MAX_BOARD_PAGE_SIZE, 0, None, &call),
+            Err(RunError::Validation(_))
+        ));
+        fixture.store.db.execute(
+            "UPDATE attempts SET record=?1,revision=?2 WHERE id=?3",
+            params![
+                serde_json::to_vec(&record)?,
+                (record.revision + 1) as i64,
+                id.to_string()
+            ],
+        )?;
+        assert!(matches!(
+            fixture
+                .store
+                .board_page(None, true, MAX_BOARD_PAGE_SIZE, 0, None, &call),
+            Err(RunError::Validation(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn board_page_limit_is_declared_and_terminal_filter_is_applied() -> TestResult {
+        let fixture = fixture()?;
+        let id = fixture.add(1)?;
+        let call = fixture.call();
+        for limit in [0, MAX_BOARD_PAGE_SIZE + 1] {
             assert!(matches!(
-                store.board_page(None, true, 100, 0, None, &call),
+                fixture.store.board_page(None, true, limit, 0, None, &call),
                 Err(RunError::Validation(_))
             ));
         }
-        store.db.execute(
-            "UPDATE attempts SET revision=?1 WHERE id=?2",
-            params![mixed.revision as i64, mixed.attempt_id.to_string()],
-        )?;
-        store.withdraw(
-            AttemptId::from_bytes([1; 16]),
-            AttemptState::Queued {
-                extra: Default::default(),
-            },
+        for limit in [1, MAX_BOARD_PAGE_SIZE] {
+            fixture
+                .store
+                .board_page(None, true, limit, 0, None, &call)?;
+        }
+        let row = fixture.store.record(id, &call)?;
+        fixture.store.withdraw(
+            id,
+            row.state,
             Outcome::Cancelled,
             "test",
             call.clock.wall_now()?,
             &call,
         )?;
-        assert!(matches!(
-            store.board_page(None, true, 101, 0, None, &call),
-            Err(RunError::Validation("board page bounds"))
-        ));
-        let active = store.board_page(None, false, 100, 0, None, &call)?;
+        let active = fixture
+            .store
+            .board_page(None, false, MAX_BOARD_PAGE_SIZE, 0, None, &call)?;
         assert!(
             !active
                 .lanes
                 .iter()
-                .any(|lane| lane.attempt.attempt_id == AttemptId::from_bytes([1; 16]))
+                .any(|lane| lane.attempt.attempt_id == id)
         );
-        let all = store.board_page(None, true, 100, 0, None, &call)?;
-        assert!(
-            all.lanes
-                .iter()
-                .any(|lane| lane.attempt.attempt_id == AttemptId::from_bytes([1; 16]))
-        );
+        let all = fixture
+            .store
+            .board_page(None, true, MAX_BOARD_PAGE_SIZE, 0, None, &call)?;
+        assert!(all.lanes.iter().any(|lane| lane.attempt.attempt_id == id));
         Ok(())
     }
 }
