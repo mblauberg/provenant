@@ -5423,8 +5423,10 @@ mod tests {
         )?;
         let mut running = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
 
-        let first_operation = OperationId::parse("steer-first")?;
-        let second_operation = OperationId::parse("steer-second")?;
+        // Deliberately reverse lexical operation-ID order: accepted sequence,
+        // not the idempotency key, owns the continuation prompt order.
+        let first_operation = OperationId::parse("steer-z-first")?;
+        let second_operation = OperationId::parse("steer-a-second")?;
         let first = store.steer(
             id,
             first_operation.clone(),
@@ -6388,6 +6390,140 @@ mod tests {
             &other_process,
             &call,
         )?);
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn explicit_cancel_after_delivered_steer_keeps_the_stop_and_blocks_successor() -> TestResult {
+        use provenant_supervisor::census::ProcessObservation;
+
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        let id = run.attempt_id;
+        store.create(&run, &call)?;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let running = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let text = "Keep the existing session and finish the scoped check.";
+        assert!(matches!(
+            store.steer(
+                id,
+                OperationId::parse("steer-before-explicit-cancel")?,
+                text,
+                &call,
+            )?,
+            SteerReceipt::Queued { .. }
+        ));
+        let source = match SystemProcessObserver.observe(i64::from(std::process::id())) {
+            ProcessObservation::Present(fact) if !fact.zombie => {
+                provenant_os::capture::CaptureSourceIdentity {
+                    attempt: id.to_string(),
+                    generation: RunStore::scope(&running).generation,
+                    boot: fact.identity.boot,
+                    pid: fact.identity.pid,
+                    native_start: fact.identity.native_start,
+                }
+            }
+            observation => {
+                return Err(format!("test process identity unavailable: {observation:?}").into());
+            }
+        };
+        let route = running
+            .applied_route
+            .as_ref()
+            .ok_or("applied route")?
+            .clone();
+        assert!(store.record_provider_session_ready(
+            id,
+            &route,
+            "fixture-session",
+            &source,
+            &call,
+        )?);
+
+        let attempt = store.attempt_dir(id, false)?;
+        let steered: crate::store::CancellationEvidence = crate::db::decode(
+            &crate::artifacts::read_sealed(&attempt, "cancel.json", RECORD_LIMIT)?
+                .ok_or("session readiness did not request the steer stop")?,
+        )?;
+        assert_eq!(steered.reason, StopReason::Steered);
+        assert!(matches!(
+            store.cancel(id, "owner cancellation after steer", &call)?,
+            CancelReceipt::Requested
+        ));
+        let explicit: crate::store::CancellationEvidence = crate::db::decode(
+            &crate::artifacts::read_sealed(&attempt, "cancel.json", RECORD_LIMIT)?
+                .ok_or("explicit cancel request missing")?,
+        )?;
+        assert_eq!(explicit.reason, StopReason::ExplicitCancellation);
+        assert_eq!(explicit.scope, RunStore::scope(&running));
+        assert_eq!(explicit.requester, context.actor_id);
+
+        // The provider was already interrupted by the first Steered signal.
+        // Its sealed reason and delivery fact remain unchanged after the later
+        // explicit cancellation request replaced cancel.json.
+        let mut exit = crate::tests::exit();
+        exit.scope = RunStore::scope(&running);
+        exit.stop_reason = Some(StopReason::Steered);
+        exit.cancel_delivered_before_exit = Some(true);
+        crate::dispatch_tests::seal_exit(&store, &exit)?;
+        let mut publication = crate::tests::publication();
+        publication.outcome = Outcome::Cancelled;
+        publication.terminal_cause = Some(TerminalCause::Steered);
+        publication.resolved_route = Some(route.clone());
+        publication.applied_route = Some(route.clone());
+        publication.observed_route = Some(route);
+        publication.session = Some("fixture-session".into());
+        let terminal = store.publish_terminal(id, running.revision, &publication, &exit, &call)?;
+        assert_eq!(
+            terminal.cancellation_disposition,
+            Some(provenant_records::run::CancellationDisposition::Unknown),
+            "the Steered delivery fact does not prove delivery of the later cancel"
+        );
+        assert!(matches!(
+            terminal.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Cancelled,
+                terminal_cause: Some(TerminalCause::Steered),
+                ..
+            }
+        ));
+        assert_eq!(
+            store.prepare_steer_continuation(id, &call)?,
+            None,
+            "the accepted explicit stop must not launch a same-session successor"
+        );
+        assert_eq!(store.record(id, &call)?.superseded_by, None);
+        let status = store
+            .steering_status(id, &call)?
+            .ok_or("steering status missing")?;
+        assert_eq!(
+            status.state,
+            provenant_records::run::SteeringState::NotContinued
+        );
+        assert_eq!(
+            status.cause,
+            Some(provenant_records::run::SteeringCause::TerminalStop)
+        );
+        let ledger = store.steer_ledger(id, &call)?;
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(
+            ledger[0].0.text, text,
+            "accepted text stays private and durable"
+        );
+        assert!(ledger[0].1, "a non-continuable stop resolves the intent");
         Ok(())
     }
 

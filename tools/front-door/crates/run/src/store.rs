@@ -1527,11 +1527,21 @@ impl RunStore {
                     Self::scope(&old),
                     old.verified_owner.unwrap_or(self.context.actor_id),
                 ) {
-                    next.cancellation_disposition = Some(match cancellation_delivered {
-                        Some(true) => CancellationDisposition::Effective,
-                        Some(false) => CancellationDisposition::AcknowledgedIneffective,
-                        None => CancellationDisposition::Unknown,
-                    });
+                    next.cancellation_disposition = Some(
+                        if publication.terminal_cause == Some(TerminalCause::Steered) {
+                            // `cancel_delivered_before_exit` belongs to the
+                            // sealed first Steered stop, not this later cancel
+                            // request. Preserve the signal fact and leave this
+                            // request's delivery unknown.
+                            CancellationDisposition::Unknown
+                        } else {
+                            match cancellation_delivered {
+                                Some(true) => CancellationDisposition::Effective,
+                                Some(false) => CancellationDisposition::AcknowledgedIneffective,
+                                None => CancellationDisposition::Unknown,
+                            }
+                        },
+                    );
                 }
             } else {
                 next.cancellation_disposition = Some(CancellationDisposition::Unknown);
