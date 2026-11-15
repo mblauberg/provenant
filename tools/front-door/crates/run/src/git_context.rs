@@ -233,6 +233,8 @@ fn transport_environment(env: &[(OsString, OsString)]) -> Vec<(OsString, OsStrin
 /// Where a lane can write: its linked worktree, the project's worktree and
 /// scratch areas, and the run state directory when one is set.
 fn lane_roots(
+    executor: &dyn Executor,
+    git: &Path,
     cwd: &Path,
     env: &[(OsString, OsString)],
 ) -> std::result::Result<transport::LaneRoots, transport::TransportError> {
@@ -246,7 +248,24 @@ fn lane_roots(
     let extra = transport::LaneRoots::new(run_state.clone());
     match (get("GIT_DIR"), get("GIT_COMMON_DIR")) {
         (Some(private), Some(common)) => {
-            transport::LaneRoots::for_repository(cwd, &private, &common, &extra, host_state)
+            let layout = provenant_confinement::worktrees::project_layout_for_common_at_state(
+                executor,
+                &common,
+                host_state,
+                git,
+                &provenant_confinement::worktrees::project_layout_git_environment(),
+                Duration::from_secs(5),
+                &provenant_core::CancelToken::new(),
+            )
+            .map_err(|_| transport::TransportError::Unreadable)?;
+            transport::LaneRoots::for_repository(
+                cwd,
+                &private,
+                &common,
+                layout.project(),
+                &extra,
+                host_state,
+            )
         }
         // An unreadable port table (for example inside a lane) narrows the
         // lane areas to the run state rather than refusing the advertisement.
@@ -280,7 +299,7 @@ fn check_transport(
         reason: error.to_string(),
     };
     let entries = transport::parse_listing(&listing.bytes).map_err(refusal)?;
-    let roots = lane_roots(cwd, env).map_err(refusal)?;
+    let roots = lane_roots(executor, git, cwd, env).map_err(refusal)?;
     transport::check_environment(transport_env, cwd, &roots).map_err(refusal)?;
     transport::check_listing(&entries, cwd, &roots).map_err(refusal)
 }
