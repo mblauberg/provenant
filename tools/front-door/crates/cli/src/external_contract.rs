@@ -355,6 +355,16 @@ mod tests {
         assert_eq!(plain_cell("unbalanced `HOME"), "unbalanced `HOME");
     }
 
+    #[test]
+    fn contract_comparison_normalises_code_spans_on_both_sides() {
+        let documented = table(
+            "\n## Surface\n\n| Contract |\n|---|\n| Run `provenant run` --json for lane-<attempt>. |\n",
+            "## Surface",
+        );
+        let declared = rows([["Run provenant run --json for `lane-<attempt>`.".to_owned()]]);
+        assert_eq!(documented, declared);
+    }
+
     /// The body rows of the first table under `heading`, as trimmed cells.
     fn table(spec: &str, heading: &str) -> BTreeSet<Vec<String>> {
         let (_, section) = spec
@@ -389,7 +399,7 @@ mod tests {
     {
         items
             .into_iter()
-            .map(|row| row.into_iter().collect())
+            .map(|row| row.into_iter().map(|cell| plain_cell(&cell)).collect())
             .collect()
     }
 
