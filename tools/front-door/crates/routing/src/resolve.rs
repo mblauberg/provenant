@@ -1260,6 +1260,7 @@ fn readiness_reason(
         .find_map(|route| {
             let read = lookup(
                 &provenant_quota::ReadinessScope {
+                    extra: Default::default(),
                     host: provenant_quota::LOCAL_HOST.into(),
                     adapter: model.adapter().into(),
                     account_key: account_key.into(),
@@ -1333,6 +1334,7 @@ fn uncertainty(
         .find_map(|(index, route)| {
             let read = lookup(
                 &provenant_quota::ReadinessScope {
+                    extra: Default::default(),
                     host: provenant_quota::LOCAL_HOST.into(),
                     adapter: model.adapter().into(),
                     account_key: account_key.clone(),

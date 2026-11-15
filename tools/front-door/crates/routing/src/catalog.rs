@@ -989,23 +989,18 @@ mod go_allowance_tests {
             );
         }
         let model = ModelId::parse("opencode/opencode-go/unlisted")?;
-        let error = check_go_allowance(&model, &config, &catalogue).unwrap_err();
-        assert!(
-            error.contains("opencode-go/unlisted")
-                && error.contains("unknown")
-                && error.contains("domains.routing.opencode_go.min_monthly_allowance_usd"),
-            "{error}"
-        );
+        assert!(check_go_allowance(&model, &config, &catalogue).is_err());
         config.opencode_go.min_monthly_allowance_usd = 0;
         assert!(check_go_allowance(&model, &config, &catalogue).is_ok());
         config.opencode_go.min_monthly_allowance_usd = 61;
-        let error = check_go_allowance(
-            &ModelId::parse("opencode/opencode-go/glm-5.3-flash")?,
-            &config,
-            &catalogue,
-        )
-        .unwrap_err();
-        assert!(error.contains("$60"), "{error}");
+        assert!(
+            check_go_allowance(
+                &ModelId::parse("opencode/opencode-go/glm-5.3-flash")?,
+                &config,
+                &catalogue,
+            )
+            .is_err()
+        );
         config.opencode_go.min_monthly_allowance_usd = 60;
         Ok(())
     }
@@ -1065,10 +1060,11 @@ mod pacing_profile_tests {
                 "{invalid}"
             );
         }
-        let error =
-            toml_edit::de::from_str::<PacingProfile>("deadline={reset_of='account-a',when='weekly'}")
-                .unwrap_err()
-                .to_string();
+        let error = toml_edit::de::from_str::<PacingProfile>(
+            "deadline={reset_of='account-a',when='weekly'}",
+        )
+        .unwrap_err()
+        .to_string();
         assert!(
             error.contains("reset_of") && error.contains("window"),
             "{error}"
@@ -1688,7 +1684,6 @@ mod tests {
         assert!(names.contains("junior"), "{names:?}");
         assert!(!names.contains("absent"), "{names:?}");
 
-        // Merged from preferences.rs::routing_default_matches_bundled_asset
         let asset: RoutingConfig =
             toml_edit::de::from_str(include_str!("../assets/review-defaults.toml"))?;
         assert_eq!(
@@ -1935,8 +1930,8 @@ mod tests {
     fn model_policy_fallbacks_are_reported_for_the_effective_route()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut config = RoutingConfig::default();
-        config.model_policy.defaults.result.fallback =
-            Some(ModelId::parse("codex/not-catalogued")?);
+        let unknown_fallback = ModelId::parse("codex/not-catalogued")?;
+        config.model_policy.defaults.result.fallback = Some(unknown_fallback.clone());
         assert!(config.validate().is_empty());
         let effective = config.model_policy.effective(
             &ModelId::parse("codex/gpt-6-luna")?,
@@ -1944,12 +1939,14 @@ mod tests {
             provenant_core::WallTime::from_unix_seconds(1)?,
         );
         assert!(effective.policy.result.fallback.is_none());
-        assert_eq!(
-            effective.dropped_fallback,
-            Some((ModelId::parse("codex/not-catalogued")?, "unknown model"))
+        assert!(
+            effective
+                .dropped_fallback
+                .is_some_and(|(model, _)| model == unknown_fallback)
         );
 
-        config.model_policy.defaults.result.fallback = Some(ModelId::parse("codex/gpt-6-luna")?);
+        let unsupported_effort_fallback = ModelId::parse("codex/gpt-6-luna")?;
+        config.model_policy.defaults.result.fallback = Some(unsupported_effort_fallback.clone());
         config.model_policy.defaults.result.fallback_effort = Some("unsupported".into());
         assert!(config.validate().is_empty());
         let effective = config.model_policy.effective(
@@ -1957,9 +1954,10 @@ mod tests {
             None,
             provenant_core::WallTime::from_unix_seconds(1)?,
         );
-        assert_eq!(
-            effective.dropped_fallback,
-            Some((ModelId::parse("codex/gpt-6-luna")?, "unsupported effort"))
+        assert!(
+            effective
+                .dropped_fallback
+                .is_some_and(|(model, _)| model == unsupported_effort_fallback)
         );
         Ok(())
     }

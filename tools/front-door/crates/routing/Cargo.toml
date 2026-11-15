@@ -21,5 +21,9 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 toml_edit = { workspace = true }
 
+[dev-dependencies]
+provenant-test-support = { path = "../test-support" }
+tempfile = { workspace = true }
+
 [lints]
 workspace = true

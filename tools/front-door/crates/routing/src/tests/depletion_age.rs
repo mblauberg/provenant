@@ -29,8 +29,10 @@ fn depletion_facts_at_age(
     let quota = [QuotaObservation {
         model: ModelId::parse(LUNA)?,
         snapshot: provenant_quota::QuotaSnapshot {
+            extra: Default::default(),
             schema_version: 1,
             account: provenant_quota::AccountScope {
+                extra: Default::default(),
                 adapter: "codex".into(),
                 account_key: "second".into(),
                 label: "second".into(),
@@ -41,6 +43,7 @@ fn depletion_facts_at_age(
             source_ref: "test".into(),
             authority_ref: None,
             windows: vec![provenant_quota::QuotaWindow {
+                extra: Default::default(),
                 pool: "primary".into(),
                 window_seconds: Some(18_000),
                 used_basis_points: 10_000,

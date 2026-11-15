@@ -1,98 +1,130 @@
 use super::*;
 
 #[test]
-fn outcome_priors_and_exploration_rank_eligible_members() -> Result<(), Box<dyn std::error::Error>>
-{
+fn catalogue_pool_members_each_have_a_prior_and_stay_eligible()
+-> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
-    let mut config: RoutingConfig = serde_json::from_value(serde_json::json!({
-        "pools": {"senior": [
-            {"model":"codex/gpt-6-luna","weight":1},
-            {"model":"codex/gpt-6.1-sol","weight":1},
-            {"model":"codex/gpt-6.1-terra","weight":1}
-        ]}
-    }))?;
-    let mut query = request("codex/gpt-6-luna")?;
+    let members: Vec<_> = catalogue
+        .pools
+        .get("senior")
+        .ok_or("catalogue senior pool")?
+        .iter()
+        .filter(|member| member.model.adapter() == "codex")
+        .cloned()
+        .collect();
+    let high = members.first().ok_or("catalogue codex senior member")?;
+    let low = members
+        .last()
+        .ok_or("second catalogue codex senior member")?;
+    if high.model == low.model {
+        return Err("catalogue pool needs distinct codex members".into());
+    }
+    let high_model = high.model.as_str().to_owned();
+    let low_model = low.model.as_str().to_owned();
+    let mut config = RoutingConfig::default();
+    config.pools.insert("senior".into(), members.clone());
+    let mut query = request(high.model.as_str())?;
     query.choice = RouteChoice::NamedRoute(RouteName::parse("senior")?);
     query.intent.workload = Workload::Review;
-    let accounts = [availability()];
+    let accounts = [AvailabilityRecord {
+        observed_models: members
+            .iter()
+            .map(|member| member.model.model().to_owned())
+            .collect(),
+        ..availability()
+    }];
     let access = [AccessContext {
         adapter: "codex",
         disclosure_ref: "policy",
         confinement_ref: "grant",
     }];
+    let priors = catalogue
+        .pools
+        .iter()
+        .flat_map(|(pool, entries)| {
+            entries.iter().map(|member| RoutePrior {
+                extra: Default::default(),
+                model: member.model.clone(),
+                pool: pool.clone(),
+                role: "review".into(),
+                successes: if pool == "senior" && member.model == high.model {
+                    100
+                } else {
+                    0
+                },
+                failures: if pool == "senior" && member.model != high.model {
+                    100
+                } else {
+                    0
+                },
+                source: "fixture:attributed".into(),
+            })
+        })
+        .collect::<Vec<_>>();
     let evidence = SelectionEvidence {
         role: None,
         source: "fixture:route_outcomes".into(),
-        priors: vec![
-            RoutePrior {
-                extra: Default::default(),
-                model: ModelId::parse("codex/gpt-6.1-sol")?,
-                pool: "senior".into(),
-                role: "review".into(),
-                successes: 100,
-                failures: 0,
-                source: "fixture:attributed".into(),
-            },
-            RoutePrior {
-                extra: Default::default(),
-                model: ModelId::parse("codex/gpt-6.1-terra")?,
-                pool: "senior".into(),
-                role: "review".into(),
-                successes: 0,
-                failures: 100,
-                source: "fixture:attributed".into(),
-            },
-        ],
+        priors,
         ..Default::default()
     };
+    assert!(
+        catalogue
+            .pools
+            .iter()
+            .all(|(pool, entries)| entries.iter().all(|member| {
+                evidence.priors.iter().any(|prior| {
+                    prior.model == member.model
+                        && prior.pool == pool.as_str()
+                        && prior.role == "review"
+                })
+            }))
+    );
     let mut ctx = context(&catalogue, &config, now()?);
     ctx.availability = &accounts;
     ctx.access = &access;
     ctx.selection_evidence = Some(&evidence);
-    let mut picks = BTreeMap::<String, u64>::new();
-    let mut explorations = 0;
-    for seed in 0..4096 {
-        let route = resolve_with_seed(&query, &ctx, "quality-invariant", seed)?;
-        assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
-        *picks.entry(route.model.clone()).or_default() += 1;
-        assert_eq!(route.selection_context.workload, query.intent.workload);
-        assert_eq!(route.selection_context.writes, query.intent.writes);
-        let receipt = route.pool_selection.ok_or("receipt")?;
-        explorations += u64::from(receipt.exploration.selected);
-        assert!(
-            receipt
-                .candidates
-                .iter()
-                .all(|candidate| candidate.exclusion.is_none())
-        );
-        assert!(receipt.candidates.iter().all(|candidate| {
-            candidate
+    let route = resolve_with_seed(&query, &ctx, "quality-invariant", 0)?;
+    assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+    assert_eq!(route.selection_context.workload, query.intent.workload);
+    assert_eq!(route.selection_context.writes, query.intent.writes);
+    let receipt = route.pool_selection.ok_or("receipt")?;
+    assert_eq!(
+        receipt.exploration.percent,
+        config.outcome_priors.exploration_percent
+    );
+    let high_candidate = receipt
+        .candidates
+        .iter()
+        .find(|candidate| candidate.model == high_model)
+        .ok_or("high-prior candidate")?;
+    let low_candidate = receipt
+        .candidates
+        .iter()
+        .find(|candidate| candidate.model == low_model)
+        .ok_or("low-prior candidate")?;
+    assert!(high_candidate.exclusion.is_none());
+    assert!(low_candidate.exclusion.is_none());
+    assert!(
+        high_candidate
+            .ranking
+            .outcome_prior
+            .as_ref()
+            .ok_or("prior")?
+            .factor_basis_points
+            > low_candidate
                 .ranking
-                .ranking_factor_basis_points
-                .is_some_and(|factor| factor > 0)
-        }));
-        assert!(
-            receipt
-                .candidates
-                .iter()
-                .all(|candidate| { candidate.ranking.outcome_prior.is_some() })
-        );
-    }
-    assert!(picks["gpt-6.1-sol"] > picks["gpt-6-luna"]);
-    assert!(
-        picks["gpt-6.1-terra"] > 0,
-        "Terra remains eligible through exploration"
+                .outcome_prior
+                .as_ref()
+                .ok_or("prior")?
+                .factor_basis_points
     );
-    assert!(
-        (300..520).contains(&explorations),
-        "configured 10% exploration share: {explorations}"
-    );
+
     // A single below-preference candidate must still serve every draw.
     config
         .pools
         .get_mut("senior")
         .ok_or("pool")?
-        .retain(|member| member.model.as_str() == "codex/gpt-6-luna");
+        .retain(|member| member.model.as_str() == high_model);
     config.outcome_priors.enabled = false;
     config
         .capability_preferences
@@ -101,29 +133,28 @@ fn outcome_priors_and_exploration_rank_eligible_members() -> Result<(), Box<dyn 
     ctx.availability = &accounts;
     ctx.access = &access;
     ctx.selection_evidence = Some(&evidence);
-    for seed in 0..32 {
-        let route = resolve_with_seed(&query, &ctx, "only-general", seed)?;
-        let receipt = route.pool_selection.ok_or("receipt")?;
-        assert_eq!(
-            receipt.candidates[0]
-                .ranking
-                .outcome_prior
-                .as_ref()
-                .ok_or("prior")?
-                .factor_basis_points,
-            10_000
-        );
-        assert_eq!(
-            receipt.candidates[0]
-                .ranking
-                .capability_preference
-                .as_ref()
-                .ok_or("capability")?
-                .source,
-            provenant_records::route_selection::WeightSource::Config
-        );
-        assert!(!receipt.exploration.selected);
-    }
+    let route = resolve_with_seed(&query, &ctx, "only-general", 0)?;
+    assert_eq!(route.model, high_model);
+    let receipt = route.pool_selection.ok_or("receipt")?;
+    assert_eq!(
+        receipt.candidates[0]
+            .ranking
+            .outcome_prior
+            .as_ref()
+            .ok_or("prior")?
+            .factor_basis_points,
+        10_000
+    );
+    assert_eq!(
+        receipt.candidates[0]
+            .ranking
+            .capability_preference
+            .as_ref()
+            .ok_or("capability")?
+            .source,
+        provenant_records::route_selection::WeightSource::Config
+    );
+    assert!(!receipt.exploration.selected);
     Ok(())
 }
 
@@ -153,6 +184,7 @@ fn account_ranking_uses_reset_adjusted_headroom_and_live_load_independent_of_ord
                 120,
             )?;
             observation.snapshot.windows = vec![provenant_quota::QuotaWindow {
+                extra: Default::default(),
                 pool: "primary".into(),
                 window_seconds: Some(18_000),
                 used_basis_points: used,

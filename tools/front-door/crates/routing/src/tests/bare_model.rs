@@ -154,15 +154,11 @@ fn pool_excludes_unsupported_effort_but_exact_and_user_pool_allow_it()
     let mut query = request(target.as_str())?;
     query.choice = RouteChoice::NamedRoute(RouteName::parse("test-pool")?);
     query.effort = Some("high".into());
-    match resolve_with_seed(&query, &ctx, "test-seed", 0) {
-        Ok(route) => {
-            assert_ne!(picked_model(&route)?, target);
-        }
-        Err(RoutingError::NoEligiblePoolMember { .. }) => {
-            // Expected when the only member is excluded by effort
-        }
-        Err(err) => return Err(err.into()),
-    }
+    let error = resolve_with_seed(&query, &ctx, "test-seed", 0).unwrap_err();
+    assert_eq!(error.code(), "no_eligible_pool_member");
+    assert!(
+        matches!(error, RoutingError::NoEligiblePoolMember { exclusions } if !exclusions.is_empty())
+    );
 
     // Exact request for the model with "high" effort resolves ready
     let mut exact = request(target.as_str())?;
