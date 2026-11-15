@@ -2942,7 +2942,7 @@ fn seed_composite_output_graph_with_gate(
             actor: identity.inbox.actor.to_string(),
             host: identity.host.to_string(),
             next: 1,
-            response: response.into(),
+            response,
         },
         &mut journal,
         &Default::default(),
