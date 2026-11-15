@@ -17,6 +17,7 @@ pub mod host;
 pub mod identity;
 mod lane;
 mod launch;
+mod package_cache;
 mod skill_stage;
 pub use lane::{BuildSlotGate, BuildSlotSetupOutcome, GhShim, LaneRuntime};
 pub use skill_stage::{SkillWarning, StagedUserSkills};
