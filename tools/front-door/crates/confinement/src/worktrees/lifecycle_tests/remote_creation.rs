@@ -40,27 +40,19 @@ fn bare_common_layout_creates_writer_from_linked_executor_checkout() -> Result<(
         &cancel(),
     )?;
     fs::create_dir(fixture.root.join(".provenant"))?;
+    let mut project_ports = provenant_config::PortTable::builtin();
+    project_ports.worktree_layout.roots = vec![PathBuf::from("project-writers")];
+    project_ports.worktree_layout.default = PathBuf::from("project-writers/<branch>");
     fs::write(
         fixture.root.join(".provenant/ports.json"),
-        serde_json::json!({
-            "schema_version": provenant_config::PORTS_SCHEMA_VERSION,
-            "worktree_layout": {
-                "roots": ["project-writers"],
-                "default": "project-writers/<branch>"
-            }
-        })
-        .to_string(),
+        serde_json::to_vec(&project_ports)?,
     )?;
+    let mut host_ports = provenant_config::PortTable::builtin();
+    host_ports.worktree_layout.roots = vec![PathBuf::from("host-writers")];
+    host_ports.worktree_layout.default = PathBuf::from("host-writers/<branch>");
     fs::write(
         fixture._temp.path().join("ports.json"),
-        serde_json::json!({
-            "schema_version": provenant_config::PORTS_SCHEMA_VERSION,
-            "worktree_layout": {
-                "roots": ["host-writers"],
-                "default": "host-writers/<branch>"
-            }
-        })
-        .to_string(),
+        serde_json::to_vec(&host_ports)?,
     )?;
 
     let test = TestContext::new(&fixture)
