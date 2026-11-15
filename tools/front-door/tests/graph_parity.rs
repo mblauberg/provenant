@@ -531,7 +531,7 @@ fn quota_stopped_task_and_composite_member_keep_the_same_lineage() -> Result {
                 successor.key.previous_attempt_ref.as_deref(),
                 Some("h/quota")
             );
-            assert_eq!(successor.key.extra["retry_generation"], 1);
+            assert_eq!(successor.key.retry_generation, Some(1));
             assert_eq!(
                 successor.key.route_index, 0,
                 "redraw keeps the task's tier alias"

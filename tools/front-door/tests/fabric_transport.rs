@@ -1212,7 +1212,10 @@ fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
     std::fs::write(&lost, "")?;
     // Observe the lost receipt before a waited submission advances its due retry.
     let (_, unknown) = launch(&rig, "probe-failure-retry", false)?;
-    assert_eq!(unknown["error"]["code"], "LAUNCH_UNKNOWN", "{unknown}");
+    assert_eq!(
+        unknown["data"]["checkpoint"]["nodes"][0]["advance_owner_code"], "LAUNCH_UNKNOWN",
+        "{unknown}"
+    );
     let after_loss: std::collections::HashSet<_> = std::fs::read_dir(&peer_attempts)?
         .map(|entry| entry.map(|entry| entry.file_name()))
         .collect::<std::io::Result<_>>()?;
@@ -1454,8 +1457,13 @@ fn unanswered_peer_submission_is_recorded_as_launch_uncertainty() -> Result {
             "--json",
         ],
     )?;
-    assert_ne!(launch_status, 0, "{launched}");
-    assert_eq!(launched["error"]["code"], "LAUNCH_UNKNOWN", "{launched}");
+    // The run stays open: the uncertainty is recorded on the node, not
+    // reported as a failed command.
+    assert_eq!(launch_status, 0, "{launched}");
+    assert_eq!(
+        launched["data"]["checkpoint"]["nodes"][0]["advance_owner_code"], "LAUNCH_UNKNOWN",
+        "{launched}"
+    );
     assert!(
         submitted.exists(),
         "the mutating submission must reach the peer"
@@ -2323,10 +2331,7 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
     drop(receiver);
     let execution = FileJournal::execution(&receiver_state, peer_project, &receiver_graph)?
         .ok_or("receiver execution")?;
-    assert_eq!(
-        execution.document.extra["peer_origin_work_key"],
-        json!(origin_key)
-    );
+    assert_eq!(execution.document.peer_origin_work_key, Some(origin_key));
     assert_eq!(
         execution
             .peer_origin_context
@@ -2533,7 +2538,7 @@ fn run_lane_document_with_overrides_at_cli_edge() -> Result {
     std::fs::write(
         &document,
         r#"
-nodes = [{ id = "inspect", use = "task", brief = "Inspect ${subject}: ${item}" }]
+nodes = [{ id = "inspect", use = "task", prompt = "Inspect ${subject}: ${item}" }]
 [parameters.subject]
 type = "string"
 "#,

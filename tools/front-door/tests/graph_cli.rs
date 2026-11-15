@@ -1295,7 +1295,7 @@ fn oversized_graph_expansion_is_refused_before_journalling() -> Result {
         &rig,
         &[(
             "two",
-            "nodes = [\n  { id = 'a', use = 'task', brief = 'first' },\n  { id = 'b', use = 'task', brief = 'second' },\n]\n"
+            "nodes = [\n  { id = 'a', use = 'task', prompt = 'first' },\n  { id = 'b', use = 'task', prompt = 'second' },\n]\n"
                 .into(),
         )],
         "two",
@@ -1322,7 +1322,7 @@ fn oversized_graph_expansion_is_refused_before_journalling() -> Result {
         &rig,
         &[(
             "chain",
-            "nodes = [\n  { id = 'a', use = 'task', brief = 'one' },\n  { id = 'b', use = 'task', brief = 'two', after = ['a'] },\n  { id = 'c', use = 'task', brief = 'three', after = ['b'] },\n]\n"
+            "nodes = [\n  { id = 'a', use = 'task', prompt = 'one' },\n  { id = 'b', use = 'task', prompt = 'two', after = ['a'] },\n  { id = 'c', use = 'task', prompt = 'three', after = ['b'] },\n]\n"
                 .into(),
         )],
         "chain",
