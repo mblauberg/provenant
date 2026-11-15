@@ -1,7 +1,7 @@
 //! Typed readiness observations and their freshness boundary.
 use crate::QuotaError;
-use serde::{Deserialize, Serialize};
 use provenant_records::ExtraFields;
+use serde::{Deserialize, Serialize};
 
 /// Identity of the route whose readiness was observed.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -35,56 +35,40 @@ impl ReadinessScope {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReadinessState {
-    Ready,
-    Unavailable,
-    Unknown,
+macro_rules! declare_readiness_enum {
+    ($name:ident { $($variant:ident),+ $(,)? }) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum $name { $($variant),+ }
+
+        impl $name {
+            /// Every declared variant, for exhaustive stored-format tables.
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+        }
+    };
 }
 
-impl ReadinessState {
-    /// Every persisted readiness state, for exhaustive format tables.
-    pub const ALL: &[Self] = &[Self::Ready, Self::Unavailable, Self::Unknown];
+declare_readiness_enum! {
+    ReadinessState { Ready, Unavailable, Unknown }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReadinessReason {
-    NotProbed,
-    Stale,
-    ProbeTimeout,
-    CommandFailure,
-    MissingExecutable,
-    SignedOut,
-    LoginExpired,
-    AccountMismatch,
-    Exhausted,
-    ProviderRefusal,
-    UncalibratedPartialCoverage,
-    InvalidEvidence,
-    UnreachablePeer,
-    UnsupportedPeerVersion,
-}
-
-impl ReadinessReason {
-    /// Every persisted readiness reason, for exhaustive projection tables.
-    pub const ALL: &[Self] = &[
-        Self::NotProbed,
-        Self::Stale,
-        Self::ProbeTimeout,
-        Self::CommandFailure,
-        Self::MissingExecutable,
-        Self::SignedOut,
-        Self::LoginExpired,
-        Self::AccountMismatch,
-        Self::Exhausted,
-        Self::ProviderRefusal,
-        Self::UncalibratedPartialCoverage,
-        Self::InvalidEvidence,
-        Self::UnreachablePeer,
-        Self::UnsupportedPeerVersion,
-    ];
+declare_readiness_enum! {
+    ReadinessReason {
+        NotProbed,
+        Stale,
+        ProbeTimeout,
+        CommandFailure,
+        MissingExecutable,
+        SignedOut,
+        LoginExpired,
+        AccountMismatch,
+        Exhausted,
+        ProviderRefusal,
+        UncalibratedPartialCoverage,
+        InvalidEvidence,
+        UnreachablePeer,
+        UnsupportedPeerVersion,
+    }
 }
 
 /// An observation is valid only for its exact scope and before its expiry.
@@ -414,10 +398,7 @@ impl ReadinessFile {
                     .clone()
                     .unwrap_or_else(|| format!("{}/{}", account.account.adapter, refusal.model)),
             };
-            if let Some(held) = published
-                .iter_mut()
-                .find(|r| r.scope.same_scope(&scope))
-            {
+            if let Some(held) = published.iter_mut().find(|r| r.scope.same_scope(&scope)) {
                 held.observed_unix_seconds = held
                     .observed_unix_seconds
                     .max(refusal.observed_unix_seconds);
@@ -431,10 +412,8 @@ impl ReadinessFile {
             published.push(RouteReadiness {
                 extra: old.map_or_else(Default::default, |record| record.extra.clone()),
                 schema_version: SCHEMA_VERSION,
-                scope: old.map_or_else(
-                    || scope.clone(),
-                    |record| record.scope.updated_from(&scope),
-                ),
+                scope: old
+                    .map_or_else(|| scope.clone(), |record| record.scope.updated_from(&scope)),
                 state: ReadinessState::Unavailable,
                 reason: Some(ReadinessReason::ProviderRefusal),
                 observed_unix_seconds: refusal.observed_unix_seconds,
@@ -788,7 +767,8 @@ mod tests {
     }
 
     #[test]
-    fn readiness_stored_shapes_round_trip_future_fields() -> Result<(), Box<dyn std::error::Error>> {
+    fn readiness_stored_shapes_round_trip_future_fields() -> Result<(), Box<dyn std::error::Error>>
+    {
         let scope = ReadinessScope {
             extra: Default::default(),
             host: "host".into(),
@@ -856,9 +836,7 @@ mod tests {
                 ReadinessReason::SignedOut => E::AuthRequired,
                 ReadinessReason::LoginExpired => E::LoginExpired,
                 ReadinessReason::AccountMismatch => E::AccountMismatch,
-                ReadinessReason::Exhausted | ReadinessReason::ProviderRefusal => {
-                    E::ProviderRefused
-                }
+                ReadinessReason::Exhausted | ReadinessReason::ProviderRefusal => E::ProviderRefused,
             }
         }
         for &reason in ReadinessReason::ALL {
