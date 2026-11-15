@@ -1110,7 +1110,7 @@ pub fn writer_launch_budget(
 
 /// Resolve a validated checkpoint path against the project root that owns it.
 fn resolve_managed_writer_path(
-    host_state: &std::path::Path,
+    ports: &provenant_config::PortTable,
     project_root: &std::path::Path,
     path: &str,
     branch: &str,
@@ -1119,8 +1119,6 @@ fn resolve_managed_writer_path(
     if !project_root.is_absolute() {
         return Err(WorktreeError::InvalidRequest);
     }
-    let ports = provenant_config::PortTable::read_for(Some(project_root), host_state)
-        .map_err(WorktreeError::PortConfiguration)?;
     let expected = ports
         .managed_writer_path(branch)
         .map_err(WorktreeError::PortConfiguration)?;
@@ -1164,12 +1162,13 @@ pub fn provision_writer_checked(
                 lock_budget: budget,
                 ..*worktree_context
             };
-            let expected = resolve_managed_writer_path(
+            let layout = worktree_context.project_layout()?;
+            let ports = provenant_config::PortTable::read_for(
+                layout.project(),
                 context.roots.state.as_path(),
-                worktree_context.repo.root_path(),
-                path,
-                branch,
-            )?;
+            )
+            .map_err(worktrees::WorktreeError::PortConfiguration)?;
+            let expected = resolve_managed_writer_path(&ports, layout.root(), path, branch)?;
             provision_in_context(&worktree_context, path, branch, source, cancel)?;
             Ok(expected)
         },
@@ -1184,12 +1183,10 @@ fn provision_in_context(
     cancel: &CancelToken,
 ) -> Result<(), provenant_confinement::worktrees::WorktreeError> {
     use provenant_confinement::worktrees::{self, WorktreeCreate, WorktreeError};
-    let expected = resolve_managed_writer_path(
-        &context.host_state()?,
-        context.repo.root_path(),
-        path,
-        branch,
-    )?;
+    let layout = context.project_layout()?;
+    let ports = provenant_config::PortTable::read_for(layout.project(), &context.host_state()?)
+        .map_err(worktrees::WorktreeError::PortConfiguration)?;
+    let expected = resolve_managed_writer_path(&ports, layout.root(), path, branch)?;
     // Inspect registration and custody without holding sibling worktrees open
     // for unrelated Git probes. The selected target's cleanliness is checked
     // below, under its writer lease.

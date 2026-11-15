@@ -523,7 +523,8 @@ fn create_with_default(
         .parent()
         .and_then(Path::parent)
         .ok_or(WorktreeError::InvalidRequest)?;
-    let ports = provenant_config::PortTable::read_for(Some(context.repo.root_path()), state)
+    let layout = context.project_layout()?;
+    let ports = provenant_config::PortTable::read_for(layout.project(), state)
         .map_err(WorktreeError::PortConfiguration)?;
     let target_relative = ports
         .managed_writer_path(&request.branch)
@@ -535,13 +536,13 @@ fn create_with_default(
         .file_name()
         .ok_or(WorktreeError::InvalidRequest)?;
     let worktree_parent = open_or_create_layout_directory(
-        context.repo.root_dir(),
+        layout.directory(),
         parent_relative,
         true,
-        context.repo.root_identity().device,
+        layout.directory().metadata()?.device,
     )?;
     let parent_identity = worktree_parent.metadata()?;
-    let target = canonicalize(context.repo.root_path())?.join(&target_relative);
+    let target = canonicalize(layout.root())?.join(&target_relative);
     match worktree_parent.metadata_at(path_name, false) {
         Ok(_) => return Err(WorktreeError::InvalidRequest),
         Err(error) if error.is_not_found() => {}
@@ -554,10 +555,10 @@ fn create_with_default(
     }
     let _writer = cache_writer_guard(context.project_state, &target).map_err(custody_refusal)?;
     let named_parent = open_or_create_layout_directory(
-        context.repo.root_dir(),
+        layout.directory(),
         parent_relative,
         false,
-        context.repo.root_identity().device,
+        layout.directory().metadata()?.device,
     )?;
     if !parent_identity.same_identity(&named_parent.metadata()?) {
         return Err(WorktreeError::UnknownWriter);

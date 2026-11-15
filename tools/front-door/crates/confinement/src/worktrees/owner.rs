@@ -370,12 +370,14 @@ pub fn prune_owned(
 ) -> Result<(RemoveOutcome, provenant_records::custody::RetirementRecord), WorktreeError> {
     let verified = verify_worktree(context.repo, path)?;
     let owner = load_owner(&verified)?.ok_or(WorktreeError::UnknownWriter)?;
+    let layout = context.project_layout()?;
     let relative = path
-        .strip_prefix(context.repo.root_path())
+        .strip_prefix(layout.root())
         .map_err(|_| WorktreeError::UnknownWriter)?;
-    let managed =
-        managed_writer_branch(context.repo.root_path(), &context.host_state()?, relative)?
-            .is_some();
+    let managed = provenant_config::PortTable::read_for(layout.project(), &context.host_state()?)
+        .map_err(WorktreeError::PortConfiguration)?
+        .managed_writer_branch(relative)
+        .is_some();
     if owner.origin != WorktreeOrigin::Lane || owner.attempt_id != Some(attempt) || !managed {
         return Err(WorktreeError::UnknownWriter);
     }

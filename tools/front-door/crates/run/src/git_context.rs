@@ -235,6 +235,8 @@ fn transport_environment(env: &[(OsString, OsString)]) -> Vec<(OsString, OsStrin
 fn lane_roots(
     cwd: &Path,
     env: &[(OsString, OsString)],
+    executor: &dyn Executor,
+    git: &Path,
 ) -> std::result::Result<transport::LaneRoots, transport::TransportError> {
     let get = |name: &str| {
         env.iter()
@@ -246,7 +248,34 @@ fn lane_roots(
     let extra = transport::LaneRoots::new(run_state.clone());
     match (get("GIT_DIR"), get("GIT_COMMON_DIR")) {
         (Some(private), Some(common)) => {
-            transport::LaneRoots::for_repository(cwd, &private, &common, &extra, host_state)
+            let private = provenant_os::fs::canonicalize(&private)
+                .map_err(|_| transport::TransportError::Unreadable)?;
+            let common = provenant_os::fs::canonicalize(&common)
+                .map_err(|_| transport::TransportError::Unreadable)?;
+            let environment = [
+                ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+                ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+                ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+                ("GIT_DIR".into(), common.as_os_str().to_owned()),
+            ];
+            let layout = provenant_confinement::worktrees::project_layout_for_common(
+                executor,
+                &common,
+                git,
+                &environment,
+                std::time::Duration::from_secs(5),
+                &provenant_core::CancelToken::new(),
+            )
+            .map_err(|_| transport::TransportError::Unreadable)?;
+            let mut roots = extra.into_paths();
+            if private != common {
+                roots.push(cwd.to_path_buf());
+            }
+            roots.extend(
+                transport::LaneRoots::for_layout(layout.root(), layout.project(), host_state)?
+                    .into_paths(),
+            );
+            Ok(transport::LaneRoots::new(roots))
         }
         // An unreadable port table (for example inside a lane) narrows the
         // lane areas to the run state rather than refusing the advertisement.
@@ -280,7 +309,7 @@ fn check_transport(
         reason: error.to_string(),
     };
     let entries = transport::parse_listing(&listing.bytes).map_err(refusal)?;
-    let roots = lane_roots(cwd, env).map_err(refusal)?;
+    let roots = lane_roots(cwd, env, executor, git).map_err(refusal)?;
     transport::check_environment(transport_env, cwd, &roots).map_err(refusal)?;
     transport::check_listing(&entries, cwd, &roots).map_err(refusal)
 }

@@ -411,10 +411,12 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
         scope: PathScope::Exact,
     }));
     // A path-shaped provider directory is protected only when declared.
-    assert!(!mandatory
-        .credentials()
-        .iter()
-        .any(|entry| entry.path == home.join(".agy-unselected")));
+    assert!(
+        !mandatory
+            .credentials()
+            .iter()
+            .any(|entry| entry.path == home.join(".agy-unselected"))
+    );
 
     Ok(())
 }
@@ -428,19 +430,38 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
     let home = root.join("home");
     let source = root.join("source");
     let state = root.join("state");
-    let foreign_common = root.join("other-project/.git");
+    let foreign_project = root.join("other-project");
+    let foreign_common = root.join("external-metadata/foreign.git");
     let foreign = root.join("external-owned-checkout");
-    for path in [
-        &home,
-        &source,
-        &state,
-        &foreign,
-        &foreign_common.join("objects"),
-    ] {
+    for path in [&home, &source, &state, &foreign_project, &foreign_common] {
         std::fs::create_dir_all(path)?;
     }
     std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
-    std::fs::write(foreign_common.join("HEAD"), "ref: refs/heads/main\n")?;
+    provenant_os::fixture::run_git(
+        &foreign_project,
+        &[
+            "init",
+            "-b",
+            "main",
+            "--separate-git-dir",
+            foreign_common.to_str().ok_or("foreign common directory")?,
+        ],
+    )?;
+    provenant_os::fixture::run_git(
+        &foreign_project,
+        &["commit", "--allow-empty", "-qm", "base"],
+    )?;
+    provenant_os::fixture::run_git(
+        &foreign_project,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "other-lane",
+            foreign.to_str().ok_or("foreign checkout")?,
+            "HEAD",
+        ],
+    )?;
     let mut inputs = provenant_core::RootInputs::new(home.clone(), source.clone());
     inputs.state_dir = Some(state.clone());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
@@ -448,8 +469,13 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
         &roots,
         provenant_config::ProjectLocation::new(&foreign_common)?,
     )?;
-    let registration = foreign_common.join("worktrees/external");
-    std::fs::create_dir_all(&registration)?;
+    let registration = PathBuf::from(
+        String::from_utf8(provenant_os::fixture::run_git(
+            &foreign,
+            &["rev-parse", "--absolute-git-dir"],
+        )?)?
+        .trim(),
+    );
     let owner = WorktreeOwner {
         attempt_id: None,
         operation_id: None,
@@ -464,10 +490,6 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
     std::fs::write(
         registration.join("provenant-owner.json"),
         serde_json::to_vec(&owner)?,
-    )?;
-    std::fs::write(
-        registration.join("gitdir"),
-        format!("{}\n", foreign.join(".git").display()),
     )?;
     // An unowned sibling's name is not an extra mandatory source boundary.
     let unowned = foreign_common.join("worktrees/unowned");
@@ -496,6 +518,12 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
     let protected = inventory.protected().to_vec();
     assert!(protected.iter().any(|root| root.path == foreign));
     assert!(protected.iter().any(|root| root.path == foreign_common));
+    assert!(
+        protected
+            .iter()
+            .any(|root| root.path == foreign_project.join(".worktrees")),
+        "the separate-git-dir project's managed allocation root must be protected"
+    );
     assert!(
         !protected
             .iter()
@@ -1530,7 +1558,8 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
     task.base = Some(head.clone());
     task.access.source_root = Some(source.clone());
     task.access.source_identity = Some(source_identity(&source)?);
-    task.route = run::RequestedRoute::Adapter { required_family: None,
+    task.route = run::RequestedRoute::Adapter {
+        required_family: None,
         extra: Default::default(),
         provider: "command".into(),
         name: "fake".into(),
