@@ -559,7 +559,7 @@ mod tests {
         }
     }
 
-    fn provider<'a>(decoder: &'a TestDecoder, events: &'a EventSink) -> FrameDelivery<'a> {
+    fn provider<'a>(decoder: &'a dyn FrameDecoder, events: &'a EventSink) -> FrameDelivery<'a> {
         FrameDelivery::Provider { decoder, events }
     }
 
