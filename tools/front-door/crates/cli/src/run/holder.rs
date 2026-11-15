@@ -700,6 +700,7 @@ mod tests {
         }
     }
 
+    // Spec: docs/specs/fabric.md#custody-and-cursors
     #[test]
     fn custody_reads_live_graph_children_after_parent_exit()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -790,7 +791,7 @@ mod tests {
             "skipped",
         ] {
             let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
-                "schema_version":1,"graph_id":"custody","plan_digest":"fixture",
+                "schema_version":2,"graph_id":"custody","plan_digest":"fixture",
                 "nodes":[{"id":"parent","state":"succeeded","attempts":[{
                     "launched":true,"key":{"graph_id":"custody","node_id":"parent","route_index":0, "attempt": 1},
                     "route":{"alias":"senior"},"state":"terminal","attempt_ref":reference,

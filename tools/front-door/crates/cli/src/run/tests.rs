@@ -770,7 +770,7 @@ fn keyed(
         document,
     })?;
     let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
-        "schema_version":1, "graph_id":graph, "plan_digest":"fixture",
+        "schema_version":2, "graph_id":graph, "plan_digest":"fixture",
         "nodes":[{"id":node, "state":"running", "attempts":[{
             "launched":true, "key":{"graph_id":graph, "node_id":node, "route_index":0, "attempt": 1},
             "route":{"alias":"senior"}, "state":"running", "attempt_ref":reference,
@@ -781,6 +781,7 @@ fn keyed(
     Ok(())
 }
 #[cfg(feature = "fixture")]
+// Spec: docs/specs/fabric.md#checkpoint-before-launch
 #[test]
 fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
 -> Result<(), Box<dyn std::error::Error>> {

@@ -393,6 +393,7 @@ fn first_install_cleans_declared_legacy_names_and_foreign_release_links() {
     }
 }
 
+// Spec: docs/specs/state.md#harness-integrations-have-one-declaration
 #[test]
 fn peer_agent_accepts_a_symlinked_home() {
     let mut f = Fixture::new();
@@ -422,7 +423,7 @@ fn peer_agent_accepts_a_symlinked_home() {
     )
     .unwrap();
     f.targets.home = f.home.clone();
-    assert!(f.plan().findings().is_empty());
+    assert!(no_drift(f.plan().findings()));
 }
 
 #[test]
@@ -919,6 +920,7 @@ fn check_after_home_rename_never_inspects_old_config_paths() {
     );
 }
 
+// Spec: docs/specs/state.md#harness-integrations-have-one-declaration
 #[test]
 fn reinstall_after_state_rename_requires_manual_link_cleanup() {
     let mut f = Fixture::new();
@@ -956,7 +958,7 @@ fn reinstall_after_state_rename_requires_manual_link_cleanup() {
     assert!(relocated.contains(&f.link()));
     assert!(relocated.contains(&f.targets.bin_dir.join("provenant")));
     install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-    assert!(f.plan().findings().is_empty());
+    assert!(no_drift(f.plan().findings()));
     assert_eq!(
         installed_binary(&f.targets).unwrap(),
         Some(f.targets.bin_dir.join("provenant"))
@@ -1503,6 +1505,7 @@ fn occupied_skill_is_refused_without_touching_unmanaged_bytes() {
     assert_eq!(fs::read(f.link().join("custom")).unwrap(), b"unmanaged");
     assert!(!f.receipt().exists());
 }
+// Spec: docs/specs/state.md#harness-integrations-have-one-declaration
 #[test]
 fn reapplication_and_post_file_crash_do_not_rewrite_exact_desired_entries() {
     let f = Fixture::new();
@@ -1517,8 +1520,8 @@ fn reapplication_and_post_file_crash_do_not_rewrite_exact_desired_entries() {
         false,
     )
     .unwrap();
-    assert!(
-        inspect_install(
+    assert!(no_drift(
+        &inspect_install(
             &f.targets,
             Some(&f.release()),
             "fixture-target",
@@ -1527,8 +1530,7 @@ fn reapplication_and_post_file_crash_do_not_rewrite_exact_desired_entries() {
         )
         .unwrap()
         .findings
-        .is_empty()
-    );
+    ));
     let binary = f.targets.bin_dir.join("provenant");
     let before = snapshot(&binary).unwrap();
     let link_before = fs::symlink_metadata(f.link()).unwrap();
@@ -1917,6 +1919,7 @@ fn fault_context<'a>(clock: &'a SystemClock, cancel: &'a TestCancelToken) -> Ins
     }
 }
 
+// Spec: docs/specs/state.md#harness-integrations-have-one-declaration
 #[test]
 fn receipt_publish_failure_reports_partial_actions_and_reapplies() {
     let f = Fixture::new();
@@ -1966,8 +1969,8 @@ fn receipt_publish_failure_reports_partial_actions_and_reapplies() {
     )
     .unwrap();
     assert!(f.plan().actions().is_empty());
-    assert!(
-        inspect_install(
+    assert!(no_drift(
+        &inspect_install(
             &f.targets,
             Some(&f.release()),
             "fixture-target",
@@ -1976,8 +1979,7 @@ fn receipt_publish_failure_reports_partial_actions_and_reapplies() {
         )
         .unwrap()
         .findings
-        .is_empty()
-    );
+    ));
 }
 
 #[test]
@@ -2211,6 +2213,7 @@ fn check_install_compares_the_requested_source_digest() {
     );
 }
 
+// Spec: docs/specs/state.md#harness-integrations-have-one-declaration
 #[test]
 fn uninstall_reconciles_entries_removed_before_receipt_publication() {
     let f = Fixture::new();
@@ -2239,8 +2242,8 @@ fn uninstall_reconciles_entries_removed_before_receipt_publication() {
             .iter()
             .all(|e| e.harness != Some(Harness::Codex))
     );
-    assert!(
-        inspect_install(
+    assert!(no_drift(
+        &inspect_install(
             &f.targets,
             None,
             "fixture-target",
@@ -2249,8 +2252,7 @@ fn uninstall_reconciles_entries_removed_before_receipt_publication() {
         )
         .unwrap()
         .findings
-        .is_empty()
-    );
+    ));
     // Once removal is reconciled, a later recreated matching link is unmanaged.
     let release = f.release();
     let path = f
@@ -2986,6 +2988,7 @@ fn bin_dir_upgrade_removes_only_the_unchanged_previous_shim() {
     }
 }
 
+// Spec: docs/specs/state.md#harness-integrations-have-one-declaration
 #[test]
 fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
     let mut f = Fixture::new();
@@ -3047,8 +3050,8 @@ fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
             .join(format!("{:?}/skills", target.harness));
         target.instruction = None;
     }
-    assert!(
-        inspect_install(
+    assert!(no_drift(
+        &inspect_install(
             &changed,
             None,
             "fixture-target",
@@ -3057,8 +3060,7 @@ fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
         )
         .unwrap()
         .findings
-        .is_empty()
-    );
+    ));
 
     changed.harnesses = vec![HarnessTarget {
         harness: Harness::Claude,
@@ -3081,8 +3083,8 @@ fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
     assert_eq!(shrunk.harnesses, vec![Harness::Codex]);
     assert_eq!(shrunk.harness_targets.len(), 1);
     assert_eq!(shrunk.harness_targets[0].harness, Harness::Codex);
-    assert!(
-        inspect_install(
+    assert!(no_drift(
+        &inspect_install(
             &changed,
             None,
             "fixture-target",
@@ -3091,10 +3093,10 @@ fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
         )
         .unwrap()
         .findings
-        .is_empty()
-    );
+    ));
 }
 
+// Spec: docs/specs/state.md#harness-integrations-have-one-declaration
 #[test]
 fn receipt_targets_drive_check_and_uninstall_and_uninstall_shrinks_harnesses() {
     let f = Fixture::new();
@@ -3131,8 +3133,8 @@ fn receipt_targets_drive_check_and_uninstall_and_uninstall_shrinks_harnesses() {
     changed_targets.bin_dir = f.home.join("elsewhere/bin");
     changed_targets.harnesses[0].skills_dir = f.home.join("elsewhere/skills");
     changed_targets.harnesses[0].instruction = Some(f.home.join("elsewhere/AGENTS.md"));
-    assert!(
-        inspect_install(
+    assert!(no_drift(
+        &inspect_install(
             &changed_targets,
             Some(&release),
             "fixture-target",
@@ -3141,8 +3143,7 @@ fn receipt_targets_drive_check_and_uninstall_and_uninstall_shrinks_harnesses() {
         )
         .unwrap()
         .findings
-        .is_empty()
-    );
+    ));
     let outcome = uninstall(
         &changed_targets,
         &context(&clock, &cancel),
