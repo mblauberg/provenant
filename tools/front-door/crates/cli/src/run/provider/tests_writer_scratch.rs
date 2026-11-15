@@ -578,7 +578,7 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
     // A recorded sign-out followed by a healthy account-scoped status probe
     // must permit preparation without waiting for the quota backoff.
     let now = clock.unix_seconds();
-    let stale_scope = provenant_quota::AccountScope {
+    let stale_scope = provenant_quota::AccountScope { extra: Default::default(),
         adapter: "cursor".into(),
         account_key: "local".into(),
         label: "default".into(),

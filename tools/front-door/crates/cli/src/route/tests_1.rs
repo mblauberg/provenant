@@ -50,7 +50,7 @@
                 "two":{"adapter":"codex","label":"two","key":"key-two","directory":"/fixture/two"}
             }}))?;
         let model = super::ModelId::parse("codex/gpt-6-luna")?;
-        let scope = ReadinessScope {
+        let scope = ReadinessScope { extra: Default::default(),
             host: provenant_quota::LOCAL_HOST.into(),
             adapter: "codex".into(),
             account_key: "key-one".into(),
@@ -58,7 +58,7 @@
         };
         let file = ReadinessFile {
             records: vec![
-                RouteReadiness {
+                RouteReadiness { extra: Default::default(),
                     schema_version: 1,
                     scope: scope.clone(),
                     state: ReadinessState::Unavailable,
@@ -68,7 +68,7 @@
                     reset_unix_seconds: None,
                     evidence_ref: Some("fixture".into()),
                 },
-                RouteReadiness {
+                RouteReadiness { extra: Default::default(),
                     schema_version: 1,
                     scope: ReadinessScope {
                         account_key: "key-two".into(),
@@ -81,7 +81,7 @@
                     reset_unix_seconds: None,
                     evidence_ref: Some("fixture".into()),
                 },
-                RouteReadiness {
+                RouteReadiness { extra: Default::default(),
                     schema_version: 1,
                     scope: ReadinessScope {
                         account_key: "key-two".into(),
@@ -219,7 +219,7 @@
         struct Effects;
         impl QuotaEffects for Effects {
             fn accounts(&self) -> Result<Vec<AccountScope>, QuotaError> {
-                Ok(vec![AccountScope {
+                Ok(vec![AccountScope { extra: Default::default(),
                     adapter: "codex".into(),
                     account_key: "key".into(),
                     label: "work".into(),
@@ -363,7 +363,7 @@
                 std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
             }
             let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
-            let account = AccountRecord::empty(AccountScope {
+            let account = AccountRecord::empty(AccountScope { extra: Default::default(),
                 adapter: adapter.into(),
                 account_key: "key".into(),
                 label: "work".into(),
@@ -463,7 +463,7 @@
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
         }
         let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
-        let account = AccountRecord::empty(AccountScope {
+        let account = AccountRecord::empty(AccountScope { extra: Default::default(),
             adapter: "opencode".into(),
             account_key: "go".into(),
             label: "go".into(),
@@ -540,7 +540,7 @@
         // The probe does not erase the recorded failure.
         assert_eq!(
             file.get(
-                &provenant_quota::ReadinessScope {
+                &provenant_quota::ReadinessScope { extra: Default::default(),
                     host: LOCAL_HOST.into(),
                     adapter: "opencode".into(),
                     account_key: "go".into(),
@@ -554,7 +554,7 @@
         let zen_dir = roots.state.as_path().join("readiness/zen");
         std::fs::create_dir_all(&zen_dir)?;
         std::fs::set_permissions(&zen_dir, std::fs::Permissions::from_mode(0o700))?;
-        let zen = AccountRecord::empty(AccountScope {
+        let zen = AccountRecord::empty(AccountScope { extra: Default::default(),
             adapter: "opencode".into(),
             account_key: "zen".into(),
             label: "zen".into(),

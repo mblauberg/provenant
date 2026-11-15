@@ -386,13 +386,13 @@
             ("fresh", QuotaStatus::Available),
             ("exhausted", QuotaStatus::Exhausted),
         ] {
-            let account = AccountScope {
+            let account = AccountScope { extra: Default::default(),
                 adapter: "codex".into(),
                 account_key: key.into(),
                 label: key.into(),
             };
             let mut record = AccountRecord::empty(account.clone());
-            record.snapshot = Some(QuotaSnapshot {
+            record.snapshot = Some(QuotaSnapshot { extra: Default::default(),
                 schema_version: 1,
                 account,
                 revision: 0,
@@ -487,13 +487,13 @@
             ("exhausted", QuotaStatus::Exhausted),
             ("fresh", QuotaStatus::Available),
         ] {
-            let account = AccountScope {
+            let account = AccountScope { extra: Default::default(),
                 adapter: "codex".into(),
                 account_key: key.into(),
                 label: key.into(),
             };
             let mut record = AccountRecord::empty(account.clone());
-            record.snapshot = Some(QuotaSnapshot {
+            record.snapshot = Some(QuotaSnapshot { extra: Default::default(),
                 schema_version: 1,
                 account,
                 revision: 0,
@@ -723,13 +723,13 @@
     #[test]
     fn exhausted_go_plan_binds_only_go_models() -> Result<(), Box<dyn Error>> {
         use provenant_quota::{AccountRecord, AccountScope, QuotaSnapshot, QuotaStatus};
-        let account = AccountScope {
+        let account = AccountScope { extra: Default::default(),
             adapter: "opencode".into(),
             account_key: "go".into(),
             label: "go".into(),
         };
         let mut record = AccountRecord::empty(account.clone());
-        record.snapshot = Some(QuotaSnapshot {
+        record.snapshot = Some(QuotaSnapshot { extra: Default::default(),
             schema_version: 1,
             account,
             revision: 0,
@@ -779,13 +779,13 @@
     #[test]
     fn observed_display_names_with_spaces_are_skipped() -> Result<(), Box<dyn Error>> {
         use provenant_quota::{AccountRecord, AccountScope, QuotaSnapshot, QuotaStatus};
-        let account = AccountScope {
+        let account = AccountScope { extra: Default::default(),
             adapter: "opencode".into(),
             account_key: "go".into(),
             label: "go".into(),
         };
         let mut record = AccountRecord::empty(account.clone());
-        record.snapshot = Some(QuotaSnapshot {
+        record.snapshot = Some(QuotaSnapshot { extra: Default::default(),
             schema_version: 1,
             account,
             revision: 0,

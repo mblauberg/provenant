@@ -293,7 +293,7 @@ pub(super) fn create_list_and_remove_a_managed_worktree() -> Result {
     );
     ok(&rig, &["gc", "--apply", "--json"])?;
     assert!(!orphan.exists(), "gc must still sweep orphaned caches");
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 pub(super) fn existing_branch_with_base_names_the_repair_in_json_and_human_output() -> Result {
@@ -369,7 +369,7 @@ pub(super) fn merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees() -
         assert_eq!(code(&refused), 1);
         assert_eq!(json(&refused)?["status"], "refused");
         assert!(dirty.join("precious").is_file());
-        rig.assert_legacy_unchanged()?;
+        rig.assert_v1_root_untouched()?;
     }
     Ok(())
 }
@@ -416,7 +416,7 @@ pub(super) fn remove_by_name_deletes_a_branch_fully_contained_in_integration() -
         serde_json::json!(["behind"])
     );
     assert!(!has_branch(&rig, "behind")?);
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 pub(super) fn remove_resolves_directory_names_and_remote_integration_refs() -> Result {
@@ -525,7 +525,7 @@ pub(super) fn remove_resolves_directory_names_and_remote_integration_refs() -> R
     assert_eq!(result["data"]["pruned_refs"], serde_json::json!(["swept"]));
     assert!(!has_branch(&rig, "swept")?);
     assert_eq!(git(&rig, &["rev-parse", "HEAD"])?, stale);
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 pub(super) fn remove_by_name_follows_the_branch_merge_state() -> Result {
@@ -574,7 +574,7 @@ pub(super) fn remove_by_name_follows_the_branch_merge_state() -> Result {
     assert_eq!(discarded["data"]["discarded"][0]["head"], dirty_head);
     assert!(!dirty.exists());
     assert!(!has_branch(&rig, "dirty")?);
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 pub(super) fn merged_pruning_deletes_a_merged_branch_without_a_worktree() -> Result {
@@ -598,7 +598,7 @@ pub(super) fn merged_pruning_deletes_a_merged_branch_without_a_worktree() -> Res
     )?;
     assert_eq!(pruned["data"]["pruned_refs"], serde_json::json!(["stale"]));
     assert!(!has_branch(&rig, "stale")?);
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 pub(super) fn dispatch_into_git_worktree_without_prior_state() -> Result {

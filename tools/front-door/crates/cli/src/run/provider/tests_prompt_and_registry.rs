@@ -484,7 +484,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
             plan: &provenant_quota::QuotaProbePlan,
             _: &provenant_quota::ProbeCapture,
         ) -> Result<provenant_quota::QuotaSnapshot, provenant_quota::QuotaError> {
-            Ok(provenant_quota::QuotaSnapshot {
+            Ok(provenant_quota::QuotaSnapshot { extra: Default::default(),
                 schema_version: 1,
                 account: plan.account.clone(),
                 revision: 0,
@@ -502,7 +502,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         fn accounts(
             &self,
         ) -> Result<Vec<provenant_quota::AccountScope>, provenant_quota::QuotaError> {
-            Ok(vec![provenant_quota::AccountScope {
+            Ok(vec![provenant_quota::AccountScope { extra: Default::default(),
                 adapter: self.1.into(),
                 account_key: self.2.into(),
                 label: self.2.into(),
@@ -623,12 +623,12 @@ fn registry_provider_resolves_prepares_and_reports_quota(
     };
     let readiness_dir = state.join("readiness").join(account_key);
     std::fs::create_dir_all(&readiness_dir)?;
-    let stale = provenant_quota::ReadinessFile {
+    let stale = provenant_quota::ReadinessFile { extra: Default::default(),
         schema_version: 1,
         login: None,
-        records: vec![provenant_quota::RouteReadiness {
+        records: vec![provenant_quota::RouteReadiness { extra: Default::default(),
             schema_version: 1,
-            scope: provenant_quota::ReadinessScope {
+            scope: provenant_quota::ReadinessScope { extra: Default::default(),
                 host: provenant_quota::LOCAL_HOST.into(),
                 adapter: adapter_name.into(),
                 account_key: account_key.into(),
@@ -798,7 +798,7 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
     std::fs::write(&executable, b"#!/bin/sh\nprintf 'opencode 2.2.0\\n'\n")?;
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
     let now = provenant_os::clock::SystemClock::new().unix_seconds();
-    let account = provenant_quota::AccountRecord::empty(provenant_quota::AccountScope {
+    let account = provenant_quota::AccountRecord::empty(provenant_quota::AccountScope { extra: Default::default(),
         adapter: "opencode".into(),
         account_key: "go".into(),
         label: "go".into(),
@@ -894,7 +894,7 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
     assert_eq!(prepared.route.provider.as_deref(), Some("opencode"));
     assert_eq!(prepared.route.account_key.as_deref(), Some("go"));
     // Expired readiness remains recorded as stale evidence and reads as unknown.
-    let scope = provenant_quota::ReadinessScope {
+    let scope = provenant_quota::ReadinessScope { extra: Default::default(),
         host: provenant_quota::LOCAL_HOST.into(),
         adapter: "opencode".into(),
         account_key: "go".into(),
@@ -997,12 +997,12 @@ fn prepare_with_partial_account_estimates(
         let directory = readiness_root.join(key);
         std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
         let readiness_path = directory.join("opencode.json");
-        let readiness = provenant_quota::ReadinessFile {
+        let readiness = provenant_quota::ReadinessFile { extra: Default::default(),
             schema_version: 1,
             login: None,
-            records: vec![provenant_quota::RouteReadiness {
+            records: vec![provenant_quota::RouteReadiness { extra: Default::default(),
                 schema_version: 1,
-                scope: provenant_quota::ReadinessScope {
+                scope: provenant_quota::ReadinessScope { extra: Default::default(),
                     host: provenant_quota::LOCAL_HOST.into(),
                     adapter: "opencode".into(),
                     account_key: key.into(),
@@ -1025,13 +1025,13 @@ fn prepare_with_partial_account_estimates(
     let quota = state.join("quota");
     std::fs::DirBuilder::new().mode(0o700).create(&quota)?;
     for key in spent {
-        let account = provenant_quota::AccountScope {
+        let account = provenant_quota::AccountScope { extra: Default::default(),
             adapter: "opencode".into(),
             account_key: (*key).into(),
             label: (*key).into(),
         };
         let mut record = provenant_quota::AccountRecord::empty(account.clone());
-        record.snapshot = Some(provenant_quota::QuotaSnapshot {
+        record.snapshot = Some(provenant_quota::QuotaSnapshot { extra: Default::default(),
             schema_version: 1,
             account,
             revision: 0,
@@ -1040,7 +1040,7 @@ fn prepare_with_partial_account_estimates(
             source_ref: "fixture".into(),
             authority_ref: None,
             details: None,
-            windows: vec![provenant_quota::QuotaWindow {
+            windows: vec![provenant_quota::QuotaWindow { extra: Default::default(),
                 pool: "five_hour".into(),
                 window_seconds: None,
                 used_basis_points: 10000,

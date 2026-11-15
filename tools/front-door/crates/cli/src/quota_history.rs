@@ -210,9 +210,9 @@ mod tests {
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     fn snapshot(at: i64, plan: Option<&str>, used: u64, reset: i64) -> QuotaSnapshot {
-        QuotaSnapshot {
+        QuotaSnapshot { extra: Default::default(),
             schema_version: 1,
-            account: AccountScope {
+            account: AccountScope { extra: Default::default(),
                 adapter: "claude".into(),
                 account_key: "k1".into(),
                 label: "work".into(),
@@ -222,7 +222,7 @@ mod tests {
             observed_unix_seconds: at,
             source_ref: "fixture".into(),
             authority_ref: None,
-            windows: vec![QuotaWindow {
+            windows: vec![QuotaWindow { extra: Default::default(),
                 pool: "five_hour".into(),
                 window_seconds: Some(18_000),
                 used_basis_points: used,

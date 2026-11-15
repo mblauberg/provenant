@@ -95,7 +95,7 @@ pub fn ingest_native(
     home: &std::path::Path,
     provider: Option<&str>,
     since: Option<jiff::Timestamp>,
-    deadline: Option<std::time::Instant>,
+    deadline: Option<provenant_core::MonoTime>,
 ) -> Result<provenant_telemetry::ingest::Report, String> {
     use provenant_telemetry::ingest;
     let config = provenant_cli::config_reads::read_for(roots, "telemetry")
@@ -192,13 +192,19 @@ pub fn ingest_after_chair_hook(globals: &Globals) {
     let Ok(resolved) = roots::resolve(globals, Workspace::Directory, Product::Optional) else {
         return;
     };
-    let deadline = std::time::Instant::now() + HOOK_INGEST_BUDGET;
     use provenant_core::Clock;
-    let since = provenant_os::clock::SystemClock::new()
+    let clock = provenant_os::clock::SystemClock::new();
+    let deadline = clock
+        .mono_now()
+        .checked_add(provenant_core::DurationMicros::from_micros(
+            HOOK_INGEST_BUDGET.as_micros() as u64,
+        ))
+        .ok();
+    let since = clock
         .wall_now()
         .ok()
         .and_then(|now| jiff::Timestamp::from_second(now.as_timestamp().as_second() - 86_400).ok());
-    let _ = ingest_native(&resolved.roots, &resolved.home, None, since, Some(deadline));
+    let _ = ingest_native(&resolved.roots, &resolved.home, None, since, deadline);
 }
 
 pub fn ingest(cmd: &provenant_cli::Ingest, globals: &Globals) -> u8 {
@@ -287,7 +293,7 @@ pub fn native(cmd: provenant_cli::Native, globals: &Globals) -> u8 {
                 effort,
             } => native_attempts::start(
                 &resolved.roots,
-                Attempt {
+                Attempt { extra: Default::default(),
                     id,
                     session,
                     alias,

@@ -471,7 +471,7 @@ fn probe_registered_account(
     else {
         return;
     };
-    let account = provenant_quota::AccountScope {
+    let account = provenant_quota::AccountScope { extra: Default::default(),
         adapter: entry.adapter.clone(),
         account_key: entry.key.clone(),
         label: entry.label.clone(),

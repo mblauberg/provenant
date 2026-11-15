@@ -1367,7 +1367,7 @@ fn escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root() -> 
     assert!(!rig.root.join("escape").exists());
     assert!(!rig.project.join(".worktrees").exists());
     assert_eq!(git(&rig, &["branch", "--format=%(refname:short)"])?, "main");
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[cfg(target_os = "macos")]

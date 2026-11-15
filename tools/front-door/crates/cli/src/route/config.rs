@@ -961,7 +961,7 @@ pub(super) fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<D
                         };
                         if let Some((state, reason)) = verdict {
                             row.observation = provenant_quota::ReadinessRead {
-                                observed_scope: Some(provenant_quota::ReadinessScope {
+                                observed_scope: Some(provenant_quota::ReadinessScope { extra: Default::default(),
                                     host: provenant_quota::LOCAL_HOST.into(),
                                     adapter: route.adapter.clone(),
                                     account_key: row.account_key.clone(),

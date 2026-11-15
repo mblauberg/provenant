@@ -610,7 +610,7 @@ pub(super) fn gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache
         if writer.starts_with("live") {
             let _released = directory.try_lock_existing(lock, LockMode::Exclusive)?;
         }
-        rig.assert_legacy_unchanged()?;
+        rig.assert_v1_root_untouched()?;
     }
     Ok(())
 }

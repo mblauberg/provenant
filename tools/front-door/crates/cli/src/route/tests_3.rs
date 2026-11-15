@@ -368,7 +368,7 @@
         ) -> Result<(), Box<dyn Error>> {
             use std::os::unix::fs::PermissionsExt;
             let key = format!("{adapter}-account");
-            let scope = provenant_quota::AccountScope {
+            let scope = provenant_quota::AccountScope { extra: Default::default(),
                 adapter: adapter.into(),
                 account_key: key.clone(),
                 label: key.clone(),
@@ -578,7 +578,7 @@
             let now = fixture.now;
             fixture.seed_claude(|record| {
                 let account = record.account.clone();
-                record.snapshot = Some(provenant_quota::QuotaSnapshot {
+                record.snapshot = Some(provenant_quota::QuotaSnapshot { extra: Default::default(),
                     schema_version: 1,
                     account,
                     revision: 0,
@@ -586,7 +586,7 @@
                     observed_unix_seconds: if stale { now - 86_400 } else { now },
                     source_ref: "fixture".into(),
                     authority_ref: None,
-                    windows: vec![provenant_quota::QuotaWindow {
+                    windows: vec![provenant_quota::QuotaWindow { extra: Default::default(),
                         pool: "seven_day".into(),
                         window_seconds: Some(604_800),
                         used_basis_points: 10_000,
@@ -652,7 +652,7 @@
     fn exhaust(record: &mut provenant_quota::AccountRecord) {
         let account = record.account.clone();
         let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
-        record.snapshot = Some(provenant_quota::QuotaSnapshot {
+        record.snapshot = Some(provenant_quota::QuotaSnapshot { extra: Default::default(),
             schema_version: 1,
             account,
             revision: 0,
@@ -660,7 +660,7 @@
             observed_unix_seconds: now,
             source_ref: "fixture".into(),
             authority_ref: None,
-            windows: vec![provenant_quota::QuotaWindow {
+            windows: vec![provenant_quota::QuotaWindow { extra: Default::default(),
                 pool: "seven_day".into(),
                 window_seconds: Some(604_800),
                 used_basis_points: 10_000,
