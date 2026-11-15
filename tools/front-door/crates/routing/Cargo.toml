@@ -7,7 +7,13 @@ license.workspace = true
 publish = false
 
 [features]
-fixture = []
+fixture = [
+    "provenant-core/fixture",
+    "provenant-records/fixture",
+    "provenant-config/fixture",
+    "provenant-quota/fixture",
+    "provenant-providers/fixture",
+]
 
 [dependencies]
 jiff = { workspace = true }

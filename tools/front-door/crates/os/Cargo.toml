@@ -15,11 +15,13 @@ thiserror = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
-provenant-test-support = { path = "../test-support" }
+provenant-test-support = { path = "../test-support", features = ["fixture"] }
 tempfile = { workspace = true }
 
 [features]
-fixture = []
+fixture = [
+    "provenant-core/fixture",
+]
 
 # Cargo cannot override one lint with lints.workspace = true.
 # Mirror the workspace policy, lowering unsafe_code only so sys can allow it.

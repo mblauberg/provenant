@@ -21,6 +21,8 @@ permissions: {}
 
 env:
   PROVENANT_ROOT: ${{ github.workspace }}
+  # Cargo.toml owns the uniform fixture feature and common dev/test profile.
+  RUST_DEVELOPMENT_CACHE: dev-test-fixture-v1
 
 # Landing candidate refs (`land/**`) run the full gate on the exact candidate
 # commit; macOS scoping is conservative there because `github.event.before` is
@@ -70,7 +72,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
       CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
     permissions:
       contents: read
@@ -85,9 +86,10 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: tools/front-door
-          shared-key: ${{ inputs.cold_cache && format('front-door-ci-dev-default-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci-dev-default' }}
+          shared-key: ${{ inputs.cold_cache && format('front-door-ci-dev-default-v1-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci-dev-default-v1' }}
           add-job-id-key: false
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      # Reference generators describe production defaults, without fixture code.
       # Generated reference is not tracked: this proves it still renders, and
       # leaves the output for download. It never compares against a checkout.
       - name: Generate contract reference
@@ -115,7 +117,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
       CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
       CARGO_INCREMENTAL: "0"
     permissions:
@@ -140,30 +141,30 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: tools/front-door
-          shared-key: ${{ inputs.cold_cache && format('front-door-ci-lint-dev-all-features-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci-lint-dev-all-features' }}
+          shared-key: ${{ inputs.cold_cache && format('front-door-ci-lint-{0}-cold-{1}-{2}', env.RUST_DEVELOPMENT_CACHE, github.run_id, github.run_attempt) || format('front-door-ci-lint-{0}', env.RUST_DEVELOPMENT_CACHE) }}
           add-job-id-key: false
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Check formatting
         if: needs.macos-scope.outputs.run_rust == 'true'
         working-directory: tools/front-door
         run: cargo fmt --all --check
-      - name: Check isolated test features
+      - name: Check isolated fixture dependencies
         if: needs.macos-scope.outputs.run_rust == 'true'
         working-directory: tools/front-door
         run: |
-          # Separate invocations prevent workspace feature unification from hiding missing dependencies.
+          # Each crate forwards the common fixture set, even without workspace selection.
           for crate in provenant-cli provenant-run provenant-supervisor provenant-os; do
             cargo check --locked -p "$crate" --features fixture
             cargo check --locked -p "$crate" --all-targets --features fixture
           done
-          cargo check --locked -p provenant-config
-          cargo check --locked -p provenant-config --all-targets
-          cargo check --locked -p provenant-providers --features recording
-          cargo check --locked -p provenant-providers --all-targets --features recording
+          cargo check --locked -p provenant-config --features fixture
+          cargo check --locked -p provenant-config --all-targets --features fixture
+          cargo check --locked -p provenant-providers --features fixture
+          cargo check --locked -p provenant-providers --all-targets --features fixture
       - name: Lint
         if: needs.macos-scope.outputs.run_rust == 'true'
         working-directory: tools/front-door
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --features fixture --locked -- -D warnings
 
       - name: Check harness assets
         run: |
@@ -288,7 +289,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
       CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
       CARGO_INCREMENTAL: "0"
     permissions:
@@ -309,7 +309,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: tools/front-door
-          shared-key: ${{ inputs.cold_cache && format('front-door-ci-test-recording-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci-test-recording' }}
+          shared-key: ${{ inputs.cold_cache && format('front-door-ci-linux-{0}-cold-{1}-{2}', env.RUST_DEVELOPMENT_CACHE, github.run_id, github.run_attempt) || format('front-door-ci-linux-{0}', env.RUST_DEVELOPMENT_CACHE) }}
           add-job-id-key: false
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Install nextest
@@ -317,9 +317,17 @@ jobs:
         timeout-minutes: 10
       - name: Build Linux test archive
         working-directory: tools/front-door
-        run: >-
-          cargo nextest archive --profile ci --workspace --locked --features provenant-providers/recording
-          --archive-file "$RUNNER_TEMP/linux-tests.tar.zst"
+        run: |
+          cargo build --locked --features fixture --bin provenant --timings
+          cargo nextest archive --profile ci --workspace --locked --features fixture --timings \
+            --archive-file "$RUNNER_TEMP/linux-tests.tar.zst"
+      - name: Upload Linux Cargo timings
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cargo-timings-linux
+          path: tools/front-door/target/cargo-timings/
+          if-no-files-found: warn
       - name: Select affected Rust tests
         id: affected
         working-directory: tools/front-door
@@ -487,7 +495,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: tools/front-door
-          shared-key: ${{ inputs.cold_cache && format('front-door-ci-macos-test-default-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci-macos-test-default' }}
+          shared-key: ${{ inputs.cold_cache && format('front-door-ci-macos-{0}-cold-{1}-{2}', env.RUST_DEVELOPMENT_CACHE, github.run_id, github.run_attempt) || format('front-door-ci-macos-{0}', env.RUST_DEVELOPMENT_CACHE) }}
           add-job-id-key: false
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Install nextest
@@ -495,12 +503,19 @@ jobs:
         timeout-minutes: 10
       - name: Lint Rust workspace
         working-directory: tools/front-door
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --features fixture --locked -- -D warnings
       - name: Build macOS test archive
         working-directory: tools/front-door
         run: >-
-          cargo nextest archive --locked --workspace
+          cargo nextest archive --locked --workspace --features fixture --timings
           --archive-file "$RUNNER_TEMP/macos-tests.tar.zst"
+      - name: Upload macOS Cargo timings
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cargo-timings-macos
+          path: tools/front-door/target/cargo-timings/
+          if-no-files-found: warn
       - name: List macOS tests in the archive
         working-directory: tools/front-door
         run: cargo nextest list --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --message-format json > "$RUNNER_TEMP/native-test-list.json"
@@ -702,8 +717,15 @@ jobs:
           CARGO_PROFILE_RELEASE_LTO: "false"
           RUSTC_WRAPPER: .cargo/rustc-wrapper.sh
         run: |
-          cargo build --release --locked -p provenant --bin provenant
+          cargo build --release --locked -p provenant --bin provenant --timings
 
+      - name: Upload macOS release Cargo timings
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cargo-timings-macos-release
+          path: ${{ runner.temp }}/release-target/cargo-timings/
+          if-no-files-found: warn
       - name: Package release and preview isolated installation
         working-directory: tools/front-door
         env:

@@ -50,6 +50,20 @@ when introducing a test that needs native coverage.
 
 ## Time budgets and caches
 
+From `tools/front-door`, use `--features fixture` for development: `cargo build
+--locked --features fixture`, `cargo test --locked --workspace --features fixture`
+(replace `--workspace` with `-p CRATE` for a focused run), `cargo clippy --locked
+--workspace --all-targets --features fixture -- -D warnings`, and `cargo nextest
+run --locked --workspace --features fixture`. Each manifest forwards this feature
+to its dependencies; release and reference-generation commands keep empty
+defaults so they contain no test helpers. The root manifest's dev profile keeps
+workspace line tables, removes dependency/build-script debuginfo and optimises
+proc-macros; test inherits it. CI cache keys name the feature set and profile;
+Linux build and both archives upload Cargo timings for comparison with the prior
+PR run (use `cold_cache` for a cold comparison). The pinned Rust toolchain already
+bundles LLD on x86_64 Linux; macOS keeps Xcode's system linker, with no extra local
+linker installation (see `.cargo/config.toml`).
+
 Keep CI reliable and bounded. Consult the workflow and nextest configuration
 for current budgets, cache and retry settings; investigate failures rather than
 pinning incidental timing or counts. Policy checks live in the repository's
