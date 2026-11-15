@@ -11,14 +11,20 @@ is the procedure.
 
 ## Stability tiers
 
-Every consumer item carries one tier. `stable` holds for all 2.x releases: it
-is removed or changed in meaning only by a major release. `provisional` may
-change in a minor release, named in its release notes. `internal` is
+Every consumer item carries one tier, declared on its entry. `evolving` is the
+default: the item may change in any minor release, and the release notes name
+the change. `stable` is kept small: an item is stable only when a consuming
+repository relies on it today, and it changes or goes only in a major release,
+with a release note. The stable items are `PROVENANT_SANDBOX`,
+`PROVENANT_PROCESS_TREE`, `PROVENANT_LANE_CARGO_LINT_TARGET`, `provenant
+process-tree --json` and the exit codes it is read through. `internal` is
 Provenant's own wiring and may change in any release. A `PROVENANT_*` name the
 environment table does not declare is internal, and every `PROVENANT_TEST_*`
-name is internal by rule and never declared.
+name is internal by rule and never declared. Promoting an item is a one-entry
+change to its declaration.
 
-- Why: a consumer must know which surfaces it may build on before it builds.
+- Why: a consumer must know which surfaces it may build on before it builds,
+  and promising only what is used keeps the rest free to improve.
 - Test: `crates/core/src/consumer_env.rs::declared_names_are_unique_provenant_names_and_never_test_names`
 - Owner: `crates/core/src/consumer_env.rs`
 
@@ -39,11 +45,10 @@ port table or settings, never a name compiled into a reader.
 
 ## Commands
 
-The core commands `provenant help` lists are stable, with the JSON envelope and
-exit codes below; a command a stable entry on this page names, such as
-`provenant process-tree --json`, is stable with it. Every other command is
-provisional. Human output, including printed next-step command lines, is
-provisional: scripts read `--json`. A removed spelling exits 2 with one line
+A command is stable only when a stable entry on this page names it: today
+`provenant process-tree --json`. Every other command, and the JSON envelope of
+commands other than `process-tree`, is evolving. Human output, including printed
+next-step command lines, is evolving: scripts read `--json`. A removed spelling exits 2 with one line
 naming its replacement and is never an alias; 2.0 replaced `provenant
 dispatch` with `provenant run TEMPLATE BRIEF`.
 
@@ -73,33 +78,33 @@ listed because a lane's home is never the caller's.
 | Variable | Channel | Stability | Meaning | When |
 |---|---|---|---|---|
 | `PROVENANT_SANDBOX` | lane | stable | `on` when the lane runs inside Provenant's native sandbox, `off` when it does not. | every lane |
-| `PROVENANT_LANE_DEPTH` | lane | stable | Nesting depth: 1 for a lane the caller started, one more per nested lane. Absent or `0` means not in a lane. | every lane |
+| `PROVENANT_LANE_DEPTH` | lane | evolving | Nesting depth: 1 for a lane the caller started, one more per nested lane. Absent or `0` means not in a lane. | every lane |
 | `PROVENANT_PROCESS_TREE` | lane | stable | Names the sample behind `provenant process-tree --json`. Its presence is the contract; read the sample through that command, never the file. | while the supervisor samples the lane's processes |
 | `PROVENANT_LANE_CARGO_LINT_TARGET` | lane | stable | A Cargo target directory beside the lane's own, for lint-only runs: point CARGO_TARGET_DIR and CARGO_BUILD_BUILD_DIR at it so lints do not queue behind builds. | writer lanes |
-| `PROVENANT_LANE_PORT_BASE` | lane | stable | First port of the lane's private port block. | writer lanes holding an allocated port block |
-| `PROVENANT_LANE_PORT_COUNT` | lane | stable | Number of ports in the lane's private block. | writer lanes holding an allocated port block |
-| `PROVENANT_STATE_DIR` | lane_or_caller | stable | State root. A caller sets it to use a root other than `~/.local/share/provenant/v2`; in a lane it names the attempt's private store. | every lane; when a caller leaves it unset the default root applies |
-| `PROVENANT_AGENT_LABEL` | lane_or_caller | provisional | The agent name inbox, fabric and checkpoint writes are attributed to: `lane-<attempt>` in a lane. A caller may set it to name itself. | every lane; when a caller leaves it unset the harness identity applies |
-| `PROVENANT_PARENT_ATTEMPT_ID` | lane | provisional | The lane's own attempt. A `provenant run` inside the lane records it as the parent. | every lane |
-| `HOME` | lane | provisional | The attempt's private home, where provider credentials and caches are staged. It is never the caller's home. | every lane |
-| `PROVENANT_GIT` | lane_or_caller | provisional | The Git executable Provenant runs. In a lane it is the wrapped Git the lane must use. | every lane; when a caller leaves it unset Git is found on PATH |
-| `PROVENANT_LANE_HEAD` | lane | provisional | The branch the writer lane delivers to. | lanes whose task names a head branch |
-| `PROVENANT_LANE_BASE` | lane | provisional | The branch the lane's head is based on. | lanes whose task names both a head and a base |
-| `PROVENANT_PRIMARY_CHECKOUT` | lane | provisional | The project's primary checkout: the directory holding the common Git directory. | lanes launched in a project |
-| `PROVENANT_WORKTREE_GITDIR` | lane | provisional | The linked worktree's private Git directory. | writer lanes, and read-only lanes whose worktree has a private Git directory |
-| `PROVENANT_SESSION_ID` | caller | provisional | Names the chair session the chair log records. When unset, settlement finds the session the chair saved. | set by the caller |
-| `PROVENANT_PORT_PHASE` | port_command | provisional | The admission phase the command runs for. | admission port commands |
-| `PROVENANT_ADMISSION_ATTEMPT` | port_command | provisional | The attempt being admitted. | admission port commands |
-| `PROVENANT_ADMISSION_WORKTREE` | port_command | provisional | The writer's worktree. | admission port commands |
-| `PROVENANT_ADMISSION_PROJECT` | port_command | provisional | The writer's project checkout. | admission port commands |
-| `PROVENANT_ADMISSION_OWNER_PID` | port_command | provisional | The Provenant process that owns the admission. | admission port commands |
-| `PROVENANT_ADMISSION_EPOCH` | port_command | provisional | The worktree lease epoch the admission holds. | admission port commands |
-| `PROVENANT_PORT_OPERATION` | port_command | provisional | The typed forge operation requested from the repository adapter. | forge port commands |
-| `PROVENANT_PORT_SOURCE` | port_command | provisional | Source of the selected build admission wrapper. | build admission port commands |
-| `PROVENANT_PORT_REQUEST_PATH` | port_command | provisional | The forge request path, such as `repos/{owner}/{repo}`. | CI observation and repository discovery port commands |
-| `PROVENANT_PORT_IF_NONE_MATCH` | port_command | provisional | The cached validator to send, or empty when none is sent. | CI observation and repository discovery port commands |
-| `PROVENANT_VERIFY_TIER` | port_command | provisional | The verify tier being run. | verify port commands |
-| `PROVENANT_VERIFY_PROJECT_ROOT` | port_command | provisional | The project checkout being verified. | verify port commands |
+| `PROVENANT_LANE_PORT_BASE` | lane | evolving | First port of the lane's private port block. | writer lanes holding an allocated port block |
+| `PROVENANT_LANE_PORT_COUNT` | lane | evolving | Number of ports in the lane's private block. | writer lanes holding an allocated port block |
+| `PROVENANT_STATE_DIR` | lane_or_caller | evolving | State root. A caller sets it to use a root other than `~/.local/share/provenant/v2`; in a lane it names the attempt's private store. | every lane; when a caller leaves it unset the default root applies |
+| `PROVENANT_AGENT_LABEL` | lane_or_caller | evolving | The agent name inbox, fabric and checkpoint writes are attributed to: `lane-<attempt>` in a lane. A caller may set it to name itself. | every lane; when a caller leaves it unset the harness identity applies |
+| `PROVENANT_PARENT_ATTEMPT_ID` | lane | evolving | The lane's own attempt. A `provenant run` inside the lane records it as the parent. | every lane |
+| `HOME` | lane | evolving | The attempt's private home, where provider credentials and caches are staged. It is never the caller's home. | every lane |
+| `PROVENANT_GIT` | lane_or_caller | evolving | The Git executable Provenant runs. In a lane it is the wrapped Git the lane must use. | every lane; when a caller leaves it unset Git is found on PATH |
+| `PROVENANT_LANE_HEAD` | lane | evolving | The branch the writer lane delivers to. | lanes whose task names a head branch |
+| `PROVENANT_LANE_BASE` | lane | evolving | The branch the lane's head is based on. | lanes whose task names both a head and a base |
+| `PROVENANT_PRIMARY_CHECKOUT` | lane | evolving | The project's primary checkout: the directory holding the common Git directory. | lanes launched in a project |
+| `PROVENANT_WORKTREE_GITDIR` | lane | evolving | The linked worktree's private Git directory. | writer lanes, and read-only lanes whose worktree has a private Git directory |
+| `PROVENANT_SESSION_ID` | caller | evolving | Names the chair session the chair log records. When unset, settlement finds the session the chair saved. | set by the caller |
+| `PROVENANT_PORT_PHASE` | port_command | evolving | The admission phase the command runs for. | admission port commands |
+| `PROVENANT_ADMISSION_ATTEMPT` | port_command | evolving | The attempt being admitted. | admission port commands |
+| `PROVENANT_ADMISSION_WORKTREE` | port_command | evolving | The writer's worktree. | admission port commands |
+| `PROVENANT_ADMISSION_PROJECT` | port_command | evolving | The writer's project checkout. | admission port commands |
+| `PROVENANT_ADMISSION_OWNER_PID` | port_command | evolving | The Provenant process that owns the admission. | admission port commands |
+| `PROVENANT_ADMISSION_EPOCH` | port_command | evolving | The worktree lease epoch the admission holds. | admission port commands |
+| `PROVENANT_PORT_OPERATION` | port_command | evolving | The typed forge operation requested from the repository adapter. | forge port commands |
+| `PROVENANT_PORT_SOURCE` | port_command | evolving | Source of the selected build admission wrapper. | build admission port commands |
+| `PROVENANT_PORT_REQUEST_PATH` | port_command | evolving | The forge request path, such as `repos/{owner}/{repo}`. | CI observation and repository discovery port commands |
+| `PROVENANT_PORT_IF_NONE_MATCH` | port_command | evolving | The cached validator to send, or empty when none is sent. | CI observation and repository discovery port commands |
+| `PROVENANT_VERIFY_TIER` | port_command | evolving | The verify tier being run. | verify port commands |
+| `PROVENANT_VERIFY_PROJECT_ROOT` | port_command | evolving | The project checkout being verified. | verify port commands |
 | `PROVENANT_VERIFY_EFFECTIVE_CONFIG_JSON` | port_command | internal | The resolved verify declaration, for Provenant's builtin verify engine. | verify port commands |
 | `PROVENANT_RUN_STATE_DIR` | lane | internal | Run storage for children the lane submits. | every lane |
 | `PROVENANT_ROOT` | lane | internal | Installed release assets. | every lane |
@@ -121,7 +126,7 @@ listed because a lane's home is never the caller's.
 
 The state root is `~/.local/share/provenant/v2` unless `PROVENANT_STATE_DIR`
 names another. The 1.x root `~/.local/share/provenant/v1` is never written by
-2.x, so reinstalling 1.x finds its state as it was left. This tier is stable.
+2.x, so reinstalling 1.x finds its state as it was left. This tier is evolving.
 
 - Why: two majors must be able to coexist and roll back without migration.
 - Test: `src/state_handoff.rs::tests::copies_only_owner_configuration_and_never_writes_the_old_root`;
@@ -137,10 +142,10 @@ All are optional; a repository with none gets compiled and host defaults.
 
 | Path | Entry | Access | Stability | Purpose |
 |---|---|---|---|---|
-| `.provenant/config.toml` | file | read | stable | Repository settings: `[launch_policy]` and `[domains.pr.land]`. |
-| `.provenant/ports.json` | file | read | provisional | Repository port table: verify, land, CI observation, worktree layout, naming, post-create, tracker, release and admission backends. |
-| `.provenant/templates` | directory | read | provisional | Repository graph templates, layered over the bundled and user templates. |
-| `.provenant/tracker-lint.toml` | file | read | provisional | Severity of the tracker lint rules. |
+| `.provenant/config.toml` | file | read | evolving | Repository settings: `[launch_policy]` and `[domains.pr.land]`. |
+| `.provenant/ports.json` | file | read | evolving | Repository port table: verify, land, CI observation, worktree layout, naming, post-create, tracker, release and admission backends. |
+| `.provenant/templates` | directory | read | evolving | Repository graph templates, layered over the bundled and user templates. |
+| `.provenant/tracker-lint.toml` | file | read | evolving | Severity of the tracker lint rules. |
 | `.provenant/scratch` | directory | created | internal | Operator scratch for briefs and graph documents; Provenant excludes it through `.git/info/exclude`. |
 
 - Why: a repository must know every path Provenant may read or create in it.
@@ -150,7 +155,8 @@ All are optional; a repository with none gets compiled and host defaults.
 
 ## Exit codes
 
-Every command exits with the code of its envelope `status`. This tier is stable.
+Every command exits with the code of its envelope `status`. This tier is stable,
+because `provenant process-tree --json` is read through it.
 
 | Status | Code |
 |---|---|

@@ -11,14 +11,19 @@ use crate::{RUN_STATE_DIRECTORY_ENV, STATE_DIRECTORY_ENV};
 use serde::{Deserialize, Serialize};
 
 /// How long a consumer may rely on a declared item.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+///
+/// `Evolving` is the default tier. An entry is `Stable` only when a consuming
+/// repository relies on it today; promoting one is a one-row change.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Stability {
-    /// Kept with the same name and meaning for every 2.x release.
+    /// Changed or removed only by a major release, with a release note.
     Stable,
-    /// Present in this release; a minor release may change it, with a
-    /// release note naming the replacement.
-    Provisional,
+    /// May change in any minor release, with a release note naming the change.
+    #[default]
+    Evolving,
     /// Provenant's own hand-off, listed so consumers know not to rely on it.
     Internal,
 }
@@ -105,7 +110,7 @@ const fn var(
 }
 
 use Channel::{Caller, Lane, LaneOrCaller, PortCommand};
-use Stability::{Internal, Provisional, Stable};
+use Stability::{Evolving, Internal, Stable};
 
 const EVERY_LANE: &str = "every lane";
 const BUILD_SHIM: &str = "only for the cargo child of the lane's cargo shim";
@@ -123,7 +128,7 @@ pub const CONSUMER_ENV: &[EnvVar] = &[
     var(
         LANE_DEPTH,
         Lane,
-        Stable,
+        Evolving,
         "Nesting depth: 1 for a lane the caller started, one more per nested lane. Absent or `0` means not in a lane.",
         EVERY_LANE,
     ),
@@ -144,168 +149,168 @@ pub const CONSUMER_ENV: &[EnvVar] = &[
     var(
         LANE_PORT_BASE,
         Lane,
-        Stable,
+        Evolving,
         "First port of the lane's private port block.",
         "writer lanes holding an allocated port block",
     ),
     var(
         LANE_PORT_COUNT,
         Lane,
-        Stable,
+        Evolving,
         "Number of ports in the lane's private block.",
         "writer lanes holding an allocated port block",
     ),
     var(
         STATE_DIRECTORY_ENV,
         LaneOrCaller,
-        Stable,
+        Evolving,
         "State root. A caller sets it to use a root other than `~/.local/share/provenant/v2`; in a lane it names the attempt's private store.",
         "every lane; when a caller leaves it unset the default root applies",
     ),
     var(
         AGENT_LABEL,
         LaneOrCaller,
-        Provisional,
+        Evolving,
         "The agent name inbox, fabric and checkpoint writes are attributed to: `lane-<attempt>` in a lane. A caller may set it to name itself.",
         "every lane; when a caller leaves it unset the harness identity applies",
     ),
     var(
         PARENT_ATTEMPT_ID,
         Lane,
-        Provisional,
+        Evolving,
         "The lane's own attempt. A `provenant run` inside the lane records it as the parent.",
         EVERY_LANE,
     ),
     var(
         HOME,
         Lane,
-        Provisional,
+        Evolving,
         "The attempt's private home, where provider credentials and caches are staged. It is never the caller's home.",
         EVERY_LANE,
     ),
     var(
         GIT,
         LaneOrCaller,
-        Provisional,
+        Evolving,
         "The Git executable Provenant runs. In a lane it is the wrapped Git the lane must use.",
         "every lane; when a caller leaves it unset Git is found on PATH",
     ),
     var(
         LANE_HEAD,
         Lane,
-        Provisional,
+        Evolving,
         "The branch the writer lane delivers to.",
         "lanes whose task names a head branch",
     ),
     var(
         LANE_BASE,
         Lane,
-        Provisional,
+        Evolving,
         "The branch the lane's head is based on.",
         "lanes whose task names both a head and a base",
     ),
     var(
         PRIMARY_CHECKOUT,
         Lane,
-        Provisional,
+        Evolving,
         "The project's primary checkout: the directory holding the common Git directory.",
         "lanes launched in a project",
     ),
     var(
         WORKTREE_GITDIR,
         Lane,
-        Provisional,
+        Evolving,
         "The linked worktree's private Git directory.",
         "writer lanes, and read-only lanes whose worktree has a private Git directory",
     ),
     var(
         SESSION_ID,
         Caller,
-        Provisional,
+        Evolving,
         "Names the chair session the chair log records. When unset, settlement finds the session the chair saved.",
         "set by the caller",
     ),
     var(
         PORT_PHASE,
         PortCommand,
-        Provisional,
+        Evolving,
         "The admission phase the command runs for.",
         ADMISSION,
     ),
     var(
         ADMISSION_ATTEMPT,
         PortCommand,
-        Provisional,
+        Evolving,
         "The attempt being admitted.",
         ADMISSION,
     ),
     var(
         ADMISSION_WORKTREE,
         PortCommand,
-        Provisional,
+        Evolving,
         "The writer's worktree.",
         ADMISSION,
     ),
     var(
         ADMISSION_PROJECT,
         PortCommand,
-        Provisional,
+        Evolving,
         "The writer's project checkout.",
         ADMISSION,
     ),
     var(
         ADMISSION_OWNER_PID,
         PortCommand,
-        Provisional,
+        Evolving,
         "The Provenant process that owns the admission.",
         ADMISSION,
     ),
     var(
         ADMISSION_EPOCH,
         PortCommand,
-        Provisional,
+        Evolving,
         "The worktree lease epoch the admission holds.",
         ADMISSION,
     ),
     var(
         PORT_OPERATION,
         PortCommand,
-        Provisional,
+        Evolving,
         "The typed forge operation requested from the repository adapter.",
         "forge port commands",
     ),
     var(
         PORT_SOURCE,
         PortCommand,
-        Provisional,
+        Evolving,
         "Source of the selected build admission wrapper.",
         "build admission port commands",
     ),
     var(
         PORT_REQUEST_PATH,
         PortCommand,
-        Provisional,
+        Evolving,
         "The forge request path, such as `repos/{owner}/{repo}`.",
         "CI observation and repository discovery port commands",
     ),
     var(
         PORT_IF_NONE_MATCH,
         PortCommand,
-        Provisional,
+        Evolving,
         "The cached validator to send, or empty when none is sent.",
         "CI observation and repository discovery port commands",
     ),
     var(
         VERIFY_TIER,
         PortCommand,
-        Provisional,
+        Evolving,
         "The verify tier being run.",
         "verify port commands",
     ),
     var(
         VERIFY_PROJECT_ROOT,
         PortCommand,
-        Provisional,
+        Evolving,
         "The project checkout being verified.",
         "verify port commands",
     ),

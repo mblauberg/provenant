@@ -60,9 +60,9 @@ pub enum ExternalInterface {
         codes: Vec<ExitCode>,
     },
     Commands {
-        /// Core commands: their names and target spelling hold for 2.x.
+        /// Commands a stable entry names; their names and spelling hold for 2.x.
         stable: Vec<String>,
-        provisional: Vec<String>,
+        evolving: Vec<String>,
     },
     RunFiles {
         stability: Stability,
@@ -164,13 +164,12 @@ fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
 }
 
-/// Commands the parser marks as core (`provenant help` lists them).
-fn core_commands() -> Vec<String> {
-    crate::command_model()
-        .get_subcommands()
-        .filter(|command| command.get::<crate::metadata::CoreCommand>().is_some())
-        .map(|command| command.get_name().to_owned())
-        .collect()
+/// The command behind the stable process-tree reading.
+const PROCESS_TREE_COMMAND: &str = "process-tree";
+
+/// Commands a stable entry names. Every other command is evolving.
+fn stable_commands() -> Vec<String> {
+    vec![PROCESS_TREE_COMMAND.to_owned()]
 }
 
 /// Whether `verb` is the command `core` or one of its subcommands.
@@ -185,10 +184,10 @@ pub fn external_contract() -> ExternalContract {
     use provenant_supervisor::process_tree;
 
     let envelope = command_result_schema();
-    let core = core_commands();
-    let provisional = crate::command_verbs()
+    let stable = stable_commands();
+    let evolving = crate::command_verbs()
         .into_iter()
-        .filter(|verb| !core.iter().any(|core| within(verb, core)))
+        .filter(|verb| !stable.iter().any(|core| within(verb, core)))
         .collect();
     ExternalContract {
         schema_version: 2,
@@ -206,7 +205,7 @@ pub fn external_contract() -> ExternalContract {
                     .collect(),
             },
             ExternalInterface::StateRoot {
-                stability: Stability::Stable,
+                stability: Stability::Evolving,
                 default: format!("~/{}", provenant_core::DEFAULT_STATE_SUFFIX),
                 environment: provenant_core::STATE_DIRECTORY_ENV.into(),
                 previous_major: format!("~/{}", provenant_core::LEGACY_V1_STATE_SUFFIX),
@@ -225,12 +224,12 @@ pub fn external_contract() -> ExternalContract {
             },
             ExternalInterface::JsonOutput {
                 command: "commands emitting command-result JSON".into(),
-                stability: Stability::Stable,
+                stability: Stability::Evolving,
                 schema: JsonOutputSchema::CommandResult { envelope },
             },
             ExternalInterface::JsonOutput {
                 command: "work-record JSON outputs".into(),
-                stability: Stability::Stable,
+                stability: Stability::Evolving,
                 schema: JsonOutputSchema::WorkIdentity {
                     envelope,
                     identity: SchemaReference {
@@ -241,12 +240,12 @@ pub fn external_contract() -> ExternalContract {
             },
             ExternalInterface::WaitJsonLines {
                 command: "provenant wait --json".into(),
-                stability: Stability::Provisional,
+                stability: Stability::Evolving,
                 event_fields: strings(&["event", "target", "settle", "line", "digests"]),
                 terminal_schema: envelope,
             },
             ExternalInterface::ProcessTreeJson {
-                command: "provenant process-tree --json".into(),
+                command: format!("provenant {PROCESS_TREE_COMMAND} --json"),
                 stability: Stability::Stable,
                 environment: PROCESS_TREE.into(),
                 envelope,
@@ -267,10 +266,7 @@ pub fn external_contract() -> ExternalContract {
                     })
                     .collect(),
             },
-            ExternalInterface::Commands {
-                stable: core,
-                provisional,
-            },
+            ExternalInterface::Commands { stable, evolving },
             ExternalInterface::RunFiles {
                 stability: Stability::Internal,
                 directory: "attempts/<attempt>/ under the project's run store in the state root"
@@ -424,23 +420,21 @@ mod tests {
 
         let verbs: BTreeSet<_> = crate::command_verbs().into_iter().collect();
         for interface in &declared.interfaces {
-            if let ExternalInterface::Commands {
-                stable,
-                provisional,
-            } = interface
-            {
+            if let ExternalInterface::Commands { stable, evolving } = interface {
                 assert!(!stable.is_empty());
                 let stable: BTreeSet<_> = stable.iter().cloned().collect();
-                let provisional: BTreeSet<_> = provisional.iter().cloned().collect();
-                assert!(stable.is_disjoint(&provisional));
-                assert!(provisional.is_subset(&verbs));
+                let evolving: BTreeSet<_> = evolving.iter().cloned().collect();
+                assert!(stable.is_disjoint(&evolving));
+                assert!(evolving.is_subset(&verbs));
                 assert!(
                     stable
                         .iter()
                         .all(|core| verbs.iter().any(|verb| within(verb, core)))
                 );
-                assert!(verbs.iter().all(|verb| provisional.contains(verb)
-                    || stable.iter().any(|core| within(verb, core))));
+                assert!(
+                    verbs.iter().all(|verb| evolving.contains(verb)
+                        || stable.iter().any(|core| within(verb, core)))
+                );
             }
         }
     }

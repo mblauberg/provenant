@@ -17,8 +17,14 @@ procedure.
 - **Environment.** `PROVENANT_SESSION_STATE` was removed in 1.x: session
   checkpoints are keyed by the host session ID. `PROVENANT_BUILD_WAIT_SECS`
   and `PROVENANT_BUILD_WAIT_MARKER` are removed because build slots no longer
-  wait. `PROVENANT_SANDBOX`, `PROVENANT_LANE_DEPTH`, `PROVENANT_PROCESS_TREE`
-  and `PROVENANT_LANE_CARGO_LINT_TARGET` keep their names and are now stable.
+  wait. `PROVENANT_SANDBOX`, `PROVENANT_PROCESS_TREE` and
+  `PROVENANT_LANE_CARGO_LINT_TARGET` keep their names and are stable.
+  `PROVENANT_LANE_DEPTH` keeps its name and is evolving.
+- **Tiers.** Most of the contract is `evolving`: it may change in a minor
+  release, and the release notes say how. Only what a consuming repository
+  relies on today is `stable`, which changes only in a major release. Check an
+  item's tier in the [consumer contract](../specs/consumer-contract.md) before
+  you build on it, and read the release notes on each minor upgrade.
   `PROVENANT_TEST_*` names are Provenant's own and never part of the contract.
 - **Run files.** Reading files under a run or attempt directory is
   unsupported. Use `provenant status --json`, `provenant output NAME` and
@@ -28,7 +34,7 @@ procedure.
   run records do not carry over. Drain and land 1.x work before upgrading
   ([install runbook](install.md#upgrade)).
 - **Output.** Parse `--json`, not human output. Printed next-step command
-  lines are provisional and may change in a minor release.
+  lines are evolving and may change in a minor release.
 
 ### Rolling back
 
@@ -79,7 +85,7 @@ release checks and admission. Each port has a backend: `builtin`, `command`
 
 Port commands receive the `port_command` variables in the contract, such as
 `PROVENANT_VERIFY_TIER` and `PROVENANT_ADMISSION_ATTEMPT`. Treat them as
-provisional.
+evolving.
 
 Set repository launch policy in `.provenant/config.toml` under
 `[launch_policy]` (`confidential`, `protected_paths`). Landing defaults go
