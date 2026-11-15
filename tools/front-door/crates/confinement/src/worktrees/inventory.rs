@@ -739,10 +739,8 @@ impl RepoFacts {
             };
             if path == project {
                 checkout_primary_present = true;
-            } else if path == common {
-                if metadata_primary.replace(index).is_some() {
-                    return Err(WorktreeError::InvalidOutput);
-                }
+            } else if path == common && metadata_primary.replace(index).is_some() {
+                return Err(WorktreeError::InvalidOutput);
             }
         }
 
