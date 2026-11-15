@@ -704,6 +704,34 @@ fn summary_run(command: ChairSummary, globals: &Globals) -> u8 {
                     &error.to_string(),
                     globals,
                 )
+            } else if matches!(
+                error.downcast_ref::<SessionError>(),
+                Some(SessionError::DiscoveryIdentity)
+            ) {
+                // The same code `workflow session` and the handoff use for a
+                // session owned by another identity.
+                crate::fail(
+                    path,
+                    Outcome::Refused,
+                    "IDENTITY",
+                    &error.to_string(),
+                    globals,
+                )
+            } else if matches!(
+                error.downcast_ref::<SessionError>(),
+                Some(
+                    SessionError::TooLarge
+                        | SessionError::SummaryTooLarge
+                        | SessionError::Summary(_)
+                )
+            ) {
+                crate::fail(
+                    path,
+                    Outcome::Invalid,
+                    "INVALID",
+                    &error.to_string(),
+                    globals,
+                )
             } else {
                 crate::fail(
                     path,

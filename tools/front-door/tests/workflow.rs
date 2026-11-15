@@ -443,7 +443,7 @@ fn chair_summary_guarded_update() -> Result {
             "--expect-revision",
             "2",
         ],
-        1,
+        2,
     )?;
     assert_eq!(refused["error"]["code"], "INVALID");
     let missing = call(&rig, &["chair", "summary", "show", "missing-chair"], 1)?;
