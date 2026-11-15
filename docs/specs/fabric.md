@@ -210,9 +210,11 @@ with different text conflicts. The host verifies launch evidence and
 ownership before reading steering input. At local graph admission, the host stamps graph, node and attempt identity from the work key; an accepted request replay preserves that stored identity, and caller-supplied flags never establish it. If natural completion races with
 readiness or the interrupt request, settlement adopts the durable intent when
 terminal session evidence is valid. A different typed stop wins and leaves the
-saved input without an automatic continuation. If the live session or process
-identity changes, or the terminal session disagrees with the bound expectation,
-status records the safe mismatch cause instead of starting a fresh session.
+saved input without an automatic continuation; a later owner cancel still wins
+after a delivered `Steered` stop without changing that stop's evidence. If the
+live session or process identity changes, or the terminal session disagrees
+with the bound expectation, status records the safe mismatch cause instead of
+starting a fresh session.
 
 This is continuation transport for #3318, not live input injection. Adapters
 advertise support as `continuation` only when their run path can retain and

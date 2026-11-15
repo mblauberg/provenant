@@ -1148,6 +1148,27 @@ impl RunStore {
         if intents.is_empty() {
             return Ok(None);
         }
+        let attempt = self.attempt_dir(id, false)?;
+        let explicit_stop = read_sealed(&attempt, "cancel.json", RECORD_LIMIT)?
+            .and_then(|raw| crate::db::decode::<crate::store::CancellationEvidence>(&raw).ok())
+            .is_some_and(|request| {
+                request.requests_stop(
+                    Self::scope(&record),
+                    record.verified_owner.unwrap_or(self.context.actor_id),
+                )
+            });
+        if explicit_stop {
+            // The guardian's sealed Steered reason and delivered-signal fact
+            // describe the first interrupt. A later owner cancellation is a
+            // separate durable intent: it vetoes continuation without
+            // rewriting that evidence or pretending its signal was delivered.
+            self.record_steer_not_continued(
+                id,
+                provenant_records::run::SteeringCause::TerminalStop,
+                call,
+            )?;
+            return Ok(None);
+        }
         // A natural success can race with the interrupt publication. If any
         // other typed stop or terminal outcome won, keep the accepted text for
         // inspection but do not turn that stop into an automatic continuation.
