@@ -18,8 +18,8 @@ fn patch(
         apply_patch(&value, doc, current, &NO_DOMAINS)
     })
 }
-fn text(dir: &Path) -> Option<String> {
-    std::fs::read_to_string(dir.join("config.toml")).ok()
+fn text(roots: &Roots) -> Option<String> {
+    std::fs::read_to_string(roots.state.as_path().join("config.toml")).ok()
 }
 
 #[test]
@@ -89,14 +89,14 @@ fn stale_revision_is_refused_naming_the_current_one() {
         &EditOptions::new("test"),
     )
     .unwrap();
-    let current = revision_of(text(temp.path()).as_deref());
+    let current = revision_of(text(&roots).as_deref());
     let mut options = EditOptions::new("test");
     options.expect_revision = Some(&first);
     let error = patch(&roots, json!({"chair.switch_threshold": 60}), &options)
         .err()
         .unwrap();
     assert!(matches!(&error, ConfigError::StaleRevision { current: c } if *c == current));
-    assert!(text(temp.path()).unwrap().contains("70"));
+    assert!(text(&roots).unwrap().contains("70"));
 }
 
 #[test]
@@ -125,7 +125,7 @@ fn concurrent_applies_leave_a_complete_valid_config() {
             .filter_map(|r| r.as_ref().err())
             .all(|e| matches!(e, ConfigError::StaleRevision { .. }))
     );
-    let final_text = text(temp.path()).unwrap();
+    let final_text = text(&roots).unwrap();
     assert!(final_text.contains("schema_version = 1"));
     assert!(
         [50, 60, 70, 80]
@@ -145,7 +145,7 @@ fn partial_invalid_patch_writes_nothing() {
         &EditOptions::new("test"),
     )
     .unwrap();
-    let before = text(temp.path());
+    let before = text(&roots);
     let entries = history(&roots, None, 100).unwrap().len();
     for bad in [
         json!({"chair.switch_threshold": 60, "chair.auto_switch": "maybe"}),
@@ -153,7 +153,7 @@ fn partial_invalid_patch_writes_nothing() {
         json!({"chair.switch_threshold": 600}),
     ] {
         assert!(patch(&roots, bad, &EditOptions::new("test")).is_err());
-        assert_eq!(text(temp.path()), before);
+        assert_eq!(text(&roots), before);
     }
     assert_eq!(history(&roots, None, 100).unwrap().len(), entries);
 }
@@ -168,8 +168,8 @@ fn dry_run_reports_the_change_and_writes_nothing() {
     assert!(edited.dry_run);
     assert_eq!(edited.changes.len(), 1);
     assert_ne!(edited.before_revision, edited.after_revision);
-    assert_eq!(text(temp.path()), None);
-    assert!(!temp.path().join("config-history.jsonl").exists());
+    assert_eq!(text(&roots), None);
+    assert!(!roots.state.as_path().join("config-history.jsonl").exists());
 }
 
 #[test]
@@ -212,7 +212,7 @@ fn apply_refuses_unknown_names_and_bad_values_before_writing() {
             "{error:?}"
         );
     }
-    assert_eq!(text(temp.path()), None);
+    assert_eq!(text(&roots), None);
 }
 
 #[test]
@@ -220,12 +220,12 @@ fn unset_removes_a_misspelt_entry_the_file_already_holds() {
     let temp = tempfile::tempdir().unwrap();
     let roots = roots(temp.path());
     std::fs::write(
-        temp.path().join("config.toml"),
+        roots.state.as_path().join("config.toml"),
         "schema_version = 1\n[knobs]\n\"lanes.max_concurency\" = 4\n",
     )
     .unwrap();
     crate::tests::knob_edit(&roots, crate::KnobEdit::Unset("lanes.max_concurency")).unwrap();
-    assert!(!text(temp.path()).unwrap().contains("max_concurency"));
+    assert!(!text(&roots).unwrap().contains("max_concurency"));
     assert!(matches!(
         crate::tests::knob_edit(&roots, crate::KnobEdit::Unset("lanes.max_concurency")),
         Err(ConfigError::UnknownKnob { .. })

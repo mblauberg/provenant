@@ -668,18 +668,27 @@ mod policy_action_tests {
     #[test]
     fn generated_policy_knobs_offer_only_supported_strengths() {
         let registry = registry().unwrap();
-        assert_eq!(
-            registry.knobs["policy.PROCESS_CENSUS"].values,
-            ["warn", "off"]
-        );
-        assert_eq!(
-            registry.knobs["policy.ARGV_PROMPT"].values,
-            ["refuse", "warn", "off"]
-        );
-        assert_eq!(
-            registry.knobs["policy.ADMISSION_WRITERS"].values,
-            ["refuse", "warn", "off"]
-        );
+        for rule in provenant_records::policy::table()
+            .iter()
+            .filter(|rule| rule.knob.is_some())
+        {
+            let name = rule.knob.as_deref().unwrap();
+            let expected: std::collections::BTreeSet<_> = rule
+                .strengths()
+                .into_iter()
+                .map(|strength| match strength {
+                    provenant_records::policy::Strength::Refuse => "refuse",
+                    provenant_records::policy::Strength::Warn => "warn",
+                    provenant_records::policy::Strength::Off => "off",
+                })
+                .collect();
+            let actual: std::collections::BTreeSet<_> = registry.knobs[name]
+                .values
+                .iter()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(actual, expected, "{}", rule.code);
+        }
     }
 }
 

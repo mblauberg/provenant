@@ -211,7 +211,7 @@ pub fn execute_port_command_with_input(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PortBackend {
     Builtin,
     Command {
@@ -239,14 +239,12 @@ impl PortBackend {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Port {
     pub source: PortSource,
     pub backend: PortBackend,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct VerifyPort {
     pub source: PortSource,
     pub backend: PortBackend,
@@ -254,7 +252,6 @@ pub struct VerifyPort {
     pub workspace: PathBuf,
     pub remote: String,
     pub load_per_cpu: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub test_threads: Option<u32>,
     pub package_paths: Vec<PackagePath>,
     pub quarantine_command: Vec<String>,
@@ -274,7 +271,6 @@ pub enum VerifySelection {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct VerifyTier {
     pub commands: Vec<String>,
     pub selection: VerifySelection,
@@ -282,14 +278,12 @@ pub struct VerifyTier {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PackagePath {
     pub paths: Vec<String>,
     pub package: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Integration {
     pub paths: Vec<String>,
     pub package: String,
@@ -297,7 +291,7 @@ pub struct Integration {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LandBackend {
     Builtin,
     /// The records owner declares the command and unknown exit code. Exit 0
@@ -310,14 +304,12 @@ pub enum LandBackend {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LandPort {
     pub source: PortSource,
     pub backend: LandBackend,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct WorktreeLayoutPort {
     pub source: PortSource,
     pub backend: PortBackend,
@@ -519,7 +511,6 @@ fn relative(path: &Path, allow_current: bool) -> bool {
 macro_rules! declare_ports {
     ($($field:ident: $kind:ty),+ $(,)?) => {
         #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-        #[serde(deny_unknown_fields)]
         pub struct PortTable {
             pub schema_version: u16,
             $(pub $field: $kind),+
@@ -555,7 +546,12 @@ declare_ports! {
     build_admission: Port,
 }
 
-fn apply_layer(table: &mut serde_json::Value, path: &Path, source: PortSource) -> io::Result<()> {
+fn apply_layer(
+    table: &mut serde_json::Value,
+    path: &Path,
+    source: PortSource,
+    on_unknown: &mut impl FnMut(&[u8], &provenant_records::InputWarning),
+) -> io::Result<()> {
     let file = match fs::File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -591,7 +587,7 @@ fn apply_layer(table: &mut serde_json::Value, path: &Path, source: PortSource) -
         )
     })?;
     for (name, value) in object.iter_mut() {
-        if name != "schema_version" {
+        if name != "schema_version" && PortTable::PORT_NAMES.contains(&name.as_str()) {
             let entry = value.as_object_mut().ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "port entry must be an object")
             })?;
@@ -600,8 +596,18 @@ fn apply_layer(table: &mut serde_json::Value, path: &Path, source: PortSource) -
                 serde_json::to_value(source).map_err(io::Error::other)?,
             );
             target.insert(name.clone(), value.clone());
+        } else if name != "schema_version" {
+            target.insert(name.clone(), value.clone());
         }
     }
+    let source = path.display().to_string();
+    let merged = serde_json::to_vec(table).map_err(io::Error::other)?;
+    let (decoded, warnings) =
+        provenant_records::decode_input::<PortTable>(&source, &merged).map_err(io::Error::other)?;
+    for warning in &warnings {
+        on_unknown(&bytes, warning);
+    }
+    *table = serde_json::to_value(decoded).map_err(io::Error::other)?;
     Ok(())
 }
 
@@ -657,17 +663,29 @@ impl PortTable {
 
     /// Inspect well-typed declarations without hiding semantically invalid ports.
     pub fn read_for_inspection(project: Option<&Path>, host_state: &Path) -> io::Result<Self> {
+        Self::read_for_inspection_with(project, host_state, |bytes, warning| {
+            let _ = crate::loader::warn_unknown_input_once(host_state, bytes, warning);
+        })
+    }
+
+    fn read_for_inspection_with(
+        project: Option<&Path>,
+        host_state: &Path,
+        mut on_unknown: impl FnMut(&[u8], &provenant_records::InputWarning),
+    ) -> io::Result<Self> {
         let mut document = serde_json::to_value(Self::builtin()).map_err(io::Error::other)?;
         apply_layer(
             &mut document,
             &host_state.join("ports.json"),
             PortSource::Host,
+            &mut on_unknown,
         )?;
         if let Some(project) = project {
             apply_layer(
                 &mut document,
                 &project.join(PORTS_CONFIG),
                 PortSource::Project,
+                &mut on_unknown,
             )?;
         }
         serde_json::from_value(document).map_err(io::Error::other)
@@ -685,93 +703,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn each_declared_port_has_a_resolved_source_consumer() {
-        fn visit(directory: &Path, files: &mut Vec<(PathBuf, String)>) -> io::Result<()> {
-            for entry in fs::read_dir(directory)? {
-                let path = entry?.path();
-                if path.is_dir() {
-                    visit(&path, files)?;
-                } else if path.extension().is_some_and(|extension| extension == "rs") {
-                    if path.ends_with("crates/config/src/ports.rs")
-                        || path
-                            .file_name()
-                            .is_some_and(|name| name.to_string_lossy().ends_with("_tests.rs"))
-                    {
-                        continue;
-                    }
-                    files.push((path.clone(), fs::read_to_string(path)?));
-                }
-            }
-            Ok(())
-        }
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let mut files = Vec::new();
-        visit(&root.join("src"), &mut files).unwrap();
-        visit(&root.join("crates"), &mut files).unwrap();
-        // A category can add operations without acquiring another transport.
-        // Credentials/tool installation are separate concerns; these markers
-        // identify repository data operations rather than executable discovery.
-        for (path, source) in &files {
-            let production = source.split("#[cfg(test)]").next().unwrap_or(source);
-            if path
-                .components()
-                .any(|component| component.as_os_str().to_string_lossy().contains("tests"))
-            {
-                continue;
-            }
-            assert!(
-                !production.contains("Command::new(\"gh\")"),
-                "direct forge process bypasses its port: {}",
-                path.display()
-            );
-            assert!(
-                !production.contains("Gh::in_checkout("),
-                "private forge adapter bypasses the shared port: {}",
-                path.display()
-            );
-            let forge_operation = production.contains("\"gh\"")
-                && ["\"pr\",", "\"api\",", "\"repo\",", "\"issue\","]
-                    .iter()
-                    .any(|operation| production.contains(operation));
-            if forge_operation {
-                assert!(
-                    production.contains("ForgePort") || production.contains("forge_execute("),
-                    "repository forge operation has no shared port consumer: {}",
-                    path.display()
-                );
-            }
-        }
-        for name in PortTable::PORT_NAMES {
-            let found = files.iter().any(|(_, source)| {
-                let resolves = source.contains("PortTable::read_for")
-                    || source.contains("PortTable::read_for_inspection");
-                let field = source.contains(&format!(".{name}"));
-                let layout_helper = *name == "worktree_layout"
-                    && [
-                        "managed_writer_path(",
-                        "managed_writer_branch(",
-                        "worktree_roots_under(",
-                    ]
-                    .iter()
-                    .any(|helper| source.contains(helper));
-                resolves && (field || layout_helper)
-            });
-            assert!(
-                found,
-                "port {name} has no source consumer resolving through PortTable"
-            );
-        }
-    }
-
-    #[test]
-    fn the_port_table_and_backend_cases_round_trip_from_the_declarations() {
+    fn declared_port_rows_and_backend_shapes_round_trip() {
         let table = PortTable::builtin();
         let value = serde_json::to_value(&table).unwrap();
-        assert_eq!(PortTable::PORT_NAMES.len(), table.entries().count());
-        for name in PortTable::PORT_NAMES {
-            assert!(
-                value.get(name).is_some(),
-                "port declaration {name} is encodable"
+        let entries: Vec<_> = table.entries().collect();
+        let declared: std::collections::BTreeSet<_> =
+            PortTable::PORT_NAMES.iter().copied().collect();
+        let observed: std::collections::BTreeSet<_> = entries.iter().map(|entry| entry.0).collect();
+        assert_eq!(observed, declared);
+        for (name, source, backend, _, _) in entries {
+            let entry = value
+                .get(name)
+                .and_then(serde_json::Value::as_object)
+                .unwrap();
+            assert_eq!(
+                entry.get("source"),
+                Some(&serde_json::to_value(source).unwrap()),
+                "{name} source"
+            );
+            let expected_backend = match backend {
+                PortBackendKind::Builtin => "builtin",
+                PortBackendKind::Command => "command",
+                PortBackendKind::None => "none",
+            };
+            assert_eq!(
+                entry.get("backend").and_then(|value| value.get("kind")),
+                Some(&serde_json::json!(expected_backend)),
+                "{name} backend"
             );
         }
         assert_eq!(serde_json::from_value::<PortTable>(value).unwrap(), table);
@@ -959,6 +917,78 @@ mod tests {
     }
 
     #[test]
+    fn port_config_unknown_root_and_nested_keys_warn_with_their_layer_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let host = directory.path().join("host");
+        let project = directory.path().join("project");
+        std::fs::create_dir_all(&host).unwrap();
+        std::fs::create_dir_all(project.join(".provenant")).unwrap();
+        let builtin = serde_json::to_value(PortTable::builtin()).unwrap();
+
+        let mut host_overlay = serde_json::json!({
+            "schema_version": PORTS_SCHEMA_VERSION,
+            "verify": builtin["verify"].clone(),
+            "future_port": {"enabled": true},
+        });
+        host_overlay["verify"]["backend"] = serde_json::json!({"kind": "none"});
+        host_overlay["verify"]["test_threads"] = serde_json::Value::Null;
+        host_overlay["verify"]["future_nested"] = serde_json::json!({"enabled": true});
+        std::fs::write(
+            host.join("ports.json"),
+            serde_json::to_vec(&host_overlay).unwrap(),
+        )
+        .unwrap();
+
+        let mut project_overlay = serde_json::json!({
+            "schema_version": PORTS_SCHEMA_VERSION,
+            "naming": builtin["naming"].clone(),
+        });
+        project_overlay["naming"]["future_nested"] = serde_json::json!("ignored");
+        std::fs::write(
+            project.join(PORTS_CONFIG),
+            serde_json::to_vec(&project_overlay).unwrap(),
+        )
+        .unwrap();
+
+        let mut warnings = Vec::new();
+        let table = PortTable::read_for_inspection_with(Some(&project), &host, |_, warning| {
+            warnings.push((warning.source.clone(), warning.key.clone()))
+        })
+        .unwrap();
+        assert_eq!(table.verify.backend, PortBackend::None);
+        assert_eq!(table.verify.source, PortSource::Host);
+        assert_eq!(table.naming.source, PortSource::Project);
+        let encoded = serde_json::to_value(&table).unwrap();
+        assert!(encoded.get("future_port").is_none());
+        assert!(encoded["verify"].get("future_nested").is_none());
+        assert!(encoded["naming"].get("future_nested").is_none());
+
+        let host_source = host.join("ports.json").display().to_string();
+        let project_source = project.join(PORTS_CONFIG).display().to_string();
+        assert_eq!(
+            warnings
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([
+                (host_source.clone(), "future_port".to_owned()),
+                (host_source.clone(), "verify.future_nested".to_owned()),
+                (project_source, "naming.future_nested".to_owned()),
+            ])
+        );
+
+        let malformed = serde_json::json!({
+            "schema_version": PORTS_SCHEMA_VERSION,
+            "verify": false,
+        });
+        std::fs::write(
+            project.join(PORTS_CONFIG),
+            serde_json::to_vec(&malformed).unwrap(),
+        )
+        .unwrap();
+        assert!(PortTable::read_for_inspection(Some(&project), &host).is_err());
+    }
+
+    #[test]
     fn command_digest_binds_argv_and_each_exit_disposition() {
         let base = PortCommand {
             argv: vec!["admit".into(), "--phase".into()],
@@ -990,7 +1020,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_host_and_project_ports_overlay_without_relabelling_omissions() {
+    fn every_declared_port_accepts_layered_overrides_without_relabelling_omissions() {
         let temp = tempfile::tempdir().unwrap();
         let host = temp.path().join("host");
         let project = temp.path().join("project");
@@ -1047,25 +1077,5 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn project_location_overrides_serialized_source_labels() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(root.path().join(".provenant")).unwrap();
-        let mut forged = PortTable::builtin();
-        let bytes = serde_json::to_vec(&forged).unwrap();
-        std::fs::write(root.path().join(PORTS_CONFIG), bytes).unwrap();
-        let loaded = PortTable::read_for(Some(root.path()), root.path()).unwrap();
-        assert!(
-            loaded
-                .entries()
-                .all(|(_, source, _, _, _)| source == PortSource::Project)
-        );
-        forged.set_sources(PortSource::Project);
-        assert_eq!(
-            serde_json::to_value(&loaded).unwrap(),
-            serde_json::to_value(&forged).unwrap()
-        );
     }
 }

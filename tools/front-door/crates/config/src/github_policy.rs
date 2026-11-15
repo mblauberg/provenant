@@ -20,6 +20,7 @@ pub const DEFAULT_GH_BUDGET: u64 = 100;
 /// Bounds on the workflow scan: a lane's checkout is untrusted input.
 const WORKFLOW_FILES: usize = 64;
 const WORKFLOW_BYTES: u64 = 256 * 1024;
+const GITHUB_POLICY_BYTES: u64 = 16 * 1024;
 
 /// Whether a workflow in `checkout` runs on pull request label events, so a
 /// label change on a pull request starts CI. A heuristic over
@@ -74,12 +75,21 @@ fn workflow_runs_on_labels(text: &str) -> bool {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct GithubPolicy {
     #[serde(default)]
     pub deny_verbs: Vec<String>,
     #[serde(default)]
     pub deny_labels: Vec<String>,
+    #[serde(flatten)]
+    extra: provenant_records::ExtraFields,
+}
+
+fn decode_policy(bytes: &[u8]) -> Result<GithubPolicy, ConfigError> {
+    let limits = provenant_records::Limits {
+        max_bytes: GITHUB_POLICY_BYTES,
+        ..provenant_records::Limits::CONFIG
+    };
+    provenant_records::decode(bytes, limits).map_err(|_| ConfigError::InvalidGithubPolicy)
 }
 
 impl GithubPolicy {
@@ -105,14 +115,30 @@ impl GithubPolicy {
             return Err(ConfigError::InvalidGithubPolicy);
         }
         let mut bytes = Vec::new();
-        file.take(16 * 1024 + 1)
+        file.take(GITHUB_POLICY_BYTES + 1)
             .read_to_end(&mut bytes)
             .map_err(|_| ConfigError::InvalidGithubPolicy)?;
-        if bytes.len() > 16 * 1024 {
+        if bytes.len() as u64 > GITHUB_POLICY_BYTES {
             return Err(ConfigError::InvalidGithubPolicy);
         }
-        let mut policy: Self =
-            serde_json::from_slice(&bytes).map_err(|_| ConfigError::InvalidGithubPolicy)?;
+        let mut policy = decode_policy(&bytes)?;
+        let source = state
+            .as_path()
+            .join("projects")
+            .join(project_id.to_string())
+            .join("github.json")
+            .display()
+            .to_string();
+        for key in policy.extra.keys() {
+            crate::loader::warn_unknown_input_once(
+                state.as_path(),
+                &bytes,
+                &provenant_records::InputWarning {
+                    source: source.clone(),
+                    key: key.clone(),
+                },
+            );
+        }
         policy.deny_labels = policy
             .deny_labels
             .into_iter()
@@ -125,7 +151,7 @@ impl GithubPolicy {
 
 #[cfg(test)]
 mod tests {
-    use super::workflow_runs_on_labels;
+    use super::*;
 
     #[test]
     fn label_triggers_are_found_in_either_list_form_and_nothing_else() {
@@ -138,5 +164,42 @@ mod tests {
         assert!(!workflow_runs_on_labels(
             "on:\n  pull_request:\n# types: [labeled]\njobs:\n  a:\n    if: github.event.action != 'labeled'\n"
         ));
+    }
+
+    #[test]
+    fn github_policy_preserves_unknown_fields_through_bounded_decode() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = provenant_test_support::test_roots(temp.path())
+            .unwrap()
+            .resolve(&provenant_test_support::IdentityPathResolver)
+            .unwrap();
+        let project = ProjectId::from_bytes([39; 16]);
+        let project_dir = roots
+            .state
+            .as_path()
+            .join("projects")
+            .join(project.to_string());
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let unknown_key = format!("future_{}", "policy");
+        let unknown_value = serde_json::json!({"nested": ["kept", 5]});
+        let mut input = serde_json::json!({
+            "deny_verbs": ["release create"],
+            "deny_labels": ["ci"],
+        });
+        input
+            .as_object_mut()
+            .unwrap()
+            .insert(unknown_key.clone(), unknown_value.clone());
+        std::fs::write(
+            project_dir.join("github.json"),
+            serde_json::to_vec(&input).unwrap(),
+        )
+        .unwrap();
+
+        let policy = GithubPolicy::read(&roots.state, project).unwrap();
+        assert_eq!(policy.extra.get(&unknown_key), Some(&unknown_value));
+        let encoded = provenant_records::encode(&policy).unwrap();
+        let decoded = decode_policy(&encoded).unwrap();
+        assert_eq!(decoded.extra.get(&unknown_key), Some(&unknown_value));
     }
 }

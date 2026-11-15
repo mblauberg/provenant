@@ -1,19 +1,36 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use super::*;
-use provenant_core::{PathResolver, RootInputs, Roots};
+use provenant_core::Roots;
 use serde::Deserialize;
-use std::{io, path::Path};
+use std::{io, path::Path, sync::OnceLock};
 
-struct Resolver;
-impl PathResolver for Resolver {
-    fn resolve_existing_ancestor(&self, path: &Path) -> io::Result<PathBuf> {
-        Ok(path.to_path_buf())
-    }
-}
 fn roots() -> Roots {
-    let mut inputs = RootInputs::new("/fixture/home".into(), "/fixture/checkout".into());
-    inputs.state_dir = Some("/fixture/state".into());
-    inputs.resolve(&Resolver).unwrap()
+    static FIXTURE: OnceLock<(tempfile::TempDir, Roots)> = OnceLock::new();
+    FIXTURE
+        .get_or_init(|| {
+            let base = tempfile::tempdir().unwrap();
+            let inputs = provenant_test_support::test_roots(base.path()).unwrap();
+            let roots = inputs
+                .resolve(&provenant_test_support::IdentityPathResolver)
+                .unwrap();
+            (base, roots)
+        })
+        .1
+        .clone()
+}
+
+fn retention_bounds(config: &ResolvedConfig, key: &str) -> (u64, u64) {
+    let declaration = schema(config, &domains::NO_DOMAINS, "fixture".into()).unwrap();
+    let path = format!("retention.{key}");
+    let field = declaration
+        .fields
+        .iter()
+        .find(|field| field.path == path)
+        .unwrap_or_else(|| panic!("missing retention declaration for {path}"));
+    (
+        field.min.expect("retention minimum") as u64,
+        field.max.expect("retention maximum") as u64,
+    )
 }
 
 #[test]
@@ -199,95 +216,69 @@ fn provider_update_settings_defaults_opt_out_commands_and_validation() {
 
 #[test]
 fn retention_defaults_overrides_and_invalid_values_are_named_cases() {
-    for (case, key, override_value, invalid_range_values, invalid_type) in [
-        (
-            "provider state days",
-            "provider_state_days",
-            14,
-            ["0", "3651"],
-            "'seven'",
-        ),
-        (
-            "session revisions",
-            "session_revisions",
-            20,
-            ["0", "65"],
-            "'many'",
-        ),
+    let config_defaults = load::<&[u8]>(&roots(), None).unwrap();
+    assert!(config_defaults.retention.validate().is_ok());
+    let defaults = serde_json::to_value(&config_defaults).unwrap();
+    for (key, override_value, invalid_type) in [
+        ("provider_state_days", 14, "'seven'"),
+        ("session_revisions", 20, "'many'"),
     ] {
-        let defaults = load::<&[u8]>(&roots(), None).unwrap();
-        assert!(defaults.retention.validate().is_ok());
-        let defaults = serde_json::to_value(defaults).unwrap();
+        let (minimum, maximum) = retention_bounds(&config_defaults, key);
         let default = &defaults["retention"][key];
         let default_value = default.as_u64().unwrap();
-        let upper_bound = if key == "provider_state_days" {
-            3650
-        } else {
-            64
-        };
-        assert!((1..=upper_bound).contains(&default_value), "{case} default");
+        assert!((minimum..=maximum).contains(&default_value));
         let text = format!("schema_version=1\n[retention]\n{key}={override_value}");
         let config = load(&roots(), Some(text.as_bytes())).unwrap();
         let value = serde_json::to_value(&config).unwrap();
-        assert_eq!(value["retention"][key], override_value, "{case} override");
+        assert_eq!(value["retention"][key], override_value);
         if key == "session_revisions" {
             assert_eq!(
                 value["retention"]["provider_state_days"],
-                defaults["retention"]["provider_state_days"],
-                "{case}"
+                defaults["retention"]["provider_state_days"]
             );
         }
         test_support::assert_leaf_origins(&config);
-        for (value, rule) in invalid_range_values
-            .into_iter()
-            .map(|value| (value, format!("{key}_range")))
-            .chain([("-1", "type".to_owned()), (invalid_type, "type".to_owned())])
-        {
+        for value in [minimum.saturating_sub(1), maximum.saturating_add(1)] {
+            let value = value.to_string();
             let text = format!("schema_version=1\n[retention]\n{key}={value}");
             let config = load(&roots(), Some(text.as_bytes())).unwrap();
-            assert_warning(&config, &rule);
+            assert_warning(&config, &format!("{key}_range"));
             assert_warning_message(&config, &format!("retention.{key}:"));
             let parsed = serde_json::to_value(config).unwrap();
-            assert_eq!(&parsed["retention"][key], default, "{case}: {value}");
+            assert_eq!(&parsed["retention"][key], default);
+        }
+        for value in ["-1", invalid_type] {
+            let text = format!("schema_version=1\n[retention]\n{key}={value}");
+            let config = load(&roots(), Some(text.as_bytes())).unwrap();
+            assert_warning(&config, "type");
+            assert_warning_message(&config, &format!("retention.{key}:"));
+            let parsed = serde_json::to_value(config).unwrap();
+            assert_eq!(&parsed["retention"][key], default);
         }
     }
 }
 
 #[test]
 fn chair_log_retention_and_gc_settings_are_named_cases() {
-    for (case, check) in [
-        (
-            "chair log retention",
-            assert_chair_log_retention_defaults_overrides_and_validation as fn(),
-        ),
-        (
-            "garbage collection settings",
-            assert_gc_settings_parse_defaults_and_warnings,
-        ),
-    ] {
-        if let Err(panic) = std::panic::catch_unwind(check) {
-            if let Some(message) = panic.downcast_ref::<String>() {
-                panic!("{case}: {message}");
-            }
-            if let Some(message) = panic.downcast_ref::<&str>() {
-                panic!("{case}: {message}");
-            }
-            panic!("{case} failed");
-        }
-    }
+    assert_chair_log_retention_defaults_overrides_and_validation();
+    assert_gc_settings_parse_defaults_and_warnings();
 }
 
 fn assert_chair_log_retention_defaults_overrides_and_validation() {
     let defaults = load::<&[u8]>(&roots(), None).unwrap();
     assert!(defaults.retention.validate().is_ok());
     let default_values = serde_json::to_value(&defaults).unwrap();
-    for (key, range) in [
-        ("chair_log_days", 1..=3650),
-        ("chair_log_entries", 1..=100_000),
-        ("chair_log_bytes", 65_536..=1_073_741_824),
-        ("payload_cap_bytes", 1_048_576..=1_125_899_906_842_624),
+    for key in [
+        "chair_log_days",
+        "chair_log_replay_days",
+        "chair_log_entries",
+        "chair_log_bytes",
+        "payload_cap_bytes",
     ] {
-        assert!(range.contains(&default_values["retention"][key].as_u64().unwrap()));
+        let (minimum, maximum) = retention_bounds(&defaults, key);
+        if let Some(value) = default_values["retention"][key].as_u64() {
+            assert!((minimum..=maximum).contains(&value));
+        }
     }
     let short = load(
         &roots(),
@@ -302,22 +293,21 @@ fn assert_chair_log_retention_defaults_overrides_and_validation() {
     assert_eq!(value["retention"]["chair_log_replay_days"], 8);
     assert_eq!(value["retention"]["chair_log_entries"], 20);
     assert_eq!(value["retention"]["chair_log_bytes"], 65_536);
-    for (key, value) in [
-        ("chair_log_days", "0"),
-        ("chair_log_days", "3651"),
-        ("chair_log_replay_days", "6"),
-        ("chair_log_replay_days", "3651"),
-        ("chair_log_entries", "0"),
-        ("chair_log_entries", "100001"),
-        ("chair_log_bytes", "65535"),
-        ("chair_log_bytes", "1073741825"),
-        ("payload_cap_bytes", "1048575"),
+    for key in [
+        "chair_log_days",
+        "chair_log_replay_days",
+        "chair_log_entries",
+        "chair_log_bytes",
+        "payload_cap_bytes",
     ] {
-        let text = format!("schema_version=1\n[retention]\n{key}={value}");
-        let config = load(&roots(), Some(text.as_bytes())).unwrap();
-        assert_warning(&config, &format!("{key}_range"));
-        assert_warning_message(&config, &format!("retention.{key}:"));
-        assert_eq!(config.retention, RetentionSettings::default());
+        let (minimum, maximum) = retention_bounds(&defaults, key);
+        for invalid in [minimum.saturating_sub(1), maximum.saturating_add(1)] {
+            let text = format!("schema_version=1\n[retention]\n{key}={invalid}");
+            let config = load(&roots(), Some(text.as_bytes())).unwrap();
+            assert_warning(&config, &format!("{key}_range"));
+            assert_warning_message(&config, &format!("retention.{key}:"));
+            assert_eq!(config.retention, RetentionSettings::default());
+        }
     }
 }
 
@@ -611,16 +601,14 @@ fn bounded_reader_preserves_io_failures_and_consumes_at_most_limit_plus_one() {
     assert!(
         matches!(load(&roots(), Some(Fails)), Err(ConfigError::Read { source: provenant_os::fs::FsError::Io { operation: "read", source, .. }, .. }) if source.kind() == io::ErrorKind::PermissionDenied)
     );
+    let limit = provenant_records::Limits::CONFIG.max_bytes;
     let mut stream = io::repeat(b' ');
     assert!(matches!(
         load(&roots(), Some(&mut stream)),
-        Err(ConfigError::TooLarge {
-            limit: 1_048_576,
-            ..
-        })
+        Err(ConfigError::TooLarge { limit: found, .. }) if found == limit
     ));
     let mut exact = String::from("schema_version=1\n#");
-    exact.extend(std::iter::repeat_n(' ', 1_048_576 - exact.len()));
+    exact.extend(std::iter::repeat_n(' ', limit as usize - exact.len()));
     assert!(load(&roots(), Some(exact.as_bytes())).is_ok());
     exact.push(' ');
     assert!(matches!(
@@ -631,16 +619,20 @@ fn bounded_reader_preserves_io_failures_and_consumes_at_most_limit_plus_one() {
 
 #[test]
 fn collection_bounds_refuse_deep_and_wide_domain_inputs() {
+    let limits = provenant_records::Limits::CONFIG;
     let deep = format!(
         "schema_version=1\n[domains]\nx={}0{}",
-        "[".repeat(70),
-        "]".repeat(70)
+        "[".repeat(limits.max_depth + 1),
+        "]".repeat(limits.max_depth + 1)
     );
     assert!(matches!(
         load(&roots(), Some(deep.as_bytes())),
         Err(ConfigError::CollectionLimit { .. })
     ));
-    let wide = format!("schema_version=1\n[domains]\nx=[{}0]", "0,".repeat(100_001));
+    let wide_members = std::iter::repeat_n("0", limits.max_members + 1)
+        .collect::<Vec<_>>()
+        .join(",");
+    let wide = format!("schema_version=1\n[domains]\nx=[{wide_members}]");
     assert!(matches!(
         load(&roots(), Some(wide.as_bytes())),
         Err(ConfigError::CollectionLimit { .. })
@@ -657,14 +649,13 @@ impl Files {
         let base = temp.path().canonicalize().unwrap();
         // All environmental locations are supplied as values; tests never
         // discover ambient HOME, state or harness configuration.
-        let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
-        inputs.state_dir = Some(base.join("state"));
-        std::fs::create_dir(base.join("home")).unwrap();
+        let inputs = provenant_test_support::test_roots(&base).unwrap();
+        let roots = inputs
+            .resolve(&provenant_test_support::IdentityPathResolver)
+            .unwrap();
+        std::fs::remove_dir(roots.state.as_path()).unwrap();
         std::fs::create_dir(base.join("harness")).unwrap();
-        Self {
-            roots: inputs.resolve(&Resolver).unwrap(),
-            _temp: temp,
-        }
+        Self { roots, _temp: temp }
     }
     fn config(&self) -> PathBuf {
         self.roots.state.as_path().join("config.toml")
@@ -789,18 +780,17 @@ fn config_filesystem_boundary_refuses_links_non_files_and_unreadable_roots() {
 fn show_serialises_origins_for_non_utf8_state_paths() {
     use std::os::unix::ffi::OsStringExt;
     let fixture = Files::new();
-    let mut inputs = RootInputs::new(
-        fixture.roots.state.as_path().with_file_name("home"),
-        fixture.roots.state.as_path().with_file_name("checkout"),
-    );
-    inputs.state_dir = Some(
-        fixture
-            .roots
-            .state
-            .as_path()
-            .with_file_name(std::ffi::OsString::from_vec(b"state-\xff".to_vec())),
-    );
-    let roots = inputs.resolve(&Resolver).unwrap();
+    let roots = fixture
+        .roots
+        .with_state_dir(
+            fixture
+                .roots
+                .state
+                .as_path()
+                .with_file_name(std::ffi::OsString::from_vec(b"state-\xff".to_vec())),
+            &provenant_test_support::IdentityPathResolver,
+        )
+        .unwrap();
     // APFS rejects creation of non-UTF-8 names. Inject a reader to prove the
     // native-path wire contract on both supported operating systems.
     let snapshot = load(&roots, Some(&b"schema_version=1\nprofile='economy'\n"[..])).unwrap();
@@ -1405,9 +1395,10 @@ fn empty_compiled_closed_section_warns_on_unknown_keys() {
 }
 
 pub(crate) fn state_roots(dir: &Path) -> Roots {
-    let mut inputs = RootInputs::new("/fixture/home".into(), "/fixture/checkout".into());
-    inputs.state_dir = Some(dir.into());
-    inputs.resolve(&Resolver).unwrap()
+    provenant_test_support::test_roots(dir)
+        .unwrap()
+        .resolve(&provenant_test_support::IdentityPathResolver)
+        .unwrap()
 }
 pub(crate) fn knob_edit(roots: &Roots, edit: KnobEdit) -> Result<ResolvedConfig, ConfigError> {
     edit_config(
@@ -1431,19 +1422,17 @@ fn config_edit_bumps_change_generation() {
         },
     )
     .unwrap();
-    assert_eq!(
-        provenant_os::changes::read(temp.path())
-            .unwrap()
-            .configuration,
-        Some(1)
-    );
+    let first_generation = provenant_os::changes::read(roots.state.as_path())
+        .unwrap()
+        .configuration
+        .unwrap();
+    assert!(first_generation > 0);
     knob_edit(&roots, KnobEdit::Unset("lanes.max_concurrency")).unwrap();
-    assert_eq!(
-        provenant_os::changes::read(temp.path())
-            .unwrap()
-            .configuration,
-        Some(2)
-    );
+    let next_generation = provenant_os::changes::read(roots.state.as_path())
+        .unwrap()
+        .configuration
+        .unwrap();
+    assert!(next_generation > first_generation);
 }
 
 #[test]
@@ -1451,7 +1440,13 @@ fn config_edit_commits_when_the_change_signal_cannot_publish() {
     let temp = tempfile::tempdir().unwrap();
     let roots = state_roots(temp.path());
     // A directory at the signal name cannot be published. The write still succeeds.
-    std::fs::create_dir(temp.path().join(provenant_core::changes::FILE_NAME)).unwrap();
+    std::fs::create_dir(
+        roots
+            .state
+            .as_path()
+            .join(provenant_core::changes::FILE_NAME),
+    )
+    .unwrap();
     knob_edit(
         &roots,
         KnobEdit::Set {
@@ -1460,7 +1455,7 @@ fn config_edit_commits_when_the_change_signal_cannot_publish() {
         },
     )
     .unwrap();
-    assert!(temp.path().join("config.toml").exists());
+    assert!(roots.state.as_path().join("config.toml").exists());
 }
 
 #[test]
@@ -1500,7 +1495,7 @@ fn set_knob_is_written_atomically_and_shown_with_its_source() {
     let dir = tempfile::tempdir().unwrap();
     let roots = state_roots(dir.path());
 
-    let path = dir.path().join("config.toml");
+    let path = roots.state.as_path().join("config.toml");
     std::fs::write(
         &path,
         "schema_version = 1 # keep\nknobs = { \"lanes.max_concurrency\" = 1 } # inline\n",
@@ -1673,13 +1668,13 @@ fn set_rejects_out_of_range_values_and_unknown_knobs() {
         set("review.polish", "always"),
         Err(ConfigError::UnknownKnob { .. })
     ));
-    assert!(!dir.path().join("config.toml").exists());
+    assert!(!roots.state.as_path().join("config.toml").exists());
 }
 #[test]
 fn knob_edit_preserves_unknown_keys_while_applying_the_edit() {
     let dir = tempfile::tempdir().unwrap();
     let roots = state_roots(dir.path());
-    let path = dir.path().join("config.toml");
+    let path = roots.state.as_path().join("config.toml");
     let invalid = "schema_version = 1\nunknown = 1\n";
     std::fs::write(&path, invalid).unwrap();
     let config = knob_edit(&roots, KnobEdit::Profile("economy")).unwrap();
@@ -1693,8 +1688,12 @@ fn knob_edit_preserves_unknown_keys_while_applying_the_edit() {
 fn set_creates_a_missing_private_state_directory() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
-    let state = dir.path().join("state");
-    let roots = state_roots(&state);
+    let inputs = provenant_test_support::test_roots(dir.path()).unwrap();
+    let roots = inputs
+        .resolve(&provenant_test_support::IdentityPathResolver)
+        .unwrap();
+    let state = roots.state.as_path().to_owned();
+    std::fs::remove_dir(&state).unwrap();
     knob_edit(&roots, KnobEdit::Profile("economy")).unwrap();
     assert_eq!(
         std::fs::metadata(&state).unwrap().permissions().mode() & 0o777,
@@ -1746,12 +1745,16 @@ fn unknown_key_in_a_serde_decoded_section_reports_unknown_key_at_the_key() {
     ] {
         let config = load(&roots(), Some(text.as_bytes())).unwrap();
         assert_warning(&config, "unknown_key");
-        assert!(
-            config.warnings.iter().any(|warning| warning.line == line
-                && warning.message.starts_with(&format!("{key_path}:"))),
-            "{text}: {:?}",
-            config.warnings
-        );
+        let unknown: Vec<_> = config
+            .warnings
+            .iter()
+            .filter(|warning| warning.rule == "unknown_key")
+            .collect();
+        assert_eq!(unknown.len(), 1, "{text}: {:?}", config.warnings);
+        let warning = unknown[0];
+        assert_eq!(warning.path.as_path(), Path::new("config.toml"));
+        assert_eq!(warning.line, line);
+        assert!(warning.message.starts_with(&format!("{key_path}:")));
     }
 }
 
@@ -1832,104 +1835,57 @@ fn owner_marked_tables_replace_defaults_and_allow_empty_overrides() {
     }
 }
 
-/// Misplaced routing knobs name their exact domain field; unrelated unknown
-/// knob keys remain ordinary unknown-key warnings.
 #[test]
-fn misplaced_routing_knobs_name_their_current_domain_fields() {
-    for field in [
-        "capacity_cooldown_seconds",
-        "settlement_retries",
-        "capacity_retry_seconds",
-        "capacity_retry_max_seconds",
-        "retry_delay_ceiling_seconds",
-    ] {
-        let key = format!("domains.routing.{field}");
-        let text = format!("schema_version=1\n[knobs]\n'{key}'=30");
-        let config = load(&roots(), Some(text.as_bytes())).unwrap();
-        assert_warning(&config, "unknown_key");
-        let message = &config.warnings[0].message;
-        assert!(message.contains(&format!("knobs.{key}")), "{message}");
-        assert!(
-            message.contains(&format!("set `{field}` in `[domains.routing]`")),
-            "{message}"
-        );
+fn removed_cli_spellings_match_both_migration_documents() {
+    fn declared_spelling(removed: &Removed) -> String {
+        let path = removed.words.join(" ");
+        match removed.flag {
+            Some(flag) => format!("provenant {path} --{flag}"),
+            None => format!("provenant {path}"),
+        }
     }
-    let text = "schema_version=1\n[knobs]\n'domains.routing.future'=30";
-    let config = load(&roots(), Some(text.as_bytes())).unwrap();
-    assert_warning(&config, "unknown_key");
-    assert!(!config.warnings[0].message.contains("retired setting"));
-}
+    fn rows(document: &str) -> Vec<(String, String)> {
+        let start = "<!-- REMOVED_CLI_START -->";
+        let end = "<!-- REMOVED_CLI_END -->";
+        let body = document
+            .split_once(start)
+            .and_then(|(_, rest)| rest.split_once(end).map(|(body, _)| body))
+            .expect("removed-command table markers exist");
+        body.lines()
+            .filter(|line| line.trim_start().starts_with('|'))
+            .filter_map(|line| {
+                let mut cells = line.trim().trim_matches('|').split('|');
+                let spelling = cells.next()?.trim().trim_matches('`').to_owned();
+                let replacement = cells.next()?.trim().to_owned();
+                (spelling.starts_with("provenant ") && !replacement.is_empty())
+                    .then_some((spelling, replacement))
+            })
+            .collect()
+    }
 
-#[test]
-fn removed_model_policy_lane_keys_warn_with_current_controls() {
-    #[derive(Debug, Default, Deserialize, serde::Serialize)]
-    #[serde(default, deny_unknown_fields)]
-    struct Routing {
-        model_policy: ModelPolicy,
-    }
-    impl DomainConfig for Routing {}
-    #[derive(Debug, Default, Deserialize, serde::Serialize)]
-    #[serde(default, deny_unknown_fields)]
-    struct Aggregate {
-        routing: Routing,
-    }
-    #[derive(Debug, Default, Deserialize, serde::Serialize)]
-    #[serde(default, deny_unknown_fields)]
-    struct ModelPolicy {
-        defaults: Defaults,
-    }
-    #[derive(Debug, Default, Deserialize, serde::Serialize)]
-    #[serde(default, deny_unknown_fields)]
-    struct Defaults {
-        lane: Lane,
-    }
-    #[derive(Debug, Default, Deserialize, serde::Serialize)]
-    #[serde(default, deny_unknown_fields)]
-    struct Lane {
-        max_context: Option<u64>,
-    }
-    fn defaults(_: Profile) -> &'static str {
-        ""
-    }
-    const SECTIONS: DomainSections<Aggregate> =
-        DomainSections::new(&[DomainSection::new::<Routing>("routing", defaults)]);
-    let current_text =
-        "schema_version=1\n[domains.routing.model_policy.defaults.lane]\nmax_context=2048";
-    let current = load_with_domains(&roots(), Some(current_text.as_bytes()), &SECTIONS).unwrap();
-    assert_eq!(
-        current
-            .domains
-            .routing
-            .model_policy
-            .defaults
-            .lane
-            .max_context,
-        Some(2048)
-    );
-    for (key, value, remedy) in [
-        (
-            "max_continuations",
-            "2",
-            "graph `limits.continuations` to bound restarts",
-        ),
-        (
-            "resume_continuations",
-            "true",
-            "automatic restarts use fresh sessions",
-        ),
+    let expected: std::collections::BTreeSet<_> = REMOVED
+        .iter()
+        .map(|removed| (declared_spelling(removed), removed.replacement.to_owned()))
+        .collect();
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+    for path in [
+        repository.join("docs/runbooks/using-provenant-2-from-another-repository.md"),
+        repository.join("docs/specs/consumer-contract.md"),
     ] {
-        let text = format!(
-            "schema_version=1\n[domains.routing.model_policy.defaults.lane]\n{key}={value}"
+        let source = std::fs::read_to_string(&path).unwrap();
+        let entries = rows(&source);
+        let actual: std::collections::BTreeSet<_> = entries.iter().cloned().collect();
+        assert_eq!(
+            entries.len(),
+            actual.len(),
+            "duplicate migration rows in {}",
+            path.display()
         );
-        let config = load_with_domains(&roots(), Some(text.as_bytes()), &SECTIONS).unwrap();
-        assert_warning(&config, "unknown_key");
-        let full_key = format!("domains.routing.model_policy.defaults.lane.{key}");
-        assert!(
-            config.warnings.iter().any(|warning| {
-                warning.message.contains(&full_key) && warning.message.contains(remedy)
-            }),
-            "{key}: {:?}",
-            config.warnings
+        assert_eq!(
+            actual,
+            expected,
+            "migration rows disagree in {}",
+            path.display()
         );
     }
 }

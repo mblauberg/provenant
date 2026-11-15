@@ -205,6 +205,7 @@ where
                 changes: changes.clone(),
                 before_revision: before_revision.clone(),
                 after_revision: after_revision.clone(),
+                extra: Default::default(),
             };
             // The edit is already committed; history is advisory and must not
             // turn a durable change into a reported failure.

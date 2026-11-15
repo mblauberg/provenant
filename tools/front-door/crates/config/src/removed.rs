@@ -1,18 +1,10 @@
-//! The released spellings this format no longer accepts.
-//!
-//! CLI command and option refusals and configuration-key warnings share this
-//! table so each retired spelling has one current replacement.
+//! Removed CLI command and option spellings with their replacements.
 
 #[derive(Clone, Copy, Debug)]
 pub struct Removed {
     pub words: &'static [&'static str],
     pub flag: Option<&'static str>,
     pub replacement: &'static str,
-    pub config_key: Option<&'static str>,
-    /// Exact diagnostic code emitted for a removed configuration contract.
-    pub diagnostic_code: Option<&'static str>,
-    /// Exact graph-node field removed from authored graph documents.
-    pub graph_field: Option<&'static str>,
 }
 
 pub const fn verb(words: &'static [&'static str], replacement: &'static str) -> Removed {
@@ -20,9 +12,6 @@ pub const fn verb(words: &'static [&'static str], replacement: &'static str) -> 
         words,
         flag: None,
         replacement,
-        config_key: None,
-        diagnostic_code: None,
-        graph_field: None,
     }
 }
 
@@ -35,58 +24,12 @@ pub const fn flag(
         words,
         flag: Some(flag),
         replacement,
-        config_key: None,
-        diagnostic_code: None,
-        graph_field: None,
     }
 }
 
-pub const fn config_key(key: &'static str, replacement: &'static str) -> Removed {
-    Removed {
-        words: &[],
-        flag: None,
-        replacement,
-        config_key: Some(key),
-        diagnostic_code: None,
-        graph_field: None,
-    }
-}
-
-/// Describe a removed graph-node field and its replacement.
-pub const fn graph_field(field: &'static str, replacement: &'static str) -> Removed {
-    Removed {
-        words: &[],
-        flag: None,
-        replacement,
-        config_key: None,
-        diagnostic_code: None,
-        graph_field: Some(field),
-    }
-}
-
-/// Describe a removed configuration diagnostic code and its repair.
-pub const fn diagnostic_code(code: &'static str, replacement: &'static str) -> Removed {
-    Removed {
-        words: &[],
-        flag: None,
-        replacement,
-        config_key: None,
-        diagnostic_code: Some(code),
-        graph_field: None,
-    }
-}
-
-/// Every removed CLI spelling and config key. A CLI spelling exits 2 with one
-/// line naming its replacement; there are no aliases.
+/// Every removed CLI spelling exits 2 with one line naming its replacement;
+/// there are no aliases.
 pub const REMOVED: &[Removed] = &[
-    config_key(
-        "domains.fabric.lanes.build_wait_minutes",
-        "build slots try once and proceed; Cargo manages its own locks",
-    ),
-    config_key(
-        "lanes.slot_wait_seconds",
-        "build-slot waits and their wall-clock extension have been removed",
-    ),
     flag(
         &["dispatch"],
         "prompt-file",
@@ -207,81 +150,16 @@ pub const REMOVED: &[Removed] = &[
         "provenant telemetry trace NAME",
     ),
     flag(&["pr", "status"], "wait", "provenant pr watch NUMBER"),
-    config_key(
-        "knobs.domains.routing.capacity_cooldown_seconds",
-        "set `capacity_cooldown_seconds` in `[domains.routing]`",
-    ),
-    config_key(
-        "knobs.domains.routing.settlement_retries",
-        "set `settlement_retries` in `[domains.routing]`",
-    ),
-    config_key(
-        "knobs.domains.routing.capacity_retry_seconds",
-        "set `capacity_retry_seconds` in `[domains.routing]`",
-    ),
-    config_key(
-        "knobs.domains.routing.capacity_retry_max_seconds",
-        "set `capacity_retry_max_seconds` in `[domains.routing]`",
-    ),
-    config_key(
-        "knobs.domains.routing.retry_delay_ceiling_seconds",
-        "set `retry_delay_ceiling_seconds` in `[domains.routing]`",
-    ),
-    config_key(
-        "lane.max_continuations",
-        "no direct equivalent; use graph `limits.continuations` to bound restarts",
-    ),
-    config_key(
-        "lane.resume_continuations",
-        "no direct equivalent; automatic restarts use fresh sessions; choose the node `on_stop` policy",
-    ),
-    config_key(
-        "domains.fabric.pipelines",
-        "no direct equivalent; delete this stale pipeline table",
-    ),
-    diagnostic_code(
-        "retired.writer_launch_seconds",
-        "removed setting; use `domains.fabric.graph.launch_wait_seconds` for launch and wait, `domains.fabric.graph.writer_provision_seconds` for writer provisioning",
-    ),
     flag(
         &["steer"],
         "text-stdin",
         "provenant steer TARGET --brief-file -",
     ),
-    diagnostic_code(
-        "moved_to_schedule.starts",
-        "replace `starts_unix_seconds` with `schedule.starts`",
-    ),
-    diagnostic_code(
-        "moved_to_schedule.expires",
-        "replace `expires_unix_seconds` with `schedule.expires`",
-    ),
-    diagnostic_code(
-        "moved_to_schedule.windows",
-        "replace `windows` with `schedule.windows`",
-    ),
-    diagnostic_code(
-        "retired.bundle_bytes",
-        "no direct equivalent; delete this setting; Git transport controls bundle sizing",
-    ),
-    graph_field("brief", "prompt"),
 ];
 
 impl Removed {
     /// The one line a removed command spelling prints.
     pub fn message(&self) -> String {
-        if let Some(field) = self.graph_field {
-            return format!(
-                "graph node field `{field}` is removed; use `{}`",
-                self.replacement
-            );
-        }
-        if let Some(key) = self.config_key {
-            return format!("`{key}` is removed; {}", self.replacement);
-        }
-        if let Some(code) = self.diagnostic_code {
-            return format!("`{code}` is refused; {}", self.replacement);
-        }
         let path = self.words.join(" ");
         let message = if self.replacement.starts_with("no direct equivalent;") {
             self.replacement.to_owned()
@@ -293,36 +171,4 @@ impl Removed {
             None => format!("`{path}` is removed; {message}"),
         }
     }
-}
-
-pub fn graph_field_replacement(field: &str) -> Option<&'static str> {
-    REMOVED
-        .iter()
-        .find(|removed| removed.graph_field == Some(field))
-        .map(|removed| removed.replacement)
-}
-
-pub fn config_key_replacement(key: &str) -> Option<&'static str> {
-    REMOVED
-        .iter()
-        .find(|removed| {
-            removed.config_key.is_some_and(|retired| {
-                key == retired
-                    || key
-                        .strip_prefix(retired)
-                        .is_some_and(|suffix| suffix.starts_with('.'))
-                    || key
-                        .strip_suffix(retired)
-                        .is_some_and(|prefix| prefix.ends_with('.'))
-            })
-        })
-        .map(|removed| removed.replacement)
-}
-
-/// Return the remedy attached to an exact domain diagnostic code.
-pub fn diagnostic_code_replacement(code: &str) -> Option<&'static str> {
-    REMOVED
-        .iter()
-        .find(|removed| removed.diagnostic_code == Some(code))
-        .map(|removed| removed.replacement)
 }

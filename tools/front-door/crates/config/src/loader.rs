@@ -3,7 +3,7 @@ use crate::{
     ResolvedConfig, SectionError, domains::NO_DOMAINS,
 };
 use provenant_core::Roots;
-use provenant_records::Limits;
+use provenant_records::{InputWarning, Limits};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -113,15 +113,18 @@ pub fn config_show<T: DeserializeOwned + Serialize>(
 // A separate marker for each finding ensures different domain readers do not
 // consume each other's warnings. Creation is atomic across concurrent commands.
 fn first_warning(state: &Path, text: Option<&str>, warning: &Finding) -> bool {
+    first_warning_bytes(state, text.unwrap_or_default().as_bytes(), &warning.message)
+}
+
+fn first_warning_bytes(state: &Path, text: &[u8], message: &str) -> bool {
     // The command edge reads settings for usage attribution before dispatching
     // the hook. Suppress those advisories as well as the hook's own reads.
     if is_pre_tool_hook(std::env::args_os().skip(1)) {
         return false;
     }
-    let text = text.unwrap_or_default().as_bytes();
     let mut bytes = (text.len() as u64).to_be_bytes().to_vec();
     bytes.extend_from_slice(text);
-    bytes.extend_from_slice(warning.message.as_bytes());
+    bytes.extend_from_slice(message.as_bytes());
     let digest = provenant_records::CanonicalV1::file_digest(&bytes);
     let name = format!("config-warning-{digest}");
     let Ok(dir) = provenant_os::fs::Directory::open_anchor(state) else {
@@ -131,6 +134,20 @@ fn first_warning(state: &Path, text: Option<&str>, warning: &Finding) -> bool {
         Ok(_) => true,
         Err(error) if error.is_exists() => false,
         Err(_) => true,
+    }
+}
+
+pub(crate) fn warn_unknown_input_once(state: &Path, bytes: &[u8], warning: &InputWarning) -> bool {
+    let message = format!(
+        "{}: {}: unknown configuration key; ignored",
+        warning.source, warning.key
+    );
+    if first_warning_bytes(state, bytes, &message) {
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+        true
+    } else {
+        false
     }
 }
 
@@ -1350,24 +1367,12 @@ fn issue_finding(issue: &Issue) -> Result<Finding, ConfigError> {
             ),
         });
     }
-    if issue.rule == "unknown_key"
-        && let Some(replacement) = crate::removed::config_key_replacement(&key)
-    {
+    if issue.rule == "unknown_key" {
         return Ok(Finding {
             rule: issue.rule.into(),
             path: user_path()?,
             line: issue.location.line,
-            message: format!("{key}: removed setting; {replacement}"),
-        });
-    }
-    if let Some(source) = &issue.source
-        && let Some(replacement) = crate::removed::diagnostic_code_replacement(source.code)
-    {
-        return Ok(Finding {
-            rule: issue.rule.into(),
-            path: user_path()?,
-            line: issue.location.line,
-            message: format!("{key}: {replacement}"),
+            message: format!("{key}: unknown configuration key; ignored"),
         });
     }
     Ok(Finding {
@@ -1393,25 +1398,14 @@ fn issue_finding(issue: &Issue) -> Result<Finding, ConfigError> {
         },
     })
 }
-/// Plain-text warning for a `[knobs]` entry the resolver ignored.
+/// Plain-text warning for an invalid `[knobs]` value.
 fn knob_message(key: &str, rule: &str) -> String {
     let name = key.trim_start_matches("knobs.");
-    if rule != "unknown_key" {
-        let fallback = match crate::knobs::safe_value(name) {
-            Some(value) => format!("using the restrictive value {value}"),
-            None => "using the default".to_owned(),
-        };
-        return format!("{key}: invalid value ({rule}); {fallback}");
-    }
-    match crate::knobs::nearest_knobs(name).as_slice() {
-        [] => format!(
-            "{key}: unknown knob, ignored; run `provenant config schema` for the valid names"
-        ),
-        near => format!(
-            "{key}: unknown knob, ignored; did you mean {}?",
-            near.join(", ")
-        ),
-    }
+    let fallback = match crate::knobs::safe_value(name) {
+        Some(value) => format!("using the restrictive value {value}"),
+        None => "using the default".to_owned(),
+    };
+    format!("{key}: invalid value ({rule}); {fallback}")
 }
 fn qualify(name: &str, field: &str) -> String {
     if field.is_empty() {
@@ -2552,30 +2546,21 @@ fn normalise_tables(table: &mut Table) {
 #[cfg(test)]
 mod warning_tests {
     use super::*;
-    use provenant_core::{PathResolver, RootInputs};
-    use std::{io, path::PathBuf};
-
-    struct Resolver;
-    impl PathResolver for Resolver {
-        fn resolve_existing_ancestor(&self, path: &Path) -> io::Result<PathBuf> {
-            Ok(path.to_owned())
-        }
-    }
 
     #[test]
     fn warning_stamp_is_per_revision_and_finding() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
-        let mut inputs = RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
-        inputs.state_dir = Some(temp.path().join("state"));
-        std::fs::create_dir(inputs.state_dir.as_ref().ok_or("state")?)?;
-        let roots = inputs.resolve(&Resolver)?;
+        let inputs = provenant_test_support::test_roots(temp.path())?;
+        let roots = inputs.resolve(&provenant_test_support::IdentityPathResolver)?;
         let text = b"schema_version=1\n[knobs]\nunregistered.setting=1";
         let config = load(&roots, Some(&text[..]))?;
         let warning = config
             .warnings
             .iter()
-            .find(|warning| warning.message.contains("unknown knob"))
+            .find(|warning| warning.rule == "unknown_key")
             .ok_or("missing current unknown-key warning")?;
+        assert!(warning.path.as_path().ends_with("config.toml"));
+        assert!(warning.line > 0);
         assert!(first_warning(
             roots.state.as_path(),
             Some("revision one"),
@@ -2590,6 +2575,29 @@ mod warning_tests {
             roots.state.as_path(),
             Some("revision two"),
             warning
+        ));
+        let port_warning = InputWarning {
+            source: "ports.json".into(),
+            key: "verify.future_option".into(),
+        };
+        assert!(warn_unknown_input_once(
+            roots.state.as_path(),
+            b"same source bytes",
+            &port_warning
+        ));
+        assert!(!warn_unknown_input_once(
+            roots.state.as_path(),
+            b"same source bytes",
+            &port_warning
+        ));
+        let project_warning = InputWarning {
+            source: "project/.provenant/ports.json".into(),
+            key: port_warning.key.clone(),
+        };
+        assert!(warn_unknown_input_once(
+            roots.state.as_path(),
+            b"same source bytes",
+            &project_warning
         ));
         Ok(())
     }

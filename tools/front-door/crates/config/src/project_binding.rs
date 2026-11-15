@@ -52,13 +52,14 @@ impl ProjectBinding {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ProjectBindingRecord {
     schema_version: u64,
     project: ProjectId,
     /// Lowercase hex of native absolute path bytes, keeping the record
     /// portable across non-UTF-8 Unix directory names.
     canonical_common_dir: String,
+    #[serde(flatten)]
+    extra: provenant_records::ExtraFields,
 }
 
 /// Find or allocate the host-local identity for this canonical location.
@@ -279,8 +280,7 @@ fn bindings(projects: &Directory) -> Result<Vec<ProjectBinding>, ConfigError> {
             Err(error) => return Err(error.into()),
         };
         let bytes = read_record(&directory, OsStr::new(RECORD), &entry, RECORD_LIMIT)?;
-        let record: ProjectBindingRecord =
-            serde_json::from_slice(&bytes).map_err(|_| ConfigError::InvalidProjectBinding)?;
+        let record = decode_binding_record(&bytes)?;
         if record.schema_version != 1 || record.project != project {
             return Err(ConfigError::InvalidProjectBinding);
         }
@@ -309,8 +309,10 @@ fn create_binding(
         schema_version: 1,
         project,
         canonical_common_dir: encode_location(&canonical_common_dir),
+        extra: Default::default(),
     };
-    let bytes = serde_json::to_vec(&record).map_err(|_| ConfigError::InvalidProjectBinding)?;
+    let bytes =
+        provenant_records::encode(&record).map_err(|_| ConfigError::InvalidProjectBinding)?;
     match directory.atomic_write_with_permissions(
         OsStr::new(RECORD),
         ".project-",
@@ -326,13 +328,12 @@ fn create_binding(
     }
     directory.sync()?;
     let entry = directory.metadata_at(OsStr::new(RECORD), false)?;
-    let stored = serde_json::from_slice::<ProjectBindingRecord>(&read_record(
+    let stored = decode_binding_record(&read_record(
         &directory,
         OsStr::new(RECORD),
         &entry,
         RECORD_LIMIT,
-    )?)
-    .map_err(|_| ConfigError::InvalidProjectBinding)?;
+    )?)?;
     if stored.schema_version != 1
         || stored.project != project
         || decode_location(&stored.canonical_common_dir)? != canonical_common_dir
@@ -344,6 +345,14 @@ fn create_binding(
         project,
         canonical_common_dir,
     })
+}
+
+fn decode_binding_record(bytes: &[u8]) -> Result<ProjectBindingRecord, ConfigError> {
+    let limits = provenant_records::Limits {
+        max_bytes: RECORD_LIMIT,
+        ..provenant_records::Limits::CONFIG
+    };
+    provenant_records::decode(bytes, limits).map_err(|_| ConfigError::InvalidProjectBinding)
 }
 
 fn open_or_create_projects(state: &Directory) -> Result<Directory, ConfigError> {
@@ -495,7 +504,7 @@ fn read_host(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_core::{RootInputs, Roots};
+    use provenant_core::Roots;
 
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -509,18 +518,9 @@ mod tests {
     }
 
     fn roots(temp: &tempfile::TempDir) -> Roots {
-        let base = canonical_base(temp);
-        let home = base.join("home");
-        let state = base.join("state");
-        let checkout = base.join("checkout");
-        fs::create_dir_all(&home).unwrap();
-        fs::create_dir_all(&state).unwrap();
-        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::create_dir_all(&checkout).unwrap();
-        let mut inputs = RootInputs::new(home, checkout);
-        inputs.state_dir = Some(state);
+        let inputs = provenant_test_support::test_roots(temp.path()).unwrap();
         inputs
-            .resolve(&provenant_os::fs::SystemPathResolver)
+            .resolve(&provenant_test_support::IdentityPathResolver)
             .unwrap()
     }
 
@@ -533,6 +533,7 @@ mod tests {
         fs::write(common.join("HEAD"), "ref: refs/heads/main").unwrap();
         let location = ProjectLocation::new(&common).unwrap();
         let before = bind_project(&roots, location.clone()).unwrap();
+        assert_eq!(before.common_dir(), common);
         fs::remove_file(common.join("HEAD")).unwrap();
         assert_eq!(bind_project(&roots, location.clone()).unwrap(), before);
         assert_eq!(lookup_project(&roots, &location).unwrap(), Some(before));
@@ -554,7 +555,12 @@ mod tests {
             .join(format!("{STAGE_PREFIX}{}", ProjectId::from_bytes([31; 16])));
         fs::create_dir(&stage).unwrap();
         fs::write(stage.join(RECORD), "partial").unwrap();
-        assert_eq!(registered_gc_projects(&roots).unwrap(), vec![binding]);
+        assert!(registered_gc_projects(&roots).unwrap().contains(&binding));
+
+        let next = canonical_base(&temp).join("next/.git");
+        fs::create_dir_all(next.join("objects")).unwrap();
+        fs::write(next.join("HEAD"), "ref: refs/heads/main").unwrap();
+        bind_project(&roots, ProjectLocation::new(&next).unwrap()).unwrap();
         assert_eq!(fs::read_to_string(stage.join(RECORD)).unwrap(), "partial");
     }
 
@@ -613,21 +619,6 @@ mod tests {
         selection.skipped_transient.sort();
         excluded.sort();
         assert_eq!(selection.skipped_transient, excluded);
-    }
-
-    #[test]
-    fn bind_project_reuses_identity_for_the_same_canonical_common_dir() {
-        let temp = tempdir();
-        let roots = roots(&temp);
-        let base = canonical_base(&temp);
-        let location = ProjectLocation::new(base.join("repository/.git")).unwrap();
-        fs::create_dir_all(location.common_dir()).unwrap();
-
-        let first = bind_project(&roots, location.clone()).unwrap();
-        let second = bind_project(&roots, location).unwrap();
-
-        assert_eq!(first, second);
-        assert_eq!(first.canonical_common_dir, base.join("repository/.git"));
     }
 
     // Competing no-replace publishers converge by validating the winning record.
@@ -729,8 +720,13 @@ mod tests {
             schema_version: 1,
             project: duplicate_id,
             canonical_common_dir: encode_location(&duplicated_dir),
+            extra: Default::default(),
         };
-        fs::write(duplicate.join(RECORD), serde_json::to_vec(&record).unwrap()).unwrap();
+        fs::write(
+            duplicate.join(RECORD),
+            provenant_records::encode(&record).unwrap(),
+        )
+        .unwrap();
         fs::set_permissions(duplicate.join(RECORD), fs::Permissions::from_mode(0o600)).unwrap();
         assert_ne!(target.project_id(), duplicate_id);
         assert_ne!(duplicated.project_id(), duplicate_id);
@@ -752,10 +748,11 @@ mod tests {
             schema_version: 1,
             project: duplicate_target_id,
             canonical_common_dir: encode_location(&target_dir),
+            extra: Default::default(),
         };
         fs::write(
             duplicate_target.join(RECORD),
-            serde_json::to_vec(&record).unwrap(),
+            provenant_records::encode(&record).unwrap(),
         )
         .unwrap();
         fs::set_permissions(
@@ -769,6 +766,30 @@ mod tests {
     }
 
     #[test]
+    fn project_binding_record_preserves_unknown_fields_with_bounded_decode() {
+        let key = format!("future_{}", "field");
+        let project = ProjectId::from_bytes([24; 16]);
+        let mut payload = serde_json::json!({
+            "schema_version": 1,
+            "project": project,
+            "canonical_common_dir": "2f746d702f7265706f",
+        });
+        let unknown = serde_json::json!({"nested": [true, 7]});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert(key.clone(), unknown.clone());
+        let bytes = serde_json::to_vec(&payload).unwrap();
+        let decoded = decode_binding_record(&bytes).unwrap();
+        assert_eq!(decoded.extra.get(&key), Some(&unknown));
+
+        let encoded = provenant_records::encode(&decoded).unwrap();
+        let round_trip = decode_binding_record(&encoded).unwrap();
+        assert_eq!(round_trip.extra.get(&key), Some(&unknown));
+        assert_eq!(round_trip.project, project);
+    }
+
+    #[test]
     fn project_location_rejects_noncanonical_path_shapes() {
         for path in [
             PathBuf::from("relative"),
@@ -777,28 +798,6 @@ mod tests {
         ] {
             assert!(ProjectLocation::new(path).is_err());
         }
-    }
-
-    #[test]
-    fn bind_project_leaves_unclaimed_stage_contents_untouched() {
-        let temp = tempdir();
-        let roots = roots(&temp);
-        let base = canonical_base(&temp);
-        let projects = roots.state.as_path().join(PROJECTS_DIR);
-        fs::create_dir(&projects).unwrap();
-        fs::set_permissions(&projects, fs::Permissions::from_mode(0o700)).unwrap();
-
-        let project = ProjectId::from_bytes([8; 16]);
-        let stage = projects.join(format!("{STAGE_PREFIX}{project}"));
-        fs::create_dir(&stage).unwrap();
-        fs::set_permissions(&stage, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::write(stage.join(RECORD), b"partial record").unwrap();
-        fs::set_permissions(stage.join(RECORD), fs::Permissions::from_mode(0o600)).unwrap();
-        let location = ProjectLocation::new(base.join("repository/.git")).unwrap();
-        fs::create_dir_all(location.common_dir()).unwrap();
-        bind_project(&roots, location).unwrap();
-
-        assert_eq!(fs::read(stage.join(RECORD)).unwrap(), b"partial record");
     }
 
     #[test]

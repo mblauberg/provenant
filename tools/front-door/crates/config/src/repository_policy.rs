@@ -1,7 +1,7 @@
 //! Opt-in launch classification from the repository's project configuration.
 use crate::ConfigError;
 use provenant_os::fs::Directory;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
     ffi::OsStr,
@@ -11,8 +11,7 @@ use std::{
 
 pub const REPOSITORY_CONFIG: &str = ".provenant/config.toml";
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct RepositoryPolicy {
     #[serde(default)]
     pub confidential: bool,
@@ -22,31 +21,153 @@ pub struct RepositoryPolicy {
 }
 
 /// The `[launch_policy]` section (`repository_files::LAUNCH_POLICY_SECTION`).
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct ProjectConfig {
     #[serde(default)]
     launch_policy: RepositoryPolicy,
+    #[serde(default)]
+    domains: ProjectDomains,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct ProjectDomains {
+    #[serde(default)]
+    pr: ProjectPrDomains,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct ProjectPrDomains {}
+
+fn decode_project_config(
+    source: &str,
+    text: &str,
+) -> Result<(ProjectConfig, Vec<provenant_records::InputWarning>), ConfigError> {
+    let config: ProjectConfig =
+        toml_edit::de::from_str(text).map_err(|_| ConfigError::InvalidRepositoryPolicy)?;
+    let document: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|_| ConfigError::InvalidRepositoryPolicy)?;
+    let accepted =
+        serde_json::to_value(&config).map_err(|_| ConfigError::InvalidRepositoryPolicy)?;
+    let mut warnings = Vec::new();
+    collect_unknown_toml_keys(document.as_table(), &accepted, "", source, &mut warnings);
+    Ok((config, warnings))
+}
+
+fn collect_unknown_toml_keys(
+    table: &toml_edit::Table,
+    accepted: &serde_json::Value,
+    prefix: &str,
+    source: &str,
+    warnings: &mut Vec<provenant_records::InputWarning>,
+) {
+    for (key, item) in table.iter() {
+        let path = if prefix.is_empty() {
+            key.to_owned()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        if path == crate::repository_files::LAND_SECTION {
+            continue;
+        }
+        let Some(accepted) = accepted.get(key) else {
+            warnings.push(provenant_records::InputWarning {
+                source: source.to_owned(),
+                key: path,
+            });
+            continue;
+        };
+        if let Some(child) = item.as_table() {
+            collect_unknown_toml_keys(child, accepted, &path, source, warnings);
+        } else if let Some(child) = item.as_inline_table() {
+            collect_unknown_inline_toml_keys(child, accepted, &path, source, warnings);
+        }
+    }
+}
+
+fn collect_unknown_inline_toml_keys(
+    table: &toml_edit::InlineTable,
+    accepted: &serde_json::Value,
+    prefix: &str,
+    source: &str,
+    warnings: &mut Vec<provenant_records::InputWarning>,
+) {
+    for (key, value) in table.iter() {
+        let path = format!("{prefix}.{key}");
+        if path == crate::repository_files::LAND_SECTION {
+            continue;
+        }
+        let Some(accepted) = accepted.get(key) else {
+            warnings.push(provenant_records::InputWarning {
+                source: source.to_owned(),
+                key: path,
+            });
+            continue;
+        };
+        if let Some(child) = value.as_inline_table() {
+            collect_unknown_inline_toml_keys(child, accepted, &path, source, warnings);
+        }
+    }
+}
+
+fn warn_project_config(warnings: &[provenant_records::InputWarning]) {
+    use std::io::Write;
+    for warning in warnings {
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "warning: {}: {}: unknown configuration key; ignored",
+            warning.source,
+            warning.key
+        );
+    }
 }
 
 /// Read the landing declaration from the same project file as launch policy.
-/// `T` is the domain owner's strict override type, so obsolete keys are rejected.
-pub fn read_land<T: serde::de::DeserializeOwned>(
+/// Known type errors remain errors; unknown keys are diagnosed and ignored.
+pub fn read_land<T: serde::de::DeserializeOwned + Serialize>(
     checkout: &Path,
 ) -> Result<Option<T>, ConfigError> {
     let Some(text) = read_declaration(checkout)? else {
         return Ok(None);
     };
+    let source = checkout.join(REPOSITORY_CONFIG).display().to_string();
+    let (_, mut warnings) = decode_project_config(&source, &text)?;
     let config: serde_json::Value =
         toml_edit::de::from_str(&text).map_err(|_| ConfigError::InvalidRepositoryPolicy)?;
-    config
+    let land = config
         .pointer(&crate::repository_files::section_pointer(
             crate::repository_files::LAND_SECTION,
         ))
-        .cloned()
-        .map(|value| {
-            serde_json::from_value(value).map_err(|_| ConfigError::InvalidRepositoryPolicy)
+        .cloned();
+    let Some(land) = land else {
+        warn_project_config(&warnings);
+        return Ok(None);
+    };
+    let (land, land_warnings) = decode_land(&source, &land)?;
+    warnings.extend(land_warnings);
+    warn_project_config(&warnings);
+    Ok(Some(land))
+}
+
+fn decode_land<T: serde::de::DeserializeOwned + Serialize>(
+    source: &str,
+    value: &serde_json::Value,
+) -> Result<(T, Vec<provenant_records::InputWarning>), ConfigError> {
+    let bytes = serde_json::to_vec(value).map_err(|_| ConfigError::InvalidRepositoryPolicy)?;
+    let (land, warnings) = provenant_records::decode_input(source, &bytes)
+        .map_err(|_| ConfigError::InvalidRepositoryPolicy)?;
+    let warnings = warnings
+        .into_iter()
+        .map(|mut warning| {
+            warning.key = if warning.key.is_empty() {
+                crate::repository_files::LAND_SECTION.into()
+            } else {
+                format!("{}.{}", crate::repository_files::LAND_SECTION, warning.key)
+            };
+            warning
         })
-        .transpose()
+        .collect();
+    Ok((land, warnings))
 }
 
 fn read_declaration(checkout: &Path) -> Result<Option<String>, ConfigError> {
@@ -79,8 +200,9 @@ impl RepositoryPolicy {
         let Some(text) = read_declaration(checkout)? else {
             return Ok(None);
         };
-        let config: ProjectConfig =
-            toml_edit::de::from_str(&text).map_err(|_| ConfigError::InvalidRepositoryPolicy)?;
+        let source = checkout.join(REPOSITORY_CONFIG).display().to_string();
+        let (config, warnings) = decode_project_config(&source, &text)?;
+        warn_project_config(&warnings);
         if config.launch_policy.protected_paths.iter().any(|path| {
             let path = path_with_separators(path);
             path.as_os_str().is_empty()
@@ -298,8 +420,7 @@ mod tests {
 
     #[test]
     fn landing_uses_the_existing_project_declaration() -> Result<(), Box<dyn std::error::Error>> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
+        #[derive(Deserialize, Serialize)]
         struct Declaration {
             strategy: provenant_records::landing::Strategy,
         }
@@ -308,13 +429,33 @@ mod tests {
         std::fs::create_dir(root.path().join(".provenant"))?;
         std::fs::write(
             root.path().join(REPOSITORY_CONFIG),
-            "[launch_policy]\nconfidential=true\n[domains.pr.land]\nstrategy='queue'\n",
+            "[launch_policy]\nconfidential=true\n[domains.pr.land]\nstrategy='queue'\nfuture=true\n",
         )?;
         assert_eq!(
             read_land::<Declaration>(root.path())?
                 .ok_or("missing declaration")?
                 .strategy,
             provenant_records::landing::Strategy::Queue
+        );
+        let source = root.path().join(REPOSITORY_CONFIG).display().to_string();
+        let document: serde_json::Value = toml_edit::de::from_str(&std::fs::read_to_string(
+            root.path().join(REPOSITORY_CONFIG),
+        )?)?;
+        let land = document
+            .pointer(&crate::repository_files::section_pointer(
+                crate::repository_files::LAND_SECTION,
+            ))
+            .ok_or("missing land section")?;
+        let (decoded, warnings) = decode_land::<Declaration>(&source, land)?;
+        assert_eq!(
+            decoded.strategy,
+            provenant_records::landing::Strategy::Queue
+        );
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].source, source);
+        assert_eq!(
+            warnings[0].key,
+            format!("{}.future", crate::repository_files::LAND_SECTION)
         );
         assert!(
             RepositoryPolicy::read(root.path())?
@@ -323,27 +464,45 @@ mod tests {
         );
         std::fs::write(
             root.path().join(REPOSITORY_CONFIG),
-            "[domains.pr.land]\nintegration='single'\n",
+            "[domains.pr.land]\nstrategy='unsupported'\n",
         )?;
         assert!(read_land::<Declaration>(root.path()).is_err());
         Ok(())
     }
 
     #[test]
-    fn every_declared_launch_policy_key_is_accepted_and_others_are_refused()
+    fn launch_policy_unknown_keys_warn_with_the_repository_config_source()
     -> Result<(), Box<dyn std::error::Error>> {
         use crate::repository_files::{LAUNCH_POLICY_KEYS, LAUNCH_POLICY_SECTION};
         let root = tempfile::tempdir()?;
         std::fs::create_dir(root.path().join(".provenant"))?;
         let value = |key: &str| if key == "confidential" { "true" } else { "[]" };
-        for key in LAUNCH_POLICY_KEYS.iter().copied().chain(["undeclared"]) {
+        for key in LAUNCH_POLICY_KEYS.iter().copied() {
             std::fs::write(
                 root.path().join(REPOSITORY_CONFIG),
                 format!("[{LAUNCH_POLICY_SECTION}]\n{key}={}\n", value(key)),
             )?;
-            let read = RepositoryPolicy::read(root.path());
-            assert_eq!(read.is_ok(), LAUNCH_POLICY_KEYS.contains(&key), "{key}");
+            assert!(RepositoryPolicy::read(root.path())?.is_some(), "{key}");
         }
+
+        let text = format!(
+            "[{LAUNCH_POLICY_SECTION}]\nconfidential=true\nprotected_paths=[]\nundeclared=true\n[future_section]\nvalue=1\n"
+        );
+        std::fs::write(root.path().join(REPOSITORY_CONFIG), &text)?;
+        assert!(RepositoryPolicy::read(root.path())?.is_some());
+        let source = root.path().join(REPOSITORY_CONFIG).display().to_string();
+        let (_, warnings) = decode_project_config(&source, &text)?;
+        let actual: std::collections::BTreeSet<_> = warnings
+            .into_iter()
+            .map(|warning| (warning.source, warning.key))
+            .collect();
+        assert_eq!(
+            actual,
+            std::collections::BTreeSet::from([
+                (source.clone(), "future_section".into()),
+                (source, "launch_policy.undeclared".into()),
+            ])
+        );
         Ok(())
     }
 
