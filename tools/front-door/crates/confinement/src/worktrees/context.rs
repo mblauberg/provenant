@@ -103,22 +103,14 @@ pub fn with_context_using_workers_and_facts<T>(
         Duration::from_secs(5),
         cancel,
     )?;
-    let selected_root = selected.root_path().to_path_buf();
-    let project_root = layout
-        .project()
-        .ok_or(WorktreeError::ProjectLayoutUnresolved)?;
-    let repo = if project_root == selected_root {
-        selected
-    } else {
-        runtime.open_repo(&executor, project_root, budget, cancel)?
-    };
     let registry = child(&state, OsStr::new("worktrees"))?;
     let project_state = child(&registry, OsStr::new(&binding.project_id().to_string()))?;
     let lock_budget =
         WaitBudget::cli(clock.mono_now(), 5).map_err(|_| WorktreeError::InvalidRequest)?;
     action(&WorktreeContext {
         home,
-        repo: &repo,
+        repo: &selected,
+        layout: &layout,
         binding: &binding,
         project_state: &project_state,
         executor: &executor,

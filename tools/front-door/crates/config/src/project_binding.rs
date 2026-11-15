@@ -1,6 +1,6 @@
 //! Host-local project identity indexed by the canonical Git common directory.
 use crate::ConfigError;
-use provenant_core::{ProjectId, Roots, WaitBudget};
+use provenant_core::{Clock, ProjectId, Roots, WaitBudget};
 use provenant_os::fs::{Directory, FileKind, LockMode, Metadata, PublishMode, effective_uid};
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
@@ -130,7 +130,7 @@ pub fn bind_project(
 
     let binding = match find_binding(&projects, &location.canonical_common_dir)? {
         Some(binding) => binding,
-        None => create_binding(&projects, &location.canonical_common_dir)?,
+        None => create_binding(&projects, location.canonical_common_dir.clone())?,
     };
     match location.canonical_primary_checkout_hint {
         Some(root) => update_primary_checkout_hint(&projects, binding, root),

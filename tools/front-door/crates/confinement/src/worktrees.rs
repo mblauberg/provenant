@@ -554,7 +554,12 @@ impl std::fmt::Display for ObservedProcess {
 /// binding and its `state/worktrees/<ProjectId>` directory.
 pub struct WorktreeContext<'a> {
     pub home: &'a Path,
+    /// The selected verified checkout is the Git execution anchor. It does
+    /// not own project configuration or managed worktree layout.
     pub repo: &'a VerifiedRepo,
+    /// Verified project configuration and allocation roots. Bare repositories
+    /// have a common-directory root and no project checkout.
+    pub layout: &'a ProjectLayout,
     pub binding: &'a ProjectBinding,
     pub project_state: &'a Directory,
     pub executor: &'a dyn Executor,
