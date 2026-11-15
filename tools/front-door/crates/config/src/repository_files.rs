@@ -6,6 +6,9 @@
 //! outward contract renders the table, so a new repository file is one
 //! constant and one row. Nothing else in a repository (scripts, build files,
 //! instruction files, CI configuration or directory layout) is required.
+//! Provider-owned ignore files that doctor and launch read only to warn
+//! (such as `.cursorignore`) are declared on the adapter
+//! (`AdapterSpec::ignore_files`), not here: they are not Provenant's files.
 use provenant_core::consumer_env::Stability;
 use serde::{Deserialize, Serialize};
 
