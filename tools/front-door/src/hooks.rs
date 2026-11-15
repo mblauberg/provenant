@@ -67,10 +67,16 @@ struct AdvisoryInput {
 #[allow(clippy::disallowed_methods)]
 pub fn run(hook: Hook, globals: &Globals) -> u8 {
     let started = Instant::now();
-    let deadline = started + LOCAL_BUDGET;
     let Some(spec) = hook.spec() else {
         diagnostic("hook skipped: adapter or handler was not recognised");
         return 0;
+    };
+    // Test delivery budgets must also fit inside the enclosing guard budget.
+    // Release builds retain the normal local deadline.
+    let deadline = started + if matches!(spec.handler, Handler::Guard) {
+        LOCAL_BUDGET.max(answer_budget())
+    } else {
+        LOCAL_BUDGET
     };
     let client = spec.client;
     match spec.handler {
