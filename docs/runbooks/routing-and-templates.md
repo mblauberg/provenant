@@ -36,12 +36,15 @@ Configure review shapes and selection under `[domains.routing.review]`; inspect
 the schema for available settings. Preview a review before submitting it:
 
 ```sh
-provenant run review --brief-file brief.md --set subject=origin/branch --set review_base=origin/main --over @review-panel --explain
+provenant run review-panel --brief-file brief.md --set subject=origin/branch --set review_base=origin/main --explain
 ```
 
 The host pins both refs, then selects the panel from the changed paths and size
 between their merge base and the subject. Configured path floors therefore apply
-before `@review-panel` expands. For an explicit risk or risk tag, supply the
+before the full panel expands, and the brief reaches its framing, lens,
+verification and synthesis stages. A command such as
+`provenant run review.security` runs one lens only; use `review-panel` for the
+complete configured topology. For an explicit risk or risk tag, supply the
 graph's top-level `review` request; `--set subject` and `--set review_base` pin
 the range only. If path or size metadata is incomplete, Provenant applies the
 configured unreadable-path floors and includes a warning in reviewer guidance.

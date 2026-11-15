@@ -69,8 +69,9 @@ continuation identity retain the canonical model and effort.
 
 ## Pinned review selection
 
-When `provenant run review` supplies both `subject` and `review_base`, the host
-resolves them to immutable commits once. Before expanding `@review-panel`, it
+When `provenant run review-panel` or a review leaf supplies both `subject` and
+`review_base`, the host resolves them to immutable commits once. Before
+expanding the full panel, it
 derives changed paths and measured size from the merge-base-to-subject diff and
 passes both to `ReviewConfig::resolve_panel`. Configured path floors can raise
 the selected shape and add their lenses; explicit request fields and layered
@@ -78,6 +79,16 @@ review configuration keep their existing precedence. If size metadata is
 unavailable because the diff is empty, selection proceeds with size unknown. If
 path or size metadata is incomplete, the resolver applies the configured
 unreadable-path floors and adds a warning to reviewer guidance.
+
+Use this command for the complete policy-selected panel:
+
+```sh
+provenant run review-panel --brief-file brief.md --set subject=origin/branch --set review_base=origin/main
+```
+
+The host passes the brief to framing, every selected lens, verification and
+synthesis. A command such as `provenant run review.security` invokes only that
+lens.
 
 - Why: panel coverage must follow the change that reviewers will actually see,
   not the submitter's current checkout.

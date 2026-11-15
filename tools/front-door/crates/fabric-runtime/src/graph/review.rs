@@ -263,7 +263,7 @@ pub(super) fn correct_verdict(
     };
     let mut next = checkpoint.clone();
     let brief = format!(
-        "{}\n\nThe previous reply had an invalid final verdict. Return the findings and end with exactly one final line: VERDICT: PASS, VERDICT: FAIL or VERDICT: INCONCLUSIVE. Only the shared closed handoff block may follow. This is the only automatic verdict correction.",
+        "{}\n\nThe previous reply had an invalid final verdict. Return the findings and end with exactly one verdict line: VERDICT: PASS, VERDICT: FAIL or VERDICT: INCONCLUSIVE. Only the shared closed handoff block may follow. This is the only automatic verdict correction.",
         node.prompt
     );
     if let Err(error) = patch::correct_review_verdict(
