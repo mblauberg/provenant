@@ -295,6 +295,9 @@ impl Completion<'_> {
             Self::Recovered(custody) => *custody,
         }
     }
+    fn provider_identity(&self) -> Option<&provenant_supervisor::census::ProcessIdentity> {
+        self.custody()?.provider_identity()
+    }
     fn holder_context(&self) -> Option<&HolderContext> {
         match self {
             Self::Live { holder_context, .. } => Some(holder_context),
@@ -1636,10 +1639,12 @@ impl RunStore {
             return self.finish_effects(record, attempt, &completion, call);
         }
         if self.steer_session_ready(id, call)?.is_some() {
-            let terminal_provider = custody::provider_identity(attempt, exit.scope)
-                .ok()
-                .flatten();
-            self.confirm_steer_terminal_process(id, exit.scope, terminal_provider.as_ref(), call)?;
+            self.confirm_steer_terminal_process(
+                id,
+                exit.scope,
+                completion.provider_identity(),
+                call,
+            )?;
         }
         // Upgraded guardians may not have called provider_exited. Capacity is
         // independent of writer custody and is free as soon as exit is known.
@@ -6730,4 +6735,79 @@ fn soft_budget_wrap_up(record: &AttemptRecord, usage: &UsageRecord) -> bool {
 fn budget_ceiling(budget: u64, grace: provenant_records::BudgetGrace) -> u64 {
     let extra = u128::from(budget) * u128::from(grace.millionths()) / 1_000_000;
     budget.saturating_add(u64::try_from(extra).unwrap_or(u64::MAX))
+}
+
+#[cfg(test)]
+mod steer_terminal_identity_tests {
+    use super::*;
+    use std::error::Error;
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn completion_uses_provider_identity_from_verified_custody() -> Result<(), Box<dyn Error>> {
+        let temporary = tempfile::tempdir()?;
+        let slot_path = temporary.path().join("custody");
+        let attempt_path = temporary.path().join("attempt");
+        std::fs::create_dir(&slot_path)?;
+        std::fs::create_dir(&attempt_path)?;
+        let slot = Directory::open_anchor(&slot_path)?;
+        let attempt = Directory::open_anchor(&attempt_path)?;
+        let clock = crate::tests::clock();
+        let cancel = CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let scope = provenant_records::custody::Scope {
+            attempt: crate::tests::input().attempt_id,
+            generation: 1,
+        };
+
+        let lease = provenant_supervisor::fixture::acquire_writer(
+            slot.try_clone()?,
+            scope,
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?;
+        drop(lease);
+
+        // Model the durable spawned reservation, then reopen it through the
+        // same verified recovery owner used by Run settlement.
+        let reservation_path = slot_path
+            .join(scope.attempt.to_string())
+            .join("reservation.json");
+        let mut reservation: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&reservation_path)?)?;
+        let boot = reservation["boot"].as_str().ok_or("reservation boot")?;
+        let guardian = provenant_supervisor::census::ProcessIdentity {
+            boot: boot.to_owned(),
+            pid: 40,
+            native_start: 1,
+            group_id: 40,
+            session_id: 40,
+        };
+        let provider = provenant_supervisor::census::ProcessIdentity {
+            boot: boot.to_owned(),
+            pid: 41,
+            native_start: 2,
+            group_id: 41,
+            session_id: 41,
+        };
+        let attempt_metadata = attempt.metadata()?;
+        reservation["launch_state"] = serde_json::json!("spawned");
+        reservation["attempt_device"] = serde_json::json!(attempt_metadata.device);
+        reservation["attempt_inode"] = serde_json::json!(attempt_metadata.inode);
+        reservation["guardian"] = serde_json::to_value(guardian)?;
+        reservation["provider"] = serde_json::to_value(&provider)?;
+        reservation["unresolved_cleanup"] = serde_json::json!(false);
+        reservation["census_incomplete"] = serde_json::json!(false);
+        std::fs::write(&reservation_path, serde_json::to_vec(&reservation)?)?;
+
+        let recovery = custody::acquire_recovery(slot, scope, call.lock_budget(), &cancel, &clock)?;
+        assert!(!attempt_path.join("reservation.json").exists());
+        let completion = Completion::Recovered(Some(&recovery));
+        let observed = completion
+            .provider_identity()
+            .ok_or("verified provider identity missing")?;
+        assert_eq!(observed, &provider);
+        Ok(())
+    }
 }
