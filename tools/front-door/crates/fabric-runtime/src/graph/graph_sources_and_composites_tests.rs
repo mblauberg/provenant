@@ -449,6 +449,159 @@ fn source_requires_upstream_commit_and_fails_before_launch_when_missing() {
     );
 }
 
+// Spec: docs/specs/fabric.md#composite-settlement
+#[test]
+fn settled_source_consumer_keeps_composite_export_when_member_retries() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "graph_id": "composite-source-retry",
+        "nodes": [
+            {"id":"work","kind":"composite","access":"read_only",
+             "composite":{"nodes":[
+                 {"id":"writer","access":"worktree_write","worktree":"lane",
+                  "prompt":"Write result","route":{"alias":"fixture"}}
+             ],"exports":[{"node":"writer","outputs":["commit"]}]}},
+            {"id":"sink","access":"read_only","depends_on":["work"],
+             "source":{"type":"node","node":"work"},
+             "prompt":"Use the composite source","route":{"alias":"fixture"}}
+        ]
+    }))
+    .unwrap();
+    let first_commit = "1".repeat(40);
+    let mut first_writer = terminal(AttemptOutcome::Succeeded);
+    if let AttemptObservation::Terminal { commit, .. } = &mut first_writer {
+        *commit = Some(first_commit.clone());
+    }
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([first_writer, terminal(AttemptOutcome::Succeeded)]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let completed = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(completed.status, GraphStatus::Complete);
+    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(owner.source_commits, vec![None, Some(first_commit.clone())]);
+    assert_eq!(
+        completed
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "work")
+            .unwrap()
+            .outputs
+            .as_ref()
+            .and_then(|outputs| outputs.commit.as_deref()),
+        Some(first_commit.as_str())
+    );
+    assert_eq!(
+        completed
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "sink")
+            .unwrap()
+            .source_commit
+            .as_deref(),
+        Some(first_commit.as_str())
+    );
+
+    let library = template::TemplateLibrary::bundled();
+    let resolvers = Default::default();
+    let limits = plans::generous();
+    let context = patch::PatchContext {
+        library: &library,
+        resolvers: &resolvers,
+        scan: &|_| Ok(()),
+        journal: None,
+        limits: &limits,
+        worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
+    };
+    let mut checkpoint = completed.checkpoint;
+    patch::retry_node(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: &mut checkpoint,
+        },
+        "work--writer",
+        None,
+        &context,
+    )
+    .unwrap();
+    let boundary = checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "work")
+        .unwrap();
+    assert_eq!(boundary.state, NodeState::Pending);
+    assert!(boundary.outputs.is_none());
+    let sink = checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "sink")
+        .unwrap();
+    assert_eq!(sink.state, NodeState::Succeeded);
+    assert_eq!(sink.source_commit.as_deref(), Some(first_commit.as_str()));
+    assert_eq!(
+        sink.settled_dependency_snapshots
+            .get("work")
+            .and_then(|snapshot| snapshot.outputs.as_ref())
+            .and_then(|outputs| outputs.commit.as_deref()),
+        Some(first_commit.as_str())
+    );
+
+    let restored: GraphCheckpoint =
+        serde_json::from_slice(&serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+    let second_commit = "2".repeat(40);
+    let mut second_writer = terminal(AttemptOutcome::Succeeded);
+    if let AttemptObservation::Terminal { commit, .. } = &mut second_writer {
+        *commit = Some(second_commit.clone());
+    }
+    let mut retry_owner = FakeOwner {
+        observations: [second_writer].into(),
+        ..Default::default()
+    };
+    let mut retry_journal = MemoryJournal(Some(restored));
+    let retried = advance(&document, &mut retry_owner, &mut retry_journal).unwrap();
+    assert_eq!(retried.status, GraphStatus::Complete);
+    assert_eq!(retry_owner.calls.len(), 1);
+    assert_eq!(retry_owner.calls[0].0.node_id, "work--writer");
+    assert_eq!(
+        retried
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "work")
+            .unwrap()
+            .outputs
+            .as_ref()
+            .and_then(|outputs| outputs.commit.as_deref()),
+        Some(second_commit.as_str())
+    );
+    assert_eq!(
+        retried
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "sink")
+            .unwrap()
+            .source_commit
+            .as_deref(),
+        Some(first_commit.as_str())
+    );
+
+    let replayed_checkpoint: GraphCheckpoint =
+        serde_json::from_slice(&serde_json::to_vec(&retried.checkpoint).unwrap()).unwrap();
+    let mut replay_owner = FakeOwner::default();
+    let replayed = advance(
+        &document,
+        &mut replay_owner,
+        &mut MemoryJournal(Some(replayed_checkpoint)),
+    )
+    .unwrap();
+    assert_eq!(replayed.status, GraphStatus::Complete);
+    assert!(replay_owner.calls.is_empty());
+}
+
 #[test]
 fn composite_inherits_inputs_and_combines_results_from_parallel_children() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
