@@ -77,7 +77,7 @@ def lex(source: str) -> list[Token]:
                 continue
         if char == '"' or (char == "b" and i + 1 < size and source[i + 1] == '"'):
             quote = i + (1 if char == '"' else 2)
-            cursor = quote + 1
+            cursor = quote
             while cursor < size:
                 if source[cursor] == "\\":
                     cursor += 2
