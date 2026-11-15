@@ -109,9 +109,21 @@ impl LaneRoots {
     pub fn project(root: &Path, host_state: &Path) -> Result<Self, TransportError> {
         let ports = provenant_config::PortTable::read_for(Some(root), host_state)
             .map_err(|_| TransportError::Unreadable)?;
+        Ok(Self::project_roots(root, ports))
+    }
+
+    /// Project-declared roots when the caller has no validated host state to
+    /// read host-level port overrides from.
+    pub fn project_without_host_state(root: &Path) -> Result<Self, TransportError> {
+        let ports = provenant_config::PortTable::read_project_only(root)
+            .map_err(|_| TransportError::Unreadable)?;
+        Ok(Self::project_roots(root, ports))
+    }
+
+    fn project_roots(root: &Path, ports: provenant_config::PortTable) -> Self {
         let mut roots = ports.worktree_roots_under(root);
         roots.extend([".provenant", ".agent-run"].map(|name| root.join(name)));
-        Ok(Self::new(roots))
+        Self::new(roots)
     }
 
     /// The lane areas for a repository whose private and common Git
@@ -123,14 +135,20 @@ impl LaneRoots {
         common: &Path,
         project: Option<&Path>,
         extra: &Self,
-        host_state: &Path,
+        host_state: Option<&Path>,
     ) -> Result<Self, TransportError> {
         let mut roots = extra.0.clone();
         if private != common {
             roots.push(root.to_path_buf());
         }
         if let Some(project) = project {
-            roots.extend(Self::project(project, host_state)?.0);
+            roots.extend(
+                match host_state {
+                    Some(host_state) => Self::project(project, host_state)?,
+                    None => Self::project_without_host_state(project)?,
+                }
+                .0,
+            );
         }
         Ok(Self::new(roots))
     }

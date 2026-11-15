@@ -2569,8 +2569,10 @@ pub(super) fn prepare_candidates(
         .base
         .as_deref()
         .map(|base| match task.head.as_deref() {
-            Some(head) => run::GitContext::capture_at(&git, &source, base, head),
-            None => run::GitContext::capture(&git, &source, base),
+            Some(head) => {
+                run::GitContext::capture_at(&git, &source, roots.state.as_path(), base, head)
+            }
+            None => run::GitContext::capture(&git, &source, roots.state.as_path(), base),
         })
         .transpose()?;
     let user = provenant_os::sys::account(provenant_os::sys::Account::Current)
