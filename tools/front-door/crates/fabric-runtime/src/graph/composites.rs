@@ -1006,7 +1006,7 @@ pub(super) fn reconcile_checkpoint(plan: &PlannedGraph, checkpoint: &mut GraphCh
     // Expanded plans place members before their boundaries. A parent therefore
     // reads already-recomputed outputs from any nested composite it contains.
     for (index, node) in plan.nodes.iter().enumerate() {
-        if node.composite.is_some() {
+        if node.composite.is_some() && when::holds(&node.when) {
             reconcile_progress(index, plan, &positions, checkpoint);
         }
     }

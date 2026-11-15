@@ -130,6 +130,144 @@ fn quota_reroute_recomputes_composite_before_checkpoint_resume() {
     assert_eq!(resumed_owner.calls.len(), 1);
 }
 
+// Spec: docs/specs/fabric.md#composite-settlement
+#[test]
+fn public_patch_preserves_inactive_composite_and_replays_derived_state() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2,
+        "graph_id": "inactive-composite-patch",
+        "nodes": [
+            {"id":"hold","access":"read_only","prompt":"Hold","route":{"alias":"fixture"}},
+            {"id":"inactive","kind":"composite","access":"read_only","depends_on":["hold"],
+             "when":[{"name":"enabled","expected":"true","actual":"false"}],
+             "composite":{"nodes":[
+                 {"id":"member","access":"read_only","prompt":"Inactive member","route":{"alias":"fixture"}}
+             ],"exports":[{"node":"member","outputs":["result"]}]}},
+            {"id":"active","kind":"composite","access":"read_only","composite":{"nodes":[
+                {"id":"member","access":"read_only","prompt":"Active member","route":{"alias":"fixture"}}
+            ],"exports":[{"node":"member","outputs":["result"]}]}}
+        ]
+    }))
+    .unwrap();
+    let mut owner = FakeOwner {
+        observations: [
+            AttemptObservation::Pending {
+                attempt_ref: Some("hold-running".into()),
+            },
+            terminal_with_result(AttemptOutcome::Succeeded, "active before retry"),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let started = advance(&document, &mut owner, &mut journal).unwrap();
+    let mut checkpoint = started.checkpoint;
+    let state = |checkpoint: &GraphCheckpoint, id: &str| {
+        checkpoint
+            .nodes
+            .iter()
+            .find(|progress| progress.id == id)
+            .map(|progress| progress.state)
+    };
+    assert_eq!(state(&checkpoint, "inactive"), Some(NodeState::Skipped));
+    assert_eq!(
+        state(&checkpoint, "inactive--member"),
+        Some(NodeState::Pending)
+    );
+    assert_eq!(state(&checkpoint, "active"), Some(NodeState::Succeeded));
+
+    let library = template::TemplateLibrary::bundled();
+    let resolvers = Default::default();
+    let limits = plans::generous();
+    let context = patch::PatchContext {
+        library: &library,
+        resolvers: &resolvers,
+        scan: &|_| Ok(()),
+        journal: None,
+        limits: &limits,
+        worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
+    };
+    patch::retry_node(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: &mut checkpoint,
+        },
+        "active--member",
+        None,
+        &context,
+    )
+    .unwrap();
+    // A retry in the active composite must leave the unrelated conditionally
+    // inactive boundary untouched, while recomputing the affected boundary.
+    assert_eq!(state(&checkpoint, "inactive"), Some(NodeState::Skipped));
+    assert_eq!(
+        state(&checkpoint, "inactive--member"),
+        Some(NodeState::Pending)
+    );
+    assert_eq!(
+        state(&checkpoint, "active--member"),
+        Some(NodeState::Pending)
+    );
+    assert_eq!(state(&checkpoint, "active"), Some(NodeState::Pending));
+    assert!(
+        checkpoint
+            .nodes
+            .iter()
+            .find(|progress| progress.id == "active")
+            .unwrap()
+            .outputs
+            .is_none()
+    );
+
+    let restored: GraphCheckpoint =
+        serde_json::from_slice(&serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+    let mut resumed_owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, "hold complete"),
+            terminal_with_result(AttemptOutcome::Succeeded, "inactive member complete"),
+            terminal_with_result(AttemptOutcome::Succeeded, "active member complete"),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut resumed_journal = MemoryJournal(Some(restored));
+    let resumed = advance(&document, &mut resumed_owner, &mut resumed_journal).unwrap();
+    assert_eq!(resumed.status, GraphStatus::Complete);
+    assert_eq!(
+        state(&resumed.checkpoint, "inactive"),
+        Some(NodeState::Skipped)
+    );
+    assert_eq!(
+        state(&resumed.checkpoint, "inactive--member"),
+        Some(NodeState::Succeeded)
+    );
+    assert_eq!(
+        state(&resumed.checkpoint, "active"),
+        Some(NodeState::Succeeded)
+    );
+    assert_eq!(resumed_owner.calls.len(), 3);
+    assert_eq!(
+        resumed_owner
+            .calls
+            .iter()
+            .filter(|call| call.0.node_id == "active--member")
+            .count(),
+        1
+    );
+
+    let replayed_checkpoint: GraphCheckpoint =
+        serde_json::from_slice(&serde_json::to_vec(&resumed.checkpoint).unwrap()).unwrap();
+    let mut replay_owner = FakeOwner::default();
+    let replayed = advance(
+        &document,
+        &mut replay_owner,
+        &mut MemoryJournal(Some(replayed_checkpoint)),
+    )
+    .unwrap();
+    assert_eq!(replayed.status, GraphStatus::Complete);
+    assert!(replay_owner.calls.is_empty());
+}
+
 #[test]
 fn advisory_composite_settlement_preserves_cause_and_launches_dependant() {
     for outcome in [AttemptOutcome::ReviewRequired, AttemptOutcome::TaskFailed] {

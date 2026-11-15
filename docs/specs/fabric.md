@@ -150,7 +150,7 @@ An occupied concurrency threshold warns and proceeds unless its declared policy 
 
 ### Composite settlement
 
-A composite's state, outputs and error summary derive from its members. A patch that replaces or skips a member recomputes the affected composite boundaries in the same checkpoint.
+A composite's state, outputs and error summary derive from its members while its own `when` condition holds. A composite skipped by its own condition retains that state regardless of its members. A patch that replaces or skips a member recomputes the affected active composite boundaries in the same checkpoint.
 - Why: recovery must validate a checkpoint against the topology it records.
 - Owner: `crates/fabric-runtime/src/graph/composites.rs`, `crates/fabric-runtime/src/graph/patch.rs`
 
