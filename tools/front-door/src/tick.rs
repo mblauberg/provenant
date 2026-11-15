@@ -1358,6 +1358,7 @@ mod tests {
         (seed_state(directory), result.error)
     }
 
+    /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
     fn seed_refresh_is_queued_without_running_inline_and_a_spawn_failure_is_recorded() {
         let temp = tempfile::tempdir().unwrap();
@@ -1394,6 +1395,7 @@ mod tests {
         ));
     }
 
+    /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
     fn a_due_busy_snapshot_cannot_narrow_a_queued_full_pass() {
         let temp = tempfile::tempdir().unwrap();
@@ -1433,6 +1435,7 @@ mod tests {
         assert_eq!(request, SeedRequest::full());
     }
 
+    /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
     fn a_full_request_queued_during_busy_work_clears_the_busy_error_snapshot() {
         let temp = tempfile::tempdir().unwrap();
@@ -1474,6 +1477,7 @@ mod tests {
         assert!(queue.retry_at.is_none());
     }
 
+    /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
     fn queued_and_active_seed_jobs_recover_after_detached_worker_crash() {
         let temp = tempfile::tempdir().unwrap();
@@ -1507,6 +1511,7 @@ mod tests {
         assert_eq!(queue.pending, Some(SeedRequest::full()));
     }
 
+    /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
     fn stale_busy_job_recovery_keeps_its_project_keys_and_prior_error() {
         let temp = tempfile::tempdir().unwrap();
@@ -1544,6 +1549,7 @@ mod tests {
         );
     }
 
+    /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
     fn producer_racing_worker_exit_is_admitted_after_the_final_check() {
         use std::sync::atomic::{AtomicBool, Ordering};
