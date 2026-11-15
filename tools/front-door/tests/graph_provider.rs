@@ -465,6 +465,62 @@ fn fixture() -> Result {
     // prior launch's evidence.
     let fixture_session = std::env::var("PROVENANT_PARENT_ATTEMPT_ID")?;
     let session = fixture_session.as_str();
+    if prompt.contains("fixture public bounded steer continuation") {
+        const STEER_SESSION: &str = "fixture-steer-session";
+        let resumed = args
+            .windows(2)
+            .any(|pair| pair[0] == "resume" && pair[1] == STEER_SESSION);
+        if resumed {
+            assert!(prompt.contains("STEER_NOTE: finish the interrupted task"));
+            assert_eq!(fs::read_to_string("before.txt")?, "before\n");
+            assert_eq!(
+                fs::read("fixture-steer-worktree.txt")?,
+                std::env::current_dir()?.as_os_str().as_encoded_bytes()
+            );
+            fs::write("after.txt", "after\n")?;
+            let committed = std::process::Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "git add before.txt after.txt fixture-steer-worktree.txt && git -c user.name='Fixture' -c user.email='fixture@example.test' commit -qm 'test: finish steered work'",
+                ])
+                .output()?;
+            assert!(
+                committed.status.success(),
+                "{}",
+                String::from_utf8_lossy(&committed.stderr)
+            );
+            for frame in [
+                json!({"type":"thread.started","thread_id":STEER_SESSION}),
+                json!({"type":"item.completed","item":{"type":"agent_message","text":format!("finished in the resumed worktree{DONE_FENCE}")}}),
+                json!({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}),
+            ] {
+                writeln!(io::stdout(), "{frame}")?;
+            }
+        } else {
+            assert!(!args.iter().any(|arg| arg == "resume"));
+            fs::write("before.txt", "before\n")?;
+            fs::write(
+                "fixture-steer-worktree.txt",
+                std::env::current_dir()?.as_os_str().as_encoded_bytes(),
+            )?;
+            writeln!(
+                io::stdout(),
+                "{}",
+                json!({"type":"thread.started","thread_id":STEER_SESSION})
+            )?;
+            io::stdout().flush()?;
+            let ready = prompt
+                .lines()
+                .find_map(|line| line.strip_prefix("STEER_READY_FILE: "))
+                .map(PathBuf::from)
+                .ok_or("steer fixture readiness file")?;
+            fs::write(ready, b"ready")?;
+            // The graph steer must stop this fresh Codex process and resume
+            // the same thread after settlement.
+            std::thread::park_timeout(std::time::Duration::from_secs(120));
+        }
+        return Ok(());
+    }
     let sessions = home.join("sessions/2026/10/24");
     fs::create_dir_all(&sessions)?;
     let recorded_session = if prompt.contains("mismatch") {
@@ -741,6 +797,208 @@ fn policy_codex_fixture() -> Result<TestRig> {
         format!("{}:/usr/bin:/bin", bin.display()).into(),
     ));
     Ok(rig)
+}
+
+// Spec: docs/specs/fabric.md#session-ready-steering
+#[test]
+fn public_bounded_implement_steers_and_resumes_the_same_local_codex_session() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    use provenant_core::{CancelToken, Clock, RootInputs};
+
+    let mut rig = policy_codex_fixture()?;
+    let cleanup = rig.process_cleanup();
+    let auth = br#"{"tokens":{"account_id":"fixture-one"}}"#;
+    let account_key = provenant_providers::identity::codex_account(auth).ok_or("account key")?;
+    support::register_account(
+        &rig,
+        "codex",
+        "fixture",
+        &account_key,
+        &rig.root.join("codex"),
+    )?;
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[domains.fabric.graph]\nlaunch_wait_seconds=5\nwriter_provision_seconds=5"
+    )?;
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let committed = rig.execute(
+        &git,
+        &["commit", "--allow-empty", "-qm", "probe base"],
+        None,
+    )?;
+    assert_eq!(code(&committed), 0, "{committed:?}");
+    let base = rig.execute(&git, &["branch", "--show-current"], None)?;
+    assert_eq!(code(&base), 0, "{base:?}");
+    let base = std::str::from_utf8(&base.stdout.bytes)?.trim().to_owned();
+    let ready = rig.root.join("steer-session-ready");
+    let brief = format!(
+        "fixture public bounded steer continuation\nSTEER_READY_FILE: {}\n",
+        ready.display()
+    );
+    let (launch, value) = rig.launch(&[
+        "implement",
+        "--brief",
+        &brief,
+        "--set",
+        "bounded=true",
+        "--name",
+        "public-steer-local",
+        "--model",
+        "codex/gpt-6-luna",
+        "--account",
+        "fixture",
+        "--no-sandbox",
+        "--branch",
+        "smoke/native-steer",
+        "--base",
+        &base,
+    ])?;
+    assert_eq!(code(&launch), 0, "{value}");
+    let graph = value["data"]["checkpoint"]["graph_id"]
+        .as_str()
+        .ok_or_else(|| format!("run did not return its graph: {value}"))?
+        .to_owned();
+    let _ = provenant_test_support::wait_for(
+        "Codex session-ready fixture",
+        std::time::Duration::from_secs(10),
+        || ready.exists(),
+        |ready| *ready,
+    )?;
+    let worktree = rig.project.join(".worktrees/smoke-native-steer");
+    assert_eq!(fs::read_to_string(worktree.join("before.txt"))?, "before\n");
+    assert_eq!(
+        std::str::from_utf8(
+            &rig.execute(
+                &git,
+                &[
+                    "-C",
+                    worktree.to_str().ok_or("worktree")?,
+                    "branch",
+                    "--show-current"
+                ],
+                None,
+            )?
+            .stdout
+            .bytes
+        )?,
+        "smoke/native-steer\n"
+    );
+
+    let target = format!("{graph}/task#1");
+    let accepted = rig.command(&[
+        "steer",
+        &target,
+        "--brief",
+        "STEER_NOTE: finish the interrupted task",
+        "--operation-id",
+        "public-steer-local-operation",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&accepted),
+        0,
+        "{}",
+        String::from_utf8_lossy(&accepted.stdout.bytes)
+    );
+    let receipt = support::last_json_record(&accepted.stdout.bytes)?;
+    assert_eq!(receipt["status"], "ok", "{receipt}");
+    assert_eq!(
+        receipt["data"]["receipts"][0]["state"], "queued",
+        "{receipt}"
+    );
+    assert_eq!(
+        receipt["data"]["receipts"][0]["support"], "continuation_only",
+        "{receipt}"
+    );
+    assert!(!receipt.to_string().contains("STEER_NOTE"), "{receipt}");
+
+    let waited = rig.command(&["wait", &graph, "--timeout", "60s", "--json"])?;
+    let wait_result = support::last_json_record(&waited.stdout.bytes)?;
+    assert_eq!(code(&waited), 0, "{wait_result}");
+    let checkpoint = rig.checkpoint(&graph)?;
+    let node = checkpoint["nodes"]
+        .as_array()
+        .and_then(|nodes| nodes.first())
+        .ok_or("graph node")?;
+    let attempts = node["attempts"].as_array().ok_or("attempts")?;
+    assert_eq!(attempts.len(), 2, "{checkpoint}");
+    assert_eq!(fs::read_to_string(worktree.join("before.txt"))?, "before\n");
+    assert_eq!(fs::read_to_string(worktree.join("after.txt"))?, "after\n");
+    let status = rig.execute(
+        &git,
+        &[
+            "-C",
+            worktree.to_str().ok_or("worktree")?,
+            "status",
+            "--porcelain",
+        ],
+        None,
+    )?;
+    assert_eq!(code(&status), 0, "{status:?}");
+    assert!(status.stdout.bytes.is_empty(), "{status:?}");
+
+    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let identity =
+        provenant_cli::fabric::Context::open(roots.clone(), &rig.home, &rig.project)?.identity;
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let execution = provenant_run::ExecutionContext {
+        state_root: roots.state,
+        project_id: identity.project,
+        actor_id: identity.inbox.actor,
+        read_prompts: true,
+    };
+    let store = provenant_run::RunStore::open(&execution, &call)?;
+    for (ordinal, attempt) in attempts.iter().enumerate() {
+        let reference = attempt["attempt_ref"].as_str().ok_or("attempt ref")?;
+        let id = reference
+            .rsplit_once('/')
+            .ok_or("host attempt ref")?
+            .1
+            .parse()?;
+        let request = store.request(id, &call)?;
+        let record = store.record(id, &call)?;
+        let context = request.task.context.as_ref().ok_or("graph context")?;
+        assert!(context.graph_template_launch, "{request:?}");
+        assert_eq!(
+            context.graph_id.as_deref(),
+            Some(graph.as_str()),
+            "{request:?}"
+        );
+        assert_eq!(context.node_id.as_deref(), Some("task"), "{request:?}");
+        assert_eq!(
+            context.attempt,
+            Some(u32::try_from(ordinal + 1)?),
+            "{request:?}"
+        );
+        assert_eq!(
+            record.route.provider.as_deref(),
+            Some("codex"),
+            "{record:?}"
+        );
+        assert_eq!(
+            record.route.model.as_deref(),
+            Some("codex/gpt-6-luna"),
+            "{record:?}"
+        );
+        assert_eq!(
+            record.route.account_label.as_deref(),
+            Some("fixture"),
+            "{record:?}"
+        );
+    }
+    cleanup.disarm();
+    Ok(())
 }
 
 /// Exercise the same public writer command with an isolated invocation directory.

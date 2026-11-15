@@ -3088,13 +3088,23 @@ impl BoundGraphOwner<'_> {
                     .and_then(|origin| origin.node_id.as_deref())
                     == Some(key.node_id.as_str())
             });
+            if !accepted {
+                // This owner is admitting a new leaf from the host-owned graph
+                // scheduler. Bind the graph marker to the work key here; the
+                // caller's WorkContext flag is never evidence, and accepted
+                // operation replay keeps its immutable stored request above.
+                let context = context.as_mut().ok_or(FacadeError::StateCorrupt)?;
+                if context.graph_id.as_deref() != Some(key.graph_id.as_str())
+                    || context.node_id.as_deref() != Some(key.node_id.as_str())
+                    || context.attempt != Some(key.attempt)
+                {
+                    return Err(FacadeError::StateCorrupt);
+                }
+                context.graph_template_launch = true;
+            }
             if peer_root && !accepted {
                 // The receiver's graph provenance was authenticated at peer
-                // ingress. Restamp its local attempt context for this graph.
-                context
-                    .as_mut()
-                    .ok_or(FacadeError::StateCorrupt)?
-                    .graph_template_launch = true;
+                // ingress; retain its source-head binding for the local attempt.
                 source_head = route.peer_source_head.clone();
             }
             let accepted_route = accepted_route.or(if peer_root {
