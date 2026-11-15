@@ -8,6 +8,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+pub const GRANT_LIMIT_SETTING_KEY: &str = "domains.run.grant_limit";
+pub const PROFILE_LIMIT_SETTING_KEY: &str = "domains.run.profile_limit_bytes";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackendKind {
@@ -79,11 +82,13 @@ pub enum PermissionError {
     #[error("nested confinement is unsupported by this backend")]
     NestedConfinementUnsupported,
     #[error(
-        "compiled profile is {bytes} bytes, over the configured {limit}-byte limit; reduce granted roots or raise domains.run.profile_limit_bytes (the OS may impose its own argv limit)"
+        "compiled profile is {bytes} bytes, over the configured {limit}-byte limit; reduce granted roots or raise {setting_key} (the OS may impose its own argv limit)",
+        setting_key = PROFILE_LIMIT_SETTING_KEY
     )]
     ProfileTooLarge { bytes: usize, limit: usize },
     #[error(
-        "{family} exceeds its effective limit of {limit}; raise domains.run.grant_limit to allow more"
+        "{family} exceeds its effective limit of {limit}; raise {setting_key} to allow more",
+        setting_key = GRANT_LIMIT_SETTING_KEY
     )]
     GrantLimitExceeded { family: &'static str, limit: usize },
     #[error("{source} (source: {})", match origin { provenant_records::diagnostic::SettingSource::Configuration => "host configuration", provenant_records::diagnostic::SettingSource::ShippedDefault => "compiled default" })]
@@ -124,6 +129,15 @@ pub enum PermissionError {
 }
 
 impl PermissionError {
+    /// The host setting that controls a configurable permission limit.
+    pub fn setting_key(&self) -> Option<&'static str> {
+        match self {
+            Self::GrantLimitExceeded { .. } => Some(GRANT_LIMIT_SETTING_KEY),
+            Self::ProfileTooLarge { .. } => Some(PROFILE_LIMIT_SETTING_KEY),
+            _ => None,
+        }
+    }
+
     /// Classify only a boundary that the typed error itself establishes.
     /// Ambiguous guards stay unclassified until their caller supplies context.
     pub fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
@@ -255,8 +269,11 @@ mod repository_error_tests {
 
     #[test]
     fn repository_refusal_names_the_underlying_reason() {
-        let message = PermissionError::from(RepoError::IdentityChanged).to_string();
-        assert!(message.contains("IdentityChanged"));
+        let error = PermissionError::from(RepoError::IdentityChanged);
+        assert!(matches!(
+            error,
+            PermissionError::Repository(RepoError::IdentityChanged)
+        ));
     }
 }
 

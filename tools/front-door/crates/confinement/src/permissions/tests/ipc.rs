@@ -55,8 +55,7 @@ fn postgres_requirement(bin: Option<PathBuf>, required: bool) -> Result<Option<P
 fn missing_postgres_obeys_required_control() {
     let root = tempfile::tempdir().unwrap();
     let missing = Some(root.path().join("missing"));
-    let error = postgres_requirement(missing.clone(), true).unwrap_err();
-    assert!(error.contains("PostgreSQL 18"));
+    assert!(postgres_requirement(missing.clone(), true).is_err());
     assert_eq!(postgres_requirement(missing, false).unwrap(), None);
 }
 

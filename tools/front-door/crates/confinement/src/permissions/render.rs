@@ -242,7 +242,7 @@ fn compile_sbpl_inner(
     if let Some(warning) = check_capacity_policy(
         policy,
         "GRANT_COUNT",
-        "domains.run.grant_limit",
+        GRANT_LIMIT_SETTING_KEY,
         plan_count,
         limits.grant_limit,
         limits.grant_origin,
@@ -256,7 +256,7 @@ fn compile_sbpl_inner(
     if let Some(warning) = check_capacity_policy(
         policy,
         "PROFILE_GRANT_COUNT",
-        "domains.run.grant_limit",
+        GRANT_LIMIT_SETTING_KEY,
         profile_count,
         limits.grant_limit,
         limits.grant_origin,
