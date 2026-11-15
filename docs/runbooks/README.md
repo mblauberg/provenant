@@ -10,6 +10,7 @@ Procedures the tool cannot make obvious. Command syntax is `provenant help --all
 - [Harness configuration](configuration.md): precedence, lane sandbox, worktree setup, pre-push hook
 - [Providers and accounts](providers.md), [fabric hosts](fabric-hosts.md), [cloud launch](cloud-launch.md)
 - [Routing and templates](routing-and-templates.md)
+- [Using Provenant 2 from another repository](using-provenant-2-from-another-repository.md): consumer changes, ports, running beside a repository's tooling
 
 **Do the work**
 

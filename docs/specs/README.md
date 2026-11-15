@@ -24,6 +24,7 @@ them as Markdown under the untracked `<repository>/docs/reference/`.
 
 ## Area specs
 
+- [Consumer contract](consumer-contract.md): what an adopting repository may rely on, and how stably
 - [CLI](cli.md): envelope, exits, waits, hooks and checks
 - [Disk](disk.md): read-only storage inventory
 - [State](state.md): roots, records, config and managed install
@@ -50,6 +51,7 @@ a cross-cutting rule.
 |---|---|
 | State roots, identities, layout and environment | [State](state.md#roots-and-identities) |
 | Envelope and exits | [CLI](cli.md#one-bounded-envelope-never-truncated) |
+| Consumer stability, lane environment and repository files | [Consumer contract](consumer-contract.md) |
 | Wait budgets and observation | [CLI](cli.md#waits-are-readers) |
 | Command grammar and checks | [CLI](cli.md), `provenant help --all` |
 | Selection, accounts, quota and readiness | [Routing](routing.md) |
