@@ -872,12 +872,17 @@ pub fn launch_resolvers(
     review: &provenant_routing::ReviewConfig,
     document: &provenant_fabric_runtime::graph::GraphDocument,
 ) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
-    launch_resolvers_with(review, document, None, |_, family| {
-        Err(format!(
-            "required provider family {}: route eligibility context unavailable",
-            family.unwrap_or("unknown")
-        ))
-    })
+    launch_resolvers_with(
+        review,
+        document,
+        ReviewDiffSelection::NotRequested,
+        |_, family| {
+            Err(format!(
+                "required provider family {}: route eligibility context unavailable",
+                family.unwrap_or("unknown")
+            ))
+        },
+    )
 }
 
 /// Resolve family-constrained panels against host eligibility before expansion.
@@ -890,19 +895,31 @@ pub fn launch_resolvers_at_roots(
     review_range: Option<(&str, &str)>,
 ) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
     let exclude = document.exclude.clone();
-    let pinned_diff = review_range.and_then(|(base, head)| {
-        let git = provenant_os::git::git_executable()?;
-        provenant_run::review_diff_context_at(&git, cwd, base, head).ok()
-    });
+    let pinned_diff = match review_range.map(|(base, head)| {
+        let git = provenant_os::git::git_executable().ok_or("git is unavailable")?;
+        provenant_run::review_diff_context_at(&git, cwd, base, head)
+            .map_err(|error| error.to_string())
+    }) {
+        None => ReviewDiffSelection::NotRequested,
+        Some(Ok(diff)) => ReviewDiffSelection::Captured(diff),
+        Some(Err(_)) => ReviewDiffSelection::Unreadable,
+    };
     launch_resolvers_with(review, document, pinned_diff, |slot, family| {
         crate::route::resolve_review_family(roots, &slot.tier, family, &exclude)
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReviewDiffSelection {
+    NotRequested,
+    Captured(provenant_run::ReviewDiffContext),
+    Unreadable,
+}
+
 fn launch_resolvers_with(
     review: &provenant_routing::ReviewConfig,
     document: &provenant_fabric_runtime::graph::GraphDocument,
-    pinned_diff: Option<provenant_run::ReviewDiffContext>,
+    pinned_diff: ReviewDiffSelection,
     eligible: impl FnMut(&provenant_routing::ResolvedSlot, Option<&str>) -> Result<String, String>,
 ) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
     let mut request = document.review.clone().unwrap_or_default();
@@ -910,18 +927,24 @@ fn launch_resolvers_with(
         request.risk_tier = request.risk_tier.or_else(|| context.risk_tier.clone());
         request.kind = request.kind.or_else(|| context.task_kind.clone());
     }
-    let measured_size = pinned_diff.as_ref().and_then(|diff| {
-        (request.kind.as_deref() != Some("integration"))
-            .then_some(())
-            .and_then(|()| diff.numstat.as_deref())
-            .filter(|numstat| !numstat.is_empty())
-            .zip(diff.tree.as_deref())
-            .map(|(numstat, tree)| review.size.classify_numstat(numstat, tree))
-    });
-    let paths = pinned_diff
-        .as_ref()
-        .map_or(&[][..], |diff| diff.paths.as_slice());
-    let mut panel = review.resolve_panel(&request, measured_size, paths, false)?;
+    let (fallback_review, paths, measured_size, incomplete_context) = match pinned_diff {
+        ReviewDiffSelection::NotRequested => (None, Vec::new(), None, false),
+        ReviewDiffSelection::Captured(diff) if diff.numstat.is_some() && diff.tree.is_some() => {
+            let measured_size = (request.kind.as_deref() != Some("integration"))
+                .then_some(())
+                .and_then(|()| diff.numstat.as_deref())
+                .filter(|numstat| !numstat.is_empty())
+                .zip(diff.tree.as_deref())
+                .map(|(numstat, tree)| review.size.classify_numstat(numstat, tree));
+            (None, diff.paths, measured_size, false)
+        }
+        ReviewDiffSelection::Captured(_) | ReviewDiffSelection::Unreadable => {
+            let (fallback, paths) = review.unreadable_paths();
+            (Some(fallback), paths, None, true)
+        }
+    };
+    let selection_review = fallback_review.as_ref().unwrap_or(review);
+    let mut panel = selection_review.resolve_panel(&request, measured_size, &paths, false)?;
     if (!panel.minimum_family_counts.is_empty()
         || panel
             .slots
@@ -934,6 +957,12 @@ fn launch_resolvers_with(
         }
     }
     panel.resolve_families(eligible)?;
+    if incomplete_context {
+        panel.warnings.push(
+            "pinned review path or size metadata was incomplete; configured unreadable-path floors were applied"
+                .into(),
+        );
+    }
     let mut resolvers = std::collections::BTreeMap::new();
     let single = panel.slots.len() == 1;
     let frame = !single && panel.frame;
@@ -2665,6 +2694,56 @@ mod panel_tests {
         )
         .expect("relay resolvers expand the complete review composite");
     }
+
+    // Spec: docs/specs/routing.md#pinned-review-selection
+    #[test]
+    fn incomplete_pinned_review_metadata_uses_configured_unreadable_path_floors() {
+        let review = provenant_routing::RoutingConfig::default().review;
+        let document = serde_json::from_value(json!({
+            "schema_version": 1, "graph_id": "incomplete-review-context",
+            "nodes": [{"id": "anchor", "access": "read_only", "prompt": "Review", "route": {"alias": "senior"}}],
+            "review": {"kind": "docs", "risk_tier": "routine"}
+        }))
+        .unwrap();
+        let incomplete_size = ReviewDiffSelection::Captured(provenant_run::ReviewDiffContext {
+            paths: vec!["docs/guide.md".into()],
+            numstat: None,
+            tree: None,
+        });
+
+        for selection in [ReviewDiffSelection::Unreadable, incomplete_size] {
+            let resolvers =
+                launch_resolvers_with(&review, &document, selection, |_, _| Ok("fixture".into()))
+                    .unwrap();
+            let lenses = &resolvers["review-panel"];
+            assert!(lenses.len() >= 8, "{lenses:?}");
+            for lens in ["correctness-spec", "reliability", "security-privacy"] {
+                assert!(lenses.iter().any(|selected| selected == lens), "{lenses:?}");
+            }
+            assert_eq!(resolvers["review-frame"], vec!["true".to_owned()]);
+            assert_eq!(resolvers["review-verify"], vec!["true".to_owned()]);
+            assert_eq!(resolvers["review-synthesis"], vec!["true".to_owned()]);
+            assert!(
+                resolvers["review-advice-correctness-spec"][0]
+                    .contains("configured unreadable-path floors were applied")
+            );
+        }
+
+        let empty_diff = ReviewDiffSelection::Captured(provenant_run::ReviewDiffContext {
+            paths: Vec::new(),
+            numstat: Some(String::new()),
+            tree: Some(String::new()),
+        });
+        let quick =
+            launch_resolvers_with(&review, &document, empty_diff, |_, _| Ok("fixture".into()))
+                .unwrap();
+        assert_eq!(quick["review-panel"].len(), 1);
+        assert!(
+            !quick["review-advice-correctness-spec"][0]
+                .contains("configured unreadable-path floors were applied")
+        );
+    }
+
     #[test]
     fn review_family_constraints_use_eligible_pools_and_survive_template_expansion()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -2730,8 +2809,11 @@ mod panel_tests {
                 ]
             }
         }))?;
-        let resolvers =
-            launch_resolvers_with(&config.review, &document, None, |slot, required| {
+        let resolvers = launch_resolvers_with(
+            &config.review,
+            &document,
+            ReviewDiffSelection::NotRequested,
+            |slot, required| {
                 let result = provenant_routing::resolve_for_account_with_seed_excluding_family(
                     &RouteRequest {
                         intent: Default::default(),
@@ -2755,7 +2837,8 @@ mod panel_tests {
                     .unwrap()
                     .family
                     .to_owned())
-            })?;
+            },
+        )?;
         let record: provenant_routing::PanelResolution =
             serde_json::from_str(&resolvers["review-family-resolution"][0])?;
         assert_eq!(
@@ -2800,9 +2883,12 @@ mod panel_tests {
                 );
             }
         }
-        let refused = launch_resolvers_with(&config.review, &document, None, |_, _| {
-            Err("candidate account unavailable; excluded by policy".into())
-        })
+        let refused = launch_resolvers_with(
+            &config.review,
+            &document,
+            ReviewDiffSelection::NotRequested,
+            |_, _| Err("candidate account unavailable; excluded by policy".into()),
+        )
         .unwrap_err();
         assert!(refused.contains(named_family));
         assert!(refused.contains("count 1"));

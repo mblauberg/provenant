@@ -43,7 +43,8 @@ The host pins both refs, then selects the panel from the changed paths and size
 between their merge base and the subject. Configured path floors therefore apply
 before `@review-panel` expands. For an explicit risk or risk tag, supply the
 graph's top-level `review` request; `--set subject` and `--set review_base` pin
-the range only.
+the range only. If path or size metadata is incomplete, Provenant applies the
+configured unreadable-path floors and includes a warning in reviewer guidance.
 
 Bind each attempt's resolved route to the review evidence. Review a changed head
 again as required by the repository's workflow.

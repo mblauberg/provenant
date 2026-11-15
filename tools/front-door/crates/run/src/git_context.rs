@@ -666,8 +666,9 @@ pub fn review_merge_base_between(git: &Path, cwd: &Path, head: &str, base: &str)
 }
 
 /// The changed paths and size inputs for one already-pinned review range.
-/// `numstat` and `tree` are absent when size metadata could not be captured;
-/// path selection remains available independently.
+/// `numstat` and `tree` are absent when size metadata could not be captured; a
+/// present empty numstat is a complete empty diff. Path selection remains
+/// available independently.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewDiffContext {
     pub paths: Vec<String>,

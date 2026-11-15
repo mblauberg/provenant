@@ -71,7 +71,9 @@ derives changed paths and measured size from the merge-base-to-subject diff and
 passes both to `ReviewConfig::resolve_panel`. Configured path floors can raise
 the selected shape and add their lenses; explicit request fields and layered
 review configuration keep their existing precedence. If size metadata is
-unavailable, selection proceeds with size unknown.
+unavailable because the diff is empty, selection proceeds with size unknown. If
+path or size metadata is incomplete, the resolver applies the configured
+unreadable-path floors and adds a warning to reviewer guidance.
 
 - Why: panel coverage must follow the change that reviewers will actually see,
   not the submitter's current checkout.

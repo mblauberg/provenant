@@ -3704,13 +3704,13 @@ mod tests {
 
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
-        let explain = |subject: &str| -> Result<GraphDocument> {
+        let explain = |subject: &str, review_base: &str| -> Result<GraphDocument> {
             let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
             let result = factory.graph_document(
                 json!({
                     "op":"run", "template":"review", "brief":"Review pinned paths",
                     "over":"@review-panel", "explain":true,
-                    "set":{"subject":subject,"review_base":base}
+                    "set":{"subject":subject,"review_base":review_base}
                 }),
                 budget,
                 &cancel,
@@ -3718,7 +3718,7 @@ mod tests {
             Ok(serde_json::from_value(result["document"].clone())?)
         };
 
-        let protected = explain(&protected_head)?;
+        let protected = explain(&protected_head, &base)?;
         let protected_lenses = &protected.template_resolvers["review-panel"];
         assert!(protected_lenses.len() >= 8, "{protected_lenses:?}");
         for lens in ["correctness-spec", "reliability", "security-privacy"] {
@@ -3740,7 +3740,7 @@ mod tests {
             vec!["true".to_owned()]
         );
 
-        let docs = explain(&docs_head)?;
+        let docs = explain(&docs_head, &base)?;
         assert_eq!(docs.template_resolvers["review-panel"].len(), 1);
         assert_eq!(
             docs.template_resolvers["review-frame"],
@@ -3753,6 +3753,25 @@ mod tests {
         assert_eq!(
             docs.template_resolvers["review-synthesis"],
             vec!["false".to_owned()]
+        );
+
+        let tree = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD^{tree}"])?;
+        let disconnected_base =
+            crate::worktree_tests::git(&rig, &["commit-tree", &tree, "-m", "disconnected base"])?;
+        let disconnected_head =
+            crate::worktree_tests::git(&rig, &["commit-tree", &tree, "-m", "disconnected head"])?;
+        let incomplete = explain(&disconnected_head, &disconnected_base)?;
+        let incomplete_lenses = &incomplete.template_resolvers["review-panel"];
+        assert!(incomplete_lenses.len() >= 8, "{incomplete_lenses:?}");
+        for lens in ["correctness-spec", "reliability", "security-privacy"] {
+            assert!(
+                incomplete_lenses.iter().any(|selected| selected == lens),
+                "{incomplete_lenses:?}"
+            );
+        }
+        assert!(
+            incomplete.template_resolvers["review-advice-correctness-spec"][0]
+                .contains("configured unreadable-path floors were applied")
         );
         Ok(())
     }
