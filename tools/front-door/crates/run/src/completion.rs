@@ -537,7 +537,10 @@ mod tests {
         ) -> std::result::Result<Decoded, String> {
             let mut result = decoded();
             match route.account_key.as_deref() {
-                Some("fixture-one") => result.result = "```handoff\n{\"schema_version\":2,".into(),
+                // The provider died before declaring anything: an absent final
+                // declaration, so settlement falls back to granted progress. A
+                // truncated fence is malformed evidence instead.
+                Some("fixture-one") => result.result = "Working on the renderer".into(),
                 Some("fixture-two") => {
                     result.outcome = Outcome::Succeeded;
                     result.complete = true;

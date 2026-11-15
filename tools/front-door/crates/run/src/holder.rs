@@ -3300,6 +3300,24 @@ mod writer_recovery_tests {
     use super::*;
     use crate::tests::{call, clock, context, input, route};
 
+    /// The settled snapshot's stored shape: a handoff result, not the bare
+    /// provider declaration.
+    fn seal_progress_handoff(
+        attempt: &provenant_os::fs::Directory,
+        progress: &serde_json::Value,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let handoff =
+            provenant_records::handoff::Handoff::from_json(&serde_json::to_vec(progress)?)?;
+        let stored: provenant_records::handoff::HandoffResult = Ok(Some(handoff));
+        crate::artifacts::seal(
+            attempt,
+            provenant_records::AttemptFile::Handoff.name(),
+            &serde_json::to_vec(&stored)?,
+            provenant_records::handoff::HANDOFF_BYTES as u64 * 4,
+        )?;
+        Ok(())
+    }
+
     #[test]
     fn modern_writer_reconcile_preserves_unlaunched_private_evidence()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -4273,12 +4291,7 @@ mod writer_recovery_tests {
             "decisions": ["Keep parser API"],
             "verify": [],
         });
-        crate::artifacts::seal(
-            &attempt,
-            provenant_records::AttemptFile::Handoff.name(),
-            &serde_json::to_vec(&progress)?,
-            provenant_records::handoff::HANDOFF_BYTES as u64,
-        )?;
+        seal_progress_handoff(&attempt, &progress)?;
         let mut observed = crate::tests::exit();
         observed.scope = scope;
         observed.stop_reason = Some(StopReason::ContextHandoff);
@@ -4420,12 +4433,7 @@ mod writer_recovery_tests {
                 "decisions": [],
                 "verify": [],
             });
-            crate::artifacts::seal(
-                &attempt,
-                provenant_records::AttemptFile::Handoff.name(),
-                &serde_json::to_vec(&progress)?,
-                provenant_records::handoff::HANDOFF_BYTES as u64,
-            )?;
+            seal_progress_handoff(&attempt, &progress)?;
             let mut observed = crate::tests::exit();
             observed.scope = scope;
             crate::dispatch_tests::seal_exit(&store, &observed)?;
