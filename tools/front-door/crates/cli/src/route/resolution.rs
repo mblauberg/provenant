@@ -1,5 +1,18 @@
 use super::*;
 
+fn explicit_provider_model_scopes(
+    origins: &std::collections::BTreeMap<String, provenant_config::Origin>,
+) -> BTreeSet<String> {
+    origins
+        .iter()
+        .filter_map(|(key, origin)| {
+            let (provider, field) = key.strip_prefix("providers.")?.rsplit_once('.')?;
+            (field == "models" && matches!(origin, provenant_config::Origin::User { .. }))
+                .then(|| provider.to_owned())
+        })
+        .collect()
+}
+
 /// Best-effort bounded evidence. Store outages affect preference, never admission.
 pub(crate) fn selection_evidence(
     roots: &Roots,
@@ -435,10 +448,12 @@ pub(super) fn with_context<T>(
         })
         .collect();
     let provider_scopes = resolved_config.providers.clone();
+    let explicit_provider_model_scopes = explicit_provider_model_scopes(&resolved_config.origins);
     let domains = resolved_config.domains;
     let policies = provenant_providers::scheduling_policies(&domains.quota, registry);
     let mut config = domains.routing;
     config.provider_scopes = provider_scopes;
+    config.explicit_provider_model_scopes = explicit_provider_model_scopes;
     config.preference_sources = preference_sources;
     let project = std::env::current_dir()
         .ok()
@@ -1297,6 +1312,10 @@ pub fn depletion_facts(
     use provenant_routing::{HostNativeRoute, Stopped, Target};
     let text = |error: &dyn std::fmt::Display| error.to_string();
     let resolved = crate::config_reads::read_for(roots, "route").map_err(|error| text(&error))?;
+    let mut routing_config = resolved.domains.routing.clone();
+    routing_config.provider_scopes = resolved.providers.clone();
+    routing_config.explicit_provider_model_scopes =
+        explicit_provider_model_scopes(&resolved.origins);
     let catalogue = Catalogue::bundled().map_err(|error| text(&error))?;
     let route = stopped
         .applied_route
@@ -1395,7 +1414,7 @@ pub fn depletion_facts(
     )
     .map_err(|error| text(&error))?;
     Ok(provenant_fabric_runtime::graph::DepletionFacts {
-        config: resolved.domains.routing,
+        config: routing_config,
         catalogue,
         stopped: stopped_route,
         readiness,

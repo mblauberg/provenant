@@ -643,8 +643,40 @@ fn provider_scope_filters_pools_and_refuses_explicit_pins() -> Result<(), Box<dy
             .filter(|member| member.model.adapter() == "cursor")
         {
             assert!(cursor.permits_model(member.model.model()));
+            assert_eq!(member.weight, 1);
+            assert!(matches!(member.model.model(), "composer-2.5" | "grok-4.7"));
         }
     }
+    let legacy = ModelId::parse("cursor/gpt-5.3-codex-low")?;
+    assert!(catalogue.model(&legacy).is_some());
+    assert!(
+        catalogue
+            .pools
+            .values()
+            .flatten()
+            .all(|member| member.model != legacy)
+    );
+
+    // The compiled Cursor scope shapes shipped pools, not an owner's pool.
+    config.pools.insert(
+        "owner-cursor".into(),
+        vec![RoutePoolMember {
+            model: legacy.clone(),
+            weight: 1,
+            effort: None,
+            efforts: Vec::new(),
+            free: false,
+        }],
+    );
+    let owner_pool = RouteRequest {
+        choice: RouteChoice::NamedRoute(RouteName::parse("owner-cursor")?),
+        ..request("cursor/auto")?
+    };
+    let ctx = context(&catalogue, &config, now()?);
+    let selected = resolve_with_seed(&owner_pool, &ctx, "owner-cursor", 0)?;
+    assert_eq!(selected.adapter, "cursor");
+    assert_eq!(selected.model, legacy.model());
+
     config.provider_scopes.insert(
         "cursor".into(),
         provenant_config::ProviderSettings {
@@ -652,6 +684,9 @@ fn provider_scope_filters_pools_and_refuses_explicit_pins() -> Result<(), Box<dy
             ..provenant_config::ProviderSettings::default()
         },
     );
+    config
+        .explicit_provider_model_scopes
+        .insert("cursor".into());
     let pool = RouteRequest {
         choice: RouteChoice::NamedRoute(RouteName::parse("senior")?),
         ..request("cursor/auto")?
@@ -663,6 +698,10 @@ fn provider_scope_filters_pools_and_refuses_explicit_pins() -> Result<(), Box<dy
         let result = resolve_with_seed(&pool, &ctx, "scope", 0)?;
         assert!(result.adapter != "cursor" || result.model == "auto");
         assert!(resolve(&pin, &ctx).is_ok());
+        assert!(matches!(
+            resolve(&owner_pool, &ctx),
+            Err(RoutingError::NoEligiblePoolMember { .. })
+        ));
     }
     config
         .provider_scopes

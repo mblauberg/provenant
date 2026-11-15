@@ -102,7 +102,7 @@ fn prepare(
         input,
         scratch,
         crate::launch::tool_search_path(input.home, true, input.policy)?,
-    );
+    )?;
     if input.sandboxed() {
         env.extend([
             ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),

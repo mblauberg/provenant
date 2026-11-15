@@ -196,7 +196,7 @@ fn prepare(
         });
     }
     let path = crate::launch::tool_search_path(input.home, true, input.policy)?;
-    let mut env = base_env(input, &plan.scratch.path, path);
+    let mut env = base_env(input, &plan.scratch.path, path)?;
     if input.account.is_some() {
         // The selected login takes precedence over ambient provider selectors.
         env.retain(|(key, _)| {

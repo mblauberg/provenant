@@ -124,6 +124,7 @@ fn installed_sign_ins(
     host_var: impl Fn(&str) -> Option<OsString>,
     executor: &dyn Executor,
 ) -> Vec<InstalledSignin> {
+    let path = host_var("PATH").unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
     adapters
         .iter()
         .filter_map(|name| {
@@ -144,6 +145,7 @@ fn installed_sign_ins(
                 home,
                 &account_dir,
                 Path::new("/"),
+                Some(&path),
             )?;
             Some(InstalledSignin {
                 adapter: name.clone(),

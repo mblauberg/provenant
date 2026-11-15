@@ -24,13 +24,17 @@ pub fn local_signin(
     home: &Path,
     account_dir: &Path,
     cwd: &Path,
+    path: Option<&OsStr>,
 ) -> Option<LocalSignin> {
     use provenant_os::exec::{StreamPolicy, Termination};
     use provenant_records::LoginReprobe;
     let mut argv = vec![executable.as_os_str().to_owned()];
     let mut env = vec![
         ("HOME".into(), home.as_os_str().to_owned()),
-        ("PATH".into(), "/usr/bin:/bin".into()),
+        (
+            "PATH".into(),
+            path.unwrap_or(OsStr::new("/usr/bin:/bin")).to_owned(),
+        ),
     ];
     match strategy {
         LoginReprobe::Codex => {
@@ -275,6 +279,7 @@ pub struct HostProbeExecutor<'a> {
     executor: &'a dyn Executor,
     root: Directory,
     path: PathBuf,
+    search_path: Option<OsString>,
 }
 
 impl<'a> HostProbeExecutor<'a> {
@@ -285,7 +290,18 @@ impl<'a> HostProbeExecutor<'a> {
             executor,
             root,
             path: host_root.to_owned(),
+            search_path: None,
         })
+    }
+
+    /// Use the request's filtered PATH for every provider probe this executor runs.
+    pub fn with_search_path(mut self, path: &OsStr) -> Self {
+        self.search_path = Some(path.to_owned());
+        self
+    }
+
+    pub fn search_path(&self) -> Option<&OsStr> {
+        self.search_path.as_deref()
     }
 
     pub fn root(&self) -> &Path {
@@ -316,9 +332,21 @@ impl Executor for HostProbeExecutor<'_> {
             HostProbeDir::create_in(&self.root, &self.path).map_err(probe_directory_error)?;
         // Reborrow filters with the shorter cwd lifetime. Struct update syntax
         // would retain ExecOptions' original, invariant filter lifetime.
+        // Probe implementations keep their deliberately small credential
+        // environments. A lane-configured executor owns PATH so identity,
+        // status and version probes cannot diverge from executable discovery.
+        let env = self.search_path.as_ref().map(|path| {
+            let mut env = options
+                .env
+                .map(<[(OsString, OsString)]>::to_vec)
+                .unwrap_or_else(|| std::env::vars_os().collect());
+            env.retain(|(name, _)| name != "PATH");
+            env.push(("PATH".into(), path.clone()));
+            env
+        });
         self.executor.execute(ExecOptions {
             argv: options.argv,
-            env: options.env,
+            env: env.as_deref().or(options.env),
             cwd: scratch.path(),
             stdin: options.stdin,
             secret_input: options.secret_input,
@@ -386,7 +414,8 @@ mod tests {
                     Path::new("/fixture/cursor"),
                     Path::new("/fixture/home"),
                     Path::new("/fixture/home"),
-                    Path::new("/")
+                    Path::new("/"),
+                    None,
                 ),
                 Some(LocalSignin::Unknown)
             );
@@ -415,6 +444,40 @@ mod tests {
             Err(ExecError::Busy)
         ));
         assert_eq!(std::fs::read_dir(host_root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn requester_path_resolves_a_provider_script_interpreter() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("requester-bin");
+        std::fs::create_dir(&bin).unwrap();
+        let node = bin.join("node");
+        std::fs::write(
+            &node,
+            "#!/bin/sh\nprintf 'version-from-requester-path\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let provider = root.path().join("provider");
+        std::fs::write(&provider, "#!/usr/bin/env node\n").unwrap();
+        std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let state = root.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        let path = std::env::join_paths([bin.as_path()]).unwrap();
+        let system = provenant_os::exec::SystemExecutor::new(1).unwrap();
+        let executor = HostProbeExecutor::new(&system, &state)
+            .unwrap()
+            .with_search_path(&path);
+        let argv = [provider.into_os_string(), "--version".into()];
+        let env = [("HOME".into(), root.path().as_os_str().to_owned())];
+        let mut options = ExecOptions::new(&argv, root.path(), std::time::Duration::from_secs(2));
+        options.env = Some(&env);
+
+        let output = executor.execute(options).unwrap();
+        assert_eq!(output.termination, provenant_os::exec::Termination::Exit(0));
+        assert_eq!(output.stdout.bytes, b"version-from-requester-path\n");
     }
 
     const STALE: &str = "probe-0123456789abcdef01234567";

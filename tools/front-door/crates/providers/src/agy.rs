@@ -508,7 +508,7 @@ fn prepare(
     argv.extend(["--print".into(), input.prompt.text().into()]);
 
     let path = crate::launch::tool_search_path(input.home, true, input.policy)?;
-    let mut env = base_env(input, &plan.scratch.path, path);
+    let mut env = base_env(input, &plan.scratch.path, path)?;
     for (key, value) in &mut env {
         if key == "HOME" && (input.sandboxed() || input.account.is_some()) {
             *value = home.into();

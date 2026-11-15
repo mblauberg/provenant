@@ -180,6 +180,43 @@ fn each_rung_answers_when_the_ones_before_it_cannot() {
     );
 }
 
+// Spec: docs/specs/routing.md#provider-model-scope
+#[test]
+fn depletion_ladder_obeys_owner_scope_without_applying_compiled_scope_to_custom_pool() {
+    let cursor = "cursor/gpt-5.3-codex-low";
+    let mut case = Case::new(vec![ready(cursor, "cursor-account")]);
+    case.config.pools.insert(
+        "senior".into(),
+        vec![RoutePoolMember {
+            model: model(cursor),
+            weight: 1,
+            effort: None,
+            efforts: Vec::new(),
+            free: false,
+        }],
+    );
+    case.config.depletion.rungs = vec![Rung::AdjacentTier];
+    case.config.depletion.tiers = vec!["junior".into(), "senior".into()];
+    case.config.depletion.adjacent = vec![TierStep::Higher];
+    case.stopped.tier = Some("junior".into());
+    assert_eq!(
+        case.handoff().map(|(_, target)| target),
+        Some(route(cursor, "cursor-account"))
+    );
+
+    case.config.provider_scopes.insert(
+        "cursor".into(),
+        provenant_config::ProviderSettings {
+            models: Some(vec!["composer-*".into()]),
+            ..provenant_config::ProviderSettings::default()
+        },
+    );
+    case.config
+        .explicit_provider_model_scopes
+        .insert("cursor".into());
+    assert_eq!(case.handoff(), None);
+}
+
 #[test]
 fn effort_and_tier_follow_the_rung() {
     let mut case = Case::new(vec![ready(SONNET, "a2")]);
@@ -561,5 +598,60 @@ fn depletion_facts_judge_each_account_with_the_dispatch_checks()
     ));
     // No claude account is registered, so that model has no fact: unknown.
     assert!(facts.iter().all(|fact| fact.model != model(SONNET)));
+    Ok(())
+}
+
+// Spec: docs/specs/routing.md#provider-model-scope
+#[test]
+fn depletion_readiness_uses_custom_pool_and_explicit_provider_scope()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let cursor_model = model("cursor/gpt-5.3-codex-low");
+    let mut config = RoutingConfig::default();
+    config.pools.insert(
+        "owner-cursor".into(),
+        vec![RoutePoolMember {
+            model: cursor_model.clone(),
+            weight: 1,
+            effort: None,
+            efforts: Vec::new(),
+            free: false,
+        }],
+    );
+    let records = [AvailabilityRecord {
+        adapter: "cursor".into(),
+        observed_models: vec![cursor_model.model().into()],
+        ..availability()
+    }];
+    let access = [AccessContext {
+        adapter: "cursor",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    let facts = depletion_facts(&ctx, RouteIntent::default(), &[])?;
+    assert!(
+        facts
+            .iter()
+            .any(|fact| { fact.model == cursor_model && fact.state == Readiness::Ready })
+    );
+
+    config.provider_scopes.insert(
+        "cursor".into(),
+        provenant_config::ProviderSettings {
+            models: Some(vec!["composer-*".into()]),
+            ..provenant_config::ProviderSettings::default()
+        },
+    );
+    config
+        .explicit_provider_model_scopes
+        .insert("cursor".into());
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    let facts = depletion_facts(&ctx, RouteIntent::default(), &[])?;
+    assert!(facts.iter().all(|fact| fact.model != cursor_model));
     Ok(())
 }

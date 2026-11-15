@@ -20,12 +20,16 @@ behaviour and [GC](gc.md) for retention configuration.
 ## Provider model scope
 
 `[providers.cursor]` defaults to `models = ["auto", "composer-*", "grok-*"]`.
-Any provider can set `models` to a list of model-name patterns: `*` matches zero
-or more characters, and other characters are literal. An empty list excludes all
-models from automatic routing; other providers without a list are unrestricted.
-Set `out_of_scope_pin = "warn"` (default), `"refuse"`, or `"allow"` to control
-explicit pins outside the scope. Warnings name the model and setting. Pools and
-named routes always exclude out-of-scope models. Host settings replace the
+That compiled list limits shipped automatic pools and supplies the default scope
+for explicit-pin policy. Owner-configured pools and routes can select other
+catalogued models. Setting `models` explicitly makes that restriction apply to
+automatic choices across shipped and owner-configured pools, routes, preferences,
+fallbacks and depletion hand-offs. Any provider can set `models` to a list of
+model-name patterns: `*` matches zero or more characters, and other characters
+are literal. An empty list excludes every model from automatic routing. Providers
+without a compiled or configured list are unrestricted. Set `out_of_scope_pin =
+"warn"` (default), `"refuse"`, or `"allow"` to control explicit pins outside the
+effective scope. Warnings name the model and setting. Host settings replace the
 provider's default list; `provenant config show` displays the values and sources,
 and `provenant check config` reports invalid settings.
 

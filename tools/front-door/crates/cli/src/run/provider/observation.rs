@@ -265,6 +265,7 @@ pub(super) fn codex_login_is_healthy(
             probe.home,
             &entry.directory,
             probe.scratch,
+            probe.executor.search_path(),
         ),
         Some(provenant_providers::host::LocalSignin::SignedIn)
     )
@@ -285,6 +286,7 @@ pub(super) fn cursor_login_is_healthy(
             probe.home,
             &entry.directory,
             probe.scratch,
+            probe.executor.search_path(),
         ),
         Some(provenant_providers::host::LocalSignin::SignedIn)
     )

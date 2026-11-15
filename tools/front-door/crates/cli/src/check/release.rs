@@ -225,7 +225,7 @@ pub(super) fn inspect(
                         git,
                         GitRead::RawObject {
                             kind: GitObjectKind::Blob,
-                            oid: entry.oid.clone(),
+                            oid: entry.oid,
                         },
                     )?
                 };
@@ -238,14 +238,14 @@ pub(super) fn inspect(
                     && raw.len() <= MAX_CACHED_SYMLINK_BYTES - cached_symlink_bytes
                 {
                     cached_symlink_bytes += raw.len();
-                    symlink_target_cache.insert(entry.oid.clone(), raw.clone());
+                    symlink_target_cache.insert(entry.oid, raw.clone());
                 }
                 if let Some(message) =
                     symlink_problem(&symlink_destination(&entry.path, &raw), &modes)
                 {
                     scan.finding("release.symlink", Path::new(&entry.path), 1, message)?;
                 }
-                if seen_blobs.insert(entry.oid.clone()) {
+                if seen_blobs.insert(entry.oid) {
                     scan.note(format!("release:blob:{}", entry.oid), &raw);
                 }
             } else if seen_blobs.insert(entry.oid) {
