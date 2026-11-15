@@ -124,10 +124,10 @@ impl crate::LaunchSpec {
         }
         let bin = scratch.join("bin");
         let disk = gate
-            .disk_limits
+            .disk_gate
             .as_ref()
-            .map(|limits| {
-                let json = serde_json::to_string(&limits).map_err(|_| ProviderError::Malformed)?;
+            .map(|gate| {
+                let json = serde_json::to_string(&gate).map_err(|_| ProviderError::Malformed)?;
                 Ok::<_, ProviderError>(format!(
                     "{name}={}\nexport {name}\n",
                     shell_quote(&json),
@@ -761,8 +761,9 @@ pub struct BuildSlotGate<'a> {
     pub state: &'a Path,
     /// How many builds the host runs at once.
     pub slots: u64,
-    /// Resolved advisory and critical limits, with their host configuration sources.
-    pub disk_limits: Option<provenant_config::DiskLimits>,
+    /// Resolved advisory and critical limits and the effective `DISK_FLOOR`
+    /// policy, with their sources: the shim takes the host's one decision.
+    pub disk_gate: Option<provenant_config::DiskGate>,
     /// The real `cargo` the shim runs once it holds a slot.
     pub cargo: &'a Path,
     /// Cargo commands the lane may run: `all`, `check` or `none`. The shim
@@ -2391,12 +2392,16 @@ mod tests {
         spec.cwd = root.clone();
         let provenant = root.join("fake provenant");
         let gate = BuildSlotGate {
-            disk_limits: Some(provenant_config::DiskLimits {
-                free_floor: 50,
-                free_floor_source: provenant_records::diagnostic::SettingSource::Configuration,
-                critical_free: 10,
-                critical_free_source: provenant_records::diagnostic::SettingSource::ShippedDefault,
-            }),
+            disk_gate: Some(provenant_config::DiskGate::new(
+                provenant_config::DiskLimits {
+                    free_floor: 50,
+                    free_floor_source: provenant_records::diagnostic::SettingSource::Configuration,
+                    critical_free: 10,
+                    critical_free_source:
+                        provenant_records::diagnostic::SettingSource::ShippedDefault,
+                },
+                &provenant_records::policy::Policy::default(),
+            )),
             provenant: &provenant,
             state: &state,
             slots: 3,
@@ -2461,7 +2466,7 @@ mod tests {
             format!(
                 "<internal><build-slot><--></home/.cargo/bin/cargo><test><--><two words>[{}|3|{}]",
                 state.display(),
-                serde_json::to_string(&gate.disk_limits.unwrap()).unwrap(),
+                serde_json::to_string(&gate.disk_gate.unwrap()).unwrap(),
             ),
             "the shim forwards its sealed slots and disk limits"
         );
@@ -2492,7 +2497,7 @@ mod tests {
         input.provenant.state = &state;
         let mut spec = Codex.prepare(input).unwrap();
         let gate = BuildSlotGate {
-            disk_limits: None,
+            disk_gate: None,
             provenant: Path::new("/fixture/bin/provenant"),
             state: &state,
             slots: 2,
@@ -2527,7 +2532,7 @@ mod tests {
         for (state, slots) in [("/s", 0), ("/s", 65)] {
             let mut spec = bare_spec("/usr/bin");
             let gate = BuildSlotGate {
-                disk_limits: None,
+                disk_gate: None,
                 provenant: Path::new("/p"),
                 state: Path::new(state),
                 slots,
@@ -2544,7 +2549,7 @@ mod tests {
         for state in ["relative", "/s\nx"] {
             let mut spec = bare_spec("/usr/bin");
             let gate = BuildSlotGate {
-                disk_limits: None,
+                disk_gate: None,
                 provenant: Path::new("/p"),
                 state: Path::new(state),
                 slots: 1,
@@ -2562,7 +2567,7 @@ mod tests {
     #[test]
     fn unrepresentable_build_slot_shim_is_skipped_without_mutating_launch() {
         let gate = BuildSlotGate {
-            disk_limits: None,
+            disk_gate: None,
             provenant: Path::new("/runtime"),
             state: Path::new("/state"),
             slots: 1,

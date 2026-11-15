@@ -577,6 +577,7 @@ impl run::Providers for Registry<'_> {
         let settings = writer_gc_settings(roots.state.as_path(), &policy);
         check_writer_disk(
             &settings,
+            &policy,
             roots.state.as_path(),
             &writer.worktree,
             &writer.project,

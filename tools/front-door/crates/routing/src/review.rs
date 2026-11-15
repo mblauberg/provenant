@@ -26,6 +26,10 @@ pub enum FamilyDiversity {
     Strict,
 }
 
+/// The floor tiers, lowest first: schema metadata, validation and ranking
+/// read this one declaration.
+pub(crate) const FLOOR_TIERS: [&str; 4] = ["routine", "substantial", "crucial", "terminal"];
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ReviewFloor {
@@ -721,13 +725,10 @@ impl ReviewConfig {
     /// only when no other class matches; unmatched paths use unknown.
     pub fn path_floors(&self, paths: &[String]) -> AppliedFloors {
         fn rank(tier: &str) -> usize {
-            match tier {
-                "routine" => 0,
-                "substantial" => 1,
-                "crucial" => 2,
-                "terminal" => 3,
-                _ => 0,
-            }
+            FLOOR_TIERS
+                .iter()
+                .position(|name| *name == tier)
+                .unwrap_or(0)
         }
         let mut result = AppliedFloors::default();
         for path in paths {
@@ -1273,7 +1274,7 @@ impl ReviewConfig {
             if !identifier(name) {
                 error(prefix.clone(), "selector");
             }
-            if !["routine", "substantial", "crucial", "terminal"].contains(&floor.tier.as_str()) {
+            if !FLOOR_TIERS.contains(&floor.tier.as_str()) {
                 error(format!("{prefix}.tier"), "selector");
             }
             if floor.paths.len() > 128

@@ -66,6 +66,18 @@ limit rather than a fabricated measurement.
 - Why: budget enforcement must preserve completed work and report its evidence.
 - Test: `crates/supervisor/src/guardian/tests.rs::budget_actions_preserve_clean_points_and_natural_completion`
 
+## Every limit names the layer that set it
+
+`dispatch_profile` seals, for every effective knob not at its registry default,
+the layer that set it: `launch` for a dispatch override, `host` for the host's
+`[knobs]` table or its selected preset. `provenant_config::knob_source` is the
+one reader; lane limits, CI scope, the gh budget and sandbox admission take
+their reported source from it, so status JSON and the preamble show the true
+layer.
+- Why: a value reported under the wrong source sends the operator to the wrong
+  place to change it.
+- Test: `crates/config/src/tests.rs::every_registered_knob_reports_the_layer_that_set_it`
+
 ## Lane Git and import
 
 Writers use private Git state; the host does not execute with lane-mutable Git

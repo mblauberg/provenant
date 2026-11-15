@@ -833,6 +833,62 @@ mod tests {
         }
     }
 
+    // Small: each owner-declared enumeration against its runtime type.
+    #[test]
+    fn every_declared_enum_value_is_one_the_runtime_accepts() {
+        let declared = provenant_config::declared_enums(&SECTIONS);
+        let schema_refusal = |errors: &[String]| errors.iter().any(|e| e.ends_with(": schema"));
+        let mut typed = Vec::new();
+        for entry in &declared {
+            let path = entry
+                .path
+                .split('.')
+                .map(|part| if part.starts_with('{') { "probe" } else { part })
+                .collect::<Vec<_>>()
+                .join(".");
+            // A keyed row whose other fields are required cannot hold one
+            // field alone; its shape, not this value, refuses the probe.
+            if schema_refusal(&provenant_config::probe_field(
+                &SECTIONS,
+                &path,
+                &json!(null),
+            )) {
+                continue;
+            }
+            for value in entry.values {
+                let errors = provenant_config::probe_field(&SECTIONS, &path, &json!(value));
+                assert!(
+                    !schema_refusal(&errors),
+                    "{} refuses declared {value}: {errors:?}",
+                    entry.path
+                );
+            }
+            // A value outside the declaration shows the probe reaches a typed
+            // field. Optional host policy resolves its network at launch, so
+            // this holds per owner rather than for every field.
+            if schema_refusal(&provenant_config::probe_field(
+                &SECTIONS,
+                &path,
+                &json!("undeclared-value"),
+            )) {
+                typed.push(entry.path.as_str());
+            }
+            if let Some(default) = &entry.default {
+                assert!(
+                    entry
+                        .values
+                        .iter()
+                        .any(|value| default.as_str() == Some(*value)),
+                    "{} defaults outside its values",
+                    entry.path
+                );
+            }
+        }
+        for owner in ["gc.", "domains."] {
+            assert!(typed.iter().any(|path| path.starts_with(owner)), "{owner}");
+        }
+    }
+
     #[test]
     fn schema_reports_real_domain_bounds_enums_and_keyed_shapes() {
         let temp = tempfile::tempdir().unwrap();

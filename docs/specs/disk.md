@@ -48,16 +48,21 @@ Collection belongs to [worktrees](supervisor.md#worktrees) and
 
 ## Dispatch and new-build pressure
 
-Dispatch and new builds share `GcSettings::disk_limits` and `DiskLimits::level`.
-Below `gc.free_floor`, warn and proceed. Only below `gc.critical_free` (default
-2 GiB; `0B` disables it) refuse new work. Diagnostics report available bytes,
-both thresholds and their configuration or shipped-default sources. Running
-builds continue. The build shim receives one serialized
-`PROVENANT_BUILD_DISK_LIMITS`; sandbox-off preparation evaluates the same limits
-against its target volume before launch. Advisory policy strengths cannot turn the free floor into a
-refusal or bypass the separate critical threshold.
-- Why: a collection target must not prevent ordinary lane work; critical
-  exhaustion can compromise output integrity.
-- Test: `crates/config/src/gc.rs::disk_levels_follow_the_declared_thresholds_and_keep_their_sources`;
-  `crates/run/src/dispatch_disk_admission_tests.rs::admission_uses_only_the_critical_threshold_for_refusal`;
+Submission, admission and new builds take one decision, `DiskGate::decide`:
+the thresholds from `GcSettings::disk_limits` plus the effective strength of
+the declared `DISK_FLOOR` policy rule. Below `gc.free_floor`, warn and proceed.
+Below `gc.critical_free` (default 2 GiB; `0B` disables it) `DISK_FLOOR` decides:
+it warns and proceeds by default, for every lane class; `policy.DISK_FLOOR =
+"refuse"` holds new work and `"off"` silences it. Messages report available
+bytes, both thresholds, their configuration or shipped-default sources and the
+`provenant gc` remedy. Running builds continue. The build shim receives the
+host's serialized gate in `PROVENANT_BUILD_DISK_LIMITS`; sandbox-off preparation
+takes the same decision against its target volume before launch. A record that
+cannot be written still fails as a data-integrity error, outside this decision.
+- Why: low space is not one of the four hard boundaries
+  ([ADR 0035](../adr/0035-four-hard-boundaries-and-flexible-everything-else.md)); a collection target must not
+  prevent ordinary lane work, and a host that wants a hard floor declares it.
+- Test: `crates/config/src/gc.rs::disk_gate_effect_follows_the_declared_disk_floor_rule`;
+  `crates/run/src/dispatch_disk_admission_tests.rs::admission_follows_the_declared_disk_floor_policy`;
+  `crates/cli/src/run/tests/writer_disk.rs::writer_disk_check_follows_the_declared_disk_floor_policy`;
   `tests/build_slot.rs::disk_policy_applies_before_starting_a_new_build`

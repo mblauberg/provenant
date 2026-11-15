@@ -658,6 +658,15 @@ pub(super) fn credential_roots(
     settings: &provenant_providers::accounts::Settings,
 ) -> Result<provenant_core::CredentialRoots, String> {
     use provenant_core::{CredentialKind, CredentialRoots, CredentialScope};
+    // The package exception belongs to the default Codex home alone,
+    // whichever declaration names it; every other path is a plain store.
+    let kind = |adapter: &str, path: &Path| {
+        if adapter == "codex" && path == home.join(provenant_core::CODEX_ACCOUNT_DIRECTORY.1) {
+            CredentialKind::CodexHome
+        } else {
+            CredentialKind::Store
+        }
+    };
     let mut roots = CredentialRoots::for_home(home);
     for entry in settings.entries.values() {
         let source = format!("account registry: {}/{}", entry.adapter, entry.label);
@@ -666,7 +675,7 @@ pub(super) fn credential_roots(
                 path.clone(),
                 CredentialScope::Subtree,
                 source.clone(),
-                CredentialKind::Store,
+                kind(entry.adapter.as_str(), path),
             );
         }
     }
@@ -718,11 +727,7 @@ pub(super) fn credential_roots(
                 spec.name
             )
         };
-        let kind = if spec.name == "codex" && path == home.join(".codex") {
-            CredentialKind::CodexHome
-        } else {
-            CredentialKind::Store
-        };
+        let kind = kind(spec.name, &path);
         roots.add(path, CredentialScope::Subtree, source, kind);
     }
     let host_roots = registry
@@ -732,17 +737,13 @@ pub(super) fn credential_roots(
     for root in host_roots {
         roots.add(root.path, root.scope, root.source, root.kind);
     }
-    // Keep both the declaration and its resolved alias. A candidate can use
+    // Keep both the declaration and its resolved alias, and give every
+    // spelling of one location all of its declarations. A candidate can use
     // either spelling, and no credential file contents are opened here.
-    let declarations = roots.entries().to_vec();
-    for root in declarations {
-        let resolved = provenant_confinement::permissions::resolve_boundary_path(&root.path)
-            .map_err(|error| error.to_string())?;
-        if resolved != root.path {
-            roots.add(resolved, root.scope, root.source, root.kind);
-        }
-    }
-    Ok(roots)
+    roots.with_aliases(|path| {
+        provenant_confinement::permissions::resolve_boundary_path(path)
+            .map_err(|error| error.to_string())
+    })
 }
 
 pub fn declared_credentials(

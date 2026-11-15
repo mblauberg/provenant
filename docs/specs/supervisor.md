@@ -157,6 +157,9 @@ lane grant validation consume it. File declarations retain exact scope.
 Credential directories are denied after every grant. The standalone Codex
 release package read exception is relative to its declared Codex home; it
 confers no writes and never exempts another overlapping credential declaration.
+Every declaration is kept, whatever its order or kind; each spelling of a
+declared location carries every declaration made at or beneath any spelling of
+it, so a store registered at a Codex home or its alias stays refused.
 
 A component named `.claude`, `.codex`, `.cursor` or `.gemini` does not establish
 a credential boundary. Project-local agent configuration overlaps warn with
@@ -172,6 +175,7 @@ access. An optional root that resolves into a declared credential root is
 omitted with a warning.
 - Why: one broad grant silently voids the boundary.
 - Test: `crates/confinement/src/permissions/tests/validation.rs::every_declared_credential_root_protects_grants_and_enclosing_paths`;
+  `crates/core/src/roots.rs::codex_package_exception_applies_only_where_no_other_declaration_protects`;
   `crates/cli/src/run/provider/tests_retained_state_and_workspace.rs::source_cwd_matches_declared_admission_for_registered_worktree_locations`;
   `src/fabric/interface.rs::explanation_and_preparation_share_worktree_admission`;
   `crates/confinement/src/permissions/tests/validation.rs::directory_discovery_keeps_literal_scope_and_refuses_symlinks`

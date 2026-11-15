@@ -784,12 +784,9 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("grant_limit", "int"),
     FieldMetadata::new("writer_token_budget", "int"),
     FieldMetadata::new("writer_budget_tiers.{tier}.token_budget", "int"),
-    FieldMetadata::enumeration(
-        "writer_budget_tiers.{tier}.on_budget",
-        &["wrap_up", "warn", "stop"],
-    ),
+    FieldMetadata::enumeration("writer_budget_tiers.{tier}.on_budget", &BudgetAction::NAMES),
     FieldMetadata::new("writer_budget_tiers.{tier}.budget_grace", "fraction"),
-    FieldMetadata::enumeration("writer_budget_action", &["wrap_up", "warn", "stop"]),
+    FieldMetadata::enumeration("writer_budget_action", &BudgetAction::NAMES),
     FieldMetadata::new("writer_budget_grace", "fraction"),
     FieldMetadata::int(
         "write_grant_limit_bytes",
@@ -811,6 +808,12 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("projects.{project}.writer_writes", "array"),
     FieldMetadata::new("projects.{project}.review_exempt", "array"),
     FieldMetadata::new("projects.{project}.admission_seconds", "integer"),
+    FieldMetadata::new("projects.{project}.writer_token_budget", "int"),
+    FieldMetadata::enumeration(
+        "projects.{project}.writer_budget_action",
+        &BudgetAction::NAMES,
+    ),
+    FieldMetadata::new("projects.{project}.writer_budget_grace", "fraction"),
     FieldMetadata::new("sandboxed_routes", "array"),
     FieldMetadata::new("sandbox_cache_reads", "array"),
     FieldMetadata::new("projects.{project}.sandbox_cache_reads", "array"),
@@ -822,6 +825,26 @@ pub const SECTION: DomainSection = DomainSection::new::<RunConfig>("run", |_| DE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every project override is editable through its declaration before any
+    /// project row exists, typed exactly as the host field it replaces. The
+    /// field list comes from the type itself.
+    #[test]
+    fn every_project_field_is_declared_like_the_host_field_it_replaces() {
+        let fields = serde_json::to_value(ProjectRunConfig::default()).unwrap();
+        let fields = fields.as_object().unwrap();
+        assert!(!fields.is_empty());
+        let declared = |path: &str| FIELD_METADATA.iter().find(|field| field.path == path);
+        for name in fields.keys() {
+            let project = declared(&format!("projects.{{project}}.{name}"))
+                .unwrap_or_else(|| panic!("projects.{{project}}.{name} has no metadata"));
+            let host = declared(name).unwrap_or_else(|| panic!("{name} has no host metadata"));
+            assert_eq!(project.kind, host.kind, "{name}");
+            assert_eq!(project.values, host.values, "{name}");
+            assert_eq!((project.min, project.max), (host.min, host.max), "{name}");
+        }
+    }
+
     fn fields(paths: &[&str]) -> Vec<String> {
         RunConfig {
             writer_writes: paths.iter().map(PathBuf::from).collect(),

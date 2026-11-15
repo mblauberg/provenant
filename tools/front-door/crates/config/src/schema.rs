@@ -56,9 +56,15 @@ const GC_FIELDS: &[FieldMetadata] = &[
     FieldMetadata::new("projects.{project}.keep", "array"),
     FieldMetadata::new("projects.{project}.integration_branches", "array"),
     FieldMetadata::new("projects.{project}.keep_paths", "array"),
-    FieldMetadata::enumeration("projects.{project}.remote_branches", &["never", "managed"]),
+    FieldMetadata::enumeration(
+        "projects.{project}.remote_branches",
+        &crate::RemoteBranches::NAMES,
+    ),
     FieldMetadata::int("projects.{project}.remote_min_tip_age_days", 0, 3650),
-    FieldMetadata::enumeration("projects.{project}.foreign_worktrees", &["keep", "collect"]),
+    FieldMetadata::enumeration(
+        "projects.{project}.foreign_worktrees",
+        &crate::ForeignWorktrees::NAMES,
+    ),
 ];
 const WORKTREE_FIELDS: &[FieldMetadata] = &[
     FieldMetadata::int("timeout_seconds", 1, 3600),
@@ -90,6 +96,139 @@ const PROVIDER_FIELDS: &[FieldMetadata] = &[
         provenant_core::MAX_LANE_RUNTIME_SECONDS as i64,
     ),
 ];
+
+/// The config-owned sections and their field metadata, by table prefix. The
+/// schema and [`declared_enums`] both read this list.
+const CONFIG_FIELDS: &[(&str, &[FieldMetadata])] = &[
+    ("gc", GC_FIELDS),
+    ("worktrees", WORKTREE_FIELDS),
+    ("retention", RETENTION_FIELDS),
+    ("install", INSTALL_FIELDS),
+    ("providers", PROVIDER_FIELDS),
+];
+
+/// Deserialise one config-owned table through its runtime type.
+fn owned(prefix: &str, document: DocumentMut) -> Result<Value, String> {
+    fn typed<S: serde::de::DeserializeOwned + Serialize>(
+        document: DocumentMut,
+    ) -> Result<Value, String> {
+        let value: S = toml_edit::de::from_document(document).map_err(|error| error.to_string())?;
+        serde_json::to_value(value).map_err(|error| error.to_string())
+    }
+    match prefix {
+        "gc" => typed::<crate::GcSettings>(document),
+        "worktrees" => typed::<crate::WorktreeSettings>(document),
+        "retention" => typed::<crate::RetentionSettings>(document),
+        "install" => typed::<crate::InstallSettings>(document),
+        "providers" => typed::<BTreeMap<String, crate::ProviderSettings>>(document),
+        _ => Err(format!("{prefix} has no runtime type")),
+    }
+}
+
+/// An owner-declared enumeration: the one list the schema and the generated
+/// reference publish, with the default its runtime type applies.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeclaredEnum {
+    pub path: String,
+    pub values: &'static [&'static str],
+    /// Absent where the value is inherited from another layer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<Value>,
+}
+
+/// Name each `{key}` segment with a probe entry.
+fn concrete(pattern: &str) -> String {
+    pattern
+        .split('.')
+        .map(|part| if is_placeholder(part) { "probe" } else { part })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+fn leaf(value: &Value, path: &str) -> Option<Value> {
+    path.split('.')
+        .try_fold(value, |value, key| value.get(key))
+        .filter(|value| !value.is_null())
+        .cloned()
+}
+
+/// Every enumeration the config-owned sections and the registered domain
+/// sections declare, under its full configuration path.
+pub fn declared_enums<T>(sections: &DomainSections<T>) -> Vec<DeclaredEnum> {
+    let mut out = Vec::new();
+    for &(prefix, metadata) in CONFIG_FIELDS {
+        for field in metadata.iter().filter(|field| !field.values.is_empty()) {
+            let path = concrete(field.path);
+            // A keyed entry with no keys set yields its runtime default.
+            let mut document = DocumentMut::new();
+            let shaped = path.rsplit_once('.').is_none_or(|(parent, _)| {
+                set_path(&mut document, parent, &Value::Object(Default::default())).is_ok()
+            });
+            let default = shaped
+                .then(|| owned(prefix, document).ok())
+                .flatten()
+                .and_then(|value| leaf(&value, &path));
+            out.push(DeclaredEnum {
+                path: format!("{prefix}.{}", field.path),
+                values: field.values,
+                default,
+            });
+        }
+    }
+    for entry in sections.entries {
+        let defaults = (entry.defaults)(crate::Profile::default())
+            .parse::<DocumentMut>()
+            .ok()
+            .and_then(|document| toml_edit::de::from_document::<Value>(document).ok());
+        for field in entry.fields.iter().filter(|field| !field.values.is_empty()) {
+            out.push(DeclaredEnum {
+                path: format!("domains.{}.{}", entry.name, field.path),
+                values: field.values,
+                default: defaults.as_ref().and_then(|value| leaf(value, field.path)),
+            });
+        }
+    }
+    out
+}
+
+/// What the runtime refuses when one field is set to `value`, at a concrete
+/// path such as `gc.projects.probe.foreign_worktrees`. Config-owned tables
+/// deserialise through their type; a domain section validates its compiled
+/// defaults with the field set.
+pub fn probe_field<T>(sections: &DomainSections<T>, path: &str, value: &Value) -> Vec<String> {
+    // A value the owning shape cannot hold is a schema refusal, as in a load.
+    let refused = || vec![format!("{path}: schema")];
+    if let Some((prefix, relative)) = path.split_once('.')
+        && CONFIG_FIELDS.iter().any(|(owner, _)| *owner == prefix)
+    {
+        let mut document = DocumentMut::new();
+        if set_path(&mut document, relative, value).is_err() {
+            return refused();
+        }
+        return owned(prefix, document)
+            .err()
+            .map_or_else(Vec::new, |_| refused());
+    }
+    let Some((entry, relative)) = path.strip_prefix("domains.").and_then(|rest| {
+        let (name, relative) = rest.split_once('.')?;
+        Some((
+            sections.entries.iter().find(|entry| entry.name == name)?,
+            relative,
+        ))
+    }) else {
+        return refused();
+    };
+    let Ok(mut document) = (entry.defaults)(crate::Profile::default()).parse::<DocumentMut>()
+    else {
+        return refused();
+    };
+    if set_path(&mut document, relative, value).is_err() {
+        return refused();
+    }
+    (entry.validate)(document.as_table())
+        .into_iter()
+        .map(|error| format!("{}: {}", error.field, error.code))
+        .collect()
+}
 
 fn user(origin: Option<&Origin>) -> Layer {
     match origin {
@@ -266,38 +405,34 @@ pub fn schema<T: Serialize>(
             restart_required: false,
         });
     }
-    for (prefix, defaults, effective, metadata) in [
-        (
-            "gc",
-            serde_json::to_value(crate::GcSettings::default()).unwrap_or(Value::Null),
-            serde_json::to_value(&config.gc).unwrap_or(Value::Null),
-            GC_FIELDS,
-        ),
-        (
-            "worktrees",
-            serde_json::to_value(crate::WorktreeSettings::default()).unwrap_or(Value::Null),
-            serde_json::to_value(&config.worktrees).unwrap_or(Value::Null),
-            WORKTREE_FIELDS,
-        ),
-        (
-            "retention",
-            serde_json::to_value(crate::RetentionSettings::default()).unwrap_or(Value::Null),
-            serde_json::to_value(&config.retention).unwrap_or(Value::Null),
-            RETENTION_FIELDS,
-        ),
-        (
-            "install",
-            serde_json::to_value(crate::InstallSettings::default()).unwrap_or(Value::Null),
-            serde_json::to_value(&config.install).unwrap_or(Value::Null),
-            INSTALL_FIELDS,
-        ),
-        (
-            "providers",
-            serde_json::to_value(crate::providers::defaults()).unwrap_or(Value::Null),
-            serde_json::to_value(&config.providers).unwrap_or(Value::Null),
-            PROVIDER_FIELDS,
-        ),
-    ] {
+    for &(prefix, metadata) in CONFIG_FIELDS {
+        let (defaults, effective) = match prefix {
+            "gc" => (
+                serde_json::to_value(crate::GcSettings::default()),
+                serde_json::to_value(&config.gc),
+            ),
+            "worktrees" => (
+                serde_json::to_value(crate::WorktreeSettings::default()),
+                serde_json::to_value(&config.worktrees),
+            ),
+            "retention" => (
+                serde_json::to_value(crate::RetentionSettings::default()),
+                serde_json::to_value(&config.retention),
+            ),
+            "install" => (
+                serde_json::to_value(crate::InstallSettings::default()),
+                serde_json::to_value(&config.install),
+            ),
+            "providers" => (
+                serde_json::to_value(crate::providers::defaults()),
+                serde_json::to_value(&config.providers),
+            ),
+            _ => (Ok(Value::Null), Ok(Value::Null)),
+        };
+        let (defaults, effective) = (
+            defaults.unwrap_or(Value::Null),
+            effective.unwrap_or(Value::Null),
+        );
         let mut default_leaves = BTreeMap::new();
         let mut effective_leaves = BTreeMap::new();
         leaves(&defaults, prefix.into(), &mut default_leaves);

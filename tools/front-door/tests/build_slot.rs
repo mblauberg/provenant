@@ -320,30 +320,50 @@ fn busy_slot_never_blocks_a_build() -> Result {
 #[test]
 fn disk_policy_applies_before_starting_a_new_build() -> Result {
     use provenant_records::diagnostic::SettingSource;
-    for (critical, starts) in [(0, true), (u64::MAX, false)] {
-        let rig = Rig::new()?;
-        rig.provision(1)?;
-        let limits = provenant_config::DiskLimits {
-            free_floor: u64::MAX,
-            free_floor_source: SettingSource::Configuration,
-            critical_free: critical,
-            critical_free_source: SettingSource::ShippedDefault,
-        };
-        let mut child = rig
-            .command(1, &["build"])
-            .env(
-                "PROVENANT_BUILD_DISK_LIMITS",
-                serde_json::to_string(&limits)?,
-            )
-            .spawn()?;
-        let completed = finish(&mut child, Duration::from_secs(10))?;
-        assert_eq!(completed, starts);
-        assert_eq!(rig.started("start"), starts);
-        let message = stderr_of(&mut child)?;
-        assert!(message.contains("gc.free_floor"));
-        assert!(message.contains("gc.critical_free"));
-        assert!(message.contains("host configuration"));
-        assert!(message.contains("shipped default"));
+    use provenant_records::policy::{Policy, Source, Strength};
+    for strength in Strength::ALL {
+        let mut policy = Policy::default();
+        policy.overlay(
+            &std::collections::BTreeMap::from([(
+                provenant_config::DISK_FLOOR.to_owned(),
+                strength,
+            )]),
+            Source::Host,
+        );
+        let effective = policy.rule(provenant_config::DISK_FLOOR).rule.strength;
+        for (critical, below) in [(0, false), (u64::MAX, true)] {
+            let rig = Rig::new()?;
+            rig.provision(1)?;
+            let gate = provenant_config::DiskGate::new(
+                provenant_config::DiskLimits {
+                    free_floor: u64::MAX,
+                    free_floor_source: SettingSource::Configuration,
+                    critical_free: critical,
+                    critical_free_source: SettingSource::ShippedDefault,
+                },
+                &policy,
+            );
+            let mut child = rig
+                .command(1, &["build"])
+                .env("PROVENANT_BUILD_DISK_LIMITS", serde_json::to_string(&gate)?)
+                .spawn()?;
+            let starts = !(below && effective == Strength::Refuse);
+            let completed = finish(&mut child, Duration::from_secs(10))?;
+            assert_eq!(completed, starts);
+            assert_eq!(rig.started("start"), starts);
+            // Whatever is reported names the figures and their sources.
+            let message = stderr_of(&mut child)?;
+            if !(below && effective == Strength::Off) {
+                for fact in [
+                    "gc.free_floor",
+                    "gc.critical_free",
+                    "host configuration",
+                    "shipped default",
+                ] {
+                    assert!(message.contains(fact), "{fact}: {message}");
+                }
+            }
+        }
     }
     Ok(())
 }

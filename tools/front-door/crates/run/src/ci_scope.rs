@@ -70,7 +70,7 @@ impl ResolvedCiScope {
                 .and_then(serde_json::Value::as_str)
                 .and_then(CiScope::parse)
                 .unwrap_or_default(),
-            source: crate::limits::knob_source(profile, KNOB),
+            source: provenant_config::knob_source(profile, KNOB),
         }
     }
 

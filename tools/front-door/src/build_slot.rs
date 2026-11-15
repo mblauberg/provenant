@@ -360,31 +360,32 @@ fn check_disk(env: &[(OsString, OsString)]) -> Result<(), String> {
             .find(|(key, _)| key == OsStr::new(name))
             .and_then(|(_, value)| value.to_str())
     };
-    let Some(encoded_limits) = value(BUILD_DISK_LIMITS) else {
+    let Some(encoded_gate) = value(BUILD_DISK_LIMITS) else {
         return Ok(());
     };
     let observed = (|| {
-        let limits: provenant_config::DiskLimits =
-            serde_json::from_str(encoded_limits).map_err(|error| error.to_string())?;
+        let gate: provenant_config::DiskGate =
+            serde_json::from_str(encoded_gate).map_err(|error| error.to_string())?;
         let target = value("CARGO_TARGET_DIR").map_or_else(|| Path::new("."), Path::new);
         let mut root = target;
         while !root.exists() {
             root = root.parent().unwrap_or(Path::new("."));
         }
         let free = provenant_os::fs::available_bytes_at(root).map_err(|error| error.to_string())?;
-        Ok::<_, String>((limits, free))
+        Ok::<_, String>((gate, free))
     })();
     match observed {
-        Ok((limits, free)) => match limits.level(free) {
-            provenant_config::DiskLevel::Critical => Err(format!(
-                "{}; refusing to start a new build",
-                limits.detail(free)
-            )),
-            provenant_config::DiskLevel::Warning => {
-                say(&format!("warning: {}; building", limits.detail(free)));
+        // The host's declared decision, shared with submission and admission.
+        Ok((gate, free)) => match gate.decide(free) {
+            provenant_records::policy::Effect::Proceed => Ok(()),
+            provenant_records::policy::Effect::Warn(message) => {
+                say(&format!("warning: {message}; building"));
                 Ok(())
             }
-            provenant_config::DiskLevel::Ready => Ok(()),
+            provenant_records::policy::Effect::Refuse(diagnostic) => Err(format!(
+                "{}; refusing to start a new build",
+                diagnostic.detail.unwrap_or_default()
+            )),
         },
         Err(error) => {
             say(&format!(

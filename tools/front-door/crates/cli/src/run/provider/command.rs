@@ -287,6 +287,7 @@ pub(super) fn prepare_command(
         &runtime,
         roots.state.as_path(),
         &task.profile.knobs,
+        &launch_policy,
     )?;
     if let Some(policy) = plan.policy_mut() {
         for root in std::iter::once(process_tree_read).chain(coordination_reads) {
@@ -441,13 +442,12 @@ pub(super) fn configure_build_slots(
     runtime: &Path,
     state: &Path,
     knobs: &std::collections::BTreeMap<String, serde_json::Value>,
+    policy: &provenant_records::policy::Policy,
 ) -> Result<Vec<PathGrant>, String> {
-    if spec
-        .env
-        .iter()
-        .any(|(name, value)| name == provenant_core::consumer_env::SANDBOX && value == "off")
-    {
-        check_sandbox_off_build_disk(&spec.env, state)?;
+    if spec.env.iter().any(|(name, value)| {
+        name == provenant_core::consumer_env::SANDBOX && value == "off"
+    }) {
+        check_sandbox_off_build_disk(&spec.env, state, policy)?;
         return Ok(Vec::new());
     }
     // Builds, not lanes, share the host's build slots: a `cargo` shim takes
@@ -460,9 +460,9 @@ pub(super) fn configure_build_slots(
         let slots = settings.build_limit(total);
         match provenant_os::build_slots::BuildSlots::provision(state, slots) {
             Ok(()) => {
-                let disk_limits = provenant_config::GcSettings::read(state)
+                let disk_gate = provenant_config::GcSettings::read(state)
                     .and_then(|gc| gc.disk_limits(state))
-                    .map(Some)
+                    .map(|limits| Some(provenant_config::DiskGate::new(limits, policy)))
                     .unwrap_or_else(|error| {
                         let _ = writeln!(
                 std::io::stderr().lock(),
@@ -476,7 +476,7 @@ pub(super) fn configure_build_slots(
                         provenant: runtime,
                         state,
                         slots,
-                        disk_limits,
+                        disk_gate,
                         cargo: &cargo,
                         local_cargo: local_cargo(knobs),
                     },
@@ -515,6 +515,7 @@ pub(super) fn configure_build_slots(
 fn check_sandbox_off_build_disk(
     env: &[(std::ffi::OsString, std::ffi::OsString)],
     state: &Path,
+    policy: &provenant_records::policy::Policy,
 ) -> Result<(), String> {
     let target = env
         .iter()
@@ -555,20 +556,20 @@ fn check_sandbox_off_build_disk(
             return Ok(());
         }
     };
-    match limits.level(free) {
-        provenant_config::DiskLevel::Critical => Err(format!(
-            "{}; refusing to start a sandbox-off lane that can build",
-            limits.detail(free)
-        )),
-        provenant_config::DiskLevel::Warning => {
+    // The same declared decision as submission, admission and new builds.
+    match provenant_config::DiskGate::new(limits, policy).decide(free) {
+        provenant_records::policy::Effect::Proceed => Ok(()),
+        provenant_records::policy::Effect::Warn(message) => {
             let _ = writeln!(
                 std::io::stderr().lock(),
-                "provenant: warning: {}; sandbox-off lane may build",
-                limits.detail(free)
+                "provenant: warning: {message}; sandbox-off lane may build"
             );
             Ok(())
         }
-        provenant_config::DiskLevel::Ready => Ok(()),
+        provenant_records::policy::Effect::Refuse(diagnostic) => Err(format!(
+            "{}; refusing to start a sandbox-off lane that can build",
+            diagnostic.detail.unwrap_or_default()
+        )),
     }
 }
 
@@ -676,23 +677,32 @@ mod refusal_tests {
     }
 
     #[test]
-    fn sandbox_off_build_checks_the_critical_disk_limit_before_lane_start() {
+    fn sandbox_off_build_follows_the_declared_disk_floor_policy() {
+        use provenant_records::policy::{Policy, Source, Strength};
         let state = tempfile::tempdir().unwrap();
         let target = state.path().join("target");
-        for (critical_free, refuses) in [("18446744073709551615B", true), ("0B", false)] {
-            std::fs::write(
-                state.path().join("config.toml"),
-                format!("schema_version = 1\n[gc]\nfree_floor = '18446744073709551615B'\ncritical_free = '{critical_free}'\n"),
-            )
-            .unwrap();
-            let env = vec![
-                ("CARGO_TARGET_DIR".into(), target.as_os_str().to_owned()),
-                (provenant_core::consumer_env::SANDBOX.into(), "off".into()),
-            ];
-            let result = check_sandbox_off_build_disk(&env, state.path());
-            assert_eq!(result.is_err(), refuses);
-            if let Err(message) = result {
-                assert!(message.contains("gc.critical_free"));
+        for strength in Strength::ALL {
+            let mut policy = Policy::default();
+            policy.overlay(
+                &std::collections::BTreeMap::from([(
+                    provenant_config::DISK_FLOOR.to_owned(),
+                    strength,
+                )]),
+                Source::Host,
+            );
+            for (critical_free, below) in [("18446744073709551615B", true), ("0B", false)] {
+                std::fs::write(
+                    state.path().join("config.toml"),
+                    format!("schema_version = 1\n[gc]\nfree_floor = '18446744073709551615B'\ncritical_free = '{critical_free}'\n"),
+                )
+                .unwrap();
+                let env = vec![
+                    ("CARGO_TARGET_DIR".into(), target.as_os_str().to_owned()),
+                    (provenant_core::consumer_env::SANDBOX.into(), "off".into()),
+                ];
+                let result = check_sandbox_off_build_disk(&env, state.path(), &policy);
+                let effective = policy.rule(provenant_config::DISK_FLOOR).rule.strength;
+                assert_eq!(result.is_err(), below && effective == Strength::Refuse);
             }
         }
     }

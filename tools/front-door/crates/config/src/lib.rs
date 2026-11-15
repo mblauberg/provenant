@@ -14,7 +14,7 @@ mod history;
 mod install_artifacts;
 mod schema;
 pub use gc::{
-    ByteObservation, DiskLevel, DiskLimits, ForeignWorktrees, GcSettings, LaneBuildSettings,
+    ByteObservation, DISK_FLOOR, DiskGate, DiskLevel, DiskLimits, ForeignWorktrees, GcSettings, LaneBuildSettings,
     MemoryPressureThreshold, PROJECT_WRITER_LANES_CEILING, ProjectGcSettings, RETENTION_CLASSES,
     RemoteBranches, RetentionAdapter, RetentionBytes, RetentionClass, RetentionCollector,
     RetentionEligibility, RetentionIssue, RetentionKind, RetentionMeasurements, RetentionOwner,
@@ -81,7 +81,7 @@ pub use install_artifacts::{
     ArtifactDisposition, LEGACY_1X_ARTIFACTS, LegacyArtifact, STABLE_BINARY_NAME,
     legacy_launch_agent_label, legacy_launch_agent_path,
 };
-pub use knobs::{KNOB_SOURCES, KnobEdit, KnobSource, KnobValue};
+pub use knobs::{KNOB_SOURCES, KnobEdit, KnobSource, KnobValue, knob_source};
 pub use loader::{
     config_show, inspect_config, load, load_with_domains, read, read_knobs, read_with_domains,
 };
@@ -92,7 +92,9 @@ pub use project_binding::{
     registered_gc_projects, registered_projects, transient_location,
 };
 pub use provenant_records::Finding;
-pub use schema::{Layer, Schema, SchemaField, apply_patch, schema};
+pub use schema::{
+    DeclaredEnum, Layer, Schema, SchemaField, apply_patch, declared_enums, probe_field, schema,
+};
 
 use serde::{Deserialize, Serialize, Serializer};
 use std::{collections::BTreeMap, fmt, path::PathBuf};
