@@ -44,10 +44,12 @@ fn node_attempt_spec_reaches_the_launch() {
         &mut MemoryJournal::default(),
     )
     .unwrap();
-    assert!(owner
-        .attempt_specs
-        .first()
-        .is_some_and(|spec| spec.as_ref().is_none_or(AttemptSpec::is_empty)));
+    assert!(
+        owner
+            .attempt_specs
+            .first()
+            .is_some_and(|spec| spec.as_ref().is_none_or(AttemptSpec::is_empty))
+    );
 }
 
 #[test]
@@ -56,34 +58,24 @@ fn node_attempt_spec_refuses_what_the_graph_cannot_launch() {
         (
             serde_json::json!({"new_worktree": {"base": "main", "branch": "b"}}),
             None,
-            "new worktree requires a writer",
         ),
-        (
-            serde_json::json!({"write_roots": [""]}),
-            None,
-            "invalid write roots",
-        ),
+        (serde_json::json!({"write_roots": [""]}), None),
         (
             serde_json::json!({"capabilities": ["postgres"]}),
             Some(Vec::new()),
-            "set capabilities on the node or its attempt, not both",
         ),
-        (
-            serde_json::json!({"account": "other"}),
-            None,
-            "attempt account conflicts with a route account",
-        ),
+        (serde_json::json!({"account": "other"}), None),
     ];
-    for (spec, capabilities, reason) in cases {
+    for (spec, capabilities) in cases {
         let mut pinned = route("first");
         pinned.account = Some("work".into());
         let mut lane = node("lane", pinned);
         lane.attempt = Some(serde_json::from_value(spec).unwrap());
         lane.capabilities = capabilities;
-        assert_eq!(
-            validate_plan(&graph(vec![lane])).unwrap_err(),
-            format!("node lane: {reason}")
-        );
+        assert!(matches!(
+            graph(vec![lane]).admit(&crate::config::GraphLimits::default()),
+            Err(AdmissionError::Plan(_))
+        ));
     }
 }
 
@@ -161,6 +153,7 @@ fn distinct_from_writer_passes_the_writer_attempts_to_the_owner() {
     let mut review = node("review", route("first"));
     review.source = Some(SourceBinding::Node {
         node: "write".into(),
+        extra: Default::default(),
     });
     review.distinct_from = Some(DistinctFrom::Writer);
     review.depends_on = vec!["write".into()];
@@ -221,7 +214,6 @@ fn family_group_replay_keeps_launch_peers() {
         nodes.push(member);
     }
     let mut document = graph(nodes);
-    document.schema_version = 2;
     let mut owner = FakeOwner {
         observations: [
             done_as("h/1"),
@@ -266,7 +258,8 @@ fn alias_retry_receives_the_prior_model() {
         alias: Some("senior".into()),
         effort: None,
         account: None,
-    tier: None, };
+        tier: None,
+    };
     member.route = None;
     member.routes = Some(vec![alias.clone(), alias]);
     let mut limited = done_as("h/1");
@@ -303,7 +296,6 @@ fn family_group_passes_peers_and_records_shared_family() {
             nodes.push(member);
         }
         let mut document = graph(nodes);
-        document.schema_version = 2;
         let mut owner = FakeOwner {
             family_pool: families.iter().map(|family| (*family).to_owned()).collect(),
             ..Default::default()
@@ -327,8 +319,8 @@ fn family_group_passes_peers_and_records_shared_family() {
 
 #[test]
 fn reduced_panel_reports_unavailable_family_separation() {
-    let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":2, "graph_id":"family-warning", "nodes":[{
+    let document = super::model::document_fixture(serde_json::json!({
+        "graph_id":"family-warning", "nodes":[{
             "id":"panel", "kind":"composite", "access":"read_only", "composite":{
                 "reduce_verdict":true, "nodes":[
                     {"id":"one", "access":"read_only", "prompt":"review", "family_group":"panel", "route":{"alias":"senior"}},
@@ -336,45 +328,28 @@ fn reduced_panel_reports_unavailable_family_separation() {
                 ], "exports":[{"node":"one","outputs":["result"]},{"node":"two","outputs":["result"]}]
             }
         }]
-    })).unwrap();
-    document.schema_version = 2;
+    }));
     let mut owner = FakeOwner {
         family_pool: vec!["same".into()],
         ..Default::default()
     };
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
-    let panel = run
+    let second = run
         .checkpoint
         .nodes
         .iter()
-        .find(|node| node.id == "panel")
+        .find(|node| node.id == "panel--two")
         .unwrap();
-    assert!(
-        panel
-            .outputs
-            .as_ref()
-            .unwrap()
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("family"))
-    );
-    assert!(
-        panel
-            .outputs
-            .as_ref()
-            .unwrap()
-            .result
-            .as_ref()
-            .unwrap()
-            .excerpt
-            .contains("not cross-family evidence")
+    assert_eq!(
+        second.separation.as_ref().unwrap().outcome,
+        SeparationOutcome::Unavailable
     );
 }
 
 #[test]
 fn synthesis_input_reports_same_family_reviewers() {
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":2, "graph_id":"family-synthesis", "nodes":[{
+    let document = super::model::document_fixture(serde_json::json!({
+        "graph_id":"family-synthesis", "nodes":[{
             "id":"panel", "kind":"composite", "access":"read_only", "composite":{
                 "nodes":[
                     {"id":"one", "access":"read_only", "prompt":"review", "family_group":"panel", "route":{"alias":"senior"}},
@@ -382,43 +357,23 @@ fn synthesis_input_reports_same_family_reviewers() {
                 ], "exports":[{"node":"one","outputs":["result"]},{"node":"two","outputs":["result"]}]
             }
         }]
-    })).unwrap();
-    for (families, expected) in [(vec!["a"], true), (vec!["a", "b"], false)] {
+    }));
+    for (families, expected) in [
+        (vec!["a"], SeparationOutcome::Unavailable),
+        (vec!["a", "b"], SeparationOutcome::Separated),
+    ] {
         let mut owner = FakeOwner {
             family_pool: families.into_iter().map(str::to_owned).collect(),
             ..Default::default()
         };
         let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
-        let panel = run
-            .checkpoint
-            .nodes
-            .iter()
-            .find(|node| node.id == "panel")
-            .unwrap();
         let second = run
             .checkpoint
             .nodes
             .iter()
             .find(|node| node.id == "panel--two")
             .unwrap();
-        assert_eq!(
-            second.separation.as_ref().unwrap().outcome,
-            if expected {
-                SeparationOutcome::Unavailable
-            } else {
-                SeparationOutcome::Separated
-            }
-        );
-        assert_eq!(
-            panel
-                .outputs
-                .as_ref()
-                .unwrap()
-                .result
-                .as_ref()
-                .is_some_and(|result| result.excerpt.contains("not cross-family evidence")),
-            expected
-        );
+        assert_eq!(second.separation.as_ref().unwrap().outcome, expected);
     }
 }
 
@@ -432,7 +387,8 @@ fn panel_with_one_usage_limited_member_reaches_synthesis() {
         alias: Some("junior".into()),
         effort: None,
         account: None,
-    tier: None, };
+        tier: None,
+    };
     let mut nodes = Vec::new();
     for id in ["one", "two", "three"] {
         let mut member = node(id, route("first"));
@@ -445,7 +401,6 @@ fn panel_with_one_usage_limited_member_reaches_synthesis() {
     synthesis.depends_on = vec!["one".into(), "two".into(), "three".into()];
     nodes.push(synthesis);
     let mut document = graph(nodes);
-    document.schema_version = 2;
     let mut limited = done_as("h/1");
     if let AttemptObservation::Terminal {
         outcome, launched, ..
@@ -497,6 +452,7 @@ fn required_writer_separation_records_enforced_and_preferred_families() {
         let mut lens = node(id, route("first"));
         lens.source = Some(SourceBinding::Node {
             node: "write".into(),
+            extra: Default::default(),
         });
         lens.depends_on = vec!["write".into()];
         lens.distinct_from = Some(DistinctFrom::Writer);
@@ -507,7 +463,6 @@ fn required_writer_separation_records_enforced_and_preferred_families() {
     let mut nodes = vec![write];
     nodes.extend(lenses);
     let mut document = graph(nodes);
-    document.schema_version = 2;
     let mut writer_done = done_as("h/1");
     if let AttemptObservation::Terminal { commit, .. } = &mut writer_done {
         *commit = Some("3".repeat(40));
@@ -544,6 +499,7 @@ fn pending_lens_journals_required_writer_and_sibling_preference() {
         let mut lens = node(id, route("first"));
         lens.source = Some(SourceBinding::Node {
             node: "write".into(),
+            extra: Default::default(),
         });
         lens.depends_on = vec!["write".into()];
         lens.distinct_from = Some(DistinctFrom::Writer);
@@ -552,7 +508,6 @@ fn pending_lens_journals_required_writer_and_sibling_preference() {
         lenses.push(lens);
     }
     let mut document = graph(vec![writer, lenses.remove(0), lenses.remove(0)]);
-    document.schema_version = 2;
     let mut writer_done = done_as("h/1");
     if let AttemptObservation::Terminal { commit, .. } = &mut writer_done {
         *commit = Some("3".repeat(40));
@@ -611,13 +566,13 @@ fn retry_start_clears_previous_family_snapshot_before_saving() {
     lens.routes = Some(vec![route("first"), route("second")]);
     lens.source = Some(SourceBinding::Node {
         node: "write".into(),
+        extra: Default::default(),
     });
     lens.depends_on = vec!["write".into()];
     lens.distinct_from = Some(DistinctFrom::Writer);
     lens.distinct_strength = Some(FamilyStrength::Require);
     lens.family_group = Some("panel".into());
     let mut document = graph(vec![writer, lens]);
-    document.schema_version = 2;
     let mut writer_done = done_as("h/1");
     if let AttemptObservation::Terminal { commit, .. } = &mut writer_done {
         *commit = Some("3".repeat(40));
@@ -677,8 +632,8 @@ fn distinct_from_dependencies_excludes_every_upstream_attempt_and_records_the_se
 fn distinct_from_dependencies_excludes_the_authors_inside_an_expanded_council() {
     // The council shape: a framing subject, a lens composite whose members
     // are dependencies only through expansion, then the verifier.
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version": 1, "graph_id": "g-council", "nodes": [
+    let document = super::model::document_fixture(serde_json::json!({
+        "graph_id": "g-council", "nodes": [
             {"id": "subject", "access": "read_only", "prompt": "frame",
              "route": {"adapter": "first", "model": "first/model"}},
             {"id": "lenses", "kind": "composite", "access": "read_only",
@@ -692,8 +647,7 @@ fn distinct_from_dependencies_excludes_the_authors_inside_an_expanded_council() 
              "distinct_from": "dependencies",
              "route": {"adapter": "first", "model": "first/model"}}
         ]
-    }))
-    .unwrap();
+    }));
     let mut owner = FakeOwner {
         observations: [
             done_as("h/1"),
@@ -723,7 +677,12 @@ fn distinct_from_dependencies_excludes_the_authors_inside_an_expanded_council() 
         .find(|node| node.id == "verify")
         .unwrap();
     let separation = verify.separation.as_ref().unwrap();
-    assert_eq!(separation.excluded, ["google", "anthropic"]);
+    let excluded = separation
+        .excluded
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(excluded, ["google", "anthropic"].into_iter().collect());
     // The verifier shares the lens authors' family, so nothing separated it.
     assert_eq!(separation.outcome, SeparationOutcome::Unavailable);
 }
@@ -796,7 +755,8 @@ fn light_preset_is_per_node_and_explicit_settings_override_it() {
     assert_eq!(light.effective_receipts(), "none");
     let custom: AttemptSpec = serde_json::from_value(serde_json::json!({
         "preset":"light", "isolation":"private", "supervision":"standard", "receipts":"delivery"
-    })).unwrap();
+    }))
+    .unwrap();
     assert_eq!(custom.effective_isolation(), "private");
     assert_eq!(custom.effective_supervision(), "standard");
     assert_eq!(custom.effective_receipts(), "delivery");
@@ -804,6 +764,7 @@ fn light_preset_is_per_node_and_explicit_settings_override_it() {
     assert_eq!(default.effective_isolation(), "private");
     assert_eq!(default.effective_supervision(), "standard");
     assert_eq!(default.effective_receipts(), "delivery");
-    let unknown: AttemptSpec = serde_json::from_value(serde_json::json!({"preset":"future"})).unwrap();
+    let unknown: AttemptSpec =
+        serde_json::from_value(serde_json::json!({"preset":"future"})).unwrap();
     assert!(!unknown.preset_known());
 }

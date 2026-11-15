@@ -172,6 +172,8 @@ pub struct PatchRecord {
 /// against the graph-wide `limits.continuations`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Restart {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub node: String,
     pub cause: provenant_records::StopCause,
     #[serde(flatten)]
@@ -184,6 +186,8 @@ pub struct Restart {
 /// The rung, target and tier the depletion ladder chose for a restart.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LadderChoice {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub rung: provenant_routing::Rung,
     /// `adapter/model` with its account, or `host-native/name`.
     pub target: String,
@@ -1440,10 +1444,14 @@ pub(super) fn prepare(
         .map_err(|reason| classify(reason.to_string()))?;
     validate_output_kinds(&preview).map_err(|error| PatchError::invalid(error.to_string()))?;
     if let Some(limit) = structural_limit(&preview, &plan, context.limits) {
+        let message = limit.to_string();
         return Err(PatchError {
             code: "invalid",
-            message: limit.to_string(),
-            cause: Some(PlanFailureFact::Structural(limit)),
+            message,
+            cause: Some(PlanFailureFact::Structural {
+                limit,
+                extra: Default::default(),
+            }),
             admission: None,
             parameter: None,
         });
@@ -1452,11 +1460,18 @@ pub(super) fn prepare(
     expansions.push(expansion.clone());
     let bound = graph_envelope_bound(source, &expansions, &checkpoint.extensions, &plan);
     if bound > MAX_CHECKPOINT_BYTES as usize {
-        let limit = GraphEnvelopeLimit { bound };
+        let limit = GraphEnvelopeLimit {
+            extra: Default::default(),
+            bound,
+        };
+        let message = limit.to_string();
         return Err(PatchError {
             code: "invalid",
-            message: limit.to_string(),
-            cause: Some(PlanFailureFact::Envelope(limit)),
+            message,
+            cause: Some(PlanFailureFact::Envelope {
+                limit,
+                extra: Default::default(),
+            }),
             admission: None,
             parameter: None,
         });

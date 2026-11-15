@@ -172,7 +172,9 @@ fn kept_unproven_worktree(
         tip,
         outcome: provenant_records::custody::RemovalOutcome::Kept {
             cause: provenant_records::custody::RemovalUncertainty::UnprovenLanding,
+            extra: Default::default(),
         },
+        extra: Default::default(),
     }
 }
 
@@ -883,7 +885,9 @@ fn collect_owned_worktree_with(
                     authority: chair.actor,
                     evidence: provenant_records::custody::RemovalEvidence::Landing {
                         evidence: evidence.clone(),
+                        extra: Default::default(),
                     },
+                    extra: Default::default(),
                 };
                 let (outcome, updated_retirement) = worktrees::prune_owned(
                     context,

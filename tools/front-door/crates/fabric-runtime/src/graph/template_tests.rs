@@ -29,7 +29,7 @@ fn document(nodes: Vec<GraphNode>) -> GraphDocument {
         template_resolvers: Default::default(),
         peer_origin_work_key: None,
         review_tier_override: None,
-        schema_version: 1,
+        schema_version: GRAPH_DOCUMENT_SCHEMA_VERSION,
         graph_id: "templates".into(),
         nodes,
     }
@@ -296,6 +296,7 @@ fn review_panel_binds_per_lens_resolver_values() {
     .unwrap();
     node.source = Some(SourceBinding::Commit {
         commit: "0123456789abcdef0123456789abcdef01234567".into(),
+        extra: Default::default(),
     });
     let expanded = document(vec![node]).expanded(&limits()).unwrap();
     let leaves: Vec<_> = expanded
@@ -305,7 +306,7 @@ fn review_panel_binds_per_lens_resolver_values() {
         .collect();
     assert_eq!(leaves.len(), 1);
     assert!(
-        matches!(&leaves[0].source, Some(SourceBinding::Commit { commit }) if commit == "0123456789abcdef0123456789abcdef01234567")
+        matches!(&leaves[0].source, Some(SourceBinding::Commit { commit, .. }) if commit == "0123456789abcdef0123456789abcdef01234567")
     );
     let missing = BTreeMap::from([
         ("review-frame".to_owned(), vec!["false".to_owned()]),
@@ -476,7 +477,7 @@ fn repeat_lowers_a_composite_template_to_a_loop() {
             .prompt
             .contains("security lens")
     );
-    assert!(matches!(&body[1].source, Some(SourceBinding::Node { node }) if node == "fix"));
+    assert!(matches!(&body[1].source, Some(SourceBinding::Node { node, .. }) if node == "fix"));
     let ids = expanded_ids(vec![node]);
     assert!(ids.contains(&"fix--r2--accepted".to_owned()), "{ids:?}");
 }
@@ -654,7 +655,7 @@ fn delivery_templates_admit_bounded_review_repairs() {
                 .find(|node| node.id == "delivery--review--selected--lenses--security")
                 .unwrap();
             assert!(
-                matches!(&review.source, Some(SourceBinding::Head { node }) if node == "delivery--implement")
+                matches!(&review.source, Some(SourceBinding::Head { node, .. }) if node == "delivery--implement")
             );
             assert!(
                 expanded
@@ -914,56 +915,120 @@ nodes = [{ id = "first", use = "task" }]
 }
 
 #[test]
-fn node_overrides_reject_unknown_fields() {
-    let library = library();
-    let error = Compiler::new(&library)
-        .compile(&json!({"id":"stage", "use":"task", "deadine_seconds":30}))
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.contains("stage") && error.contains("deadine_seconds"),
-        "{error}"
-    );
-    let node = Compiler::new(&library)
-        .compile(&json!({"id":"stage", "use":"task", "deadline_seconds":30,
-            "extensions":{"custom":true}}))
-        .unwrap();
-    assert_eq!(node.deadline_seconds, Some(30));
-    assert_eq!(node.extra["custom"], true);
-}
+fn unknown_template_fields_are_refused_across_compiled_shapes() {
+    let cases = [
+        (
+            None,
+            json!({"id":"stage", "use":"task", "deadine_seconds":30}),
+            "stage",
+            "deadine_seconds",
+        ),
+        (
+            None,
+            json!({"id":"stage", "use":"task", "auto_continue_no_work":true}),
+            "stage",
+            "auto_continue_no_work",
+        ),
+        (
+            None,
+            json!({"id":"stage", "use":"task", "brief":"work"}),
+            "stage",
+            "brief",
+        ),
+        (
+            None,
+            json!({"id":"stage", "use":"task", "source":{
+                "type":"commit", "commit":"0123456789abcdef0123456789abcdef01234567",
+                "future_source":true
+            }}),
+            "stage",
+            "source.future_source",
+        ),
+        (
+            None,
+            json!({"id":"stage", "use":"task", "repeat":{
+                "until":"done", "max_rounds":2, "future_repeat":true
+            }}),
+            "stage",
+            "repeat.future_repeat",
+        ),
+        (
+            Some(json!({"nodes":[{"id":"work", "use":"task", "deadine_seconds":30}]})),
+            json!({"id":"stage", "use":"local"}),
+            "work",
+            "deadine_seconds",
+        ),
+        (
+            Some(
+                json!({"nodes":[{"id":"group", "access":"read_only", "composite":{
+                    "nodes":[{"id":"work", "access":"read_only", "deadine_seconds":30}],
+                    "exports":[]
+                }}]}),
+            ),
+            json!({"id":"stage", "use":"local"}),
+            "work",
+            "deadine_seconds",
+        ),
+        (
+            Some(
+                json!({"nodes":[{"id":"group", "access":"read_only", "loop":{
+                    "body":[{"id":"work", "access":"read_only", "deadine_seconds":30}],
+                    "until":"work", "max_rounds":1
+                }}]}),
+            ),
+            json!({"id":"stage", "use":"local"}),
+            "work",
+            "deadine_seconds",
+        ),
+        (
+            Some(json!({"parameters":{"members":{"type":"list"}},
+                "node":{"kind":"composite", "composite":{"nodes":"${members}"}}})),
+            json!({"id":"stage", "use":"local", "with":{"members":[
+                {"id":"work", "access":"read_only", "deadine_seconds":30}
+            ]}}),
+            "work",
+            "deadine_seconds",
+        ),
+        (
+            Some(
+                json!({"nodes":[{"id":"group", "access":"read_only", "composite":{
+                    "nodes":[{"id":"work", "access":"read_only", "prompt":"work"}],
+                    "exports":[], "future_composite_option":true
+                }}]}),
+            ),
+            json!({"id":"stage", "use":"local"}),
+            "group",
+            "composite.future_composite_option",
+        ),
+    ];
 
-#[test]
-fn composite_members_reject_unknown_fields() {
-    for member in [
-        json!({"id":"work", "use":"task", "deadine_seconds":30}),
-        json!({"id":"work", "access":"read_only", "deadine_seconds":30}),
-        json!({"id":"group", "access":"read_only", "composite":{"nodes":[
-            {"id":"work", "access":"read_only", "deadine_seconds":30}
-        ]}}),
-        json!({"id":"group", "access":"read_only", "loop":{"body":[
-            {"id":"work", "access":"read_only", "deadine_seconds":30}
-        ], "until":"work", "max_rounds":1}}),
-    ] {
+    for (template, node, source, field) in cases {
         let mut library = library();
-        library
-            .insert(
-                Layer::Repository,
-                "local",
-                serde_json::from_value(json!({
-                    "nodes":[member]
-                }))
-                .unwrap(),
-            )
-            .unwrap();
+        if let Some(template) = template {
+            library
+                .insert(
+                    Layer::Repository,
+                    "local",
+                    serde_json::from_value(template).unwrap(),
+                )
+                .unwrap();
+        }
         let error = Compiler::new(&library)
-            .compile(&json!({"id":"stage", "use":"local"}))
+            .compile(&node)
             .unwrap_err()
             .to_string();
-        assert!(
-            error.contains("work") && error.contains("deadine_seconds"),
-            "{error}"
-        );
+        assert!(error.contains(source) && error.contains(field), "{error}");
     }
+
+    let node = Compiler::new(&library())
+        .compile(
+            &json!({"id":"stage", "use":"task", "deadline_seconds":30, "prompt":"work",
+            "extensions":{"custom":true}}),
+        )
+        .unwrap();
+    assert_eq!(node.deadline_seconds, Some(30));
+    assert_eq!(node.prompt.as_deref(), Some("work"));
+    assert_eq!(node.extra["custom"], true);
 }
 
 #[test]
@@ -1075,32 +1140,6 @@ fn leaf_node_tables_reject_instance_only_syntax() {
 }
 
 #[test]
-fn parameterised_composite_members_reject_unknown_fields() {
-    let mut library = library();
-    library
-        .insert(
-            Layer::Inline,
-            "local",
-            serde_json::from_value(json!({
-                "parameters":{"members":{"type":"list"}},
-                "node":{"kind":"composite", "composite":{"nodes":"${members}"}}
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-    let error = Compiler::new(&library)
-        .compile(&json!({"id":"stage", "use":"local", "with":{"members":[
-            {"id":"work", "access":"read_only", "deadine_seconds":30}
-        ]}}))
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.contains("work") && error.contains("deadine_seconds"),
-        "{error}"
-    );
-}
-
-#[test]
 fn shorthand_document_controls_are_not_node_overrides() {
     let library = TemplateLibrary::bundled();
     let compiler = Compiler::new(&library);
@@ -1108,12 +1147,21 @@ fn shorthand_document_controls_are_not_node_overrides() {
     separate_document_fields(&mut node).unwrap();
     assert!(compiler.compile(&node).is_ok());
     node["unknown_node_field"] = json!(true);
+    let error = compiler.compile(&node).unwrap_err().to_string();
     assert!(
-        compiler
-            .compile(&node)
-            .unwrap_err()
-            .to_string()
-            .contains("unknown field unknown_node_field")
+        error.contains("node task") && error.contains("unknown_node_field"),
+        "{error}"
+    );
+    node.as_object_mut().unwrap().remove("unknown_node_field");
+    node["brief"] = json!("Do the work");
+    let error = compiler.compile(&node).unwrap_err().to_string();
+    assert!(
+        error.contains("node task") && error.contains("brief"),
+        "{error}"
+    );
+    assert!(
+        !error.contains("removed") && !error.contains("use `prompt`"),
+        "{error}"
     );
 }
 
@@ -1121,7 +1169,8 @@ fn shorthand_document_controls_are_not_node_overrides() {
 fn shorthand_schema_version_must_be_a_supported_integer() {
     for version in [
         json!(0),
-        json!(3),
+        json!(GRAPH_DOCUMENT_SCHEMA_VERSION - 1),
+        json!(GRAPH_DOCUMENT_SCHEMA_VERSION + 1),
         json!(-1),
         json!(1.5),
         json!("1"),
@@ -1133,7 +1182,7 @@ fn shorthand_schema_version_must_be_a_supported_integer() {
         assert!(error.contains("schema_version"), "{error}");
         assert_eq!(node["schema_version"], version);
     }
-    for version in [1, 2] {
+    for version in [GRAPH_DOCUMENT_SCHEMA_VERSION] {
         let mut node = json!({"use":"task", "schema_version":version});
         separate_document_fields(&mut node).unwrap();
         assert!(node.get("schema_version").is_none());
@@ -1219,41 +1268,71 @@ enum = ["low", "high"]
     library
 }
 
+fn parameter_refusal(error: CompileError) -> ParameterRefusal {
+    match error {
+        CompileError::Parameter(refusal) => refusal,
+        CompileError::Message(message) => panic!("expected a parameter refusal, got {message}"),
+    }
+}
+
 #[test]
 fn unknown_parameter_names_the_key_and_suggests_the_nearest_declared_name() {
     let library = parameter_library();
     let compiler = Compiler::new(&library);
     let refusal = compiler
         .compile(&json!({"id":"gate", "use":"gate", "with":{"subject.commit":"abc"}}))
-        .unwrap_err()
-        .to_string();
-    assert!(
-        refusal.starts_with("node gate: template gate has no parameter subject.commit"),
-        "{refusal}"
+        .unwrap_err();
+    let refusal = parameter_refusal(refusal);
+    assert_eq!(refusal.node.as_deref(), Some("gate"));
+    assert_eq!(refusal.template, "gate");
+    let ParameterFault::Unknown {
+        key,
+        accepted,
+        suggestion,
+    } = refusal.fault
+    else {
+        panic!("expected an unknown-parameter fault");
+    };
+    assert_eq!(key.as_deref(), Some("subject.commit"));
+    assert_eq!(suggestion.as_deref(), Some("subject"));
+    let declared: std::collections::BTreeSet<_> = library
+        .resolve("gate")
+        .unwrap()
+        .parameters
+        .into_keys()
+        .collect();
+    assert_eq!(
+        accepted
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+        declared
     );
-    assert!(
-        refusal.contains("accepted parameters: retries, review_base, subject"),
-        "{refusal}"
-    );
-    assert!(refusal.ends_with("did you mean subject?"), "{refusal}");
 
-    let refusal = compiler
-        .compile(&json!({"id":"gate", "use":"gate", "with":{"nonsense_key":"x"}}))
-        .unwrap_err()
-        .to_string();
-    assert!(
-        refusal.contains("has no parameter nonsense_key"),
-        "{refusal}"
+    let refusal = parameter_refusal(
+        compiler
+            .compile(&json!({"id":"gate", "use":"gate", "with":{"nonsense_key":"x"}}))
+            .unwrap_err(),
     );
-    assert!(!refusal.contains("did you mean"), "{refusal}");
+    assert_eq!(refusal.node.as_deref(), Some("gate"));
+    assert_eq!(refusal.template, "gate");
+    assert!(matches!(
+        refusal.fault,
+        ParameterFault::Unknown { key: Some(key), suggestion: None, .. } if key == "nonsense_key"
+    ));
 
     // A key that is not an identifier is not echoed, so a pasted secret stays out.
-    let refusal = compiler
-        .compile(&json!({"id":"gate", "use":"gate", "with":{"sk ant secret":"x"}}))
-        .unwrap_err()
-        .to_string();
-    assert!(!refusal.contains("sk ant secret"), "{refusal}");
-    assert!(refusal.contains("has no such parameter"), "{refusal}");
+    let refusal = parameter_refusal(
+        compiler
+            .compile(&json!({"id":"gate", "use":"gate", "with":{"sk ant secret":"x"}}))
+            .unwrap_err(),
+    );
+    assert_eq!(refusal.node.as_deref(), Some("gate"));
+    assert_eq!(refusal.template, "gate");
+    assert!(matches!(
+        &refusal.fault,
+        ParameterFault::Unknown { key: None, .. }
+    ));
+    assert!(!refusal.to_string().contains("sk ant secret"));
 }
 
 #[test]
@@ -1263,19 +1342,29 @@ fn wrong_shape_names_the_key_and_the_declared_shape_without_the_value() {
     let refusal = compiler
         .compile(&json!({"id":"gate", "use":"gate", "with":{"subject":"x", "retries":9}}))
         .unwrap_err();
-    assert_eq!(
-        refusal.to_string(),
-        "node gate: template gate parameter retries expects an integer from 1 to 5"
-    );
+    let refusal = parameter_refusal(refusal);
+    assert_eq!(refusal.node.as_deref(), Some("gate"));
+    assert_eq!(refusal.template, "gate");
+    assert!(matches!(
+        refusal.fault,
+        ParameterFault::Shape { key, expected }
+            if key == "retries"
+                && expected == library.resolve("gate").unwrap().parameters["retries"].expected()
+    ));
     let refusal = compiler
         .compile(&json!({
             "id":"gate", "use":"gate",
             "with":{"subject":"x", "retries":"SECRET-VALUE-7"}
         }))
-        .unwrap_err()
-        .to_string();
-    assert!(refusal.contains("retries expects an integer"), "{refusal}");
-    assert!(!refusal.contains("SECRET-VALUE-7"), "{refusal}");
+        .unwrap_err();
+    let refusal = parameter_refusal(refusal);
+    assert_eq!(refusal.node.as_deref(), Some("gate"));
+    assert_eq!(refusal.template, "gate");
+    assert!(matches!(
+        &refusal.fault,
+        ParameterFault::Shape { key, .. } if key == "retries"
+    ));
+    assert!(!refusal.to_string().contains("SECRET-VALUE-7"));
 }
 
 #[test]
@@ -1296,10 +1385,6 @@ fn failing_node_inside_a_composite_is_named() {
     assert_eq!(node.as_deref(), Some("check"));
     assert_eq!(template, "level");
     assert!(matches!(fault, ParameterFault::Shape { key, .. } if key == "level"));
-    assert_eq!(
-        refusal.to_string(),
-        "node check: template level parameter level expects a string, one of [\"low\",\"high\"]"
-    );
 }
 
 #[test]
@@ -1508,22 +1593,4 @@ fn a_name_without_room_for_its_suffix_is_refused_in_one_line() {
     let error = launch(&mut journal, &base, "d2", true).unwrap_err();
     assert!(!error.contains('\n') && error.contains("--name"), "{error}");
     assert_eq!(journal.len(), 1);
-}
-
-#[test]
-fn graph_node_accepts_prompt_and_refuses_removed_brief_spelling() {
-    let prompt = serde_json::from_value::<GraphNode>(json!({
-        "id":"work", "access":"read_only", "prompt":"Do the work"
-    }))
-    .unwrap();
-    assert_eq!(prompt.prompt, "Do the work");
-
-    let alias = serde_json::from_value::<GraphNode>(json!({
-        "id":"work", "access":"read_only", "brief":"Do the work"
-    }));
-    assert!(alias.is_err());
-    assert_eq!(
-        provenant_config::removed::graph_field_replacement("brief"),
-        Some("prompt")
-    );
 }

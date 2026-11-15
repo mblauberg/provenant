@@ -9,6 +9,19 @@ use std::{
     sync::{Arc, Barrier},
 };
 
+thread_local! {
+    static BUSY_SIGNAL: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn signal_first_busy(_: i32) -> bool {
+    BUSY_SIGNAL.with(|signal| {
+        if let Some(sender) = signal.borrow_mut().take() {
+            let _ = sender.send(());
+        }
+    });
+    true
+}
+
 #[test]
 fn bounded_row_collection_stops_before_over_budget_row() {
     let rows = [
@@ -36,8 +49,12 @@ fn sqlite_diagnostic_reports_code_without_private_details() {
         rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_READONLY),
         Some("private SQL value".into()),
     ));
+    let code = match &error {
+        Error::Sqlite(rusqlite::Error::SqliteFailure(code, _)) => code.code,
+        other => panic!("expected a typed SQLite failure, got {other:?}"),
+    };
+    assert_eq!(code, rusqlite::ErrorCode::ReadOnly);
     let message = error.to_string();
-    assert!(message.contains("Error code 8: attempt to write a readonly database"));
     assert!(!message.contains("private SQL value"));
 }
 
@@ -430,7 +447,7 @@ fn sqlite_full_rolls_back_messages_deliveries_and_events() {
     );
 }
 #[test]
-fn future_schema_refuses_without_journal_mutation() {
+fn future_schema_refuses_without_changing_its_version() {
     let f = Fixture::new();
     drop(f.open());
     let db = rusqlite::Connection::open(f.path()).unwrap();
@@ -443,9 +460,9 @@ fn future_schema_refuses_without_journal_mutation() {
     ));
     let db = rusqlite::Connection::open(f.path()).unwrap();
     assert_eq!(
-        db.pragma_query_value(None, "journal_mode", |r| r.get::<_, String>(0))
+        db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        "delete"
+        99
     );
 }
 
@@ -534,29 +551,28 @@ fn event_replay_deduplication_and_durable_cursor() {
 fn a_busy_store_waits_for_the_writer_instead_of_failing() {
     let f = Fixture::new();
     let store = f.open();
-    let (held_tx, held_rx) = std::sync::mpsc::sync_channel(0);
-    let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (contended_tx, contended_rx) = std::sync::mpsc::channel();
     std::thread::scope(|s| {
         let fixture = &f;
         let holder = s.spawn(move || {
             let holder = fixture.open();
             holder.db.execute_batch("BEGIN IMMEDIATE").unwrap();
             held_tx.send(()).unwrap();
-            let blocked = matches!(
-                done_rx.recv_timeout(std::time::Duration::from_millis(100)),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-            );
+            release_rx.recv().unwrap();
             holder.db.execute_batch("ROLLBACK").unwrap();
-            blocked
         });
         held_rx.recv().unwrap();
-        let result = store.send(&message(&f, 5), &f.request());
-        let _ = done_tx.send(());
-        assert!(
-            holder.join().unwrap(),
-            "sender returned while the write lock was held"
-        );
-        result.unwrap();
+        BUSY_SIGNAL.with(|signal| *signal.borrow_mut() = Some(contended_tx));
+        store.db.busy_handler(Some(signal_first_busy)).unwrap();
+        let releaser = s.spawn(move || {
+            contended_rx.recv().unwrap();
+            release_tx.send(()).unwrap();
+        });
+        store.send(&message(&f, 5), &f.request()).unwrap();
+        holder.join().unwrap();
+        releaser.join().unwrap();
     });
     assert_eq!(
         store
@@ -573,10 +589,7 @@ fn busy_and_cancellation_are_bounded_and_leave_no_mutation() {
     let store = f.open();
     let holder = f.open();
     holder.db.execute_batch("BEGIN IMMEDIATE").unwrap();
-    store
-        .db
-        .busy_timeout(std::time::Duration::from_millis(10))
-        .unwrap();
+    store.db.busy_timeout(std::time::Duration::ZERO).unwrap();
     assert!(matches!(
         store.send(&message(&f, 5), &f.request()),
         Err(Error::Busy)

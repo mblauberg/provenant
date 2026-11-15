@@ -829,10 +829,10 @@ fn graph_hint_requires_a_matching_attempt() -> Result<(), Box<dyn std::error::Er
     };
     let mut record = fixture.store.record(fixture.settled.attempt_id, &call)?;
     let document = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":"hint-test","nodes":[{"id":"one","prompt":"work","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
+        "schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"hint-test","nodes":[{"id":"one","prompt":"work","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
     }))?;
     let checkpoint = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":"hint-test","plan_digest":"digest","nodes":[{
+        "schema_version":provenant_fabric_runtime::graph::GraphCheckpoint::SCHEMA_VERSION,"graph_id":"hint-test","plan_digest":"digest","nodes":[{
             "id":"one","worktree":null,"state":"running","attempts":[{
                 "key":{"graph_id":"hint-test","node_id":"one","route_index":0, "attempt": 1},
                 "route":{"adapter":"fixture","model":"fixture/model"},"state":"starting",
@@ -957,7 +957,7 @@ fn settlement_advances_only_matching_graph_and_retains_writer()
     let budget = WaitBudget::cli(clock.mono_now(), 30)?;
     for id in ["matching", "unrelated"] {
         let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version":1,"graph_id":id,"nodes":[{"id":"one","prompt":"reply OK",
+            "schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":id,"nodes":[{"id":"one","prompt":"reply OK",
             "access":"worktree_write","worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}}]
         }))?;
         let mut journal = graph::FileJournal::open(
@@ -1106,7 +1106,7 @@ fn settlement_and_tick_read_no_terminal_graphs_at_scale() -> Result<(), Box<dyn 
             "default":"hold","timeout_seconds":3600}}])
         };
         let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version":1,"graph_id":id,"decision_session":"chair-session","nodes":nodes
+            "schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":id,"decision_session":"chair-session","nodes":nodes
         }))?;
         let mut journal = graph::FileJournal::open(
             &fixture.roots.state,
@@ -1268,7 +1268,7 @@ fn an_attempt_keyed_to_another_graph_is_refused_not_adopted()
     .identity;
     let budget = WaitBudget::cli(clock.mono_now(), 30)?;
     let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":"owner","nodes":[{"id":"one","prompt":"reply OK",
+        "schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"owner","nodes":[{"id":"one","prompt":"reply OK",
         "access":"worktree_write","worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}}]
     }))?;
     let mut journal = graph::FileJournal::open(

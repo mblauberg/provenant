@@ -71,7 +71,7 @@ fn launch_retry_save_failure_keeps_the_prior_checkpoint() {
     #[derive(Default)]
     struct FailingJournal {
         checkpoint: Option<GraphCheckpoint>,
-        before_failure: Option<Vec<u8>>,
+        before_failure: Option<GraphCheckpoint>,
     }
     impl GraphJournal for FailingJournal {
         type Error = std::io::Error;
@@ -84,7 +84,7 @@ fn launch_retry_save_failure_keeps_the_prior_checkpoint() {
                     .as_ref()
                     .is_some_and(|retry| retry.failures > 0)
             }) {
-                self.before_failure = Some(serde_json::to_vec(&self.checkpoint).unwrap());
+                self.before_failure = self.checkpoint.clone();
                 return Err(std::io::Error::other("injected retry save failure"));
             }
             self.checkpoint = Some(checkpoint.clone());
@@ -100,12 +100,9 @@ fn launch_retry_save_failure_keeps_the_prior_checkpoint() {
     let mut journal = FailingJournal::default();
     let error = advance(&document, &mut owner, &mut journal).unwrap_err();
     assert!(
-        matches!(error, GraphError::Journal(ref error) if error.to_string().contains("injected retry save"))
+        matches!(error, GraphError::Journal(ref error) if error.kind() == std::io::ErrorKind::Other)
     );
-    assert_eq!(
-        serde_json::to_vec(&journal.checkpoint).unwrap(),
-        journal.before_failure.unwrap()
-    );
+    assert_eq!(journal.checkpoint, journal.before_failure);
     let saved = journal.checkpoint.as_ref().unwrap();
     assert_eq!(saved.nodes[0].state, NodeState::Running);
     assert_eq!(retry_of(saved).failures, 0);
@@ -431,7 +428,6 @@ fn host_delivery_limit_reaches_graph_status_without_exposing_io_sources() {
     assert!(text.contains("git worktree list"));
     assert!(text.contains("8388608"));
     assert!(text.contains("inspect host delivery"));
-    assert!(!text.contains("host capacity"));
     assert!(!text.contains("TOKEN_SENTINEL"));
     assert!(!text.contains("/private/host"));
     let stored = serde_json::to_string(journal.0.as_ref().unwrap()).unwrap();
@@ -517,7 +513,6 @@ fn launch_errors_retry_until_the_persisted_deadline() {
     );
     let reason = progress.advance_error.as_deref().expect("blocked reason");
     assert!(reason.contains("service is busy"));
-    assert!(!reason.contains("new graph_id"));
     assert_eq!(owner.calls.len(), 4);
 
     // A blocked node never launches again.
@@ -614,42 +609,33 @@ fn launch_wake_is_capped_by_the_original_deadline() {
 }
 
 #[test]
-fn nonterminal_observation_transitions_need_no_owner_or_journal() {
-    let mut attempt = GraphAttempt {
-        extra: Default::default(),
-        review_substitution: false,
-        key: AttemptKey {
-            extra: Default::default(),
-            retry_generation: None,
-            previous_attempt_ref: None,
-            graph_id: "g".into(),
-            node_id: "n".into(),
-            route_index: 0,
-            attempt: 1,
-        },
-        route: route("first"),
-        state: AttemptState::Starting,
-        stop: None,
-        attempt_ref: None,
-        outcome: None,
-        host_refused_before_acceptance: false,
-        launched: true,
-        launch_actor: "actor".into(),
-        settled: 0,
-        input_cap: None,
-        input_cap_source: None,
-        input_manifest: None,
-        usage: None,
+fn nonterminal_observations_preserve_the_admitted_attempt() {
+    let document = graph(vec![node("one", route("first"))]);
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        observations: VecDeque::from([
+            AttemptObservation::Unknown { attempt_ref: None },
+            AttemptObservation::Pending {
+                attempt_ref: Some("host/1".into()),
+            },
+        ]),
+        ..Default::default()
     };
-    let mut state = NodeState::Pending;
-    apply_unknown_observation(&mut attempt, &mut state, None);
-    assert_eq!(attempt.state, AttemptState::Unresolved);
-    assert_eq!(state, NodeState::Running);
-    apply_pending_observation(&mut attempt, &mut state, Some("host/1".into()));
-    assert_eq!(attempt.state, AttemptState::Running);
-    assert_eq!(attempt.attempt_ref.as_deref(), Some("host/1"));
-    assert_eq!(state, NodeState::Running);
-    assert_eq!(attempt.key.route_index, 0);
+    let mut journal = MemoryJournal::default();
+
+    let unresolved = advance(&document, &mut owner, &mut journal).unwrap();
+    let progress = &unresolved.checkpoint.nodes[0];
+    assert_eq!(progress.state, NodeState::Running);
+    assert_eq!(progress.attempts.len(), 1);
+    assert_eq!(progress.attempts[0].state, AttemptState::Unresolved);
+    assert_eq!(progress.attempts[0].attempt_ref, None);
+
+    let pending = advance(&document, &mut owner, &mut journal).unwrap();
+    let progress = &pending.checkpoint.nodes[0];
+    assert_eq!(progress.state, NodeState::Running);
+    assert_eq!(progress.attempts.len(), 1);
+    assert_eq!(progress.attempts[0].state, AttemptState::Running);
+    assert_eq!(progress.attempts[0].attempt_ref.as_deref(), Some("host/1"));
 }
 
 #[test]

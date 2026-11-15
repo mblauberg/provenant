@@ -399,6 +399,19 @@ mod tests {
                 .as_mono_time(),
             later
         );
+        let start = MonoTime::from_micros(0);
+        for (requested_micros, expected_micros) in [
+            (50_000, 50_000),
+            (u64::MAX, MAX_LANE_RUNTIME_SECONDS * 1_000_000),
+        ] {
+            let bounded = WaitBudget::up_to(start, DurationMicros::from_micros(requested_micros));
+            assert_eq!(
+                bounded.remaining(start).as_micros(),
+                expected_micros,
+                "requested {requested_micros}µs"
+            );
+            assert!(!bounded.is_nonblocking(), "requested {requested_micros}µs");
+        }
     }
     #[test]
     fn host_time_refuses_unless_a_clock_provides_it() {
@@ -428,18 +441,6 @@ mod tests {
             .unwrap();
         assert_eq!(later.unix_seconds(), 90);
         assert_eq!(test.boot_identity().unwrap(), "test-boot");
-    }
-    #[test]
-    fn an_internal_bound_accepts_sub_second_waits_and_caps_long_ones() {
-        let start = MonoTime::from_micros(0);
-        let short = WaitBudget::up_to(start, DurationMicros::from_micros(50_000));
-        assert_eq!(short.remaining(start).as_micros(), 50_000);
-        assert!(!short.is_nonblocking());
-        let long = WaitBudget::up_to(start, DurationMicros::from_micros(u64::MAX));
-        assert_eq!(
-            long.remaining(start).as_micros(),
-            MAX_LANE_RUNTIME_SECONDS * 1_000_000
-        );
     }
     #[test]
     fn wall_time_is_exact_and_has_only_one_wire_spelling() {

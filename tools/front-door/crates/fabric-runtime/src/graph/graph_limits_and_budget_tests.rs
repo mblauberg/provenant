@@ -57,8 +57,15 @@ fn usage_fetch_failure_is_unknown_and_does_not_wedge_graph() {
             run.checkpoint
                 .usage_events
                 .iter()
-                .any(|event| event.metric == "telemetry"
-                    && event.reason.as_deref() == Some("no fake observation remains"))
+                .any(|event| { event.node_id == "one" && event.metric == "telemetry" })
+        );
+        assert_eq!(
+            run.checkpoint.nodes[1].state,
+            if policy == crate::config::UnknownUsage::Warn {
+                NodeState::Succeeded
+            } else {
+                NodeState::Pending
+            }
         );
     }
 }
@@ -219,15 +226,20 @@ fn structural_limit_pauses_and_host_limit_change_resumes() {
     assert_eq!(paused.status, GraphStatus::Paused);
     assert_eq!(
         paused.checkpoint.pause_cause(),
-        Some(PauseCause::StructuralLimit)
+        Some(PauseCause::StructuralLimit {
+            extra: Default::default(),
+        })
     );
-    let reason = limits.nodes_bound().refusal(2).unwrap();
-    assert_eq!(document.admit(&limits).unwrap_err().to_string(), reason);
-    assert_eq!(
-        paused.checkpoint.pause_reason(),
-        Some(reason.as_str())
-    );
-    assert!(owner.calls.is_empty());
+    let refusal = document.admit(&limits).unwrap_err();
+    let AdmissionError::StructuralLimit(limit) = refusal else {
+        panic!("expected the declared structural node limit")
+    };
+    assert_eq!(limit.key, GraphLimitKey::Nodes);
+    assert_eq!(limit.actual, document.nodes.len());
+    assert_eq!(limit.max, limits.nodes);
+    assert_eq!(paused.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(paused.checkpoint.nodes[1].state, NodeState::Pending);
+    assert!(paused.checkpoint.nodes[1].attempts.is_empty());
     let raised = crate::config::GraphLimits { nodes: 2, ..limits };
     let resumed = resume_with_budget(
         &document,
@@ -251,15 +263,21 @@ fn fan_out_and_depth_pause_before_launch() {
     let mut c = node("c", route("first"));
     c.depends_on.push("a".into());
     let document = graph(vec![root, a, b, c]);
-    for limits in [
-        crate::config::GraphLimits {
-            fan_out_width: 1,
-            ..Default::default()
-        },
-        crate::config::GraphLimits {
-            expansion_depth: 1,
-            ..Default::default()
-        },
+    for (limits, key) in [
+        (
+            crate::config::GraphLimits {
+                fan_out_width: 1,
+                ..Default::default()
+            },
+            GraphLimitKey::FanOutWidth,
+        ),
+        (
+            crate::config::GraphLimits {
+                expansion_depth: 1,
+                ..Default::default()
+            },
+            GraphLimitKey::ExpansionDepth,
+        ),
     ] {
         let mut owner = FakeOwner::default();
         let run = advance_with_budget(
@@ -273,17 +291,27 @@ fn fan_out_and_depth_pause_before_launch() {
         assert_eq!(run.status, GraphStatus::Paused);
         assert_eq!(
             run.checkpoint.pause_cause(),
-            Some(PauseCause::StructuralLimit)
+            Some(PauseCause::StructuralLimit {
+                extra: Default::default(),
+            })
         );
-        if limits.expansion_depth == 1 {
-            let reason = limits.expansion_depth_bound().refusal(2).unwrap();
-            assert_eq!(document.admit(&limits).unwrap_err().to_string(), reason);
-            assert_eq!(
-                run.checkpoint.pause_reason(),
-                Some(reason.as_str())
-            );
-        }
-        assert!(owner.calls.is_empty());
+        let max = match key {
+            GraphLimitKey::FanOutWidth => limits.fan_out_width,
+            GraphLimitKey::ExpansionDepth => limits.expansion_depth,
+            _ => unreachable!("the rows exercise a graph-width or depth limit"),
+        };
+        let Err(AdmissionError::StructuralLimit(limit)) = document.admit(&limits) else {
+            panic!("expected the declared structural graph limit")
+        };
+        assert_eq!(limit.key, key);
+        assert_eq!(limit.max, max);
+        assert!(limit.actual > limit.max);
+        assert!(
+            run.checkpoint
+                .nodes
+                .iter()
+                .all(|progress| progress.attempts.is_empty())
+        );
     }
 }
 
@@ -374,7 +402,15 @@ fn budget_pause_stops_admission_and_extension_resumes() {
     )
     .unwrap();
     assert_eq!(paused.status, GraphStatus::Paused);
-    assert_eq!(owner.calls.len(), 1);
+    assert_eq!(
+        paused.checkpoint.pause_cause(),
+        Some(PauseCause::BudgetExceeded {
+            extra: Default::default(),
+        })
+    );
+    assert_eq!(paused.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(paused.checkpoint.nodes[1].state, NodeState::Pending);
+    assert!(paused.checkpoint.nodes[1].attempts.is_empty());
     let resumed = resume_with_budget(
         &document,
         &mut owner,
@@ -385,7 +421,13 @@ fn budget_pause_stops_admission_and_extension_resumes() {
     )
     .unwrap();
     assert_eq!(resumed.status, GraphStatus::Complete);
-    assert_eq!(owner.calls.len(), 2);
+    assert!(
+        resumed
+            .checkpoint
+            .nodes
+            .iter()
+            .all(|progress| progress.state == NodeState::Succeeded)
+    );
 }
 
 #[test]
@@ -444,19 +486,20 @@ fn unknown_usage_warns_or_pauses_and_events_are_idempotent() {
                 GraphStatus::Complete
             }
         );
+        assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
         assert_eq!(
-            owner.calls.len(),
+            run.checkpoint.nodes[1].state,
             if policy == crate::config::UnknownUsage::Pause {
-                1
+                NodeState::Pending
             } else {
-                2
+                NodeState::Succeeded
             }
         );
         assert!(
             run.checkpoint
-                .unknown_usage
+                .usage_events
                 .iter()
-                .any(|warning| warning.contains("tokens"))
+                .any(|event| { event.metric == "tokens" && event.node_id == "one" })
         );
         let mut checkpoint = run.checkpoint;
         let events = checkpoint.usage_events.clone();
@@ -511,7 +554,9 @@ fn graph_wall_budget_sums_provider_time_and_preserves_partial_lower_bound() {
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(
         run.checkpoint.pause_cause(),
-        Some(PauseCause::BudgetExceeded)
+        Some(PauseCause::BudgetExceeded {
+            extra: Default::default(),
+        })
     );
     let mut checkpoint = run.checkpoint;
     let wall_budget = crate::config::GraphBudget {
@@ -527,10 +572,14 @@ fn graph_wall_budget_sums_provider_time_and_preserves_partial_lower_bound() {
         .as_mut()
         .unwrap()
         .wall_time_seconds = Some(11);
-    assert!(
-        budget_reason(&checkpoint, &wall_budget)
+    assert!(budget_reason(&checkpoint, &wall_budget).is_some());
+    assert_eq!(
+        checkpoint.nodes[0].attempts[0]
+            .usage
+            .as_ref()
             .unwrap()
-            .contains("wall_time_seconds")
+            .wall_time_seconds,
+        Some(11)
     );
 }
 
@@ -555,8 +604,8 @@ fn node_titles_are_validated_and_sent_to_attempts_and_status() {
 
     let mut invalid = node("invalid", route("first"));
     invalid.title = Some("bad\ntitle".into());
-    assert_eq!(
-        validate_plan(&graph(vec![invalid])).err(),
-        Some("node invalid: task title must be 1 to 256 bytes and contain no control characters")
-    );
+    assert!(matches!(
+        validate_plan_with_limits(&graph(vec![invalid]), &Default::default()),
+        Err(AdmissionError::Plan(_))
+    ));
 }

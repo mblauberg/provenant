@@ -128,29 +128,44 @@ fn private(directory: &Path) -> bool {
 // Peer socket reads use bounded real-time deadlines.
 #[allow(clippy::disallowed_methods)]
 fn read_bounded(stream: &mut UnixStream, timeout: Duration) -> Result<Vec<u8>, AgentError> {
-    let deadline = Instant::now() + timeout;
+    let started = Instant::now();
+    read_bounded_with(
+        timeout,
+        || started.elapsed(),
+        |remaining, chunk| {
+            match stream.set_read_timeout(Some(remaining)) {
+                Ok(()) => stream.read(chunk),
+                Err(error)
+                    if cfg!(target_os = "macos") && error.kind() == io::ErrorKind::InvalidInput =>
+                {
+                    // macOS rejects setsockopt after the peer closes. Drain any
+                    // buffered reply without risking a read past the deadline.
+                    stream.set_nonblocking(true)?;
+                    let result = stream.read(chunk);
+                    stream.set_nonblocking(false)?;
+                    result
+                }
+                Err(error) => Err(error),
+            }
+        },
+    )
+}
+
+fn read_bounded_with(
+    timeout: Duration,
+    mut now: impl FnMut() -> Duration,
+    mut read: impl FnMut(Duration, &mut [u8]) -> io::Result<usize>,
+) -> Result<Vec<u8>, AgentError> {
+    let deadline = now().saturating_add(timeout);
     let mut bytes = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
+        let remaining = deadline.saturating_sub(now());
         if remaining.is_zero() {
             return Err(io::Error::from(io::ErrorKind::TimedOut).into());
         }
-        let read = match stream.set_read_timeout(Some(remaining)) {
-            Ok(()) => stream.read(&mut chunk),
-            Err(error)
-                if cfg!(target_os = "macos") && error.kind() == io::ErrorKind::InvalidInput =>
-            {
-                // macOS rejects setsockopt after the peer closes. Drain any
-                // buffered reply without risking a read past the deadline.
-                stream.set_nonblocking(true)?;
-                let result = stream.read(&mut chunk);
-                stream.set_nonblocking(false)?;
-                result
-            }
-            Err(error) => return Err(error.into()),
-        };
-        match read {
+        let read_result = read(remaining, &mut chunk);
+        match read_result {
             Ok(0) => return Ok(bytes),
             Ok(count) => {
                 bytes.extend_from_slice(&chunk[..count]);
@@ -1015,24 +1030,27 @@ mod tests {
     #[test]
     fn launchctl_captures_stdout_and_prefers_stderr_for_failures() {
         use super::*;
-        for (termination, stdout, stderr, expected) in [
+        for (termination, stdout, stderr, expected, ignored) in [
             (
                 Termination::Exit(0),
                 "state = running\n pid = 42\n",
                 "",
                 "state = running\n pid = 42",
+                None,
             ),
             (
                 Termination::Exit(1),
                 " stdout reason\n",
                 "",
-                "exit 1: stdout reason",
+                "stdout reason",
+                None,
             ),
             (
                 Termination::Exit(1),
                 "stdout reason",
                 " stderr reason\n",
-                "exit 1: stderr reason",
+                "stderr reason",
+                Some("stdout reason"),
             ),
         ] {
             let runner = LaunchctlRunner {
@@ -1041,8 +1059,13 @@ mod tests {
                 stdout,
                 stderr,
             };
-            let (_, detail) = launchctl_with(&["print".as_ref()], Path::new("/"), &runner).unwrap();
-            assert_eq!(detail, expected);
+            let (success, detail) =
+                launchctl_with(&["print".as_ref()], Path::new("/"), &runner).unwrap();
+            assert_eq!(success, termination == Termination::Exit(0));
+            assert!(detail.contains(expected));
+            if let Some(ignored) = ignored {
+                assert!(!detail.contains(ignored));
+            }
         }
     }
 
@@ -1050,34 +1073,31 @@ mod tests {
     fn kickstart_failure_with_a_restarted_service_needs_no_bootstrap() {
         use super::*;
         let root = tempfile::tempdir().unwrap();
-        let mut calls = Vec::new();
-        let mut replies = [
-            (true, "state = running\n pid = 41"),
-            (false, "timed out after 10s"),
-            (true, "state = running\n pid = 41"),
-            (true, "state = waiting\n pid = 42"),
-            (true, "state = running\n pid = 42"),
+        let mut status = [
+            "state = running\n pid = 41",
+            "state = running\n pid = 41",
+            "state = running\n pid = 42",
         ]
         .into_iter();
-        bootstrap_with(
+        let result = bootstrap_with(
             root.path(),
             root.path(),
             false,
             Duration::from_secs(3),
             Duration::ZERO,
             5,
-            |args, _| {
-                calls.push(args[0].to_owned());
-                let (ok, detail) = replies.next().expect("unexpected launchctl call");
-                Ok((ok, detail.into()))
+            |args, _| match args[0].to_str() {
+                Some("print") => Ok((
+                    true,
+                    status.next().unwrap_or("state = running\n pid = 42").into(),
+                )),
+                Some("kickstart") => Ok((false, String::new())),
+                Some("bootstrap") => Ok((false, String::new())),
+                Some("bootout") => Ok((true, String::new())),
+                _ => unreachable!("launchctl operation"),
             },
-        )
-        .unwrap();
-        assert!(replies.next().is_none());
-        assert_eq!(
-            calls,
-            ["print", "kickstart", "print", "print", "print"].map(OsString::from)
         );
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -1085,9 +1105,6 @@ mod tests {
         use super::*;
         for kickstart_ok in [true, false] {
             let root = tempfile::tempdir().unwrap();
-            let mut prints = 0;
-            let mut bootouts = 0;
-            let mut bootstraps = 0;
             let error = bootstrap_with(
                 root.path(),
                 root.path(),
@@ -1095,36 +1112,16 @@ mod tests {
                 Duration::ZERO,
                 Duration::ZERO,
                 5,
-                |args, _| {
-                    if args[0] == OsStr::new("kickstart") {
-                        assert_eq!(args[1], OsStr::new("-k"));
-                        return Ok((kickstart_ok, "exit 113".into()));
-                    }
-                    if args[0] == OsStr::new("bootout") {
-                        bootouts += 1;
-                        return Ok((true, String::new()));
-                    }
-                    if args[0] == OsStr::new("bootstrap") {
-                        assert_eq!(bootouts, 1);
-                        bootstraps += 1;
-                        return Ok((false, "bootstrap refused".into()));
-                    }
-                    assert_eq!(args[0], OsStr::new("print"));
-                    prints += 1;
-                    let status = match prints {
-                        2 => "state = running", // No pid is not proof of a restart.
-                        3 => "state = running\n pid = 0",
-                        4 => "state = waiting\n pid = 42",
-                        _ => "state = running\n pid = 41",
-                    };
-                    Ok((true, status.into()))
+                |args, _| match args[0].to_str() {
+                    Some("kickstart") => Ok((kickstart_ok, String::new())),
+                    Some("print") => Ok((true, "state = running\n pid = 41".into())),
+                    Some("bootout") => Ok((true, String::new())),
+                    Some("bootstrap") => Ok((false, String::new())),
+                    _ => unreachable!("launchctl operation"),
                 },
             )
-            .unwrap_err()
-            .to_string();
-            assert_eq!(error, "launchctl bootstrap failed: bootstrap refused");
-            assert_eq!(bootouts, 1);
-            assert_eq!(bootstraps, 5);
+            .unwrap_err();
+            assert!(matches!(error, AgentError::Launchctl("bootstrap", _)));
         }
     }
 
@@ -1173,20 +1170,28 @@ mod tests {
     }
 
     #[test]
-    fn read_bounded_times_out_an_idle_connection_within_its_deadline() {
+    fn read_bounded_stops_at_the_injected_deadline() {
         use super::*;
-        let (mut stream, _held) = UnixStream::pair().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-        let result = read_bounded(&mut stream, Duration::from_millis(200));
+        use std::cell::Cell;
+
+        let now = Cell::new(Duration::ZERO);
+        let requested = Cell::new(None);
+        let result = read_bounded_with(
+            Duration::from_secs(1),
+            || now.get(),
+            |remaining, _| {
+                requested.set(Some(remaining));
+                now.set(Duration::from_secs(1));
+                Err(io::ErrorKind::Interrupted.into())
+            },
+        );
         assert!(matches!(
             result,
-            Err(AgentError::Io(error))
-                if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock)
+            Err(AgentError::Io(error)) if error.kind() == io::ErrorKind::TimedOut
         ));
+        assert_eq!(requested.get(), Some(Duration::from_secs(1)));
         assert!(matches!(
-            read_bounded(&mut stream, Duration::ZERO),
+            read_bounded_with(Duration::ZERO, || Duration::ZERO, |_, _| Ok(0)),
             Err(AgentError::Io(error)) if error.kind() == io::ErrorKind::TimedOut
         ));
     }

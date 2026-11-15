@@ -253,12 +253,22 @@ pub(super) fn evaluate<O: AttemptOwner>(
     checkpoint.nodes[index].ci = Some(CiEvidence {
         wake_at: None,
         pending_observations,
-        extra: [("failed_checks_policy".into(), serde_json::json!({
-            "max_bytes": max_bytes,
-            "max_bytes_source": if failed_checks_max_bytes.is_some() { "condition" } else { "default" },
-            "max_checks": max_checks,
-            "max_checks_source": if max_failed_checks.is_some() { "condition" } else { "default" },
-        }))].into(),
+        extra: Default::default(),
+        failed_checks_policy: Some(CiFailedChecksPolicy {
+            max_bytes,
+            max_bytes_source: if failed_checks_max_bytes.is_some() {
+                CiPolicySource::Condition
+            } else {
+                CiPolicySource::Default
+            },
+            max_checks,
+            max_checks_source: if max_failed_checks.is_some() {
+                CiPolicySource::Condition
+            } else {
+                CiPolicySource::Default
+            },
+            extra: Default::default(),
+        }),
         first_observed_stamp: anchor,
         clock_reanchors: reanchors,
         clock_reanchor_reason: reanchor_reason,

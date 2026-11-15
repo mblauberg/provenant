@@ -52,6 +52,7 @@ pub(super) fn dynamic_subtree(
                 .filter_map(|node| rows.remove(&node.id))
                 .collect();
             let record = RetiredExpansion {
+                extra: Default::default(),
                 reason: reason.to_owned(),
                 expansion: expansion.clone(),
                 progress,

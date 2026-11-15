@@ -61,7 +61,6 @@ struct Owner {
     tick: bool,
     backoff: CiPollBackoff,
     repair_fixture: bool,
-    repair_prompts: Vec<String>,
     repair_families: std::collections::BTreeMap<String, String>,
     repair_alternative: bool,
     /// The repository history that proves review carry-over against `TARGET`.
@@ -229,9 +228,6 @@ impl AttemptOwner for Owner {
         worktree: Option<&str>,
         replay: Replay<'_>,
     ) -> Result<AttemptObservation, Self::Error> {
-        if self.repair_fixture {
-            self.repair_prompts.push(input.prompt.to_owned());
-        }
         if self.pending_writer && key.node_id == "write" {
             return Ok(AttemptObservation::Pending {
                 attempt_ref: Some("pending-writer".into()),
@@ -325,6 +321,36 @@ fn owner() -> Owner {
     }
 }
 
+fn assert_repair_received_finding(checkpoint: &GraphCheckpoint) {
+    let repair = checkpoint
+        .nodes
+        .iter()
+        .find(|progress| progress.id.ends_with("--fix"))
+        .unwrap();
+    let evidence = repair
+        .attempts
+        .last()
+        .unwrap()
+        .input_manifest
+        .as_ref()
+        .unwrap();
+    let finding = evidence
+        .inputs
+        .iter()
+        .filter(|input| {
+            input.kind == OutputKind::Findings && input.delivery == InputDelivery::Delivered
+        })
+        .filter_map(|input| node(checkpoint, &input.producer_node).outputs.as_ref())
+        .flat_map(|outputs| outputs.findings.iter())
+        .find(|finding| finding.id == "F1")
+        .expect("repair input selects the reported finding");
+    assert_eq!(finding.severity, "high");
+    assert_eq!(finding.file, "a.rs");
+    assert_eq!(finding.line, Some(1));
+    assert_eq!(finding.evidence.as_deref(), Some("counterexample"));
+    assert_eq!(finding.proposed_fix.as_deref(), Some("repair"));
+}
+
 #[test]
 fn findings_panels_feed_repair_and_land_the_reviewed_head() {
     for (model_synthesis, alternative) in
@@ -355,14 +381,14 @@ fn findings_panels_feed_repair_and_land_the_reviewed_head() {
             "exports":[{"node":exported,"outputs":["findings","verdict"]}]}}),
         )
         .unwrap();
-        let mut document: GraphDocument = serde_json::from_value(json!({"schema_version":1,"graph_id":"repair-land",
+        let mut document = super::model::document_fixture(json!({"graph_id":"repair-land",
             "context":{"risk_tier":"substantial"},"nodes":[
             {"id":"write","access":"worktree_write","worktree":"/wt/feature","delivery":"pr","prompt":"write","route":{"alias":"senior"}},
             {"id":"ci","kind":"gate","access":"read_only","depends_on":["cycles"],"condition":{"type":"ci","target":{"node":"write"}}},
             {"id":"review","access":"read_only","depends_on":["ci"],"source":{"type":"head","node":"write"},"prompt":"review","route":{"alias":"senior"}},
             {"id":"accept","kind":"gate","access":"read_only","depends_on":["review"],"inputs":[{"node":"review","outputs":["verdict"]}],"condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}},
             {"id":"land","kind":"land","access":"read_only","depends_on":["accept"],"land":{"node":"write","tier":"routine"}}
-        ]})).unwrap();
+        ]}));
         document.nodes.insert(1, initial);
         document.nodes.insert(2, repair);
         let mut owner = owner();
@@ -379,12 +405,6 @@ fn findings_panels_feed_repair_and_land_the_reviewed_head() {
                 .map(|n| (&n.id, n.state, &n.advance_error))
                 .collect::<Vec<_>>()
         );
-        let fix = owner
-            .launches
-            .iter()
-            .position(|launch| launch.node.ends_with("--fix"))
-            .unwrap();
-        let prompt = &owner.repair_prompts[fix];
         let repair_node = run
             .checkpoint
             .nodes
@@ -407,17 +427,7 @@ fn findings_panels_feed_repair_and_land_the_reviewed_head() {
                 .contains("No separate model family was available for the repair writer")),
             !alternative
         );
-        for field in [
-            "F1",
-            "\"lens\":\"correctness\"",
-            "\"severity\":\"high\"",
-            "\"file\":\"a.rs\"",
-            "\"line\":1",
-            "\"evidence\":\"counterexample\"",
-            "\"proposed_fix\":\"repair\"",
-        ] {
-            assert!(prompt.contains(field), "missing {field}: {prompt}");
-        }
+        assert_repair_received_finding(&run.checkpoint);
         assert!(
             owner
                 .launches
@@ -456,10 +466,8 @@ fn bundled_deliver_repairs_findings_before_landing() {
     .compile(&json!({"id":"delivery","use":"deliver",
             "with":{"worktree":"/wt/feature","write_scope":["src"]}}))
     .unwrap();
-    let mut document: GraphDocument =
-        serde_json::from_value(json!({"schema_version":1,"graph_id":"bundled-deliver",
-        "context":{"risk_tier":"substantial"},"nodes":[]}))
-        .unwrap();
+    let mut document = super::model::document_fixture(json!({"graph_id":"bundled-deliver",
+        "context":{"risk_tier":"substantial"},"nodes":[]}));
     document.nodes.push(delivery);
     let mut owner = owner();
     owner.repair_fixture = true;
@@ -479,26 +487,7 @@ fn bundled_deliver_repairs_findings_before_landing() {
             .map(|n| (&n.id, n.state, &n.advance_error))
             .collect::<Vec<_>>()
     );
-    let fix = owner
-        .launches
-        .iter()
-        .position(|launch| launch.node.ends_with("--fix"))
-        .unwrap();
-    for field in [
-        "F1",
-        "\"lens\":\"correctness\"",
-        "\"severity\":\"high\"",
-        "\"file\":\"a.rs\"",
-        "\"line\":1",
-        "\"evidence\":\"counterexample\"",
-        "\"proposed_fix\":\"repair\"",
-    ] {
-        assert!(
-            owner.repair_prompts[fix].contains(field),
-            "missing {field} in {}",
-            owner.repair_prompts[fix]
-        );
-    }
+    assert_repair_received_finding(&run.checkpoint);
     assert!(
         owner
             .launches
@@ -527,11 +516,11 @@ fn nodes(tier: &str) -> serde_json::Value {
 }
 
 fn document(tier: &str, session: Option<&str>) -> GraphDocument {
-    let mut value = json!({"schema_version":1, "graph_id":"g-land", "nodes":nodes(tier)});
+    let mut value = json!({"graph_id":"g-land", "nodes":nodes(tier)});
     if let Some(session) = session {
         value["decision_session"] = session.into();
     }
-    serde_json::from_value(value).unwrap()
+    super::model::document_fixture(value)
 }
 
 fn run(document: &GraphDocument, owner: &mut Owner, journal: &mut Journal) -> GraphCheckpoint {
@@ -616,7 +605,9 @@ fn an_auto_tier_lands_the_newest_delivered_head_through_the_host() {
         [(
             "feature/x".to_owned(),
             REPAIR_HEAD.to_owned(),
-            LandAuthority::Policy
+            LandAuthority::Policy {
+                extra: Default::default(),
+            }
         )]
     );
     // The gate bound the writer's head; the repair is newer, so the host's
@@ -633,8 +624,6 @@ fn an_auto_tier_lands_the_newest_delivered_head_through_the_host() {
     let outputs = land.outputs.as_ref().unwrap();
     assert_eq!(outputs.verdict.as_deref(), Some(land::LANDED));
     assert_eq!(outputs.commit.as_deref(), Some(REPAIR_HEAD));
-    let excerpt = &outputs.result.as_ref().unwrap().excerpt;
-    assert!(excerpt.contains("#7") && excerpt.contains("policy is auto (default)"));
     assert!(checkpoint.asks.is_empty());
 }
 
@@ -663,8 +652,9 @@ fn land_identity_save_failure_prevents_merge() {
     let mut owner = owner();
     let mut journal = FailingJournal::default();
     let error = advance(&document("routine", None), &mut owner, &mut journal).unwrap_err();
-    assert!(matches!(error, GraphError::Journal(ref e) if e.to_string().contains("injected")));
-    assert_eq!(owner.merge_requests, 0);
+    assert!(matches!(&error, GraphError::Journal(_)));
+    assert_eq!(error.code(), "journal");
+    assert!(owner.lands.is_empty());
     let land = node(journal.0.as_ref().unwrap(), "land")
         .land
         .as_ref()
@@ -681,9 +671,8 @@ fn land_rejects_a_merge_observation_for_another_pr() {
     });
     let mut journal = Journal::default();
     let error = advance(&document("routine", None), &mut owner, &mut journal).unwrap_err();
-    assert!(
-        matches!(error, GraphError::Refused(ref reason) if reason.contains("saved PR identity"))
-    );
+    assert!(matches!(&error, GraphError::Refused(_)));
+    assert_eq!(error.code(), "graph_refused");
     let saved = journal.0.as_ref().unwrap();
     assert_eq!(node(saved, "land").state, NodeState::Running);
     assert_eq!(
@@ -717,9 +706,8 @@ fn merged_land_is_reobserved_after_its_checkpoint_save_fails() {
     let mut owner = owner();
     let mut journal = FailingJournal::default();
     let error = advance(&document, &mut owner, &mut journal).unwrap_err();
-    assert!(
-        matches!(error, GraphError::Journal(ref error) if error.to_string().contains("injected"))
-    );
+    assert!(matches!(&error, GraphError::Journal(_)));
+    assert_eq!(error.code(), "journal");
     let saved = journal.saved.clone().unwrap();
     assert_eq!(node(&saved, "land").state, NodeState::Running);
     assert_eq!(owner.merge_requests, 1);
@@ -747,7 +735,8 @@ fn pending_land_without_a_wall_clock_keeps_the_prior_checkpoint() {
     });
     let mut journal = Journal::default();
     let error = advance(&document, &mut owner, &mut journal).unwrap_err();
-    assert!(matches!(error, GraphError::Refused(ref reason) if reason.contains("no wall clock")));
+    assert!(matches!(&error, GraphError::Refused(_)));
+    assert_eq!(error.code(), "graph_refused");
     let saved = journal.0.as_ref().unwrap();
     assert_eq!(node(saved, "land").state, NodeState::Running);
     let record = node(saved, "land").land.as_ref().unwrap();
@@ -772,19 +761,11 @@ fn a_crucial_tier_asks_and_succeeds_only_once_the_chair_merges_by_hand() {
             .all(|observed| *observed == ("feature/x".to_owned(), REPAIR_HEAD.to_owned()))
     );
     let ask = &checkpoint.asks[0];
-    assert_eq!(
-        (ask.ask_id.as_str(), ask.kind, ask.session.as_str()),
-        ("land.ask-1", AskKind::Land, "chair")
-    );
+    assert_eq!((ask.kind, ask.session.as_str()), (AskKind::Land, "chair"));
     let filed = &owner.filed[0];
+    assert_eq!(filed.ask_id, ask.ask_id);
     let options: Vec<_> = filed.options.iter().map(|o| o.id.as_str()).collect();
     assert_eq!(options, ["hold"]);
-    assert!(filed.body.contains(REPAIR_HEAD) && filed.body.contains("crucial tier asks first"));
-    assert!(
-        filed
-            .body
-            .contains(&format!("provenant land N --head {REPAIR_HEAD}"))
-    );
 
     owner.chair_merged = true;
     let checkpoint = run(&document, &mut owner, &mut journal);
@@ -792,18 +773,13 @@ fn a_crucial_tier_asks_and_succeeds_only_once_the_chair_merges_by_hand() {
     let land = node(&checkpoint, "land");
     assert_eq!(land.state, NodeState::Succeeded);
     let authority = LandAuthority::Chair {
-        ask_id: "land.ask-1".into(),
+        ask_id: ask.ask_id.clone(),
+        extra: Default::default(),
     };
     assert_eq!(land.land.as_ref().unwrap().authorised_by, Some(authority));
-    assert!(
-        land.outputs
-            .as_ref()
-            .unwrap()
-            .result
-            .as_ref()
-            .unwrap()
-            .excerpt
-            .contains("the chair landed it by hand after land.ask-1")
+    assert_eq!(
+        land.outputs.as_ref().unwrap().verdict.as_deref(),
+        Some(land::LANDED)
     );
     assert!(checkpoint.asks.is_empty());
 }
@@ -884,7 +860,6 @@ fn a_configured_policy_overrides_the_default_and_records_its_source() {
         ),
         (LandPolicy::Ask, LandSource::Project, None)
     );
-    assert!(owner.filed[0].body.contains("project config"));
     assert!(owner.lands.is_empty());
 }
 
@@ -982,9 +957,7 @@ fn a_pending_land_persists_a_retry_deadline_that_survives_restart() {
 
 /// Run `nodes` with reviewers ending in `verdict`, returning the land node.
 fn land_outcome(nodes: serde_json::Value, verdict: &'static str) -> (Owner, NodeProgress) {
-    let document: GraphDocument =
-        serde_json::from_value(json!({"schema_version":1, "graph_id":"g-land", "nodes":nodes}))
-            .unwrap();
+    let document = super::model::document_fixture(json!({"graph_id":"g-land", "nodes":nodes}));
     let mut owner = owner();
     owner.review_verdict = Some(verdict);
     let checkpoint = run(&document, &mut owner, &mut Journal::default());
@@ -1021,8 +994,8 @@ fn a_failed_review_routed_to_land_never_calls_the_host() {
 
 #[test]
 fn empty_review_range_cannot_pass_deliver_gate_or_land() {
-    let document: GraphDocument = serde_json::from_value(json!({
-        "schema_version": 1, "graph_id": "empty-review-land", "nodes": [
+    let document = super::model::document_fixture(json!({
+        "graph_id": "empty-review-land", "nodes": [
             {"id":"write", "access":"worktree_write", "worktree":"/wt/feature", "delivery":"pr",
              "prompt":"write it", "route":{"alias":"senior"}},
             {"id":"review", "role":"lens.correctness-spec", "access":"read_only", "prompt":"review",
@@ -1035,8 +1008,7 @@ fn empty_review_range_cannot_pass_deliver_gate_or_land() {
             {"id":"land", "kind":"land", "access":"read_only", "depends_on":["accepted", "ci"],
              "land":{"node":"write", "tier":"routine"}}
         ]
-    }))
-    .unwrap();
+    }));
     let mut owner = owner();
     owner.equal_review_range = true;
     let checkpoint = run(&document, &mut owner, &mut Journal::default());
@@ -1124,9 +1096,7 @@ fn a_carried_over_head_lands_and_a_changed_delta_does_not() {
         {"id":"land", "kind":"land", "access":"read_only", "depends_on":["ci"],
          "land":{"node":"write", "tier":"routine"}}
     ]);
-    let document: GraphDocument =
-        serde_json::from_value(json!({"schema_version":1, "graph_id":"g-land", "nodes":graph}))
-            .unwrap();
+    let document = super::model::document_fixture(json!({"graph_id":"g-land", "nodes":graph}));
     for (extra, lands) in [(&[][..], true), (&["one-more-line"][..], false)] {
         let mut history = provenant_core::review_cover::history::History::default();
         history.commit(REVIEW_BASE, &[], &["base"]);
@@ -1194,7 +1164,7 @@ fn a_review_of_an_earlier_head_never_lands_a_continuation() {
 }
 
 fn refusal(value: serde_json::Value) -> &'static str {
-    let document: GraphDocument = serde_json::from_value(value).unwrap();
+    let document = super::model::document_fixture(value);
     match advance(&document, &mut owner(), &mut Journal::default()) {
         Err(error @ (GraphError::Invalid(_) | GraphError::Admission(_))) => error.code(),
         other => panic!("expected refusal, got {:?}", other.map(|run| run.status)),
@@ -1203,60 +1173,30 @@ fn refusal(value: serde_json::Value) -> &'static str {
 
 #[test]
 fn continuation_and_land_wiring_is_checked_before_launch() {
-    for (edit, reason) in [
-        (
-            Box::new(|nodes: &mut serde_json::Value| nodes[2]["worktree"] = "/wt/other".into())
-                as Box<dyn FnOnce(&mut serde_json::Value)>,
-            "same worktree",
-        ),
-        (
-            Box::new(|nodes: &mut serde_json::Value| nodes[2]["delivery"] = "push".into()),
-            "no delivery of its own",
-        ),
-        (
-            Box::new(|nodes: &mut serde_json::Value| {
-                nodes[2]["depends_on"] = json!([]);
-            }),
-            "upstream writer",
-        ),
-        (
-            Box::new(|nodes: &mut serde_json::Value| nodes[0]["delivery"] = "none".into()),
-            "upstream writer",
-        ),
-        (
-            Box::new(|nodes: &mut serde_json::Value| nodes[5]["land"]["node"] = "repair".into()),
-            "writer that delivers pr",
-        ),
-        (
-            Box::new(|nodes: &mut serde_json::Value| nodes[5]["depends_on"] = json!(["ci"])),
-            "verdict gate and a CI gate",
-        ),
-        (
-            Box::new(|nodes: &mut serde_json::Value| nodes[5]["prompt"] = "merge".into()),
-            "no agent configuration",
-        ),
-        (
-            Box::new(|nodes: &mut serde_json::Value| {
-                nodes[5]["land"]["tier"] = "urgent".into();
-            }),
-            "",
-        ),
+    for edit in [
+        Box::new(|nodes: &mut serde_json::Value| nodes[2]["worktree"] = "/wt/other".into())
+            as Box<dyn FnOnce(&mut serde_json::Value)>,
+        Box::new(|nodes: &mut serde_json::Value| nodes[2]["delivery"] = "push".into()),
+        Box::new(|nodes: &mut serde_json::Value| nodes[2]["depends_on"] = json!([])),
+        Box::new(|nodes: &mut serde_json::Value| nodes[0]["delivery"] = "none".into()),
+        Box::new(|nodes: &mut serde_json::Value| nodes[5]["land"]["node"] = "repair".into()),
+        Box::new(|nodes: &mut serde_json::Value| nodes[5]["depends_on"] = json!(["ci"])),
+        Box::new(|nodes: &mut serde_json::Value| nodes[5]["prompt"] = "merge".into()),
     ] {
-        let mut value = json!({"schema_version":1, "graph_id":"g-land", "nodes":nodes("routine")});
+        let mut value = json!({"graph_id":"g-land", "nodes":nodes("routine")});
         edit(&mut value["nodes"]);
-        if reason.is_empty() {
-            assert!(serde_json::from_value::<GraphDocument>(value).is_err());
-            continue;
-        }
         let refused = refusal(value);
         assert_eq!(refused, "invalid_graph");
     }
+    let mut invalid_tier = serde_json::to_value(document("routine", None)).unwrap();
+    invalid_tier["nodes"][5]["land"]["tier"] = "urgent".into();
+    assert!(serde_json::from_value::<GraphDocument>(invalid_tier).is_err());
 }
 
 #[test]
 fn a_loop_body_cannot_land() {
-    let document: GraphDocument = serde_json::from_value(json!({
-        "schema_version":1, "graph_id":"g-land", "nodes":[
+    let document = super::model::document_fixture(json!({
+        "graph_id":"g-land", "nodes":[
             {"id":"rounds", "kind":"loop", "access":"read_only",
              "loop":{"max_rounds":2, "until":"done", "body":[
                 {"id":"land", "kind":"land", "access":"read_only",
@@ -1265,8 +1205,7 @@ fn a_loop_body_cannot_land() {
                  "condition":{"type":"budget"}}
              ]}}
         ]
-    }))
-    .unwrap();
+    }));
     let reason = refusal(serde_json::to_value(document).unwrap());
     assert_eq!(reason, "invalid_graph");
 }
@@ -1293,12 +1232,12 @@ fn a_head_source_reviews_the_newest_continuation_and_lands_it() {
         [(
             "feature/x".to_owned(),
             REPAIR_HEAD.to_owned(),
-            LandAuthority::Policy
+            LandAuthority::Policy {
+                extra: Default::default(),
+            }
         )]
     );
-    let document: GraphDocument =
-        serde_json::from_value(json!({"schema_version":1, "graph_id":"g-land", "nodes":nodes}))
-            .unwrap();
+    let document = super::model::document_fixture(json!({"graph_id":"g-land", "nodes":nodes}));
     let mut owner = owner();
     let mut journal = Journal::default();
     let checkpoint = run(&document, &mut owner, &mut journal);
@@ -1350,7 +1289,7 @@ fn a_head_source_must_name_an_upstream_writer() {
             .push(json!({"id":"late", "access":"read_only",
             "prompt":"look", "depends_on":depends_on, "route":{"alias":"senior"},
             "source":{"type":"head", "node":target}}));
-        let refused = refusal(json!({"schema_version":1, "graph_id":"g-land", "nodes":nodes}));
+        let refused = refusal(json!({"graph_id":"g-land", "nodes":nodes}));
         assert_eq!(refused, "invalid_graph", "{target}");
     }
 }

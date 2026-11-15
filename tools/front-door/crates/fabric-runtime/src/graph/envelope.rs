@@ -40,7 +40,10 @@ pub(super) fn admit(
 ) -> Result<(), AdmissionError> {
     let bound = checkpoint_bound(document, expansions, extensions, plan);
     if bound > MAX_CHECKPOINT_BYTES as usize {
-        Err(AdmissionError::Envelope(GraphEnvelopeLimit { bound }))
+        Err(AdmissionError::Envelope(GraphEnvelopeLimit {
+            extra: Default::default(),
+            bound,
+        }))
     } else {
         Ok(())
     }
@@ -67,6 +70,7 @@ fn ask_bound(ask: &AskRequest) -> usize {
         session: ask.session.clone(),
         wake_at: Some(latest()),
         timeout: Some(asks::DecideTimeout {
+            extra: Default::default(),
             seconds: u64::MAX,
             source: asks::DecideTimeoutSource::Configured,
         }),
@@ -109,9 +113,10 @@ pub(super) fn checkpoint_bound(
         cancelled: true,
         cancel_reason: Some(String::new()),
         pause: provenant_records::pause::Pause::new(
-            provenant_records::pause::PauseCause::Stop(
-                provenant_records::StopCause::CredentialHelperFailed,
-            ),
+            provenant_records::pause::PauseCause::Stop {
+                stop: provenant_records::StopCause::CredentialHelperFailed,
+                extra: Default::default(),
+            },
             None,
             "p",
         )
@@ -211,6 +216,7 @@ fn land_skeleton(tier: provenant_records::workflow::RiskTier) -> LandRecord {
         head: String::new(),
         authorised_by: Some(LandAuthority::Chair {
             ask_id: String::new(),
+            extra: Default::default(),
         }),
         pull_request: Some(u64::MAX),
         note: Some(String::new()),
@@ -247,6 +253,7 @@ fn node_bound(
         yielded_slot: false,
         stop_fence: false,
         retry: Some(RetryAllowance {
+            extra: Default::default(),
             retries: u8::MAX,
             origin: "shipped_default".into(),
         }),
@@ -269,11 +276,16 @@ fn node_bound(
         expansion_cause: expands.then_some(NodeDecisionCause::PlanExpansionPaused {
             active: false,
             fallback: false,
-            fragment_error: Some(PlanFailureFact::Structural(GraphStructuralLimit {
-                key: GraphLimitKey::GraphPromptBytes,
-                actual: usize::MAX,
-                max: usize::MAX,
-            })),
+            fragment_error: Some(PlanFailureFact::Structural {
+                limit: GraphStructuralLimit {
+                    extra: Default::default(),
+                    key: GraphLimitKey::GraphPromptBytes,
+                    actual: usize::MAX,
+                    max: usize::MAX,
+                },
+                extra: Default::default(),
+            }),
+            extra: Default::default(),
         }),
         loop_pause: node.loop_body.as_ref().map(|_| String::new()),
         loop_pause_code: node
@@ -283,11 +295,14 @@ fn node_bound(
         loop_cause: node
             .loop_body
             .as_ref()
-            .map(|_| NodeDecisionCause::InvalidLoopDecision),
+            .map(|_| NodeDecisionCause::InvalidLoopDecision {
+                extra: Default::default(),
+            }),
         truncation_cause: node.composite.as_ref().map(|_| {
             NodeDecisionCause::CompositeFindingsTruncated {
                 warning_indices: vec![usize::MAX; MAX_WARNINGS],
                 notice_lines: usize::MAX,
+                extra: Default::default(),
             }
         }),
         round: node.round.clone(),
@@ -312,6 +327,13 @@ fn node_bound(
             wake_at: Some(latest()),
             pending_observations: u64::MAX,
             extra: Default::default(),
+            failed_checks_policy: Some(CiFailedChecksPolicy {
+                max_bytes: usize::MAX,
+                max_bytes_source: CiPolicySource::Condition,
+                max_checks: usize::MAX,
+                max_checks_source: CiPolicySource::Condition,
+                extra: Default::default(),
+            }),
             first_observed_stamp: Some(CiHostStamp {
                 extra: Default::default(),
                 boot_identity: String::new(),
@@ -392,6 +414,7 @@ fn node_bound(
     // Ordinary agent nodes may still report risk assessments in their output.
     if repair_gate {
         skeleton.repair_growth = Some(RepairGrowth {
+            extra: Default::default(),
             before: "1".repeat(64),
             after: "1".repeat(64),
             grew: false,
@@ -411,6 +434,7 @@ fn node_bound(
             .any(|consumer| consumer.repair_scope_gate && consumer.depends_on.contains(&node.id))
         {
             outputs.repair_design = Some(RepairDesign {
+                extra: Default::default(),
                 within_scope: false,
                 one_way_door: false,
             });
@@ -484,7 +508,7 @@ fn node_bound(
             session,
             u64::MAX,
             None,
-            asks::WORST_DECIDE_TIMEOUT,
+            &asks::worst_decide_timeout(),
             Some(""),
         );
         bytes += ask_bound(&ask)

@@ -64,16 +64,9 @@ mod tests {
             );
             assert!(RelativePath::parse(r"a\.\b").is_ok());
         }
-    }
-}
-
-#[cfg(all(test, windows))]
-mod windows_tests {
-    use super::*;
-    #[test]
-    fn windows_separators_cannot_hide_dot_components() {
+        #[cfg(windows)]
         for bad in [r"a\.\b", r"a\..\b", r".\a"] {
-            assert!(RelativePath::parse(bad).is_err());
+            assert!(RelativePath::parse(bad).is_err(), "{bad:?}");
         }
     }
 }

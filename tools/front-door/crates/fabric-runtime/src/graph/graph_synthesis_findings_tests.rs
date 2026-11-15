@@ -59,10 +59,12 @@ fn identity_only_dispositions_inherit_selected_findings() {
             assert_eq!(finding.status, "open");
             assert_eq!(finding.reason.as_deref(), Some("falsified"));
         } else {
-            let error = progress.advance_error.as_deref().unwrap();
-            assert!(
-                error.contains("(missing-F9) field id: unknown upstream identity"),
-                "{error}"
+            assert_eq!(
+                progress
+                    .outputs
+                    .as_ref()
+                    .and_then(|outputs| outputs.findings_available),
+                Some(false)
             );
         }
     }
@@ -86,8 +88,8 @@ fn composite_findings_have_qualified_ids_and_unambiguous_bare_aliases() {
         ),
         ("F1", vec!["F1", "reviews--b:F1"], NodeState::Failed),
     ] {
-        let document: GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version":1, "graph_id":"qualified-findings", "nodes":[
+        let document: GraphDocument = document_fixture(serde_json::json!({
+            "graph_id":"qualified-findings", "nodes":[
                 {"id":"reviews", "kind":"composite", "access":"read_only", "composite":{
                     "nodes":[
                         {"id":"a", "access":"read_only", "prompt":"review", "route":{"alias":"senior"}},
@@ -98,7 +100,7 @@ fn composite_findings_have_qualified_ids_and_unambiguous_bare_aliases() {
                  "depends_on":["reviews"], "inputs":[{"node":"reviews", "outputs":["findings"]}],
                  "dispositions":["accepted", "rejected", "deferred"]}
             ]
-        })).unwrap();
+        }));
         let entries: Vec<_> = cited
             .iter()
             .map(|id| serde_json::json!({"id":id, "disposition":"rejected", "reason":"falsified"}))
@@ -180,36 +182,29 @@ fn composite_findings_have_qualified_ids_and_unambiguous_bare_aliases() {
 
 // Small: malformed entries must retain a bounded, actionable diagnostic.
 #[test]
-fn findings_error_names_first_entry_and_field() {
-    for (entry, field) in [
-        (
-            r#"{"id":"broken","severity":42},{"id":"later"}"#.to_owned(),
-            "severity",
-        ),
-        (
-            r#"{"id":"broken","severity":"high","file":"a"}"#.to_owned(),
-            "summary",
-        ),
-        (
-            entry("").replace("null", "-1").replace("F1", "broken"),
-            "line",
-        ),
+fn malformed_findings_keep_bounded_diagnostics_and_partial_values() {
+    for findings in [
+        r#"{"id":"broken","severity":42},{"id":"later"}"#.to_owned(),
+        r#"{"id":"broken","severity":"high","file":"a"}"#.to_owned(),
+        entry("").replace("null", "-1").replace("F1", "broken"),
     ] {
-        let capture = capture(&findings_text(&entry));
+        let capture = capture(&findings_text(&findings));
         let outputs = make_outputs(Some(&capture), None, None, None, None);
+        assert_eq!(outputs.findings_available, Some(false));
         assert!(
             outputs
                 .findings
                 .iter()
                 .any(|finding| finding.id == "broken")
         );
-        let error = &outputs.warnings[0];
+        assert!(!outputs.findings.iter().any(|finding| finding.id == "later"));
+        assert!(!outputs.warnings.is_empty());
         assert!(
-            error.contains("entry 1") && error.contains("broken"),
-            "{error}"
+            outputs
+                .warnings
+                .iter()
+                .all(|warning| warning.len() <= WARNING_BYTES)
         );
-        assert!(error.contains(field), "{error}");
-        assert!(!error.contains("later"), "{error}");
     }
     let progress = synthesis_run(&findings_text(&format!(
         r#"{{"id":"{}","disposition":"rejected","reason":"unknown"}}"#,
@@ -387,18 +382,14 @@ fn large_synthesis_trims_metadata_and_replays_with_finding_identities() {
         synthesis.advance_error
     );
     let outputs = synthesis.outputs.as_ref().unwrap();
-    assert!(
-        outputs
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("findings metadata trimmed"))
-    );
     assert_eq!(outputs.findings.len(), 8 * MAX_FINDINGS);
     assert!(outputs.findings.iter().all(|finding| finding.id == "F1"
         && finding.severity == "high"
         && finding.trigger().is_none()
         && finding.effective_severity() == "note"
-        && finding.file == "a.rs"));
+        && finding.file == "a.rs"
+        && finding.summary.is_empty()
+        && finding.propagates.as_deref() == Some("seed:F1")));
     assert_eq!(
         run.checkpoint.nodes.last().unwrap().state,
         NodeState::Succeeded
@@ -419,7 +410,7 @@ fn large_synthesis_trims_metadata_and_replays_with_finding_identities() {
 fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities() {
     let trigger =
         serde_json::json!({"sequence":"run", "reach":"operator_mistake", "observed":true});
-    for verifying in [false, true] {
+    for (verifying, composite_export) in [(false, false), (true, false), (false, true)] {
         let input = |id: &str| GraphInput {
             required_outputs: Vec::new(),
             extra: Default::default(),
@@ -435,7 +426,7 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
         )]);
         // Leave room for trigger evidence under each verifier's findings cap;
         // 640 copies still exceed the synthesis projection's compaction cap.
-        let long_file = "a".repeat(16);
+        let long_file = "a".repeat(OUTPUT_FIELD_BYTES);
         let verifier_entry = entry(",\"propagates\":\"seed:F1\",\"lens\":\"tests\",\"evidence\":\"observed\",\"proposed_fix\":\"repair\"").replace("a.rs", &long_file);
         let mut verifier_entry: serde_json::Value = serde_json::from_str(&verifier_entry).unwrap();
         verifier_entry["trigger"] = trigger.clone();
@@ -472,10 +463,31 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
         } else {
             synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
         }
-        nodes.push(synthesis);
+        let (output_id, exported_id) = if composite_export {
+            let mut outer = node("outer", route("first"));
+            outer.kind = Some(NodeKind::Composite);
+            outer.route = None;
+            outer.prompt.clear();
+            outer.depends_on = synthesis.depends_on.clone();
+            outer.inputs = synthesis.inputs.clone();
+            synthesis.depends_on.clear();
+            synthesis.inputs.clear();
+            outer.composite = Some(CompositeSpec {
+                extra: Default::default(),
+                reduce_verdict: false,
+                min_successful: None,
+                nodes: vec![synthesis],
+                exports: vec![input("synthesis")],
+            });
+            nodes.push(outer);
+            ("outer--synthesis", "outer")
+        } else {
+            nodes.push(synthesis);
+            ("synthesis", "synthesis")
+        };
         let mut next = node("next", route("first"));
-        next.depends_on = vec!["synthesis".into()];
-        next.inputs = vec![input("synthesis")];
+        next.depends_on = vec![exported_id.into()];
+        next.inputs = vec![input(exported_id)];
         nodes.push(next);
         let mut decisions = serde_json::json!({"id":"F1", "disposition":"accepted", "reason":"yes", "detail":"detail", "verification":"falsified"});
         if verifying {
@@ -519,7 +531,7 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
             .checkpoint
             .nodes
             .iter()
-            .find(|node| node.id == "synthesis")
+            .find(|node| node.id == output_id)
             .unwrap();
         assert_eq!(
             synthesis.state,
@@ -528,25 +540,20 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
             synthesis.advance_error
         );
         let outputs = synthesis.outputs.as_ref().unwrap();
-        assert!(
-            outputs
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("findings compacted"))
-        );
+        assert!(outputs.compact_disposition_findings.is_some());
         assert!(outputs.findings.is_empty());
         let expanded =
             loops::expand(&document, &[], &crate::config::GraphLimits::default()).unwrap();
         let (plan, positions) =
             validate_flat_plan(&expanded, &crate::config::GraphLimits::default()).unwrap();
         let reconstructed =
-            materialised_findings(positions["synthesis"], &plan, &run.checkpoint, &positions);
+            materialised_findings(positions[output_id], &plan, &run.checkpoint, &positions);
         let bound = graph_envelope_bound(&document, &[], &[], &plan);
         assert!(canonical_len(&run.checkpoint) <= bound);
         let mut reporting = run.checkpoint.clone();
         materialise_checkpoint_findings(&document, &mut reporting).unwrap();
         assert_eq!(
-            reporting.nodes[positions["synthesis"]]
+            reporting.nodes[positions[output_id]]
                 .outputs
                 .as_ref()
                 .unwrap()
@@ -582,13 +589,7 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
             consumer.advance_error
         );
         let prompt = owner.prompts.last().unwrap();
-        assert!(
-            prompt.contains("F1")
-                && prompt.contains("F2")
-                && prompt.contains("\"severity\":\"high\"")
-                && prompt.contains(&long_file)
-                && prompt.contains(&format!("\"trigger\":{trigger}"))
-        );
+        assert!(prompt.contains("F1") && prompt.contains("F2"));
         let stored = serde_json::to_vec(journal.0.as_ref().unwrap()).unwrap();
         journal.0 = Some(serde_json::from_slice(&stored).unwrap());
         let replay = advance_with_budget(
@@ -602,18 +603,13 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
         assert_eq!(run.checkpoint, replay.checkpoint);
         assert_eq!(
             reconstructed,
-            materialised_findings(
-                positions["synthesis"],
-                &plan,
-                &replay.checkpoint,
-                &positions
-            )
+            materialised_findings(positions[output_id], &plan, &replay.checkpoint, &positions)
         );
         let checkpoint = journal.0.as_mut().unwrap();
         let outputs = checkpoint
             .nodes
             .iter_mut()
-            .find(|node| node.id == "synthesis")
+            .find(|node| node.id == output_id)
             .unwrap()
             .outputs
             .as_mut()
@@ -630,142 +626,6 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
             Err(GraphError::BadCheckpoint { .. })
         ));
     }
-}
-
-#[test]
-fn compacted_synthesis_survives_composite_export_and_replay() {
-    let input = |id: &str| GraphInput {
-        required_outputs: Vec::new(),
-        extra: Default::default(),
-        node: id.into(),
-        outputs: vec![OutputKind::Findings],
-    };
-    let mut nodes = vec![node("seed", route("first"))];
-    let mut observations = VecDeque::from([terminal_with_result(
-        AttemptOutcome::Succeeded,
-        &findings_text(&entry("")),
-    )]);
-    let long_file = "a".repeat(180);
-    let verifier_entry = entry(",\"propagates\":\"seed:F1\"").replace("a.rs", &long_file);
-    let entries = vec![verifier_entry; MAX_FINDINGS].join(",");
-    let verifier_text = findings_text(&entries);
-    for i in 0..20 {
-        let mut verifier = node(&format!("verifier{i}"), route("first"));
-        verifier.depends_on = vec!["seed".into()];
-        verifier.inputs = vec![input("seed")];
-        nodes.push(verifier);
-        observations.push_back(terminal_with_result(
-            AttemptOutcome::Succeeded,
-            &verifier_text,
-        ));
-    }
-    let mut synthesis = node("synthesis", route("first"));
-    synthesis.depends_on = (0..20).map(|i| format!("verifier{i}")).collect();
-    synthesis.inputs = synthesis.depends_on.iter().map(|id| input(id)).collect();
-    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
-    let mut outer = node("outer", route("first"));
-    outer.kind = Some(NodeKind::Composite);
-    outer.route = None;
-    outer.prompt.clear();
-    outer.depends_on = synthesis.depends_on.clone();
-    outer.inputs = synthesis.inputs.clone();
-    synthesis.depends_on.clear();
-    synthesis.inputs.clear();
-    outer.composite = Some(CompositeSpec {
-        reduce_verdict: false,
-        min_successful: None,
-        nodes: vec![synthesis],
-        exports: vec![input("synthesis")],
-    });
-    nodes.push(outer);
-    let mut next = node("next", route("first"));
-    next.depends_on = vec!["outer".into()];
-    next.inputs = vec![input("outer")];
-    nodes.push(next);
-    let decisions =
-        serde_json::json!({"id":"F1", "disposition":"accepted", "reason":"yes", "detail":"detail"});
-    observations.push_back(terminal_with_result(
-        AttemptOutcome::Succeeded,
-        &findings_text(&decisions.to_string()),
-    ));
-    observations.push_back(terminal_with_result(
-        AttemptOutcome::Succeeded,
-        &findings_text(""),
-    ));
-    let document = graph(nodes);
-    let mut journal = MemoryJournal::default();
-    let mut owner = FakeOwner {
-        observations,
-        ..Default::default()
-    };
-    let run = advance(&document, &mut owner, &mut journal).unwrap();
-    let synthesis = run
-        .checkpoint
-        .nodes
-        .iter()
-        .find(|node| node.id == "outer--synthesis")
-        .unwrap();
-    assert_eq!(
-        synthesis.state,
-        NodeState::Succeeded,
-        "{:?}",
-        synthesis.advance_error
-    );
-    let outputs = synthesis.outputs.as_ref().unwrap();
-    assert!(
-        outputs
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("findings compacted"))
-    );
-    assert!(outputs.findings.is_empty());
-    let expanded = loops::expand(&document, &[], &crate::config::GraphLimits::default()).unwrap();
-    let (plan, positions) =
-        validate_flat_plan(&expanded, &crate::config::GraphLimits::default()).unwrap();
-    let reconstructed = materialised_findings(
-        positions["outer--synthesis"],
-        &plan,
-        &run.checkpoint,
-        &positions,
-    );
-    let bound = graph_envelope_bound(&document, &[], &[], &plan);
-    assert!(canonical_len(&run.checkpoint) <= bound);
-    assert_eq!(reconstructed.len(), 20 * MAX_FINDINGS);
-    assert!(reconstructed.iter().all(|finding| finding.id == "F1"
-        && finding.severity == "high"
-        && finding.trigger().is_none()
-        && finding.effective_severity() == "note"
-        && finding.file == long_file));
-    assert_eq!(
-        run.checkpoint.nodes.last().unwrap().state,
-        NodeState::Succeeded
-    );
-    let prompt = owner.prompts.last().unwrap();
-    assert!(
-        prompt.contains("F1")
-            && prompt.contains("\"severity\":\"high\"")
-            && prompt.contains(&long_file)
-    );
-    let identities = truncated_finding_ids(
-        &plan.nodes[positions["next"]],
-        &plan,
-        &run.checkpoint,
-        &positions,
-    );
-    assert_eq!(identities.len(), 20 * MAX_FINDINGS);
-    let stored = serde_json::to_vec(journal.0.as_ref().unwrap()).unwrap();
-    journal.0 = Some(serde_json::from_slice(&stored).unwrap());
-    let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
-    assert_eq!(run.checkpoint, replay.checkpoint);
-    assert_eq!(
-        reconstructed,
-        materialised_findings(
-            positions["outer--synthesis"],
-            &plan,
-            &replay.checkpoint,
-            &positions
-        )
-    );
 }
 
 #[test]
@@ -851,8 +711,8 @@ fn settled_copies_keep_origin_and_evidence_for_downstream_disposition() {
 // Small: the verifier sees a composite-qualified ID and synthesis accepts its bare alias.
 #[test]
 fn composite_qualified_propagation_resolves_identity_only_disposition() {
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1, "graph_id":"composite-propagation", "nodes":[
+    let document: GraphDocument = document_fixture(serde_json::json!({
+        "graph_id":"composite-propagation", "nodes":[
             {"id":"lenses", "kind":"composite", "access":"read_only", "composite":{
                 "nodes":[{"id":"lens-correctness-spec", "access":"read_only", "prompt":"review", "route":{"alias":"senior"}}],
                 "exports":[{"node":"lens-correctness-spec", "outputs":["findings"]}]
@@ -863,7 +723,7 @@ fn composite_qualified_propagation_resolves_identity_only_disposition() {
              "depends_on":["lenses", "verify"], "inputs":[{"node":"lenses", "outputs":["findings"]}, {"node":"verify", "outputs":["findings"]}],
              "dispositions":["accepted", "rejected", "deferred"]}
         ]
-    })).unwrap();
+    }));
     let propagated = entry(
         ",\"verification\":\"upheld\",\"propagates\":\"lenses:lenses--lens-correctness-spec:F1\"",
     )

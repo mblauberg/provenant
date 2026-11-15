@@ -3,7 +3,7 @@ use super::*;
 use serde_json::json;
 
 #[test]
-fn implementation_is_planned_unless_its_brief_is_already_bounded() {
+fn implementation_templates_follow_their_declared_planning_policy() {
     let library = TemplateLibrary::bundled();
     let compiler = Compiler::new(&library);
     let limits = crate::config::GraphLimits::default();
@@ -19,10 +19,9 @@ fn implementation_is_planned_unless_its_brief_is_already_bounded() {
         if bounded {
             raw["with"] = json!({"bounded":true});
         }
-        let document: GraphDocument = serde_json::from_value(json!({
-            "schema_version":1, "graph_id":"bounded", "nodes":[compiler.compile(&raw).unwrap()]
-        }))
-        .unwrap();
+        let document = super::model::document_fixture(json!({
+            "graph_id":"bounded", "nodes":[compiler.compile(&raw).unwrap()]
+        }));
         let expanded = document.expanded(&limits).unwrap();
         let writer = expanded
             .nodes
@@ -44,9 +43,9 @@ fn implementation_is_planned_unless_its_brief_is_already_bounded() {
             let planner = planners.first().expect("an open brief needs a sizing plan");
             assert_eq!(planner.access, AccessMode::ReadOnly);
             assert!(writer.depends_on.contains(&planner.id));
-            assert!(writer.inputs.iter().any(
-                |input| input.node == planner.id && input.outputs.contains(&OutputKind::Result)
-            ));
+            assert!(writer.inputs.iter().any(|input| {
+                input.node == planner.id && input.outputs.contains(&OutputKind::Result)
+            }));
             let boundary = expanded
                 .nodes
                 .iter()
@@ -59,35 +58,41 @@ fn implementation_is_planned_unless_its_brief_is_already_bounded() {
                     .unwrap()
                     .exports
                     .iter()
-                    .any(|export| export.node == writer.id
-                        && export.outputs.contains(&OutputKind::Commit))
+                    .any(|export| {
+                        export.node == writer.id && export.outputs.contains(&OutputKind::Commit)
+                    })
             );
         } else {
             assert!(planners.is_empty());
         }
     }
-    // A plan result bounds the consumer; an arbitrary task's result does not.
-    for source in ["plan", "task"] {
+}
+
+#[test]
+fn implementation_is_bounded_only_by_a_plan_result() {
+    let library = TemplateLibrary::bundled();
+    let compiler = Compiler::new(&library);
+    for (source, expects_composite) in [("plan", false), ("task", true)] {
         let raw = [
             json!({"id":"source", "use":source}),
             json!({"id":"work", "use":"implement", "inputs":[{"node":"source","outputs":["result"]}],
                 "worktree":"/fixture/writer", "write_scope":["src"]}),
         ];
         let nodes = compiler.compile_all(&raw).unwrap();
-        assert_eq!(nodes[1].composite.is_some(), source != "plan");
-        // A raw composite must use the same sibling inference as a template.
-        let nested = compiler
-            .compile(
-                &json!({"id":"outer", "kind":"composite", "access":"read_only",
-            "composite":{"nodes":raw, "exports":[{"node":"work","outputs":["result"]}]}}),
-            )
-            .unwrap();
-        assert_eq!(
-            nested.composite.unwrap().nodes[1].composite.is_some(),
-            source != "plan"
-        );
-        // The consumer may sit below several composites while its producer
-        // stays visible in the enclosing scope.
+        assert_eq!(nodes[1].composite.is_some(), expects_composite, "{source}");
+    }
+}
+
+#[test]
+fn implementation_plan_inference_survives_nested_and_scoped_templates() {
+    let library = TemplateLibrary::bundled();
+    let compiler = Compiler::new(&library);
+    for (source, expects_composite) in [("plan", false), ("task", true)] {
+        let raw = [
+            json!({"id":"source", "use":source}),
+            json!({"id":"work", "use":"implement", "inputs":[{"node":"source","outputs":["result"]}],
+                "worktree":"/fixture/writer", "write_scope":["src"]}),
+        ];
         for depth in 1..=3 {
             let mut group = raw[1].clone();
             for level in 0..depth {
@@ -98,15 +103,20 @@ fn implementation_is_planned_unless_its_brief_is_already_bounded() {
             let outer = compiler
                 .compile(
                     &json!({"id":"outer", "kind":"composite", "access":"read_only",
-                "composite":{"nodes":[raw[0],group],"exports":[]}}),
+                    "composite":{"nodes":[raw[0],group],"exports":[]}}),
                 )
                 .unwrap();
             let mut member = outer.composite.unwrap().nodes.remove(1);
             for _ in 0..depth {
                 member = member.composite.unwrap().nodes.remove(0);
             }
-            assert_eq!(member.composite.is_some(), source != "plan");
+            assert_eq!(
+                member.composite.is_some(),
+                expects_composite,
+                "{source}/{depth}"
+            );
         }
+
         let mut scoped_library = library.clone();
         scoped_library
             .insert(
@@ -121,7 +131,7 @@ fn implementation_is_planned_unless_its_brief_is_already_bounded() {
         let outer = Compiler::new(&scoped_library)
             .compile(
                 &json!({"id":"outer", "kind":"composite", "access":"read_only",
-            "composite":{"nodes":[raw[0],{"id":"group","use":"group"}],"exports":[]}}),
+                "composite":{"nodes":[raw[0],{"id":"group","use":"group"}],"exports":[]}}),
             )
             .unwrap();
         assert_eq!(
@@ -132,15 +142,24 @@ fn implementation_is_planned_unless_its_brief_is_already_bounded() {
                 .nodes[0]
                 .composite
                 .is_some(),
-            source != "plan"
+            expects_composite,
+            "{source}"
         );
     }
-    let shadow = compiler.compile(&json!({"id":"outer", "kind":"composite", "access":"read_only",
-        "composite":{"nodes":[{"id":"source","use":"plan"},
-            {"id":"group","kind":"composite","access":"read_only","composite":{
-                "nodes":[{"id":"source","use":"task"},
-                    {"id":"work","use":"implement","worktree":"/fixture/writer","write_scope":["src"],
-                        "inputs":[{"node":"source","outputs":["result"]}]}],"exports":[]}}],"exports":[]}})).unwrap();
+}
+
+#[test]
+fn a_shadowed_sibling_result_does_not_bound_an_implementation() {
+    let library = TemplateLibrary::bundled();
+    let compiler = Compiler::new(&library);
+    let shadow = compiler
+        .compile(&json!({"id":"outer", "kind":"composite", "access":"read_only",
+            "composite":{"nodes":[{"id":"source","use":"plan"},
+                {"id":"group","kind":"composite","access":"read_only","composite":{
+                    "nodes":[{"id":"source","use":"task"},
+                        {"id":"work","use":"implement","worktree":"/fixture/writer","write_scope":["src"],
+                            "inputs":[{"node":"source","outputs":["result"]}]}],"exports":[]}}],"exports":[]}}))
+        .unwrap();
     assert!(
         shadow.composite.unwrap().nodes[1]
             .composite
@@ -150,18 +169,19 @@ fn implementation_is_planned_unless_its_brief_is_already_bounded() {
             .composite
             .is_some()
     );
+}
+
+#[test]
+fn implementation_over_slices_keep_the_writer_contract() {
+    let library = TemplateLibrary::bundled();
+    let compiler = Compiler::new(&library);
     let over = compiler
         .compile(
             &json!({"id":"slices", "use":"implement", "over":["one", "two"],
-        "worktree":"/fixture/writer", "write_scope":["src"]}),
+            "worktree":"/fixture/writer", "write_scope":["src"]}),
         )
         .unwrap();
-    assert!(
-        over.composite
-            .unwrap()
-            .nodes
-            .iter()
-            .all(|node| node.composite.is_none()
-                && node.route.as_ref().unwrap().alias.as_deref() == Some("junior"))
-    );
+    assert!(over.composite.unwrap().nodes.iter().all(|node| {
+        node.composite.is_none() && node.route.as_ref().unwrap().alias.as_deref() == Some("junior")
+    }));
 }

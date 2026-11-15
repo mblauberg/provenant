@@ -1211,14 +1211,7 @@ impl<'a> InboxService<'a> {
             } => {
                 let value = HumanRequest {
                     extra: Default::default(),
-                    schema_version: if draft.work.is_some()
-                        || draft.deadline.is_some()
-                        || draft.supersedes.is_some()
-                    {
-                        2
-                    } else {
-                        1
-                    },
+                    schema_version: HUMAN_REQUEST_SCHEMA_VERSION,
                     id: HumanRequestId::from_bytes(entropy()?),
                     revision: 1,
                     operation_id: operation.clone(),

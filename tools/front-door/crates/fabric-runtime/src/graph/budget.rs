@@ -22,7 +22,12 @@ pub(super) fn structural_limit(
     limits: &crate::config::GraphLimits,
 ) -> Option<GraphStructuralLimit> {
     let check = |key: GraphLimitKey, actual: usize, max: usize| {
-        (actual > max).then_some(GraphStructuralLimit { key, actual, max })
+        (actual > max).then_some(GraphStructuralLimit {
+            extra: Default::default(),
+            key,
+            actual,
+            max,
+        })
     };
     check(GraphLimitKey::Nodes, document.nodes.len(), limits.nodes)
         .or_else(|| {

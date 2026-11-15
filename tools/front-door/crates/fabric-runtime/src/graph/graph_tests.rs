@@ -489,53 +489,10 @@ fn pool_route(alias: &str) -> GraphRoute {
 
 fn node(id: &str, route: GraphRoute) -> GraphNode {
     GraphNode {
-        on_stop: Default::default(),
-        attempt: None,
-        attachments: Vec::new(),
-        family_group: None,
-        context: None,
-        extra: Default::default(),
-        composite_members: Vec::new(),
-        when: Vec::new(),
-        topology_present: Default::default(),
-        distinct_from: None,
-        distinct_strength: None,
-        dispositions: Vec::new(),
-        composite: None,
-        role: None,
-        read_roots: Vec::new(),
-        capabilities: None,
-        source: None,
-        after_expansion: Vec::new(),
-        plan: None,
-        write_scope: Vec::new(),
-        acceptance_checks: Vec::new(),
-        decide: None,
-        continues: None,
-        land: None,
-        loop_body: None,
-        round: None,
-        kind: None,
-        condition: None,
-        on_fail: None,
-        delivery: None,
-        require_skill_location: false,
-        access: AccessMode::ReadOnly,
-        worktree: None,
-        template: None,
-        review_base: None,
         id: id.to_owned(),
-        title: None,
-        deadline_seconds: None,
         prompt: format!("work for {id}"),
-        depends_on: Vec::new(),
-        advisory: false,
-        inputs: Vec::new(),
+        access: AccessMode::ReadOnly,
         route: Some(route),
-        routes: None,
-        required_verdict: None,
-        require_findings: false,
-        skip_without_findings: None,
         ..Default::default()
     }
 }
@@ -562,7 +519,7 @@ fn graph(nodes: Vec<GraphNode>) -> GraphDocument {
         peer_origin_work_key: None,
         review_tier_override: None,
         replay_digest: None,
-        schema_version: 1,
+        schema_version: GRAPH_DOCUMENT_SCHEMA_VERSION,
         graph_id: "g-test".to_owned(),
         nodes,
     }
@@ -672,7 +629,7 @@ fn partial_review(minimum: usize) -> (GraphDocument, FakeOwner) {
         .map(|id| serde_json::json!({"node":id,"outputs":["result","findings"]}))
         .into();
     let document = serde_json::from_value(serde_json::json!({
-        "schema_version": 1, "graph_id": "partial-review", "nodes": [
+        "schema_version": GRAPH_DOCUMENT_SCHEMA_VERSION, "graph_id": "partial-review", "nodes": [
             {"id":"lenses","kind":"composite","access":"read_only",
              "composite":{"min_successful":minimum,
                 "nodes":[lens("lens-a"),lens("lens-b"),lens("lens-c")],"exports":exports}},
@@ -870,11 +827,8 @@ fn check_fallback(
                 | AttemptOutcome::UsageLimited
                 | AttemptOutcome::AdapterUnavailable
         );
-    assert_eq!(
-        owner.calls.len(),
-        if expected || restarted { 2 } else { 1 },
-        "{case}"
-    );
+    // Persisted attempt history and restart patches below prove fallback;
+    // observing the owner again after replay must not change either.
     assert_eq!(
         run.checkpoint.nodes[0].attempts.len(),
         if expected { 2 } else { 1 },

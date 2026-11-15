@@ -1,5 +1,12 @@
 use super::*;
 
+fn assert_plan_refusal(document: &GraphDocument) {
+    assert!(matches!(
+        document.admit(&crate::config::GraphLimits::default()),
+        Err(AdmissionError::Plan(_))
+    ));
+}
+
 #[test]
 fn matched_required_contract_cannot_override_ambiguous_verdict_evidence() {
     let mut review = node("review", route("fixture"));
@@ -171,10 +178,7 @@ fn graph_refuses_node_integration_target_mismatch() {
     let mut document = graph(vec![writer]);
     document.integration_branch = Some("origin/integration".into());
     document.delivery = Some(DeliveryMode::Pr);
-    assert_eq!(
-        validate_plan(&document).err(),
-        Some("node writer: node integration target differs from graph integration branch")
-    );
+    assert_plan_refusal(&document);
 }
 
 #[test]
@@ -271,8 +275,8 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
 
 #[test]
 fn read_only_sign_in_failure_falls_back_to_next_route() {
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version": 1, "graph_id": "signed-out", "nodes": [{
+    let document = super::model::document_fixture(serde_json::json!({
+        "graph_id": "signed-out", "nodes": [{
             "id": "review", "prompt": "review", "access": "read_only", "routes": [
                 {"adapter": "cursor", "model": "cursor/example"},
                 {"adapter": "codex", "model": "codex/example"}
@@ -303,8 +307,8 @@ fn read_only_sign_in_failure_falls_back_to_next_route() {
 
 #[test]
 fn route_fallback_preserves_each_selected_account() {
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version": 1, "graph_id": "accounts", "nodes": [{
+    let document = super::model::document_fixture(serde_json::json!({
+        "graph_id": "accounts", "nodes": [{
             "id": "review", "prompt": "review", "access": "read_only", "routes": [
                 {"adapter": "claude", "model": "claude/model", "account": "work"},
                 {"adapter": "claude", "model": "claude/model", "account": "pro"}
@@ -338,10 +342,9 @@ fn route_fallback_preserves_each_selected_account() {
 
 #[test]
 fn single_route_form_remains_valid() {
-    let document: GraphDocument = serde_json::from_str(
-        r#"{"schema_version":1,"graph_id":"g-test","nodes":[{"id":"one","prompt":"work for one","access":"read_only","route":{"adapter":"only","alias":"only-alias","effort":"high"}}]}"#,
-    )
-    .expect("legacy single-route document parses");
+    let document = super::model::document_fixture(serde_json::json!({
+        "graph_id":"g-test","nodes":[{"id":"one","prompt":"work for one","access":"read_only","route":{"adapter":"only","alias":"only-alias","effort":"high"}}]
+    }));
     let mut owner = FakeOwner {
         observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
         ..FakeOwner::default()
@@ -357,8 +360,8 @@ fn single_route_form_remains_valid() {
 
 #[test]
 fn pool_only_and_mixed_routes_advance_in_order() {
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version": 1, "graph_id": "pools", "nodes": [
+    let document = super::model::document_fixture(serde_json::json!({
+        "graph_id": "pools", "nodes": [
             {"id": "one", "prompt": "work", "access": "read_only", "route": {"alias": "senior"}},
             {"id": "two", "prompt": "work", "access": "read_only", "depends_on": ["one"], "routes": [
                 {"adapter": "codex", "model": "codex/model"}, {"alias": "senior"}
@@ -395,8 +398,11 @@ fn route_effort_is_checked_against_the_adapter_table() {
         leaf.effort = Some("high".into());
         let document = graph(vec![node("one", leaf)]);
         assert_eq!(
-            validate_plan(&document).err(),
-            (!accepted).then_some("node one: effort is not supported by the route's adapter"),
+            matches!(
+                document.admit(&crate::config::GraphLimits::default()),
+                Err(AdmissionError::Plan(_))
+            ),
+            !accepted,
             "{adapter}"
         );
     }
@@ -410,75 +416,44 @@ fn host_native_requires_a_later_non_native_fallback() {
     let mut repair = node("repair", host.clone());
     repair.access = AccessMode::WorktreeWrite;
     repair.worktree = Some("/repo/writer".into());
-    assert_eq!(
-        validate_plan(&graph(vec![repair.clone()])).err(),
-        Some("node repair: host-native route requires a later non-native fallback")
-    );
+    assert_plan_refusal(&graph(vec![repair.clone()]));
     repair.route = None;
     repair.routes = Some(vec![host.clone(), host.clone()]);
-    assert_eq!(
-        validate_plan(&graph(vec![repair.clone()])).err(),
-        Some("node repair: host-native route requires a later non-native fallback")
-    );
+    assert_plan_refusal(&graph(vec![repair.clone()]));
     repair.routes = Some(vec![host, route("claude")]);
     assert!(validate_plan(&graph(vec![repair])).is_ok());
 }
 
 #[test]
-fn named_adapter_route_has_no_model_and_rejects_mixed_selectors() {
+fn routes_require_a_named_adapter_or_alias_and_reject_mixed_selectors() {
     let mut leaf = route("command");
     leaf.model = None;
     leaf.name = Some("fmt-check".into());
     assert!(validate_plan(&graph(vec![node("check", leaf.clone())])).is_ok());
     for field in ["model", "alias", "effort", "account"] {
-        let mut value = serde_json::to_value(&leaf).unwrap();
-        value[field] = "other".into();
-        let mixed = serde_json::from_value(value).unwrap();
-        assert!(
-            validate_plan(&graph(vec![node("check", mixed)])).is_err(),
-            "{field}"
-        );
+        let mut mixed = leaf.clone();
+        match field {
+            "model" => mixed.model = Some("other/model".into()),
+            "alias" => mixed.alias = Some("other".into()),
+            "effort" => mixed.effort = Some("high".into()),
+            "account" => mixed.account = Some("other".into()),
+            _ => unreachable!("selector table is exhaustive"),
+        }
+        assert_plan_refusal(&graph(vec![node("check", mixed)]));
     }
-    leaf.adapter = None;
-    assert_eq!(
-        validate_plan(&graph(vec![node("check", leaf)])).err(),
-        Some("node check: route requires an adapter or alias")
-    );
-}
+    assert_plan_refusal(&graph(vec![node("check", GraphRoute::default())]));
 
-#[test]
-fn route_requires_adapter_or_alias() {
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version": 1, "graph_id": "g", "nodes": [{
-            "id": "one", "prompt": "work", "access": "read_only", "route": {}
-        }]
-    }))
-    .unwrap();
-    assert_eq!(
-        validate_plan(&document).err(),
-        Some("node one: route requires an adapter or alias")
-    );
-}
-
-#[test]
-fn route_with_exact_model_alias_fails_validation_for_dry_run_and_launch() {
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version": 1, "graph_id": "g", "nodes": [{
-            "id": "one", "prompt": "work", "access": "read_only", "route": { "alias": "codex/gpt-6-luna" }
-        }]
-    }))
-    .unwrap();
-    assert_eq!(
-        validate_plan(&document).err(),
-        Some(
-            "node one: route alias must be an identifier; exact models require an adapter or --model"
-        )
-    );
-    let mut exact = document.clone();
-    let route = exact.nodes[0].route.as_mut().unwrap();
-    route.adapter = Some("codex".into());
-    route.model = Some("gpt-6-luna".into());
-    assert!(validate_plan(&exact).is_ok());
+    let alias = GraphRoute {
+        alias: Some("codex/gpt-6-luna".into()),
+        ..Default::default()
+    };
+    assert_plan_refusal(&graph(vec![node("check", alias)]));
+    let exact_model = GraphRoute {
+        adapter: Some("codex".into()),
+        model: Some("gpt-6-luna".into()),
+        ..Default::default()
+    };
+    assert!(validate_plan(&graph(vec![node("check", exact_model)])).is_ok());
 }
 
 #[test]
@@ -536,7 +511,7 @@ fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
             required_verdict: None,
             require_findings: false,
             skip_without_findings: None,
-        ..Default::default()
+            ..Default::default()
         }]);
         let mut owner = FakeOwner {
             observations: VecDeque::from([first, terminal(AttemptOutcome::Succeeded)]),

@@ -17,7 +17,7 @@ fn submission_cancellation_drains_only_attached_work() -> TestResult {
     let graph = crate::fabric::peer::peer_graph_name(actor, &operation)?;
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
     let mut checkpoint: graph::GraphCheckpoint = serde_json::from_value(json!({
-        "schema_version":1, "graph_id":graph, "plan_digest":"digest", "cancelled":true,
+        "schema_version":provenant_fabric_runtime::graph::GraphCheckpoint::SCHEMA_VERSION, "graph_id":graph, "plan_digest":"digest", "cancelled":true,
         "nodes":[
             {"id":"parent", "state":"skipped", "worktree":null, "attempts":[]},
             {"id":"parent--child", "state":"running", "worktree":null, "attempts":[]}
@@ -43,7 +43,7 @@ fn submission_cancellation_drains_only_attached_work() -> TestResult {
                 bases: None,
                 directory: rig.project.clone(),
                 document: serde_json::from_value(json!({
-                    "schema_version":1, "graph_id":graph,
+                    "schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION, "graph_id":graph,
                     "nodes":[{"id":"parent", "prompt":"work", "access":"read_only",
                         "route":{"alias":"senior"}}]
                 }))?,

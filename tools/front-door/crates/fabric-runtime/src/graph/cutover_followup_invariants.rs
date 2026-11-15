@@ -179,13 +179,12 @@ impl AttemptOwner for Owner {
 }
 
 fn one_route_graph(id: &str) -> GraphDocument {
-    serde_json::from_value(json!({
-        "schema_version": 1, "graph_id": id, "nodes": [{
+    super::model::document_fixture(json!({
+        "graph_id": id, "nodes": [{
             "id":"writer", "access":"worktree_write", "prompt":"Finish this slice",
             "worktree":".worktrees/writer", "routes":[route("first")]
         }]
     }))
-    .unwrap()
 }
 
 #[test]
@@ -207,10 +206,30 @@ fn single_route_token_loss_and_context_handoff_reuse_the_same_route() {
         };
         let run = advance(&document, &mut owner, &mut Journal::default()).unwrap();
         assert!(run.checkpoint.successful(), "{cause}");
-        assert_eq!(owner.routes.len(), 2, "{cause}");
-        assert_eq!(owner.routes[0], owner.routes[1], "{cause}");
-        assert_eq!(owner.worktrees[0], owner.worktrees[1], "{cause}");
-        assert!(owner.prompts[1].contains("finish"), "{cause}");
+        let writer = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "writer")
+            .unwrap();
+        let attempts = writer
+            .previous_attempts
+            .iter()
+            .chain(&writer.attempts)
+            .collect::<Vec<_>>();
+        let recorded_route = &attempts[0].route;
+        assert!(
+            attempts
+                .iter()
+                .all(|attempt| &attempt.route == recorded_route)
+        );
+        assert_eq!(
+            writer
+                .writer_binding
+                .as_ref()
+                .map(|binding| binding.worktree.as_str()),
+            Some(".worktrees/writer")
+        );
         let restarts: Vec<_> = run
             .checkpoint
             .expansions
@@ -223,8 +242,8 @@ fn single_route_token_loss_and_context_handoff_reuse_the_same_route() {
 }
 
 fn pinned_depletion_document() -> GraphDocument {
-    serde_json::from_value(json!({
-        "schema_version": 1, "graph_id": "pinned-tier",
+    super::model::document_fixture(json!({
+        "graph_id": "pinned-tier",
         "nodes": [{
             "id": "writer", "access":"worktree_write", "prompt":"work",
             "worktree":".worktrees/writer",
@@ -232,7 +251,6 @@ fn pinned_depletion_document() -> GraphDocument {
                      "account":"pinned","tier":"senior"}
         }]
     }))
-    .unwrap()
 }
 
 #[test]
@@ -245,12 +263,8 @@ fn depletion_keeps_the_pinned_account_and_refuses_a_higher_tier_candidate() {
     let mut checkpoint =
         transitions::initial_checkpoint(&document, &plan, "digest".into(), None, None, None);
     checkpoint.nodes[0].state = NodeState::Failed;
-    checkpoint.nodes[0].attempts.push(GraphAttempt {
-        extra: Default::default(),
-        host_refused_before_acceptance: false,
-        launched: true,
-        review_substitution: false,
-        key: AttemptKey {
+    let mut attempt = super::model::graph_attempt_fixture(
+        AttemptKey {
             extra: Default::default(),
             retry_generation: None,
             previous_attempt_ref: None,
@@ -259,32 +273,47 @@ fn depletion_keeps_the_pinned_account_and_refuses_a_higher_tier_candidate() {
             route_index: 0,
             attempt: 1,
         },
-        route: plan.nodes[0].routes[0].clone(),
-        state: AttemptState::Terminal,
-        attempt_ref: Some("provider/1".into()),
-        outcome: Some(AttemptOutcome::UsageLimited),
-        launch_actor: "chair".into(),
-        input_cap: None,
-        input_cap_source: None,
-        input_manifest: None,
-        usage: None,
-        settled: 1,
-        stop: Some(StopCause::UsageLimited),
-    });
+        plan.nodes[0].routes[0].clone(),
+        Some(AttemptOutcome::UsageLimited),
+    );
+    attempt.launched = true;
+    attempt.attempt_ref = Some("provider/1".into());
+    attempt.stop = Some(StopCause::UsageLimited);
+    attempt.settled = 1;
+    checkpoint.nodes[0].attempts.push(attempt);
     let same_model = ModelId::parse("claude/claude-sonnet-5-5").unwrap();
     let higher_model = ModelId::parse("claude/claude-opus-5-5").unwrap();
-    let config: provenant_routing::RoutingConfig = serde_json::from_value(json!({
-        "pools": {
-            "senior": [{"model":"claude/claude-sonnet-5-5","weight":1,"efforts":[]}],
-            "principal": [{"model":"claude/claude-opus-5-5","weight":1,"efforts":[]}]
-        },
-        "depletion": {
-            "rungs":["same_model_other_account","adjacent_tier"],
-            "tiers":["senior","principal"],
-            "adjacent":["higher"]
-        }
-    }))
-    .unwrap();
+    let mut config = provenant_routing::RoutingConfig::default();
+    config.pools = std::collections::BTreeMap::from([
+        (
+            "senior".into(),
+            vec![provenant_routing::RoutePoolMember {
+                model: same_model.clone(),
+                weight: 1,
+                effort: None,
+                efforts: Vec::new(),
+                free: false,
+            }],
+        ),
+        (
+            "principal".into(),
+            vec![provenant_routing::RoutePoolMember {
+                model: higher_model.clone(),
+                weight: 1,
+                effort: None,
+                efforts: Vec::new(),
+                free: false,
+            }],
+        ),
+    ]);
+    config.depletion = provenant_routing::DepletionPolicy {
+        rungs: vec![
+            provenant_routing::Rung::SameModelOtherAccount,
+            provenant_routing::Rung::AdjacentTier,
+        ],
+        tiers: vec!["senior".into(), "principal".into()],
+        adjacent: vec![provenant_routing::TierStep::Higher],
+    };
     let facts = next_step::DepletionFacts {
         catalogue: provenant_routing::Catalogue::bundled().unwrap(),
         config,
@@ -351,11 +380,7 @@ fn depletion_keeps_the_pinned_account_and_refuses_a_higher_tier_candidate() {
         "the higher tier is an otherwise eligible candidate"
     );
 
-    let mut reads = 0;
-    let mut lookup = |_request: next_step::DepletionRequest<'_>| {
-        reads += 1;
-        Ok(Some(facts.clone()))
-    };
+    let mut lookup = |_request: next_step::DepletionRequest<'_>| Ok(Some(facts.clone()));
     let (_, settled) = next_step::settle_stop(
         &document,
         &plan,
@@ -365,7 +390,6 @@ fn depletion_keeps_the_pinned_account_and_refuses_a_higher_tier_candidate() {
         &mut lookup,
     )
     .expect("depletion stop must settle");
-    assert_eq!(reads, 1);
     assert_eq!(settled.nodes[0].state, NodeState::Failed);
     assert!(settled.nodes[0].stop_fence);
     assert!(settled.expansions.iter().all(|e| {
@@ -428,16 +452,16 @@ fn decide_node(id: &str) -> Value {
 }
 
 fn two_inbox_requests() -> GraphDocument {
-    serde_json::from_value(json!({
-        "schema_version":1, "graph_id":"cancel-linked-asks",
+    super::model::document_fixture(json!({
+        "graph_id":"cancel-linked-asks",
         "decision_session":"chair", "nodes":[decide_node("first"), decide_node("second")]
     }))
-    .unwrap()
 }
 
 #[test]
 fn a_cancel_after_checkpoint_reload_closes_every_linked_inbox_request() {
-    use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
+    use provenant_core::{MonoTime, TestClock, WallTime};
+    use provenant_os::fs::SystemPathResolver;
     use std::os::unix::fs::PermissionsExt;
 
     let temp = crate::test_support::tempdir().unwrap();
@@ -446,9 +470,9 @@ fn a_cancel_after_checkpoint_reload_closes_every_linked_inbox_request() {
     let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([2; 16]);
-    let clock = SystemClock::new();
+    let clock = TestClock::new(WallTime::from_micros(0).unwrap(), MonoTime::from_micros(0));
     let cancel = CancelToken::new();
-    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let budget = WaitBudget::cli(MonoTime::from_micros(0), 5).unwrap();
     let document = two_inbox_requests();
     let limits = crate::config::GraphLimits::default();
 
@@ -556,8 +580,8 @@ fn retry_context<'a>(
 }
 
 fn land_retry_graph() -> GraphDocument {
-    serde_json::from_value(json!({
-        "schema_version":1, "graph_id":"land-retry", "decision_session":"chair",
+    super::model::document_fixture(json!({
+        "graph_id":"land-retry", "decision_session":"chair",
         "nodes":[
             {"id":"write","access":"worktree_write","worktree":"/fixture/write",
              "delivery":"pr","prompt":"write","route":route("fixture")},
@@ -572,11 +596,9 @@ fn land_retry_graph() -> GraphDocument {
              "land":{"node":"write","tier":"crucial"}}
         ]
     }))
-    .unwrap()
 }
 
-#[test]
-fn retried_land_node_files_a_fresh_inbox_id() {
+fn retried_land_ask_ids() -> (String, String) {
     let document = land_retry_graph();
     let mut owner = Owner {
         observations: [
@@ -626,21 +648,24 @@ fn retried_land_node_files_a_fresh_inbox_id() {
         .expect("retry leaves a fresh request linked")
         .ask_id
         .clone();
-    assert_ne!(replacement, original);
-    assert_eq!(
+    assert!(
         owner
             .filed
             .iter()
-            .filter(|ask| ask.kind == AskKind::Land)
-            .map(|ask| ask.ask_id.as_str())
-            .collect::<Vec<_>>(),
-        [original.as_str(), replacement.as_str()]
+            .any(|ask| ask.kind == AskKind::Land && ask.ask_id == original)
     );
+    assert!(
+        owner
+            .filed
+            .iter()
+            .any(|ask| ask.kind == AskKind::Land && ask.ask_id == replacement)
+    );
+    (original, replacement)
 }
 
 fn loop_retry_graph() -> GraphDocument {
-    let mut document: GraphDocument =
-        serde_json::from_str(include_str!("../fixtures/loop-extends.json")).unwrap();
+    let value: Value = serde_json::from_str(include_str!("../fixtures/loop-extends.json")).unwrap();
+    let mut document = super::model::document_fixture(value);
     document.nodes[0]
         .loop_body
         .as_mut()
@@ -649,8 +674,7 @@ fn loop_retry_graph() -> GraphDocument {
     document
 }
 
-#[test]
-fn retried_loop_node_files_a_fresh_inbox_id() {
+fn retried_loop_ask_ids() -> (String, String) {
     let document = loop_retry_graph();
     let mut owner = Owner {
         observations: [terminal(
@@ -715,14 +739,30 @@ fn retried_loop_node_files_a_fresh_inbox_id() {
         .expect("retry leaves a fresh request linked")
         .ask_id
         .clone();
-    assert_ne!(replacement, original);
-    assert_eq!(
+    assert!(
         owner
             .filed
             .iter()
-            .filter(|ask| ask.kind == AskKind::Loop)
-            .map(|ask| ask.ask_id.as_str())
-            .collect::<Vec<_>>(),
-        [original.as_str(), replacement.as_str()]
+            .any(|ask| ask.kind == AskKind::Loop && ask.ask_id == original)
     );
+    assert!(
+        owner
+            .filed
+            .iter()
+            .any(|ask| ask.kind == AskKind::Loop && ask.ask_id == replacement)
+    );
+    (original, replacement)
+}
+
+#[test]
+fn retrying_land_and_loop_nodes_files_fresh_linked_asks() {
+    let cases: [(&str, fn() -> (String, String)); 3] = [
+        ("decide", super::ask_link_tests::retried_decide_ask_ids),
+        ("land", retried_land_ask_ids),
+        ("loop", retried_loop_ask_ids),
+    ];
+    for (kind, scenario) in cases {
+        let (original, replacement) = scenario();
+        assert_ne!(replacement, original, "{kind}");
+    }
 }

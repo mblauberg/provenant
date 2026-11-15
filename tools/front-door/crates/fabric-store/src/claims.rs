@@ -110,7 +110,7 @@ fn read(
         return Err(Error::Invalid("custody schema version"));
     }
     if let Some(record) = &record
-        && let CustodyState::Retired { retirement_id } = &record.state
+        && let CustodyState::Retired { retirement_id, .. } = &record.state
     {
         let retirement = read_retirement(db, project, retirement_id)?
             .ok_or(Error::Invalid("orphan retirement state"))?;
@@ -204,7 +204,7 @@ fn validate_retirement_identity(record: &RetirementRecord) -> Result<()> {
             .zip(&expected_steps)
             .any(|(outcome, expected)| &outcome.step != expected)
         || record.outcomes.iter().any(|outcome| {
-            !matches!(&outcome.state, RetirementStepState::Pending)
+            !matches!(&outcome.state, RetirementStepState::Pending { .. })
                 && !outcome.step.prerequisites_complete(&record.outcomes)
         })
     {
@@ -218,7 +218,7 @@ fn validate_retirement(record: &RetirementRecord) -> Result<()> {
         || record
             .outcomes
             .iter()
-            .any(|outcome| !matches!(&outcome.state, RetirementStepState::Pending))
+            .any(|outcome| !matches!(&outcome.state, RetirementStepState::Pending { .. }))
     {
         return Err(Error::Invalid("retirement record"));
     }
@@ -363,7 +363,7 @@ impl HostStore {
             for subject in &subjects {
                 let item = read(tx, record.project, subject)?.ok_or(Error::NotFound)?;
                 match &item.state {
-                    CustodyState::Active | CustodyState::Landed { .. } => {}
+                    CustodyState::Active { .. } | CustodyState::Landed { .. } => {}
                     _ => return Err(Error::Conflict),
                 }
                 custody.push(item);
@@ -372,6 +372,7 @@ impl HostStore {
             for mut item in custody {
                 item.state = CustodyState::Retired {
                     retirement_id: record.id.clone(),
+                    extra: Default::default(),
                 };
                 item.last_activity = request.clock.wall_now()?;
                 changed(
@@ -410,12 +411,12 @@ impl HostStore {
                 .ok_or(Error::Invalid("retirement step"))?;
             if matches!(
                 &next.state,
-                RetirementStepState::Completed { evidence }
+                RetirementStepState::Completed { evidence, .. }
                     if !record.accepts_completion_evidence(&next.step, evidence)
             ) {
                 return Err(Error::Invalid("retirement completion evidence"));
             }
-            if !matches!(&next.state, RetirementStepState::Pending)
+            if !matches!(&next.state, RetirementStepState::Pending { .. })
                 && !next.step.prerequisites_complete(&record.outcomes)
             {
                 return Err(Error::Conflict);
@@ -426,11 +427,19 @@ impl HostStore {
             }
             let can_resume = matches!(
                 (&current.state, &next.state),
-                (RetirementStepState::Refused { .. } | RetirementStepState::Unknown { .. }, RetirementStepState::Pending)
+                (
+                    RetirementStepState::Refused { .. } | RetirementStepState::Unknown { .. },
+                    RetirementStepState::Pending { .. }
+                )
             );
             let can_finish = matches!(
                 (&current.state, &next.state),
-                (RetirementStepState::Pending | RetirementStepState::Unknown { .. }, RetirementStepState::Completed { .. } | RetirementStepState::Refused { .. } | RetirementStepState::Unknown { .. })
+                (
+                    RetirementStepState::Pending { .. } | RetirementStepState::Unknown { .. },
+                    RetirementStepState::Completed { .. }
+                        | RetirementStepState::Refused { .. }
+                        | RetirementStepState::Unknown { .. }
+                )
             );
             if !can_resume && !can_finish {
                 return Err(Error::Conflict);
@@ -497,7 +506,9 @@ impl HostStore {
                 holder: source.holder,
                 project,
                 origin: source.origin,
-                state: CustodyState::Active,
+                state: CustodyState::Active {
+                    extra: Default::default(),
+                },
                 last_activity: request.clock.wall_now()?,
                 links: Vec::new(),
                 provenance: source.provenance,
@@ -543,7 +554,9 @@ impl HostStore {
                 holder: holder.clone(),
                 project,
                 origin,
-                state: CustodyState::Active,
+                state: CustodyState::Active {
+                    extra: Default::default(),
+                },
                 last_activity: request.clock.wall_now()?,
                 links: previous
                     .as_ref()
@@ -625,15 +638,15 @@ impl HostStore {
         let subject = canonical(subject)?;
         self.0.write(request, |tx| {
             let mut record = read(tx, project, &subject)?.ok_or(Error::NotFound)?;
-            if let CustodyState::Retired { retirement_id } = &state {
+            if let CustodyState::Retired { retirement_id, .. } = &state {
                 let retirement =
                     read_retirement(tx, project, retirement_id)?.ok_or(Error::Conflict)?;
                 let can_link = matches!(
                     &record.state,
-                    CustodyState::Active | CustodyState::Landed { .. }
+                    CustodyState::Active { .. } | CustodyState::Landed { .. }
                 ) || matches!(
                     &record.state,
-                    CustodyState::Retired { retirement_id: current } if current == retirement_id
+                    CustodyState::Retired { retirement_id: current, .. } if current == retirement_id
                 );
                 if !retirement.owns_subject(&subject) || !can_link {
                     return Err(Error::Conflict);

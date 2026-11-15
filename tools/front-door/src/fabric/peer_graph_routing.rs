@@ -62,7 +62,7 @@ fn failed_settlement_does_not_advance_unrelated_graphs() -> Result<(), Box<dyn s
         ("b-completes", second.attempt_id),
     ] {
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version":1,"graph_id":id,"nodes":[{"id":"one","prompt":"reply OK","access":"worktree_write","worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}}]
+            "schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":id,"nodes":[{"id":"one","prompt":"reply OK","access":"worktree_write","worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}}]
         }))?;
         let mut journal = FileJournal::open(
             &fixture.roots.state,
@@ -256,7 +256,7 @@ fn graph_owner_fails_node_when_result_integrity_is_lost() -> Result<(), Box<dyn 
             "corrupt-result"
         };
         let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version":1,"graph_id":id,"nodes":[
+            "schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":id,"nodes":[
                 {"id":"parent","prompt":"work","access":"worktree_write","worktree":fixture.worktree,"required_verdict":required,"route":{"adapter":"fixture","model":"fixture/model"}},
                 {"id":"child","prompt":"review","access":"read_only","depends_on":["parent"],"inputs":[{"node":"parent","outputs":["result"]}],"route":{"adapter":"fixture","model":"fixture/model"}}
             ]
@@ -355,7 +355,7 @@ fn graph_owner_fails_node_when_result_integrity_is_lost() -> Result<(), Box<dyn 
     std::fs::write(&artifact, b"XX")?;
     let id = "corrupt-auth";
     let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":id,"nodes":[
+        "schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":id,"nodes":[
             {"id":"parent","prompt":"work","access":"read_only","routes":[
                 {"adapter":"fixture","model":"fixture/model"},
                 {"adapter":"fixture","model":"fixture/other"}
@@ -572,7 +572,7 @@ fn exact_route_in_an_excluded_family_is_refused_before_launch()
     )?;
     let id = "exact-separation";
     let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":id,"nodes":[
+        "schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":id,"nodes":[
             {"id":"author","prompt":"work","access":"read_only",
                 "route":{"adapter":"fixture","model":"fixture/model"}},
             {"id":"verifier","prompt":"verify","access":"read_only","depends_on":["author"],

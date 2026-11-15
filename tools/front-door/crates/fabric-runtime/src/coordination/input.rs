@@ -162,6 +162,8 @@ pub const MAX_CLI_PROMPT_BYTES: usize = 1_048_576;
 pub const MAX_REFERENCE_BYTES: usize = 1_024;
 pub const MAX_ROUTE_BYTES: usize = 128;
 pub const MAX_ARTIFACT_PATH_BYTES: usize = 4_096;
+const MAX_PAGE_ROWS: u64 = 100;
+const MAX_WAIT_TARGETS: usize = 100;
 /// Leaves over 250 KiB for the relay envelope under the 1 MiB frame cap after
 /// worst-case sixfold JSON string escaping; base64 encoding stays below 2x.
 pub const MAX_FETCH_BYTES: u64 = 131_072;
@@ -201,7 +203,7 @@ fn optional_text(value: Option<&str>, path: &str, max: usize) -> Result<(), Inpu
 }
 
 fn page(limit: u64, path: &str) -> Result<(), InputError> {
-    if !(1..=100).contains(&limit) {
+    if !(1..=MAX_PAGE_ROWS).contains(&limit) {
         return Err(field(path));
     }
     Ok(())
@@ -511,7 +513,7 @@ impl ValidateInput for RunInput {
                 wait_seconds,
                 ..
             } => {
-                if targets.is_empty() || targets.len() > 100 {
+                if targets.is_empty() || targets.len() > MAX_WAIT_TARGETS {
                     return Err(field("targets"));
                 }
                 wait(*wait_seconds, transport)
@@ -644,7 +646,11 @@ mod tests {
         use super::ValidateInput;
         use provenant_core::WaitTransport;
 
-        for bytes in [65_536, 65_537, 117 * 1024, 1_048_576] {
+        for bytes in [
+            super::MAX_TEXT_BYTES,
+            super::MAX_TEXT_BYTES + 1,
+            super::MAX_CLI_PROMPT_BYTES,
+        ] {
             let input: SubmitInput = serde_json::from_value(json!({
                 "op":"submit", "operation_id":"large-prompt",
                 "task":{"prompt":"x".repeat(bytes), "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}
@@ -652,16 +658,18 @@ mod tests {
             .unwrap();
             assert!(input.validate_input(WaitTransport::Cli).is_ok());
             let relay = input.validate_input(WaitTransport::Relay);
-            if bytes <= 65_536 {
+            if bytes <= super::MAX_TEXT_BYTES {
                 assert!(relay.is_ok());
             } else {
                 let error = relay.unwrap_err();
                 assert_eq!(error.path, "task.prompt");
-                let projection = error.diagnostic();
-                let detail = projection.detail.as_deref().unwrap();
-                assert!(detail.contains("task.prompt"));
-                assert!(detail.contains("65536"));
-                assert!(projection.next.is_some());
+                assert_eq!(
+                    error.cause,
+                    Some(super::super::facade::InvalidInputDetail::FieldTooLarge {
+                        field: "task.prompt".into(),
+                        limit: super::MAX_TEXT_BYTES,
+                    })
+                );
                 let facade = super::super::facade::FacadeError::from(
                     &super::super::CoordinationError::Input(error),
                 );
@@ -704,55 +712,92 @@ mod tests {
     }
 
     #[test]
-    fn serde_rejects_out_of_bounds_message_text() {
-        let input = serde_json::json!({
-            "op": "send",
-            "recipients": ["00000000000000000000000000000001"],
-            "kind": "note",
-            "body": "x".repeat(65_537),
-            "artifacts": [],
-            "reply_to": null
-        });
-
-        rejects::<super::super::MailInput>(input, "body");
-    }
-
-    #[test]
-    fn serde_rejects_bounds_on_nested_string_fields() {
-        rejects::<ClaimInput>(
-            json!({"op":"claim_verify","subject":{"kind":"issue","id":"k".repeat(1_025)}}),
-            "subject.id",
-        );
+    fn serde_rejects_declared_input_bounds() {
+        #[derive(Clone, Copy)]
+        enum InputKind {
+            Mail,
+            Claim,
+            Submit,
+            Output,
+            Run,
+        }
+        let mut cases = vec![
+            (
+                InputKind::Mail,
+                json!({
+                    "op":"send",
+                    "recipients":["00000000000000000000000000000001"],
+                    "kind":"note",
+                    "body":"x".repeat(super::MAX_TEXT_BYTES + 1),
+                    "artifacts":[], "reply_to":null
+                }),
+                "body".to_owned(),
+            ),
+            (
+                InputKind::Claim,
+                json!({"op":"claim_verify","subject":{"kind":"issue","id":"k".repeat(super::MAX_REFERENCE_BYTES + 1)}}),
+                "subject.id".into(),
+            ),
+            (
+                InputKind::Submit,
+                json!({"op":"submit","operation_id":"work-1","task":{
+                    "prompt":"do work","route":{"kind":"named","name":"m".repeat(super::MAX_ROUTE_BYTES + 1)},"timeout_seconds":1
+                }}),
+                "task.route.name".into(),
+            ),
+            (
+                InputKind::Output,
+                json!({
+                    "op":"fetch","target":{"attempt":"00000000000000000000000000000001"},
+                    "artifact":{"path":{"encoding":"utf8","path":"a".repeat(super::MAX_ARTIFACT_PATH_BYTES + 1)},"digest":null},
+                    "max_bytes":1
+                }),
+                "artifact.path.path".into(),
+            ),
+            (
+                InputKind::Claim,
+                json!({"op":"claim_list","limit":0}),
+                "limit".into(),
+            ),
+            (
+                InputKind::Run,
+                json!({
+                    "op":"wait","condition":"any","wait_seconds":1,
+                    "targets":vec![json!({"attempt":"00000000000000000000000000000001"}); super::MAX_WAIT_TARGETS + 1]
+                }),
+                "targets".into(),
+            ),
+            (
+                InputKind::Output,
+                json!({
+                    "op":"fetch","target":{"attempt":"00000000000000000000000000000001"},
+                    "artifact":{"path":{"encoding":"utf8","path":"a"},"digest":null},
+                    "max_bytes":super::MAX_FETCH_BYTES + 1
+                }),
+                "max_bytes".into(),
+            ),
+        ];
         for name in ["provider", "model", "effort"] {
             let mut route = json!({"kind":"model","provider":"codex","model":"model"});
-            route[name] = json!("m".repeat(129));
-            rejects::<SubmitInput>(
+            route[name] = json!("m".repeat(super::MAX_ROUTE_BYTES + 1));
+            cases.push((
+                InputKind::Submit,
                 json!({
                     "op":"submit","operation_id":"work-1",
                     "task":{"prompt":"do work","route":route,"timeout_seconds":1}
                 }),
-                &format!("task.route.{name}"),
-            );
+                format!("task.route.{name}"),
+            ));
         }
-        rejects::<SubmitInput>(
-            json!({"op":"submit","operation_id":"work-1","task":{
-                "prompt":"do work","route":{"kind":"named","name":"m".repeat(129)},"timeout_seconds":1
-            }}),
-            "task.route.name",
-        );
-        rejects::<OutputInput>(
-            json!({
-                "op":"fetch","target":{"attempt":"00000000000000000000000000000001"},
-                "artifact":{"path":{"encoding":"utf8","path":"a".repeat(4_097)},"digest":null},
-                "max_bytes":1
-            }),
-            "artifact.path.path",
-        );
-    }
-
-    #[test]
-    fn serde_rejects_numeric_and_collection_bounds() {
-        rejects::<ClaimInput>(json!({"op":"claim_list","limit":0}), "limit");
+        for (kind, value, path) in cases {
+            match kind {
+                InputKind::Mail => rejects::<super::super::MailInput>(value, &path),
+                InputKind::Claim => rejects::<ClaimInput>(value, &path),
+                InputKind::Submit => rejects::<SubmitInput>(value, &path),
+                InputKind::Output => rejects::<OutputInput>(value, &path),
+                InputKind::Run => rejects::<RunInput>(value, &path),
+            }
+        }
         assert!(
             serde_json::from_value::<super::super::EventsInput>(
                 json!({"op":"read","limit":1,"wait_seconds":0})
@@ -765,21 +810,6 @@ mod tests {
                 "targets":[{"attempt":"00000000000000000000000000000001"}]
             }))
             .is_ok()
-        );
-        rejects::<RunInput>(
-            json!({
-                "op":"wait","condition":"any","wait_seconds":1,
-                "targets":vec![json!({"attempt":"00000000000000000000000000000001"}); 101]
-            }),
-            "targets",
-        );
-        rejects::<OutputInput>(
-            json!({
-                "op":"fetch","target":{"attempt":"00000000000000000000000000000001"},
-                "artifact":{"path":{"encoding":"utf8","path":"a"},"digest":null},
-                "max_bytes":super::MAX_FETCH_BYTES + 1
-            }),
-            "max_bytes",
         );
     }
 

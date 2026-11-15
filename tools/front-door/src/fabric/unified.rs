@@ -2552,7 +2552,7 @@ mod tests {
     }
 
     fn checkpoint(graph: &str) -> GraphCheckpoint {
-        serde_json::from_value(json!({"schema_version":1,"graph_id":graph,"plan_digest":"digest","nodes":[
+        serde_json::from_value(json!({"schema_version":provenant_fabric_runtime::graph::GraphCheckpoint::SCHEMA_VERSION,"graph_id":graph,"plan_digest":"digest","nodes":[
             {"id":"parent","state":"running","worktree":null,"attempts":[
                 {"launched":true,"key":{"graph_id":graph,"node_id":"parent","route_index":0, "attempt": 1},"route":{"alias":"senior"},"state":"running","attempt_ref":"11111111111111111111111111111111/22222222222222222222222222222222","launch_actor":"actor"}
             ]},
@@ -2563,7 +2563,7 @@ mod tests {
     }
 
     fn document(graph: &str) -> GraphDocument {
-        serde_json::from_value(json!({"schema_version":1,"graph_id":graph,"nodes":[
+        serde_json::from_value(json!({"schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":graph,"nodes":[
             {"id":"parent","access":"read_only","prompt":"parent","route":{"alias":"senior"}},
             {"id":"parent--child","access":"read_only","prompt":"child","route":{"alias":"senior"}},
             {"id":"parent--keep","access":"read_only","prompt":"keep","route":{"alias":"senior"},"detached":true},
@@ -2846,40 +2846,32 @@ mod tests {
     }
 
     #[test]
-    fn graph_failure_rows_prefer_owner_code_and_fall_back_for_old_checkpoints() {
-        let mut checkpoint = checkpoint("g");
-        checkpoint.nodes[0].state = NodeState::Blocked;
-        checkpoint.nodes[0].advance_error_code = Some("launch_refused".into());
-        checkpoint.nodes[0].advance_owner_code = Some("invalid_input".into());
+    fn graph_failure_rows_preserve_the_owner_cause_and_action() {
+        let mut declared = checkpoint("g");
+        declared.nodes[0].state = NodeState::Blocked;
+        declared.nodes[0].advance_error_code = Some("launch_refused".into());
+        declared.nodes[0].advance_owner_code = Some("invalid_input".into());
         let target = GraphTarget {
             graph: "g".into(),
             node: None,
             attempt: None,
         };
-        let rows = status_rows(&graph_snapshot(checkpoint.clone()), &target);
+        let rows = status_rows(&graph_snapshot(declared.clone()), &target);
         assert_eq!(rows[1]["cause_code"], "invalid_input");
-        let mut old = serde_json::to_value(checkpoint).unwrap();
-        old["nodes"][0]
+        let mut without_owner_code = serde_json::to_value(declared).unwrap();
+        without_owner_code["nodes"][0]
             .as_object_mut()
             .unwrap()
             .remove("advance_owner_code");
-        let old = serde_json::from_value(old).unwrap();
-        let rows = status_rows(&graph_snapshot(old), &target);
+        let without_owner_code = serde_json::from_value(without_owner_code).unwrap();
+        let rows = status_rows(&graph_snapshot(without_owner_code), &target);
         assert_eq!(rows[1]["cause_code"], "launch_refused");
-    }
 
-    #[test]
-    fn graph_failure_rows_preserve_the_owner_cause_and_action() {
         let mut checkpoint = checkpoint("g");
         checkpoint.nodes[0].state = NodeState::Blocked;
         checkpoint.nodes[0].advance_error_code = Some("launch_retry_exhausted".into());
         checkpoint.nodes[0].advance_owner_code = Some("LAUNCH_UNKNOWN".into());
         checkpoint.nodes[0].advance_error = Some("[LAUNCH_UNKNOWN] inspect the receipt for operation op-123 before retrying with the same operation ID".into());
-        let target = GraphTarget {
-            graph: "g".into(),
-            node: None,
-            attempt: None,
-        };
         let rows = status_rows(&graph_snapshot(checkpoint), &target);
         let node = &rows[1];
         assert_eq!(node["cause_code"], "LAUNCH_UNKNOWN");
@@ -2943,14 +2935,51 @@ mod tests {
 
     #[test]
     fn recovered_attempt_failure_does_not_recommend_retrying_successful_work() {
-        let rows = vec![
-            json!({"kind":"graph","id":"g","state":"complete","outcome":"succeeded","next":"provenant output g"}),
-            json!({"kind":"node","id":"g/a","state":"succeeded","next":"provenant output g/a"}),
-            json!({"kind":"attempt","id":"old","state":"terminal","outcome":"task_failed","next":"provenant retry g/a"}),
-        ];
+        use provenant_fabric_runtime::graph::{AttemptOutcome, AttemptState, NodeState};
+
+        let mut checkpoint = checkpoint("g");
+        checkpoint.nodes.truncate(1);
+        let node = &mut checkpoint.nodes[0];
+        let mut previous = node.attempts[0].clone();
+        previous.key.attempt = 1;
+        previous.attempt_ref =
+            Some("11111111111111111111111111111111/33333333333333333333333333333333".into());
+        previous.state = AttemptState::Terminal;
+        previous.outcome = Some(AttemptOutcome::TaskFailed);
+        previous.settled = 1;
+        node.previous_attempts.push(previous);
+
+        let current = &mut node.attempts[0];
+        current.key.attempt = 2;
+        current.attempt_ref =
+            Some("11111111111111111111111111111111/44444444444444444444444444444444".into());
+        current.state = AttemptState::Terminal;
+        current.outcome = Some(AttemptOutcome::Succeeded);
+        current.settled = 2;
+        node.state = NodeState::Succeeded;
+
+        let run = graph_snapshot(checkpoint);
+        assert_eq!(
+            run.outcome,
+            Some(provenant_fabric_runtime::graph::GraphOutcome::Succeeded)
+        );
+        let target = GraphTarget {
+            graph: "g".into(),
+            node: None,
+            attempt: None,
+        };
+        let rows = status_rows(&run, &target);
+        let graph = rows.iter().find(|row| row["kind"] == "graph").unwrap();
+        assert_eq!(graph["outcome"], "succeeded");
+        assert!(
+            !graph["next"]
+                .as_str()
+                .unwrap()
+                .starts_with("provenant retry ")
+        );
         let reading = render_graph_status(&rows);
-        assert!(reading.starts_with("g complete"), "{reading}");
-        assert!(reading.ends_with("next: provenant output g\n"));
+        assert!(reading.contains("g complete"), "{reading}");
+        assert!(!reading.contains("provenant retry "), "{reading}");
     }
 
     #[test]

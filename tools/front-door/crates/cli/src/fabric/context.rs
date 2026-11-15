@@ -1011,14 +1011,13 @@ mod tests {
             identity::CrossHostProjectKey,
             runs::RunCapabilities,
         };
-        use std::{cell::Cell, path::Path};
+        use std::path::Path;
         let host = HostId::from_bytes([2; 16]);
         let project =
             CrossHostProjectKey::from_home(Path::new("/home/a"), Path::new("/home/a/repo"))?;
         for (submit, code) in [(false, Some("dispatch_refused")), (true, None)] {
-            let calls = Cell::new(0);
-            let stub = || {
-                calls.set(calls.get() + 1);
+            let submit_calls = std::cell::Cell::new(false);
+            let response = || {
                 Ok(PeerResponse {
                     extra: Default::default(),
                     version: 1,
@@ -1048,14 +1047,21 @@ mod tests {
                     },
                 })
             };
-            let result = super::submit_after_probe("worker", stub, stub);
+            let result = super::submit_after_probe(
+                "worker",
+                || response(),
+                || {
+                    submit_calls.set(true);
+                    response()
+                },
+            );
             if let Some(code) = code {
                 let error = result.unwrap_err();
                 assert_eq!(error.error.code(), code);
-                assert_eq!(calls.get(), 1);
+                assert!(!submit_calls.get());
             } else {
                 assert!(result.is_ok());
-                assert_eq!(calls.get(), 2);
+                assert!(submit_calls.get());
             }
         }
         Ok(())
@@ -1110,6 +1116,7 @@ node_prompt_bytes = 262144
     }
     #[test]
     fn protocol_mismatch_keeps_both_versions_and_the_cli_code() {
+        use provenant_fabric_runtime::coordination::facade::FacadeError;
         let failure = super::peer_failure(
             "workshop",
             &super::PeerError::ProtocolMismatch {
@@ -1119,13 +1126,14 @@ node_prompt_bytes = 262144
             },
         );
         assert_eq!(failure.error.code(), "peer_version");
-        assert_eq!(
-            failure.error.to_string(),
-            format!(
-                "peer workshop speaks protocol 1, this host expects protocol {}; upgrade both",
-                provenant_fabric_runtime::hosts::PROTOCOL
-            )
-        );
+        assert!(matches!(
+            failure.error,
+            FacadeError::PeerProtocolMismatch {
+                remote: 1,
+                expected: provenant_fabric_runtime::hosts::PROTOCOL,
+                ..
+            }
+        ));
         assert_eq!(
             super::facade_outcome(&failure.error).1.code(),
             "PEER_VERSION"

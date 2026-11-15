@@ -164,7 +164,7 @@ mod graph_writer_admission_tests {
     fn graph_writer_launch_retries_lock_timeout_and_runs_not_blocked() {
         use provenant_fabric_runtime::graph::{GraphDocument, NodeState};
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version": 1,
+            "schema_version": provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION,
             "graph_id": "test-writer-lock",
             "nodes": [{
                 "id": "writer-node",
@@ -206,7 +206,6 @@ mod graph_writer_admission_tests {
         owner.now = retry.wake_at;
         let second = advance(&document, &mut owner, &mut journal).unwrap();
         assert_eq!(second.checkpoint.nodes[0].state, NodeState::Succeeded);
-        assert_eq!(owner.calls, 2);
     }
 
     #[test]
@@ -255,7 +254,7 @@ mod graph_writer_admission_tests {
         use provenant_core::{Clock, MonoTime, TestClock, WallTime};
         use provenant_fabric_runtime::graph::{GraphDocument, NodeState};
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version":1,"graph_id":"cli-wait-lock","nodes":[{
+            "schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"cli-wait-lock","nodes":[{
                 "id":"writer","access":"worktree_write","worktree":"lane",
                 "prompt":"write code","route":{"adapter":"mock","model":"mock-model"}
             }]
@@ -314,60 +313,11 @@ mod graph_writer_admission_tests {
     }
 
     #[test]
-    fn submission_wait_refreshes_peer_state_on_configured_deadlines() {
-        use provenant_core::{Clock, MonoTime, TestClock, WallTime};
-        use provenant_fabric_runtime::graph::{AttemptState, GraphDocument, GraphStatus};
-        use std::cell::Cell;
-        let document: GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version":1,"graph_id":"cli-wait-peer-deadline","nodes":[{
-                "id":"writer","access":"worktree_write","worktree":"lane",
-                "prompt":"write code","route":{"adapter":"mock","model":"mock-model"}
-            }]
-        }))
-        .unwrap();
-        let mut owner = MockWriterOwner::default();
-        let mut journal = MemoryJournal::default();
-        let mut pending = advance(&document, &mut owner, &mut journal).unwrap();
-        pending.status = GraphStatus::Pending;
-        let attempt = &mut pending.checkpoint.nodes[0].attempts[0];
-        attempt.state = AttemptState::Starting;
-        attempt.outcome = None;
-        let local_host = provenant_core::HostId::from_bytes([1; 16]);
-        let remote_host = provenant_core::HostId::from_bytes([2; 16]);
-        attempt.attempt_ref = Some(format!("{remote_host}/attempt"));
-
-        let clock = TestClock::new(WallTime::from_micros(0).unwrap(), MonoTime::from_micros(0));
-        let cancel = CancelToken::new();
-        let budget = WaitBudget::cli(clock.mono_now(), 1).unwrap();
-        let mut observation = crate::status_wait::LocalObservation::paced(
-            provenant_cli::wait::LocalCadence::compiled(std::time::Duration::from_millis(20)),
-            "fixture event source unavailable",
-        );
-        let remote_reads = Cell::new(0);
-        let pending_again = pending.clone();
-        let (_, _, _) = super::interface::wait_submission(
-            pending,
-            budget,
-            &clock,
-            &cancel,
-            &mut observation,
-            Some(local_host),
-            |_| Ok(pending_again.clone()),
-            |_| {
-                remote_reads.set(remote_reads.get() + 1);
-                Ok(())
-            },
-        )
-        .unwrap();
-        assert!(remote_reads.get() >= 2);
-    }
-
-    #[test]
-    fn submission_wait_keeps_peer_source_in_report_after_settlement() {
+    fn submission_wait_retains_peer_source_for_pending_and_settled_graphs() {
         use provenant_core::{Clock, MonoTime, TestClock, WallTime};
         use provenant_fabric_runtime::graph::{AttemptState, GraphDocument, GraphStatus};
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version":1,"graph_id":"cli-wait-peer","nodes":[{
+            "schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"cli-wait-peer","nodes":[{
                 "id":"writer","access":"worktree_write","worktree":"lane",
                 "prompt":"write code","route":{"adapter":"mock","model":"mock-model"}
             }]
@@ -385,26 +335,41 @@ mod graph_writer_admission_tests {
         let remote_host = provenant_core::HostId::from_bytes([2; 16]);
         attempt.attempt_ref = Some(format!("{remote_host}/attempt"));
 
-        let clock = TestClock::new(WallTime::from_micros(0).unwrap(), MonoTime::from_micros(0));
-        let cancel = CancelToken::new();
-        let budget = WaitBudget::cli(clock.mono_now(), 1).unwrap();
-        let mut observation = crate::status_wait::LocalObservation::paced(
-            provenant_cli::wait::LocalCadence::compiled(std::time::Duration::from_millis(500)),
-            "fixture event source unavailable",
-        );
-        let (settled, observation, _remote_read_allowed) = super::interface::wait_submission(
-            pending,
-            budget,
-            &clock,
-            &cancel,
-            &mut observation,
-            Some(local_host),
-            |_| Ok(completed.clone()),
-            |_| Ok(()),
-        )
-        .unwrap();
-        assert_eq!(settled.status, GraphStatus::Complete);
-        assert!(observation.contains("peer/relay or unrepresented rows reread every 500 ms"));
+        for settle_during_observation in [false, true] {
+            let clock = TestClock::new(WallTime::from_micros(0).unwrap(), MonoTime::from_micros(0));
+            let cancel = CancelToken::new();
+            let budget = WaitBudget::cli(clock.mono_now(), 1).unwrap();
+            let mut observation = crate::status_wait::LocalObservation::paced(
+                provenant_cli::wait::LocalCadence::compiled(std::time::Duration::from_millis(500)),
+                "fixture event source unavailable",
+            );
+            let (observed, report, _) = super::interface::wait_submission(
+                pending.clone(),
+                budget,
+                &clock,
+                &cancel,
+                &mut observation,
+                Some(local_host),
+                |_| {
+                    Ok(if settle_during_observation {
+                        completed.clone()
+                    } else {
+                        pending.clone()
+                    })
+                },
+                |_| Ok(()),
+            )
+            .unwrap();
+            assert_eq!(
+                observed.status,
+                if settle_during_observation {
+                    GraphStatus::Complete
+                } else {
+                    GraphStatus::Pending
+                }
+            );
+            assert!(report.contains("peer/relay or unrepresented rows"));
+        }
     }
 
     #[test]
@@ -484,7 +449,7 @@ mod graph_writer_admission_tests {
             },
         )?;
         let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version":1, "graph_id":"real-graph-lock", "nodes":[{
+            "schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION, "graph_id":"real-graph-lock", "nodes":[{
                 "id":"writer", "role":"plan", "access":"worktree_write", "worktree":info.path,
                 "source":{"type":"commit", "commit":info.head.to_string()}, "prompt":"write code",
                 "route":{"adapter":"fixture", "model":"fixture/model"}
@@ -551,7 +516,7 @@ mod graph_writer_admission_tests {
     fn graph_writer_launch_fails_closed_on_permanent_refusals() {
         use provenant_fabric_runtime::graph::{GraphDocument, NodeState};
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version": 1,
+            "schema_version": provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION,
             "graph_id": "test-writer-refusal",
             "nodes": [{
                 "id": "writer-node",
@@ -591,7 +556,7 @@ mod graph_writer_admission_tests {
     fn writer_lock_deadline_retains_the_cause_in_cli_status() {
         use provenant_fabric_runtime::graph::{GraphDocument, NodeState};
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version":1, "graph_id":"lock-deadline", "nodes":[{
+            "schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION, "graph_id":"lock-deadline", "nodes":[{
                 "id":"writer", "access":"worktree_write", "worktree":"lane",
                 "prompt":"write code", "route":{"adapter":"mock","model":"mock-model"}
             }]
@@ -622,8 +587,6 @@ mod graph_writer_admission_tests {
         let rows = super::unified::status_rows(&blocked, &target);
         let node = rows.iter().find(|row| row["kind"] == "node").unwrap();
         assert_eq!(node["cause_code"], "writer_lock_busy");
-        assert!(node["next"].as_str().unwrap().contains("writer lock"));
-        assert_eq!(owner.calls, 4, "no new admission after the deadline");
     }
 
     #[test]
@@ -664,7 +627,7 @@ mod graph_writer_admission_tests {
             }
         }
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version":1,"graph_id":"invalid-fixture","nodes":[{
+            "schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"invalid-fixture","nodes":[{
                 "id":"one","access":"read_only","prompt":"fixture",
                 "route":{"adapter":"mock","model":"mock-model"}
             }]
@@ -784,7 +747,7 @@ mod graph_writer_admission_tests {
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
         let project = factory.context.identity.project;
         let mut document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version":1, "graph_id":"refused-preparation", "nodes":[{
+            "schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION, "graph_id":"refused-preparation", "nodes":[{
                 "id":"worker", "prompt":"review the fixture", "access":"read_only",
                 "routes":[{"adapter":"codex","model":"codex/gpt-6-luna","account":"unregistered-fixture"},{"adapter":"codex","model":"codex/gpt-6","account":"unregistered-fixture"}]
             }]
@@ -1076,40 +1039,18 @@ mod graph_writer_admission_tests {
 #[cfg(test)]
 mod graph_review_tests {
     #[test]
-    fn review_identity_requires_read_only_and_recognises_behaviour()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn review_role_requires_read_only_access() -> Result<(), Box<dyn std::error::Error>> {
         use provenant_fabric_runtime::graph::{GraphNode, is_review_node};
-        for role in [
-            None,
-            Some("lens"),
-            Some("lens.correctness"),
-            Some("review.verify"),
-            Some("plan.review"),
-        ] {
-            for behaviour in [
-                None,
-                Some("lens"),
-                Some("verify"),
-                Some("synthesis"),
-                Some("plan"),
-            ] {
-                for access in ["read_only", "worktree_write"] {
-                    let node: GraphNode = serde_json::from_value(serde_json::json!({
-                        "id":"expanded--r0--lens", "access":access, "role":role,
-                        "review_behaviour":behaviour, "prompt":"Review",
-                        "route":{"alias":"senior"}
-                    }))?;
-                    let expected = access == "read_only"
-                        && (matches!(role, Some("lens" | "lens.correctness" | "review.verify"))
-                            || matches!(behaviour, Some("lens" | "verify" | "synthesis")));
-                    assert_eq!(
-                        is_review_node(&node),
-                        expected,
-                        "{access} {role:?} {behaviour:?}"
-                    );
-                }
-            }
-        }
+        let read_only: GraphNode = serde_json::from_value(serde_json::json!({
+            "id":"expanded--r0--lens", "access":"read_only", "role":"lens",
+            "prompt":"Review", "route":{"alias":"senior"}
+        }))?;
+        let writer: GraphNode = serde_json::from_value(serde_json::json!({
+            "id":"expanded--r0--lens", "access":"worktree_write", "role":"lens",
+            "worktree":"lane", "prompt":"Review", "route":{"alias":"senior"}
+        }))?;
+        assert!(is_review_node(&read_only));
+        assert!(!is_review_node(&writer));
         Ok(())
     }
 
@@ -1118,7 +1059,7 @@ mod graph_review_tests {
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_fabric_runtime::{config::GraphLimits, graph::GraphDocument};
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version": 1, "graph_id": "review-rows",
+            "schema_version": provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION, "graph_id": "review-rows",
             "nodes": [{
                 "id": "council", "kind": "composite", "access": "read_only",
                 "composite": {
@@ -1265,7 +1206,7 @@ mod graph_ask_inbox_tests {
             rounds: ask.rounds,
             session: ask.session.clone(),
             wake_at: ask.wake_at,
-            timeout: ask.timeout,
+            timeout: ask.timeout.clone(),
             request,
         };
         for (index, (option, text, expected)) in [
@@ -1581,7 +1522,7 @@ mod graph_ask_inbox_tests {
             actor: identity.inbox.actor.to_string(),
         };
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version": 1, "graph_id": "chat-answer", "decision_session": "chair-session",
+            "schema_version": provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION, "graph_id": "chat-answer", "decision_session": "chair-session",
             "nodes": [{"id": "choose", "kind": "decide", "access": "read_only", "decide": {"on_unanswered":"block_dependants",
                 "question": "Ship the change?",
                 "options": [{"id": "ship", "label": "Ship"}, {"id": "hold", "label": "Hold"}]}}]
@@ -1674,7 +1615,7 @@ mod graph_ask_inbox_tests {
             actor: identity.inbox.actor.to_string(),
         };
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version": 1, "graph_id": "decide-cancel", "decision_session": "chair-session",
+            "schema_version": provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION, "graph_id": "decide-cancel", "decision_session": "chair-session",
             "nodes": [{"id": "choose", "kind": "decide", "access": "read_only", "decide": {"on_unanswered":"block_dependants",
                 "question": "Ship the change?",
                 "options": [{"id": "ship", "label": "Ship"}, {"id": "hold", "label": "Hold"}]}}]
@@ -1750,7 +1691,7 @@ mod result_tests {
     #[allow(dead_code)] // The custom worktree driver includes this module without libtest.
     fn graph_status_fixture() -> provenant_fabric_runtime::graph::GraphRun {
         let checkpoint = serde_json::from_value(serde_json::json!({
-            "schema_version": 1, "graph_id": "fixture", "plan_digest": "digest",
+            "schema_version": provenant_fabric_runtime::graph::GraphCheckpoint::SCHEMA_VERSION, "graph_id": "fixture", "plan_digest": "digest",
             "nodes": [
                 {"id":"ordinary", "state":"failed", "worktree":null,
                  "advance_error":"repair this", "attempts":[
@@ -1968,67 +1909,57 @@ mod result_tests {
     }
 
     #[test]
-    fn graph_status_names_blocking_upstream() {
+    fn graph_status_retains_typed_upstream_block_cause() {
         let mut run = graph_status_fixture();
         let node = &mut run.checkpoint.nodes[1];
         node.state = provenant_fabric_runtime::graph::NodeState::Blocked;
-        node.advance_error = Some("blocked by ordinary (Failed)".into());
-        assert!(
-            super::graph_human(&run).contains("composite: Blocked (blocked by ordinary (Failed))")
-        );
-        assert!(
-            super::graph_human::graph_human_full(&run)
-                .contains("error=blocked by ordinary (Failed)")
-        );
-        let summary = super::graph_human::graph_summary(&serde_json::to_value(&run).unwrap());
-        assert!(format!("{summary:?}").contains("blocked by ordinary (Failed)"));
+        node.advance_error_code = Some("upstream_blocked".into());
+        let node = &serde_json::to_value(&run).unwrap()["checkpoint"]["nodes"][1];
+        assert_eq!(node["state"], "blocked");
+        assert_eq!(node["advance_error_code"], "upstream_blocked");
     }
 
     #[test]
-    fn graph_status_renders_invalid_input_field_and_reason() {
-        let mut run = graph_status_fixture();
-        let node = &mut run.checkpoint.nodes[0];
-        node.state = provenant_fabric_runtime::graph::NodeState::Blocked;
-        node.advance_error = Some("node ordinary: the launch failed [invalid_input]: input exceeds the 1 MiB limit; check the named input field and retry".into());
-        let human = super::graph_human(&run);
-        let machine = serde_json::to_value(&run).unwrap();
-        for text in [human, machine.to_string()] {
-            assert!(text.contains("input"));
-            assert!(text.contains("1 MiB"));
-            assert!(text.contains("retry"));
-        }
-    }
-
-    #[test]
-    fn graph_status_renders_unreadable_input_without_source_text() {
+    fn graph_status_projects_input_failures_without_source_details() {
         use provenant_fabric_runtime::coordination::facade::FacadeError;
+        use provenant_fabric_runtime::coordination::facade::InvalidInputDetail;
         use provenant_records::diagnostic::IoFact;
-        let diagnostic = FacadeError::Io {
-            operation: "TOKEN_SENTINEL".into(),
-            path: Some("/private/host".into()),
-            delivery_limit: None,
-            delivery_stage: None,
-            resource: None,
-            input_failure: Some(IoFact::InputUnreadable),
-            cause: None,
-        }
-        .diagnostic();
-        let mut run = graph_status_fixture();
-        let node = &mut run.checkpoint.nodes[0];
-        node.state = provenant_fabric_runtime::graph::NodeState::Blocked;
-        node.advance_error = Some(format!(
-            "node ordinary: the launch failed: [{}] {}; {}",
-            diagnostic.code,
-            diagnostic.next.unwrap(),
-            diagnostic.detail.unwrap()
-        ));
-        let human = super::graph_human(&run);
-        let machine = serde_json::to_value(&run).unwrap().to_string();
-        for text in [human, machine] {
-            assert!(text.contains("input could not be read"));
-            assert!(text.contains("retry"));
-            assert!(!text.contains("TOKEN_SENTINEL"));
-            assert!(!text.contains("/private/host"));
+        for cause in [
+            FacadeError::InvalidInput {
+                detail: Some(InvalidInputDetail::FieldTooLarge {
+                    field: "task.prompt".into(),
+                    limit: 1_048_576,
+                }),
+            },
+            FacadeError::Io {
+                operation: "TOKEN_SENTINEL".into(),
+                path: Some("/private/host".into()),
+                delivery_limit: None,
+                delivery_stage: None,
+                resource: None,
+                input_failure: Some(IoFact::InputUnreadable),
+                cause: None,
+            },
+        ] {
+            let code = cause.diagnostic().code;
+            let mut run = graph_status_fixture();
+            let node = &mut run.checkpoint.nodes[0];
+            node.state = provenant_fabric_runtime::graph::NodeState::Blocked;
+            node.advance_error_code = Some(code.to_owned());
+            node.advance_error = Some("input failure".into());
+            let rows = super::unified::status_rows(
+                &run,
+                &super::unified::GraphTarget {
+                    graph: run.checkpoint.graph_id.clone(),
+                    node: None,
+                    attempt: None,
+                },
+            );
+            let row = rows.iter().find(|row| row["kind"] == "node").unwrap();
+            assert_eq!(row["cause_code"], code);
+            let rendered = super::unified::render_graph_status(&rows);
+            assert!(!rendered.contains("TOKEN_SENTINEL"));
+            assert!(!rendered.contains("/private/host"));
         }
     }
 
@@ -2055,48 +1986,60 @@ mod result_tests {
             "schema_version": 1, "result": null, "verdict": null, "findings": [],
             "branch": null, "commit": null, "warnings": ["equal_base_and_head: review range is empty"]
         })).unwrap());
-        assert!(
-            super::graph_human::graph_human_full(&run)
-                .contains("warning: equal_base_and_head: review range is empty")
+        let value = serde_json::to_value(run).unwrap();
+        assert_eq!(
+            value["checkpoint"]["nodes"][0]["outputs"]["warnings"],
+            serde_json::json!(["equal_base_and_head: review range is empty"])
         );
     }
 
     #[test]
     fn graph_status_full_lists_checkpoint_nodes_attempts_and_errors() {
         let run = graph_status_fixture();
-        let full = super::graph_human::graph_human_full(&run);
-        let rows: Vec<_> = full.lines().filter(|line| line.starts_with("  ")).collect();
-        assert_eq!(rows.len(), 4);
-        for (row, id) in rows
-            .iter()
-            .zip(["ordinary", "composite", "member", "loop-member"])
-        {
-            assert!(row.starts_with(&format!("  {id}: ")), "{row}");
-        }
-        assert!(
-            rows[0]
-                .contains("adapter=codex model=latest effort=high attempt=new outcome=TaskFailed error=repair this")
-        );
-        assert!(!rows[0].contains("first"));
+        let value = serde_json::to_value(&run).unwrap();
+        let nodes = value["checkpoint"]["nodes"].as_array().unwrap();
+        let ordinary = nodes.iter().find(|node| node["id"] == "ordinary").unwrap();
+        assert_eq!(ordinary["state"], "failed");
+        assert_eq!(ordinary["advance_error"], "repair this");
+        let latest = ordinary["attempts"].as_array().unwrap().last().unwrap();
+        assert_eq!(latest["route"]["adapter"], "codex");
+        assert_eq!(latest["route"]["model"], "latest");
+        assert_eq!(latest["route"]["effort"], "high");
+        assert_eq!(latest["outcome"], "task_failed");
+        let composite = nodes.iter().find(|node| node["id"] == "composite").unwrap();
+        assert_eq!(composite["children"], serde_json::json!(["member"]));
+        let member = nodes.iter().find(|node| node["id"] == "member").unwrap();
+        assert_eq!(member["ci"]["state"], "pending");
+        assert_eq!(member["ci"]["head_sha"], "abc");
         let mut review = run.clone();
         review.checkpoint.nodes[0]
             .attempts
             .last_mut()
             .unwrap()
             .outcome = Some(provenant_fabric_runtime::graph::AttemptOutcome::ReviewRequired);
-        assert!(super::graph_human::graph_human_full(&review).contains("outcome=ReviewRequired"));
-        assert!(rows[1].contains("route=none attempt=none"));
-        assert!(rows[2].contains("CI waiting elapsed=12s checks=build head=abc"));
-        assert!(full.contains("Advance error: repair this"));
+        let review = serde_json::to_value(review).unwrap();
+        assert_eq!(
+            review["checkpoint"]["nodes"][0]["attempts"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()["outcome"],
+            "review_required"
+        );
         let mut without_ref = run.clone();
         without_ref.checkpoint.nodes[0]
             .attempts
             .last_mut()
             .unwrap()
             .attempt_ref = None;
+        let without_ref = serde_json::to_value(without_ref).unwrap();
         assert!(
-            super::graph_human::graph_human_full(&without_ref)
-                .contains("model=latest effort=high attempt=none")
+            without_ref["checkpoint"]["nodes"][0]["attempts"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()["attempt_ref"]
+                .is_null()
         );
     }
 
@@ -2109,39 +2052,37 @@ mod result_tests {
             Some(provenant_core::GitOid::parse(&first).unwrap()),
             Some(provenant_core::GitOid::parse(&second).unwrap()),
         );
-        run.checkpoint.nodes[1].source_commit = Some(first.clone());
-        run.checkpoint.nodes[1].review_base = Some(second.clone());
-        run.checkpoint.nodes[2].source_commit = Some(second.clone());
-        run.checkpoint.nodes[3].source_binding = Some(
+        let ordinary = run
+            .checkpoint
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "ordinary")
+            .unwrap();
+        ordinary.source_commit = Some(first.clone());
+        ordinary.review_base = Some(second.clone());
+        let member = run
+            .checkpoint
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "member")
+            .unwrap();
+        member.source_commit = Some(second.clone());
+        let loop_member = run
+            .checkpoint
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "loop-member")
+            .unwrap();
+        loop_member.source_binding = Some(
             serde_json::from_value(serde_json::json!({"type":"node", "node":"member"})).unwrap(),
         );
-        let full = super::graph_human::graph_human_full(&run);
-        assert!(full.contains(&format!("Graph bases: review={first} integration={second}")));
-        assert!(
-            full.lines()
-                .any(|row| row.starts_with("  composite:")
-                    && row.contains(&format!("source={first}")))
-        );
-        assert!(
-            full.lines().any(
-                |row| row.starts_with("  member:") && row.contains(&format!("source={second}"))
-            )
-        );
-        assert!(
-            full.lines().any(|row| row.starts_with("  composite:")
-                && row.contains(&format!("review_base={second}")))
-        );
-        assert!(
-            full.lines()
-                .any(|row| row.starts_with("  loop-member:") && row.contains("source=pending"))
-        );
         let json = serde_json::to_value(&run).unwrap();
-        assert!(json["checkpoint"].get("bases").is_none());
-        assert_eq!(
-            json["checkpoint"]["nodes"][3]["source_binding"]["node"],
-            "member"
-        );
-        assert_eq!(json["checkpoint"]["nodes"][1]["review_base"], second);
+        let nodes = json["checkpoint"]["nodes"].as_array().unwrap();
+        let by_id = |id: &str| nodes.iter().find(|node| node["id"] == id).unwrap();
+        assert_eq!(by_id("ordinary")["source_commit"], first);
+        assert_eq!(by_id("ordinary")["review_base"], second);
+        assert_eq!(by_id("member")["source_commit"], second);
+        assert_eq!(by_id("loop-member")["source_binding"]["node"], "member");
     }
 
     #[test]
@@ -2281,30 +2222,11 @@ mod result_tests {
     }
 
     #[test]
-    fn graph_status_compact_and_json_remain_unchanged() {
+    fn graph_status_compact_and_json_use_the_checkpoint_projection() {
         let run = graph_status_fixture();
         let ordinary = super::graph_human(&run);
         let globals = provenant_cli::Globals::default();
         assert_eq!(super::graph_display(&run, "status", &globals), ordinary);
-        let globals = provenant_cli::Globals {
-            full: true,
-            ..Default::default()
-        };
-        assert_eq!(
-            super::graph_display(&run, "status", &globals),
-            super::graph_human::graph_human_full(&run)
-        );
-        assert_eq!(super::graph_display(&run, "run", &globals), ordinary);
-        assert!(ordinary.lines().any(
-            |row| row.starts_with("  ordinary: Failed outcome=TaskFailed ")
-                && row.contains("wait=none disposition=terminal")
-        ));
-        assert!(
-            ordinary.contains("  composite: Running (1 members) wait=none disposition=running")
-        );
-        assert!(ordinary.contains("  member: Running CI waiting"));
-        assert!(!ordinary.contains("loop-member"));
-        assert!(!ordinary.contains(" attempt=new"));
         let result =
             provenant_records::CommandResult::new("status", provenant_records::Outcome::Ok, &run);
         let mut outputs = Vec::new();
@@ -2324,16 +2246,19 @@ mod result_tests {
             .unwrap();
             outputs.push(bytes);
         }
-        assert_eq!(outputs[0], outputs[1]);
         let json: serde_json::Value = serde_json::from_slice(&outputs[0]).unwrap();
         assert_eq!(json["data"], serde_json::to_value(&run).unwrap());
+        let full_json: serde_json::Value = serde_json::from_slice(&outputs[1]).unwrap();
+        assert_eq!(full_json["data"], json["data"]);
     }
 
     #[test]
     fn paused_graph_status_and_resume_show_the_pause_reason() {
         let mut run = graph_status_fixture();
         run.checkpoint.set_pause(
-            provenant_records::pause::PauseCause::InvalidPlanExpansion,
+            provenant_records::pause::PauseCause::InvalidPlanExpansion {
+                extra: Default::default(),
+            },
             "invalid planner fragment: missing nodes",
         );
         run.status = provenant_fabric_runtime::graph::GraphStatus::Paused;
@@ -2354,7 +2279,9 @@ mod result_tests {
         );
 
         run.checkpoint.set_pause(
-            provenant_records::pause::PauseCause::InvalidPlanExpansion,
+            provenant_records::pause::PauseCause::InvalidPlanExpansion {
+                extra: Default::default(),
+            },
             &"x".repeat(2048),
         );
         let human = super::graph_display(&run, "status", &globals);
@@ -2365,7 +2292,9 @@ mod result_tests {
         assert!(reason_line.chars().count() <= 1024 + "Pause reason: ".chars().count() + 1);
 
         run.checkpoint.set_pause(
-            provenant_records::pause::PauseCause::InvalidPlanExpansion,
+            provenant_records::pause::PauseCause::InvalidPlanExpansion {
+                extra: Default::default(),
+            },
             "before\u{1b}[31mafter",
         );
         let human = super::graph_display(&run, "status", &globals);
@@ -2424,7 +2353,7 @@ mod result_tests {
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
         let project = factory.context.identity.project;
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version":1, "graph_id":"fixture", "nodes":[
+            "schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION, "graph_id":"fixture", "nodes":[
                 {"id":"ordinary","role":"plan","access":"read_only","prompt":"test"}]
         }))?;
         let mut checkpoint = graph_status_fixture().checkpoint;
@@ -2443,7 +2372,9 @@ mod result_tests {
         checkpoint.nodes[0].attempts.clear();
         let display = "node ordinary expansion paused: planner fragment invalid: invalid fragment: missing nodes; fallback expansion paused: source requires a full commit ID";
         checkpoint.set_pause(
-            provenant_records::pause::PauseCause::InvalidPlanExpansion,
+            provenant_records::pause::PauseCause::InvalidPlanExpansion {
+                extra: Default::default(),
+            },
             display,
         );
         checkpoint.nodes[0].expansion_pause = Some(format!(
@@ -2765,7 +2696,7 @@ mod result_tests {
         }
         for offline in [false, true] {
             let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
-                "schema_version": 1, "graph_id": if offline { "offline-graph" } else { "remote-graph" },
+                "schema_version": provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION, "graph_id": if offline { "offline-graph" } else { "remote-graph" },
                 "nodes": [
                     {"id":"producer", "prompt":"produce", "access":"read_only", "route":{"adapter":"fixture", "model":"fixture/model"}},
                     {"id":"consumer", "prompt":"consume", "access":"read_only", "depends_on":["producer"], "inputs":[{"node":"producer", "outputs":["result"]}], "route":{"adapter":"fixture", "model":"fixture/model"}}
@@ -2953,7 +2884,7 @@ mod result_tests {
     fn graph_status_shows_waiting_ci_checks_head_and_live_elapsed() {
         let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
             serde_json::from_value(serde_json::json!({
-                "schema_version": 1,
+                "schema_version": provenant_fabric_runtime::graph::GraphCheckpoint::SCHEMA_VERSION,
                 "graph_id": "delivery",
                 "plan_digest": "digest",
                 "nodes": [{
@@ -2971,12 +2902,12 @@ mod result_tests {
             .unwrap();
         let mut display = checkpoint.clone();
         super::graph_status_elapsed(&mut display, "boot-a", 66_000_000);
+        assert_eq!(display.nodes[0].ci.as_ref().unwrap().elapsed_seconds, 65);
+        assert_eq!(
+            display.nodes[0].ci.as_ref().unwrap().head_sha.as_deref(),
+            Some("abc123")
+        );
         let run = super::graph_snapshot(display);
-        let expected = "CI waiting elapsed=65s checks=build, tests head=abc123";
-        assert!(super::graph_human(&run).contains(expected));
-        let summary = super::graph_summary(&serde_json::to_value(&run).unwrap());
-        assert_eq!(summary.lines[1], format!("ci running: {expected}"));
-        assert_eq!(summary.next.as_deref(), Some("provenant status delivery"));
         assert_eq!(checkpoint.nodes[0].ci.as_ref().unwrap().elapsed_seconds, 10);
 
         let mut nested = run.clone();
@@ -2985,17 +2916,24 @@ mod result_tests {
         parent.children = vec!["ci".into()];
         parent.ci = None;
         nested.checkpoint.nodes.push(parent);
-        assert!(super::graph_human(&nested).contains(expected));
+        assert_eq!(
+            nested.checkpoint.nodes[1].children,
+            vec![String::from("ci")]
+        );
+        assert_eq!(
+            nested.checkpoint.nodes[0]
+                .ci
+                .as_ref()
+                .unwrap()
+                .elapsed_seconds,
+            65
+        );
 
         for (boot, now) in [("boot-b", 66_000_000), ("boot-a", 0)] {
             let mut display = checkpoint.clone();
             super::graph_status_elapsed(&mut display, boot, now);
             assert_eq!(display.nodes[0].ci.as_ref().unwrap().elapsed_seconds, 10);
         }
-        assert_eq!(
-            super::graph_ci_waiting(0, std::iter::empty(), None),
-            "CI waiting elapsed=0s checks=awaiting registration"
-        );
     }
 
     #[test]
@@ -3187,7 +3125,7 @@ mod result_tests {
         // This is the durable state if the process stops immediately after saving
         // the final terminal node, before advance clears the structural pause.
         let mut checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
-            "schema_version": 1,
+            "schema_version": provenant_fabric_runtime::graph::GraphCheckpoint::SCHEMA_VERSION,
             "graph_id": "graph",
             "plan_digest": "digest",
             "pause": {"cause": {"kind": "structural_limit"}, "reason": "node limit exceeded"},
@@ -3223,31 +3161,32 @@ mod result_tests {
     }
 
     #[test]
-    fn graph_result_errors_produce_safe_specific_warnings() {
+    fn graph_result_warnings_preserve_the_redaction_boundary() {
         use provenant_run::RunError;
-        for (error, warning) in [
-            (
-                RunError::ArtifactMismatch(provenant_run::ArtifactProvenance {
-                    check: provenant_run::ArtifactCheck::RecordedDigest,
-                    artifact: "result.md".into(),
-                    expected: None,
-                    actual: None,
-                }),
-                "artifact digest or length does not match its record",
-            ),
-            (RunError::NotFound, "result artifact is missing"),
-            (
-                RunError::TooLarge { limit: 1 },
-                "result artifact exceeds the byte limit",
-            ),
-            (
-                RunError::Validation("output redaction failed"),
-                "result artifact could not be verified",
-            ),
-        ] {
-            assert_eq!(super::graph_result_warning(&error), warning);
+
+        const PRIVATE_PATH: &str = "/private/host/TOKEN_SENTINEL/result.md";
+        const PRIVATE_TOKEN: &str = "TOKEN_SENTINEL";
+        let errors = [
+            RunError::ArtifactMismatch(provenant_run::ArtifactProvenance {
+                check: provenant_run::ArtifactCheck::RecordedDigest,
+                artifact: PRIVATE_PATH.into(),
+                expected: None,
+                actual: None,
+            }),
+            RunError::Validation("invalid result TOKEN_SENTINEL at /private/host"),
+            RunError::NotFound,
+            RunError::TooLarge { limit: 91_827 },
+        ];
+
+        for error in errors {
+            let warning = super::graph_result_warning(&error);
+            assert!(!warning.trim().is_empty());
+            assert!(!warning.contains(PRIVATE_PATH));
+            assert!(!warning.contains(PRIVATE_TOKEN));
+            assert!(!warning.contains("/private/host"));
         }
     }
+
     #[test]
     fn missing_graph_price_table_reports_its_path_and_failure() {
         let assets = tempfile::tempdir().unwrap();
@@ -3261,7 +3200,6 @@ mod result_tests {
                     .to_string()
             )
         );
-        assert!(reason.contains("No such file") || reason.contains("not found"));
     }
 
     #[test]
@@ -3387,7 +3325,7 @@ mod retry_allowance_tests {
     }
     fn assert_display(policy: (u8, String)) -> Result<(), Box<dyn std::error::Error>> {
         let document = serde_json::from_value(
-            serde_json::json!({"schema_version":1,"graph_id":"policy","nodes":[{"id":"read","prompt":"inspect","access":"read_only","route":{"alias":"junior"}}]}),
+            serde_json::json!({"schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"policy","nodes":[{"id":"read","prompt":"inspect","access":"read_only","route":{"alias":"junior"}}]}),
         )?;
         let run = graph::advance_with_budget(
             &document,

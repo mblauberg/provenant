@@ -31,11 +31,18 @@ pub struct LandSpec {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LandAuthority {
     /// The tier policy was `auto`.
-    Policy,
+    Policy {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
     /// The tier asked in `ask_id`, and the chair merged the pull request at the
     /// pinned head with `provenant land`, which the node observed. An inbox
     /// answer never authorises a land: lanes and peers can write answers.
-    Chair { ask_id: String },
+    Chair {
+        ask_id: String,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
 }
 
 /// A land node's pinned subject and decision, kept as the receipt.
@@ -167,7 +174,7 @@ pub(super) fn validate_relations(
     positions: &BTreeMap<String, usize>,
 ) -> Result<(), String> {
     for node in nodes {
-        if let Some(SourceBinding::Head { node: target }) = &node.source {
+        if let Some(SourceBinding::Head { node: target, .. }) = &node.source {
             let upstream = ancestors(nodes, positions, &node.id);
             let valid = positions.get(target).is_some_and(|index| {
                 let writer = &nodes[*index];
@@ -364,7 +371,8 @@ fn reviewed_head(
     };
     let graph_review_base = checkpoint
         .bases
-        .and_then(|bases| bases.review)
+        .as_ref()
+        .and_then(|bases| bases.review.as_ref())
         .map(|base| base.to_string());
     let review_base = progress
         .review_base
@@ -384,7 +392,8 @@ fn reviewed_head(
     let base = review_base.map(str::to_owned).or_else(|| {
         checkpoint
             .bases
-            .and_then(|bases| bases.integration)
+            .as_ref()
+            .and_then(|bases| bases.integration.as_ref())
             .map(|base| base.to_string())
     });
     Some(ReviewedSubject { head, base })
@@ -634,7 +643,7 @@ fn fail<R: AttemptOwner, J: GraphJournal>(
 
 fn outputs(record: &LandRecord) -> NodeOutputs {
     let authority = match &record.authorised_by {
-        Some(LandAuthority::Chair { ask_id }) => {
+        Some(LandAuthority::Chair { ask_id, .. }) => {
             format!("the chair landed it by hand after {ask_id}")
         }
         _ => format!(
@@ -736,7 +745,9 @@ pub(super) fn advance<R: AttemptOwner, J: GraphJournal>(
             policy_source: source,
             branch: bounded(&branch, OUTPUT_FIELD_BYTES),
             head: bounded(&head, OUTPUT_FIELD_BYTES),
-            authorised_by: (policy == LandPolicy::Auto).then_some(LandAuthority::Policy),
+            authorised_by: (policy == LandPolicy::Auto).then_some(LandAuthority::Policy {
+                extra: Default::default(),
+            }),
             pull_request: None,
             note: None,
             wake_at: None,
@@ -801,7 +812,10 @@ pub(super) fn advance<R: AttemptOwner, J: GraphJournal>(
                 )));
             }
             if let Some(ask_id) = asked {
-                record.authorised_by = Some(LandAuthority::Chair { ask_id });
+                record.authorised_by = Some(LandAuthority::Chair {
+                    ask_id,
+                    extra: Default::default(),
+                });
             }
             record.pull_request = pull_request;
             record.note = note.map(|note| bounded(&note, MAX_ADVANCE_ERROR_BYTES));
@@ -953,7 +967,7 @@ pub(super) fn validate_progress(
         .as_ref()
         .and_then(|record| record.authorised_by.as_ref());
     let authority_valid = match authority {
-        Some(LandAuthority::Chair { ask_id }) => {
+        Some(LandAuthority::Chair { ask_id, .. }) => {
             progress
                 .land
                 .as_ref()
@@ -963,7 +977,7 @@ pub(super) fn validate_progress(
                 && parse(ask_id, &progress.id)
                     .is_some_and(|(_, generation)| generation == asks::retry_generation(progress))
         }
-        Some(LandAuthority::Policy) => progress
+        Some(LandAuthority::Policy { .. }) => progress
             .land
             .as_ref()
             .is_some_and(|record| record.policy == LandPolicy::Auto),

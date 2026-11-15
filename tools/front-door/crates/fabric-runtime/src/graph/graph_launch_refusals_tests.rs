@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn admitted_invalid_launch_projects_safe_schema_reason_and_action() {
+fn admitted_invalid_launch_preserves_schema_cause_and_safe_projection() {
     let document = graph(vec![node("one", route("first"))]);
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
@@ -18,10 +18,17 @@ fn admitted_invalid_launch_projects_safe_schema_reason_and_action() {
     let result = advance(&document, &mut owner, &mut journal).unwrap();
     let progress = &result.checkpoint.nodes[0];
     assert_eq!(progress.state, NodeState::Blocked);
+    assert_eq!(
+        progress.advance_error_code.as_deref(),
+        Some("launch_refused")
+    );
+    assert_eq!(
+        progress.advance_owner_code.as_deref(),
+        Some("invalid_input")
+    );
     let reason = progress.advance_error.as_deref().unwrap();
-    assert!(reason.contains("invalid_input"));
+    // Schema is the typed owner detail; the projection retains its safe field.
     assert!(reason.contains("schema_version"));
-    assert!(reason.contains("check the named input field"));
     assert!(!reason.contains("TOKEN_SENTINEL"));
     assert!(!reason.chars().any(char::is_control));
 
@@ -35,17 +42,30 @@ fn admitted_invalid_launch_projects_safe_schema_reason_and_action() {
         ..Default::default()
     };
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
-    let reason = run.checkpoint.nodes[0].advance_error.as_deref().unwrap();
-    assert!(reason.contains("invalid_input"));
-    assert!(reason.contains("check the input"));
+    let progress = &run.checkpoint.nodes[0];
+    assert_eq!(
+        progress.advance_error_code.as_deref(),
+        Some("launch_refused")
+    );
+    assert_eq!(
+        progress.advance_owner_code.as_deref(),
+        Some("invalid_input")
+    );
+    assert!(
+        !progress
+            .advance_error
+            .as_deref()
+            .unwrap()
+            .contains("TOKEN_SENTINEL")
+    );
 }
 
 #[test]
-fn admitted_invalid_launch_reports_input_failure_reason() {
+fn admitted_invalid_launch_records_typed_input_failure_category() {
     use crate::coordination::facade::{FacadeError, InvalidInputDetail};
-    for (detail, expected) in [
-        (InvalidInputDetail::InputTooLarge, "1 MiB"),
-        (InvalidInputDetail::InputUnreadable, "unreadable"),
+    for detail in [
+        InvalidInputDetail::InputTooLarge,
+        InvalidInputDetail::InputUnreadable,
     ] {
         let document = graph(vec![node("one", route("first"))]);
         let mut owner = ErrorLauncher {
@@ -55,13 +75,17 @@ fn admitted_invalid_launch_reports_input_failure_reason() {
         };
         let mut journal = MemoryJournal::default();
         let run = advance(&document, &mut owner, &mut journal).unwrap();
-        let node = &run.checkpoint.nodes[0];
-        assert_eq!(node.state, NodeState::Blocked);
-        let reason = node.advance_error.as_deref().unwrap();
-        assert!(reason.contains("invalid_input"));
-        assert!(reason.contains("input"));
-        assert!(reason.contains(expected));
-        assert!(reason.contains("retry"));
+        let progress = &run.checkpoint.nodes[0];
+        assert_eq!(progress.state, NodeState::Blocked);
+        assert_eq!(
+            progress.advance_error_code.as_deref(),
+            Some("launch_refused")
+        );
+        assert_eq!(
+            progress.advance_owner_code.as_deref(),
+            Some("invalid_input")
+        );
+        let reason = progress.advance_error.as_deref().unwrap();
         assert!(!reason.contains("TOKEN_SENTINEL"));
     }
 }
@@ -79,7 +103,8 @@ fn admitted_launch_projects_typed_prompt_field_and_limit() {
     }))
     .unwrap();
     let SubmitInput::Submit { task, .. } = &mut input;
-    task.prompt = format!("TOKEN_SENTINEL{}", "é".repeat(524_289));
+    let prompt_limit = crate::coordination::input::MAX_CLI_PROMPT_BYTES;
+    task.prompt = format!("TOKEN_SENTINEL{}", "é".repeat(prompt_limit / "é".len() + 1));
     let cause = input
         .validate_input(provenant_core::WaitTransport::Cli)
         .unwrap_err();
@@ -96,27 +121,42 @@ fn admitted_launch_projects_typed_prompt_field_and_limit() {
         &mut journal,
     )
     .unwrap();
-    let reason = run.checkpoint.nodes[0].advance_error.as_deref().unwrap();
+    let progress = &run.checkpoint.nodes[0];
+    assert_eq!(
+        progress.advance_error_code.as_deref(),
+        Some("launch_refused")
+    );
+    assert_eq!(
+        progress.advance_owner_code.as_deref(),
+        Some("invalid_input")
+    );
+    let reason = progress.advance_error.as_deref().unwrap();
     assert!(reason.contains("task.prompt"));
-    assert!(reason.contains("1048576"));
-    assert!(reason.contains("retry"));
+    assert!(reason.contains(&prompt_limit.to_string()));
     assert!(!reason.contains("TOKEN_SENTINEL"));
     assert!(reason.len() <= MAX_ADVANCE_ERROR_BYTES);
 }
 
 #[test]
-fn memory_pressure_launch_refusal_names_source_and_action() {
+fn memory_pressure_launch_refusal_retains_typed_cause() {
     use crate::coordination::facade::FacadeError;
     use provenant_records::diagnostic::{
         PressureLevel, PressureThreshold, ResourceFact, SettingSource,
     };
-    let error = FacadeError::ConfinementRefused {
-        resource: Some(ResourceFact::MemoryPressure {
-            level: PressureLevel::Critical,
-            threshold: PressureThreshold::Critical,
-            origin: SettingSource::ShippedDefault,
-        }),
+    let resource = ResourceFact::MemoryPressure {
+        level: PressureLevel::Critical,
+        threshold: PressureThreshold::Critical,
+        origin: SettingSource::ShippedDefault,
     };
+    let error = FacadeError::ConfinementRefused {
+        resource: Some(resource),
+    };
+    let diagnostic = error.diagnostic();
+    assert_eq!(diagnostic.code, "confinement_refused");
+    let detail = diagnostic.detail.as_deref().unwrap();
+    assert!(detail.contains(PressureLevel::Critical.name()));
+    assert!(detail.contains(PressureThreshold::Critical.name()));
+    assert!(detail.contains(SettingSource::ShippedDefault.description()));
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
         errors: [(1, error)].into(),
@@ -129,29 +169,44 @@ fn memory_pressure_launch_refusal_names_source_and_action() {
         &mut journal,
     )
     .unwrap();
-    let reason = run.checkpoint.nodes[0].advance_error.as_deref().unwrap();
-    assert!(reason.contains("memory_pressure_threshold"));
-    assert!(reason.contains("shipped default"));
-    assert!(reason.contains("reduce host memory pressure"));
+    let progress = &run.checkpoint.nodes[0];
+    assert_eq!(
+        progress.advance_owner_code.as_deref(),
+        Some("confinement_refused")
+    );
+    assert!(progress.advance_error.is_some());
 }
 
 #[test]
-fn process_limit_launch_projection_keeps_io_and_resource_reason() {
+fn process_limit_launch_projection_keeps_io_code_and_redacts_sources() {
+    let resource = provenant_records::diagnostic::ResourceFact::Processes {
+        used: 950,
+        limit: 1000,
+        reserved: 100,
+    };
     let error = crate::coordination::facade::FacadeError::Io {
         operation: "TOKEN_SENTINEL".into(),
         path: Some("/private/host".into()),
         delivery_limit: None,
         delivery_stage: None,
-        resource: Some(Box::new(
-            provenant_records::diagnostic::ResourceFact::Processes {
-                used: 950,
-                limit: 1000,
-                reserved: 100,
-            },
-        )),
+        resource: Some(Box::new(resource)),
         input_failure: None,
         cause: None,
     };
+    let diagnostic = error.diagnostic();
+    assert_eq!(diagnostic.code, "io");
+    let detail = diagnostic.detail.as_deref().unwrap();
+    let (used, limit, reserved) = match resource {
+        provenant_records::diagnostic::ResourceFact::Processes {
+            used,
+            limit,
+            reserved,
+        } => (used, limit, reserved),
+        _ => unreachable!("the fixture carries a process resource fact"),
+    };
+    for fact in [used, limit, reserved] {
+        assert!(detail.contains(&fact.to_string()));
+    }
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
         errors: [(1, error)].into(),
@@ -164,13 +219,10 @@ fn process_limit_launch_projection_keeps_io_and_resource_reason() {
         &mut journal,
     )
     .unwrap();
-    let reason = retry_of(journal.0.as_ref().unwrap())
-        .reason
-        .as_deref()
-        .unwrap();
-    assert!(reason.contains("io"));
-    assert!(reason.contains("RLIMIT_NPROC"));
-    assert!(reason.contains("process"));
+    let checkpoint = journal.0.as_ref().unwrap();
+    let progress = &checkpoint.nodes[0];
+    assert_eq!(progress.advance_owner_code.as_deref(), Some("io"));
+    let reason = retry_of(checkpoint).reason.as_deref().unwrap();
     assert!(!reason.contains("TOKEN_SENTINEL"));
     assert!(!reason.contains("/private/host"));
 }
@@ -311,7 +363,7 @@ fn graph_remedies_follow_writer_resource_and_unknown_handoff_causes() {
                 disk: None,
                 reason: "TOKEN_SENTINEL".into(),
             },
-            "commit",
+            "dispatch_refused",
             false,
         ),
         (
@@ -324,18 +376,19 @@ fn graph_remedies_follow_writer_resource_and_unknown_handoff_causes() {
                 disk: None,
                 reason: "TOKEN_SENTINEL".into(),
             },
-            "free disk space",
+            "dispatch_refused",
             false,
         ),
         (
             FacadeError::LaunchUnknown {
                 operation_id: provenant_core::OperationId::parse("dispatch-17").unwrap(),
             },
-            "dispatch-17",
+            "LAUNCH_UNKNOWN",
             true,
         ),
     ];
-    for (error, condition, uncertain) in cases {
+    for (error, expected_code, uncertain) in cases {
+        assert_eq!(error.diagnostic().code, expected_code);
         let mut owner = ErrorLauncher {
             now: Some(at(0)),
             errors: [(1, error)].into(),
@@ -349,6 +402,7 @@ fn graph_remedies_follow_writer_resource_and_unknown_handoff_causes() {
         )
         .unwrap();
         let progress = &journal.0.as_ref().unwrap().nodes[0];
+        assert_eq!(progress.advance_owner_code.as_deref(), Some(expected_code));
         let reason = if uncertain {
             retry_of(journal.0.as_ref().unwrap())
                 .reason
@@ -357,14 +411,8 @@ fn graph_remedies_follow_writer_resource_and_unknown_handoff_causes() {
         } else {
             progress.advance_error.as_deref().unwrap()
         };
-        assert!(reason.contains(condition), "{reason}");
         assert!(!reason.contains("TOKEN_SENTINEL"));
         if uncertain {
-            assert!(
-                reason.contains("inspect") && reason.contains("same operation ID"),
-                "{reason}"
-            );
-            assert!(!reason.contains("provenant retry"));
             owner.now = Some(at(6));
             advance(
                 &graph(vec![node("one", route("first"))]),
@@ -382,24 +430,26 @@ fn graph_remedies_follow_writer_resource_and_unknown_handoff_causes() {
 }
 
 #[test]
-fn graph_plan_refusal_preserves_node_reason_and_writer_remedy() {
+fn graph_plan_refusal_preserves_typed_fact_and_safe_detail() {
     use crate::coordination::facade::{FacadeError, InvalidInputDetail};
     let error = FacadeError::graph_admission(crate::graph::AdmissionError::Plan(
         "node implement: writer worktree".into(),
     ));
     let diagnostic = error.diagnostic();
-    assert!(
-        error
-            .to_string()
-            .contains("node implement: writer worktree")
-    );
-    assert_eq!(
-        diagnostic.detail.as_deref(),
-        Some("node implement: writer worktree")
-    );
-    assert!(diagnostic.next.as_deref().is_some_and(
-        |next| next.contains("--worktree PATH") && next.contains("--branch B --base REF")
+    assert!(matches!(
+        &error,
+        FacadeError::DispatchRefused {
+            fact: Some(crate::coordination::facade::DispatchRefusalFact::GraphPlan),
+            ..
+        }
     ));
+    assert_eq!(diagnostic.code, "dispatch_refused");
+    assert!(
+        diagnostic
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("implement"))
+    );
     assert!(!matches!(
         error,
         FacadeError::InvalidInput {
@@ -473,7 +523,6 @@ fn graph_advance_preserves_typed_admission_refusal() {
         error,
         GraphError::Admission(AdmissionError::Schema(_))
     ));
-    assert_eq!(error.to_string(), "invalid graph: schema version");
     assert!(journal.0.is_none());
 }
 
@@ -528,13 +577,13 @@ fn failed_parent_waits_for_sibling_before_blocking_join() {
 
 #[test]
 fn expanded_composite_identifiers_support_long_lane_names() {
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":"long-identifiers","nodes":[{
+    let document = document_fixture(serde_json::json!({
+        "graph_id":"long-identifiers","nodes":[{
             "id":"lanes","kind":"composite","access":"read_only",
             "composite":{"nodes":[{"id":"lane-cuts-quarantine","kind":"composite","access":"read_only",
               "composite":{"nodes":[{"id":"lens--review--lens-conventions-readability","access":"read_only","prompt":"review","route":{"alias":"junior"}}],"exports":[]}}],"exports":[]}
         }]
-    })).unwrap();
+    }));
     let expanded = composites::expand(&document, &crate::config::GraphLimits::default()).unwrap();
     assert!(
         expanded.nodes.iter().any(|node| node.id

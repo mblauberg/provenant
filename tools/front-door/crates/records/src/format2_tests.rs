@@ -406,8 +406,26 @@ fn records_refuse_values_outside_their_bounds() {
     let mut wire = serde_json::to_value(&key).unwrap();
     wire["attempt"] = json!(0);
     assert!(serde_json::from_value::<WorkKey>(wire).is_err());
-    assert!(Pause::new(PauseCause::LoopPaused, None, "").is_err());
-    assert!(Pause::new(PauseCause::LoopPaused, Some("a b".into()), "Paused.").is_err());
+    assert!(
+        Pause::new(
+            PauseCause::LoopPaused {
+                extra: Default::default()
+            },
+            None,
+            ""
+        )
+        .is_err()
+    );
+    assert!(
+        Pause::new(
+            PauseCause::LoopPaused {
+                extra: Default::default()
+            },
+            Some("a b".into()),
+            "Paused."
+        )
+        .is_err()
+    );
     let oid = GitOid::parse(&"a".repeat(40)).unwrap();
     assert!(FindingDecision::new("", FindingDisposition::Act, "Fix.", oid, Some(oid)).is_err());
     assert!(FindingDecision::new("f1", FindingDisposition::Act, "", oid, Some(oid)).is_err());
@@ -487,17 +505,30 @@ fn each_record_round_trips_and_keeps_an_unknown_field() {
         .unwrap(),
         true,
     );
+    let pause = Pause::new(
+        PauseCause::Stop {
+            stop: StopCause::Blocked,
+            extra: Default::default(),
+        },
+        Some("implement".into()),
+        "writer implement is blocked; inspect its handoff",
+    )
+    .unwrap();
+    round_trip(&pause, true);
+    let mut wire = serde_json::to_value(&pause).unwrap();
+    wire["cause"]["future_field"] = json!({"retained": true});
+    let bytes = serde_json::to_vec(&wire).unwrap();
+    let decoded: Pause = decode(bytes.as_slice(), Limits::default()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
     round_trip(
         &Pause::new(
-            PauseCause::Stop(StopCause::Blocked),
-            Some("implement".into()),
-            "writer implement is blocked; inspect its handoff",
+            PauseCause::ContinuationBudget {
+                extra: Default::default(),
+            },
+            None,
+            "Budget spent.",
         )
         .unwrap(),
-        true,
-    );
-    round_trip(
-        &Pause::new(PauseCause::ContinuationBudget, None, "Budget spent.").unwrap(),
         true,
     );
 }

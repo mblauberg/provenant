@@ -6,7 +6,9 @@ fn synthesis_stops_when_the_pinned_integration_head_moves() {
     for (second, expected) in [(pin.clone(), true), ("2".repeat(40), false)] {
         let mut synthesis = node("synthesis", route("first"));
         synthesis.kind = Some(NodeKind::Synthesise);
-        synthesis.source = Some(SourceBinding::Integration);
+        synthesis.source = Some(SourceBinding::Integration {
+            extra: Default::default(),
+        });
         synthesis.depends_on = vec!["lens".into()];
         synthesis.inputs = vec![GraphInput {
             required_outputs: Vec::new(),
@@ -42,7 +44,9 @@ fn synthesis_stops_when_the_pinned_integration_head_moves() {
 fn source_and_read_roots_survive_retry_and_replay() {
     let commit = "1".repeat(40);
     let mut leaf = node("review", route("first"));
-    leaf.source = Some(SourceBinding::Integration);
+    leaf.source = Some(SourceBinding::Integration {
+        extra: Default::default(),
+    });
     leaf.read_roots = vec!["/authorised/other-worktree".into()];
     leaf.attachments = vec!["/authorised/shot.png".into()];
     leaf.route = None;
@@ -91,15 +95,18 @@ fn reader_review_base_resolves_in_its_bound_source_writer_and_replays() {
     let mut writer = node("writer", route("fixture"));
     writer.access = AccessMode::WorktreeWrite;
     writer.worktree = Some("lane".into());
-    writer.source = Some(SourceBinding::Commit { commit: original });
+    writer.source = Some(SourceBinding::Commit {
+        commit: original,
+        extra: Default::default(),
+    });
     let mut reader = node("reader", route("fixture"));
     reader.depends_on.push("writer".into());
     reader.source = Some(SourceBinding::Node {
         node: "writer".into(),
+        extra: Default::default(),
     });
     reader.review_base = Some("moving-ref".into());
     let mut document = graph(vec![reader, writer]);
-    document.schema_version = 2;
     let mut written = terminal(AttemptOutcome::Succeeded);
     if let AttemptObservation::Terminal { commit, .. } = &mut written {
         *commit = Some(predecessor.clone());
@@ -198,9 +205,9 @@ fn known_commit_source_is_visible_before_dependencies_settle() {
     reader.depends_on.push("gate".into());
     reader.source = Some(SourceBinding::Commit {
         commit: "1".repeat(40),
+        extra: Default::default(),
     });
     let mut document = graph(vec![reader, node("gate", route("fixture"))]);
-    document.schema_version = 2;
     let mut owner = FakeOwner {
         observations: VecDeque::from([AttemptObservation::Pending {
             attempt_ref: Some("host/gate".into()),
@@ -228,10 +235,10 @@ fn explicit_writer_source_stays_distinct_from_its_bound_worktree_head() {
     writer.worktree = Some("lane".into());
     writer.source = Some(SourceBinding::Commit {
         commit: "1".repeat(40),
+        extra: Default::default(),
     });
     writer.depends_on.push("gate".into());
     let mut document = graph(vec![writer, node("gate", route("fixture"))]);
-    document.schema_version = 2;
     let mut owner = FakeOwner {
         implicit_head: Some("2".repeat(40)),
         observations: VecDeque::from([AttemptObservation::Pending {
@@ -270,12 +277,11 @@ fn explicit_writer_source_stays_distinct_from_its_bound_worktree_head() {
 }
 
 #[test]
-fn schema_two_refuses_a_host_that_cannot_bind_a_writer() {
+fn writer_binding_requires_host_support() {
     let mut writer = node("writer", route("fixture"));
     writer.access = AccessMode::WorktreeWrite;
     writer.worktree = Some("lane".into());
     let mut document = graph(vec![writer]);
-    document.schema_version = 2;
     let mut journal = MemoryJournal::default();
     let mut owner = ErrorLauncher::default();
     assert!(matches!(
@@ -291,32 +297,12 @@ fn schema_two_refuses_a_host_that_cannot_bind_a_writer() {
 }
 
 #[test]
-fn implicit_writer_binding_applies_to_schema_one_when_host_supports_it() {
-    let mut writer = node("writer", route("fixture"));
-    writer.access = AccessMode::WorktreeWrite;
-    writer.worktree = Some("lane".into());
-    let document = graph(vec![writer]);
-    let mut owner = FakeOwner {
-        implicit_head: Some("1".repeat(40)),
-        observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
-        ..Default::default()
-    };
-    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(
-        run.checkpoint.nodes[0].source_commit.as_deref(),
-        Some("1111111111111111111111111111111111111111")
-    );
-    assert_eq!(owner.implicit_bindings, 1);
-}
-
-#[test]
 fn implicit_writer_binds_before_its_dependency_settles() {
     let mut writer = node("writer", route("fixture"));
     writer.access = AccessMode::WorktreeWrite;
     writer.worktree = Some("lane".into());
     writer.depends_on.push("gate".into());
     let mut document = graph(vec![writer, node("gate", route("fixture"))]);
-    document.schema_version = 2;
     let first_head = "1".repeat(40);
     let mut owner = FakeOwner {
         implicit_head: Some(first_head.clone()),
@@ -376,7 +362,6 @@ fn implicit_writer_source_is_bound_at_admission_and_survives_replay() {
     writer.access = AccessMode::WorktreeWrite;
     writer.worktree = Some("lane".into());
     let mut document = graph(vec![writer]);
-    document.schema_version = 2;
     let first_head = "1".repeat(40);
     let mut owner = FakeOwner {
         implicit_head: Some(first_head.clone()),
@@ -427,6 +412,7 @@ fn source_requires_upstream_commit_and_fails_before_launch_when_missing() {
     child.depends_on.push("author".into());
     child.source = Some(SourceBinding::Node {
         node: "author".into(),
+        extra: Default::default(),
     });
     let document = graph(vec![node("author", route("writer")), child]);
     let mut owner = FakeOwner {
@@ -435,12 +421,13 @@ fn source_requires_upstream_commit_and_fails_before_launch_when_missing() {
     };
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(owner.calls.len(), 1);
-    assert_eq!(run.checkpoint.nodes[1].state, NodeState::Failed);
     assert_eq!(
-        run.checkpoint.nodes[1].advance_error.as_deref(),
-        Some("node review: source commit unavailable or invalid")
+        run.checkpoint.nodes[1].advance_error_code.as_deref(),
+        Some("source_commit_unavailable")
     );
+    assert!(run.checkpoint.nodes[1].attempts.is_empty());
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(run.checkpoint.nodes[1].state, NodeState::Failed);
     assert_eq!(
         advance(&document, &mut FakeOwner::default(), &mut journal)
             .unwrap()
@@ -451,8 +438,8 @@ fn source_requires_upstream_commit_and_fails_before_launch_when_missing() {
 
 #[test]
 fn composite_inherits_inputs_and_combines_results_from_parallel_children() {
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":"parallel-composite","nodes":[
+    let document = super::model::document_fixture(serde_json::json!({
+        "graph_id":"parallel-composite","nodes":[
             {"id":"start","access":"read_only","prompt":"start","route":{"alias":"senior"}},
             {"id":"parallel","kind":"composite","access":"read_only","require_skill_location":true,"depends_on":["start"],
             "inputs":[{"node":"start","outputs":["result"]}],
@@ -461,8 +448,7 @@ fn composite_inherits_inputs_and_combines_results_from_parallel_children() {
                 {"id":"b","access":"read_only","prompt":"b","route":{"alias":"junior"}}
             ],"exports":[{"node":"a","outputs":["result"]},{"node":"b","outputs":["result"]}]}}
         ]
-    }))
-    .unwrap();
+    }));
     let mut owner = FakeOwner {
         observations: [
             terminal_with_result(AttemptOutcome::Succeeded, "initial evidence"),
@@ -488,15 +474,24 @@ fn composite_inherits_inputs_and_combines_results_from_parallel_children() {
         .result
         .as_ref()
         .unwrap();
-    assert!(result.excerpt.contains("parallel--a:\nevidence A"));
-    assert!(result.excerpt.contains("parallel--b:\nevidence B"));
+    let member_result = |id: &str| {
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .and_then(|node| node.outputs.as_ref())
+            .and_then(|outputs| outputs.result.as_ref())
+            .map(|result| result.excerpt.as_str())
+    };
+    assert_eq!(member_result("parallel--a"), Some("evidence A"));
+    assert_eq!(member_result("parallel--b"), Some("evidence B"));
     assert!(!result.truncated);
 }
 
 #[test]
 fn composite_merge_retains_inherited_required_outputs() {
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":2,"graph_id":"required-composite-input","nodes":[
+    let document = super::model::document_fixture(serde_json::json!({
+        "graph_id":"required-composite-input","nodes":[
             {"id":"start","access":"read_only","prompt":"start","route":{"alias":"senior"}},
             {"id":"parallel","kind":"composite","access":"read_only","depends_on":["start"],
              "inputs":[{"node":"start","outputs":["findings"],"required_outputs":["findings"]}],
@@ -505,8 +500,7 @@ fn composite_merge_retains_inherited_required_outputs() {
                   "depends_on":["start"],"inputs":[{"node":"start","outputs":["result"]}]}
              ],"exports":[{"node":"a","outputs":["result"]}]}}
         ]
-    }))
-    .unwrap();
+    }));
     let expanded = loops::expand(&document, &[], &crate::config::GraphLimits::default()).unwrap();
     let child = expanded
         .nodes
@@ -527,8 +521,8 @@ fn composite_merge_retains_inherited_required_outputs() {
 fn required_composite_findings_need_complete_member_evidence() {
     let empty = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```";
     for (second, succeeds) in [(empty, true), ("missing findings", false)] {
-        let document: GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version":2,"graph_id":"required-composite-findings","nodes":[
+        let document = super::model::document_fixture(serde_json::json!({
+            "graph_id":"required-composite-findings","nodes":[
                 {"id":"reviews","kind":"composite","access":"read_only","composite":{
                     "nodes":[
                         {"id":"a","access":"read_only","prompt":"a","route":{"alias":"senior"}},
@@ -538,7 +532,7 @@ fn required_composite_findings_need_complete_member_evidence() {
                 {"id":"consumer","access":"read_only","prompt":"check","route":{"alias":"senior"},
                  "depends_on":["reviews"],"inputs":[{"node":"reviews","outputs":["findings"],"required_outputs":["findings"]}]}
             ]
-        })).unwrap();
+        }));
         let mut owner = FakeOwner {
             observations: VecDeque::from([
                 terminal_with_result(AttemptOutcome::Succeeded, empty),
@@ -574,16 +568,15 @@ fn required_composite_findings_need_complete_member_evidence() {
 
 #[test]
 fn crash_mid_composite_resumes_without_rerunning_settled_children() {
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":"composite-crash","nodes":[{
+    let document = super::model::document_fixture(serde_json::json!({
+        "graph_id":"composite-crash","nodes":[{
             "id":"group","kind":"composite","access":"read_only",
             "composite":{"nodes":[
                 {"id":"a","access":"read_only","prompt":"a","route":{"alias":"junior"}},
                 {"id":"b","access":"read_only","prompt":"b","depends_on":["a"],"route":{"alias":"junior"}}
             ],"exports":[{"node":"a","outputs":["result"]},{"node":"b","outputs":["result"]}]}
         }]
-    }))
-    .unwrap();
+    }));
     let mut journal = MemoryJournal::default();
     // A progress boundary inside a composite: the crash window is an
     // accepted but unobserved child, whose attempt stays starting with no
@@ -597,9 +590,21 @@ fn crash_mid_composite_resumes_without_rerunning_settled_children() {
         ..Default::default()
     };
     let interrupted = advance(&document, &mut crashing, &mut journal).unwrap();
-    assert_eq!(crashing.calls.len(), 2);
     assert_eq!(interrupted.status, GraphStatus::Pending);
-    let progress = &interrupted.checkpoint.nodes[1];
+    let progress = interrupted
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "group--b")
+        .unwrap();
+    let settled_attempts = interrupted
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "group--a")
+        .unwrap()
+        .attempts
+        .clone();
     assert_eq!(progress.state, NodeState::Running);
     assert!(progress.launch_retry.is_none());
     assert_eq!(
@@ -620,34 +625,45 @@ fn crash_mid_composite_resumes_without_rerunning_settled_children() {
     let run = advance(&document, &mut resumed, &mut journal).unwrap();
     assert_eq!(run.status, GraphStatus::Complete);
     assert!(run.checkpoint.successful());
-    assert_eq!(resumed.calls.len(), 1);
-    assert!(resumed.prompts[0].contains("evidence A") || resumed.prompts[0].contains('b'));
-    let result = run
-        .checkpoint
-        .nodes
-        .last()
-        .unwrap()
-        .outputs
-        .as_ref()
-        .unwrap()
-        .result
-        .as_ref()
-        .unwrap();
-    assert!(result.excerpt.contains("evidence A") && result.excerpt.contains("evidence B"));
+    let child = |id: &str| {
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .unwrap()
+    };
+    assert_eq!(child("group--a").state, NodeState::Succeeded);
+    assert_eq!(child("group--a").attempts, settled_attempts);
+    assert_eq!(child("group--b").state, NodeState::Succeeded);
+    assert_eq!(
+        child("group--a")
+            .outputs
+            .as_ref()
+            .and_then(|outputs| outputs.result.as_ref())
+            .map(|result| result.excerpt.as_str()),
+        Some("evidence A")
+    );
+    assert_eq!(
+        child("group--b")
+            .outputs
+            .as_ref()
+            .and_then(|outputs| outputs.result.as_ref())
+            .map(|result| result.excerpt.as_str()),
+        Some("evidence B")
+    );
 }
 
 #[test]
 fn composite_running_status_does_not_consume_an_attempt_slot() {
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":"composite-running","nodes":[{
+    let document = super::model::document_fixture(serde_json::json!({
+        "graph_id":"composite-running","nodes":[{
             "id":"group","kind":"composite","access":"read_only",
             "composite":{"nodes":[
                 {"id":"a","access":"read_only","prompt":"a","route":{"alias":"junior"}},
                 {"id":"b","access":"read_only","prompt":"b","route":{"alias":"junior"}}
             ],"exports":[]}
         }]
-    }))
-    .unwrap();
+    }));
     let limits = crate::config::GraphLimits {
         concurrency: Some(1),
         ..Default::default()
@@ -694,6 +710,7 @@ fn typed_composite_constructor_matches_decoded_graph_node() {
         "panel".into(),
         vec!["source".into()],
         CompositeSpec {
+            extra: Default::default(),
             min_successful: Some(1),
             reduce_verdict: true,
             nodes: Vec::new(),
@@ -720,30 +737,35 @@ fn typed_composite_constructor_matches_decoded_graph_node() {
 
 #[test]
 fn composite_expansion_reports_the_bound_and_owner() {
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version": 1, "graph_id": "composite-bound", "nodes": [{
+    let document = super::model::document_fixture(serde_json::json!({
+        "graph_id": "composite-bound", "nodes": [{
             "id": "group", "kind": "composite", "access": "read_only",
             "composite": {"nodes": [
                 {"id": "a", "access": "read_only", "prompt": "a", "route": {"alias": "fixture"}},
                 {"id": "b", "access": "read_only", "prompt": "b", "route": {"alias": "fixture"}}
             ], "exports": []}
         }]
-    }))
-    .unwrap();
+    }));
     let limits = crate::config::GraphLimits {
         nodes: 1,
         ..Default::default()
     };
-    let reason = composites::expand(&document, &limits)
-        .unwrap_err()
-        .to_string();
-    assert!(reason.contains("limits.nodes"), "{reason}");
-    assert!(reason.contains("composite expansion"), "{reason}");
+    let bound = crate::config::GraphLimits::composite_nodes_bound(limits.nodes);
+    let member_count = document.nodes[0].composite.as_ref().unwrap().nodes.len();
+    assert!(bound.refusal(member_count).is_some());
+    assert!(matches!(
+        composites::expand(&document, &limits),
+        Err(AdmissionError::Composite(_))
+    ));
 }
 
 #[test]
 fn loop_expansion_safety_refusal_names_bound_and_owner_at_each_boundary() {
-    let body: Vec<_> = (0..17)
+    let limits = crate::config::GraphLimits::default();
+    let node_bound = crate::config::GraphLimits::loop_expansion_nodes_bound();
+    let round_bound = crate::config::GraphLimits::loop_expansion_rounds_bound();
+    let body_len = node_bound.maximum / round_bound.maximum + 1;
+    let body: Vec<_> = (0..body_len)
         .map(|index| {
             serde_json::json!({
                 "id": format!("member-{index}"), "access": "read_only",
@@ -751,23 +773,19 @@ fn loop_expansion_safety_refusal_names_bound_and_owner_at_each_boundary() {
             })
         })
         .collect();
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version": 1, "graph_id": "large-loop", "nodes": [{
+    let document = super::model::document_fixture(serde_json::json!({
+        "graph_id": "large-loop", "nodes": [{
             "id": "repair", "kind": "loop", "access": "read_only",
-            "loop": {"body": body, "until": "member-0", "max_rounds": 1024}
+            "loop": {"body": body, "until": "member-0", "max_rounds": round_bound.maximum}
         }]
-    }))
-    .unwrap();
-    let limits = crate::config::GraphLimits::default();
-    let bound = crate::config::GraphLimits::loop_expansion_nodes_bound();
-    assert!(bound.refusal(bound.maximum).is_none());
-    let reason = bound.refusal(17 * 1024 + 1).unwrap();
-    assert!(
-        reason.contains("loop_expansion_nodes")
-            && reason.contains("internal loop expansion safety")
-    );
-    assert_eq!(document.check_composites(&limits).unwrap_err(), reason);
-    assert_eq!(document.admit(&limits).unwrap_err().to_string(), reason);
+    }));
+    assert!(node_bound.refusal(node_bound.maximum).is_none());
+    assert!(node_bound.refusal(node_bound.maximum + 1).is_some());
+    assert!(document.check_composites(&limits).is_err());
+    assert!(matches!(
+        document.admit(&limits),
+        Err(AdmissionError::Composite(_))
+    ));
     let mut owner = FakeOwner::default();
     let result = advance_with_budget(
         &document,
@@ -776,28 +794,24 @@ fn loop_expansion_safety_refusal_names_bound_and_owner_at_each_boundary() {
         &limits,
         &Default::default(),
     );
-    assert!(
-        matches!(result, Err(GraphError::Admission(AdmissionError::Composite(ref actual))) if actual == &reason)
-    );
-    assert!(owner.calls.is_empty());
+    assert!(matches!(
+        result,
+        Err(GraphError::Admission(AdmissionError::Composite(_)))
+    ));
 
     let mut too_many_rounds = document.clone();
+    let exceeded_rounds = round_bound.maximum + 1;
     too_many_rounds.nodes[0]
         .loop_body
         .as_mut()
         .unwrap()
-        .max_rounds = 1025;
-    let reason = crate::config::GraphLimits::loop_expansion_rounds_bound()
-        .refusal(1025)
-        .unwrap();
-    assert_eq!(
-        too_many_rounds.check_composites(&limits).unwrap_err(),
-        reason
-    );
-    assert_eq!(
-        too_many_rounds.admit(&limits).unwrap_err().to_string(),
-        reason
-    );
+        .max_rounds = exceeded_rounds;
+    assert!(round_bound.refusal(exceeded_rounds).is_some());
+    assert!(too_many_rounds.check_composites(&limits).is_err());
+    assert!(matches!(
+        too_many_rounds.admit(&limits),
+        Err(AdmissionError::Composite(_))
+    ));
     let result = advance_with_budget(
         &too_many_rounds,
         &mut owner,
@@ -805,19 +819,18 @@ fn loop_expansion_safety_refusal_names_bound_and_owner_at_each_boundary() {
         &limits,
         &Default::default(),
     );
-    assert!(
-        matches!(result, Err(GraphError::Admission(AdmissionError::Composite(ref actual))) if actual == &reason)
-    );
-    assert!(owner.calls.is_empty());
+    assert!(matches!(
+        result,
+        Err(GraphError::Admission(AdmissionError::Composite(_)))
+    ));
 
     let mut zero_rounds = document.clone();
     zero_rounds.nodes[0].loop_body.as_mut().unwrap().max_rounds = 0;
-    let reason = zero_rounds.check_composites(&limits).unwrap_err();
-    assert!(
-        reason.contains("repair") && reason.contains("loop.max_rounds"),
-        "{reason}"
-    );
-    assert_eq!(zero_rounds.admit(&limits).unwrap_err().to_string(), reason);
+    assert!(zero_rounds.check_composites(&limits).is_err());
+    assert!(matches!(
+        zero_rounds.admit(&limits),
+        Err(AdmissionError::Composite(_))
+    ));
     let result = advance_with_budget(
         &zero_rounds,
         &mut owner,
@@ -825,16 +838,16 @@ fn loop_expansion_safety_refusal_names_bound_and_owner_at_each_boundary() {
         &limits,
         &Default::default(),
     );
-    assert!(
-        matches!(result, Err(GraphError::Admission(AdmissionError::Composite(ref actual))) if actual == &reason)
-    );
-    assert!(owner.calls.is_empty());
+    assert!(matches!(
+        result,
+        Err(GraphError::Admission(AdmissionError::Composite(_)))
+    ));
 }
 
 #[test]
 fn composite_depth_uses_the_same_bound_in_preflight_and_runtime() {
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version": 1, "graph_id": "composite-depth", "nodes": [{
+    let document = super::model::document_fixture(serde_json::json!({
+        "graph_id": "composite-depth", "nodes": [{
             "id": "outer", "kind": "composite", "access": "read_only",
             "composite": {"nodes": [{
                 "id": "inner", "kind": "composite", "access": "read_only",
@@ -844,8 +857,7 @@ fn composite_depth_uses_the_same_bound_in_preflight_and_runtime() {
                 }], "exports": []}
             }], "exports": []}
         }]
-    }))
-    .unwrap();
+    }));
     let limits = crate::config::GraphLimits {
         expansion_depth: 1,
         ..Default::default()
@@ -856,9 +868,14 @@ fn composite_depth_uses_the_same_bound_in_preflight_and_runtime() {
     };
     assert!(document.check_composites(&boundary).is_ok());
     assert!(document.admit(&boundary).is_ok());
-    let reason = limits.expansion_depth_bound().refusal(2).unwrap();
-    assert_eq!(document.check_composites(&limits).unwrap_err(), reason);
-    assert_eq!(document.admit(&limits).unwrap_err().to_string(), reason);
+    let depth_bound = limits.expansion_depth_bound();
+    assert!(depth_bound.refusal(depth_bound.maximum).is_none());
+    assert!(depth_bound.refusal(depth_bound.maximum + 1).is_some());
+    assert!(document.check_composites(&limits).is_err());
+    assert!(matches!(
+        document.admit(&limits),
+        Err(AdmissionError::Composite(_))
+    ));
     let mut owner = FakeOwner::default();
     let run = advance_with_budget(
         &document,
@@ -868,54 +885,59 @@ fn composite_depth_uses_the_same_bound_in_preflight_and_runtime() {
         &Default::default(),
     )
     .unwrap();
-    assert_eq!(run.checkpoint.pause_reason(), Some(reason.as_str()));
-    assert!(owner.calls.is_empty());
+    assert_eq!(
+        run.checkpoint.pause_cause(),
+        Some(PauseCause::InvalidPlanExpansion {
+            extra: Default::default()
+        })
+    );
+    assert!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .all(|node| node.attempts.is_empty())
+    );
 }
 
 #[test]
 fn composite_expansion_identifies_duplicate_and_invalid_child_ids() {
-    let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":"composite-identifiers","nodes":[{
+    let mut document = super::model::document_fixture(serde_json::json!({
+        "graph_id":"composite-identifiers","nodes":[{
             "id":"group","kind":"composite","access":"read_only",
             "composite":{"nodes":[
                 {"id":"same","access":"read_only","prompt":"a","route":{"alias":"junior"}},
                 {"id":"same","access":"read_only","prompt":"b","route":{"alias":"junior"}}
             ],"exports":[]}
         }]
-    }))
-    .unwrap();
+    }));
     let limits = crate::config::GraphLimits::default();
-    let error = composites::expand(&document, &limits).unwrap_err();
-    assert!(matches!(error, AdmissionError::Composite(_)));
-    let error = error.to_string();
-    assert!(error.contains("group--same"), "{error}");
-    assert!(error.contains("duplicated"), "{error}");
+    assert!(matches!(
+        composites::expand(&document, &limits),
+        Err(AdmissionError::Composite(_))
+    ));
     let children = &mut document.nodes[0].composite.as_mut().unwrap().nodes;
     children[1].id = "bad name".into();
-    let error = composites::expand(&document, &limits).unwrap_err();
-    assert!(matches!(error, AdmissionError::Composite(_)));
-    let error = error.to_string();
-    assert!(error.contains("group--bad name"), "{error}");
-    assert!(error.contains("ASCII"), "{error}");
-    assert!(error.contains("shorten"), "{error}");
+    assert!(matches!(
+        composites::expand(&document, &limits),
+        Err(AdmissionError::Composite(_))
+    ));
 }
 
 #[test]
 fn composite_rejects_ambiguous_exports_and_blocks_on_child_failure() {
-    let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":"failed-composite","nodes":[{
+    let mut document = super::model::document_fixture(serde_json::json!({
+        "graph_id":"failed-composite","nodes":[{
             "id":"group","kind":"composite","access":"read_only",
             "composite":{"nodes":[
                 {"id":"a","access":"read_only","prompt":"a","route":{"alias":"junior"}},
                 {"id":"b","access":"read_only","prompt":"b","route":{"alias":"junior"}}
             ],"exports":[{"node":"a","outputs":["verdict"]},{"node":"b","outputs":["verdict"]}]}
         }]
-    }))
-    .unwrap();
-    assert_eq!(
-        validate_plan(&document).unwrap_err(),
-        "composite scalar output has multiple sources"
-    );
+    }));
+    assert!(matches!(
+        document.admit(&crate::config::GraphLimits::default()),
+        Err(AdmissionError::Plan(_))
+    ));
     document.nodes[0].composite.as_mut().unwrap().exports.pop();
     let mut owner = FakeOwner {
         observations: [

@@ -645,18 +645,16 @@ mod tests {
             .strip_prefix(std::env::current_dir()?)?
             .join("relay/socket");
         let (started, ready) = mpsc::sync_channel(1);
+        let (cancelled, observed_cancellation) = mpsc::sync_channel(1);
         let relay = HostRelay::start(
             path.clone(),
             provenant_records::Limits::CONFIG,
             move |_, cancel, _| {
                 started.send(()).unwrap();
-                provenant_test_support::wait_for(
-                    "relay cancellation",
-                    IO_TIMEOUT,
-                    || cancel.is_cancelled(),
-                    |cancelled| *cancelled,
-                )
-                .unwrap();
+                while !cancel.is_cancelled() {
+                    thread::yield_now();
+                }
+                cancelled.send(()).unwrap();
                 Err(FacadeError::Cancelled.into())
             },
         )?;
@@ -670,13 +668,11 @@ mod tests {
                     Duration::from_secs(5),
                 )
             });
-            ready.recv_timeout(IO_TIMEOUT).unwrap();
-            let start = Instant::now();
+            ready.recv().unwrap();
             drop(relay);
-            assert!(start.elapsed() < IO_TIMEOUT);
+            observed_cancellation.recv().unwrap();
             assert!(call.join().unwrap().is_err());
         });
-        let start = Instant::now();
         let error = mutate(
             &path,
             &request(),
@@ -685,12 +681,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, ServiceError::FabricOwnerUnavailable));
-        assert!(
-            error
-                .to_string()
-                .contains("host Fabric endpoint unavailable")
-        );
-        assert!(start.elapsed() < IO_TIMEOUT);
         Ok(())
     }
 
@@ -781,17 +771,20 @@ mod tests {
     #[test]
     fn lost_child_add_reply_replays_the_durable_receipt_over_the_relay()
     -> Result<(), Box<dyn std::error::Error>> {
-        use crate::graph::{GraphCheckpoint, GraphDocument, patch, relay, template};
+        use crate::graph::{
+            GraphCheckpoint, GraphDocument, checkpoint_fixture, document_fixture, patch, relay,
+            template,
+        };
         use serde_json::json;
-        let document: GraphDocument = serde_json::from_value(json!({
-            "schema_version":1,"graph_id":"relay-replay","nodes":[{
+        let document: GraphDocument = document_fixture(json!({
+            "graph_id":"relay-replay","nodes":[{
                 "id":"parent","access":"read_only","prompt":"Work","route":{"alias":"senior"}
             }]
-        }))?;
-        let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
-            "schema_version":1,"graph_id":"relay-replay","plan_digest":"unused",
+        }));
+        let checkpoint: GraphCheckpoint = checkpoint_fixture(json!({
+            "graph_id":"relay-replay","plan_digest":"unused",
             "nodes":[{"id":"parent","state":"running","worktree":null,"attempts":[]}]
-        }))?;
+        }));
         // Only serialised checkpoint bytes cross calls, like reopening the host
         // journal after an acknowledgement is lost.
         let stored = Mutex::new(serde_json::to_vec(&checkpoint)?);

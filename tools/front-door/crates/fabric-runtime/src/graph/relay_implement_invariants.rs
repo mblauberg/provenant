@@ -76,6 +76,7 @@ mod relay_provisioning {
         assert_eq!(
             writer.source,
             Some(SourceBinding::Commit {
+                extra: Default::default(),
                 commit: source.clone()
             })
         );

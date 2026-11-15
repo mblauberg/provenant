@@ -859,9 +859,9 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
         let wire = serde_json::to_string(&error)?;
         assert!(!wire.contains("PRIVATE_PACING_SENTINEL"));
         let decoded: FacadeError = serde_json::from_str(&wire)?;
-        assert!(matches!(decoded, FacadeError::DispatchRefused {
+        assert!(matches!(&decoded, FacadeError::DispatchRefused {
             fact: Some(provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::Resource(actual)), ..
-        } if actual == fact));
+        } if *actual == fact));
         let diagnostic = decoded.diagnostic();
         assert!(diagnostic.detail.as_deref().is_some_and(|detail| {
             detail.contains("23") && detail.contains("domains.routing.pacing_reserve")

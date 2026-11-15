@@ -1,6 +1,7 @@
 //! Atomic persistence of human requests, immutable answers and delivery intent.
 use crate::*;
 use provenant_core::{HumanAnswerId, HumanRequestId};
+use provenant_records::inbox::HUMAN_REQUEST_SCHEMA_VERSION;
 use provenant_records::inbox::*;
 
 /// Preserve history and pending deliveries; refuse growth rather than pruning them.
@@ -239,7 +240,7 @@ impl Store {
             let chair_session_id: Option<String> = row.get(9)?;
             let session_type: Option<String> = row.get(10)?;
             let owner_host: Option<String> = row.get(11)?;
-            if !matches!(version, Some(1 | 2))
+            if version != Some(HUMAN_REQUEST_SCHEMA_VERSION as i64)
                 || record_project.as_deref() != Some(&project_id)
                 || record_id.as_deref() != Some(&id)
                 || title.is_none()
@@ -736,7 +737,7 @@ fn view(mut value: HumanRequest, at: WallTime) -> HumanRequest {
 
 fn request_record(bytes: &[u8]) -> Result<HumanRequest> {
     let value: HumanRequest = decode(bytes)?;
-    if !matches!(value.schema_version, 1 | 2) {
+    if value.schema_version != HUMAN_REQUEST_SCHEMA_VERSION {
         return Err(Error::Invalid("stored request version"));
     }
     Ok(value)

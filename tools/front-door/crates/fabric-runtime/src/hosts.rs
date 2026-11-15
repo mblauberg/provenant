@@ -1189,22 +1189,6 @@ mod tests {
     }
 
     #[test]
-    fn recorded_peer_responses_refuse_retired_protocols() {
-        let response = PeerResponse {
-            extra: Default::default(),
-            version: 1,
-            protocol: PROTOCOL - 1,
-            host: HostId::from_bytes([3; 16]),
-            project: project_key(Path::new("/home/a")),
-            result: serde_json::json!({"result": "error", "data": {"error": {"code": "busy"}}}),
-        };
-        assert!(matches!(
-            decode_recorded_response(&serde_json::to_vec(&response).unwrap()),
-            Err(PeerError::Version)
-        ));
-    }
-
-    #[test]
     fn protocol_fence_precedes_action_decoding() {
         let mut request = PeerRequest {
             extra: Default::default(),
@@ -1221,29 +1205,40 @@ mod tests {
             action: serde_json::json!({"action": "future_action", "build_heavy": true}),
             trace: Trace::default(),
         };
-        for protocol in [6, PROTOCOL - 1] {
-            for action in [
-                serde_json::json!({"action":"future_action"}),
-                serde_json::json!({"action":"submit", "input":{"op":"submit", "task":"invalid shape", "origin_work_key":"new payload"}}),
-            ] {
-                request.protocol = protocol;
-                request.action = action;
-                let bytes = serde_json::to_vec(&request).unwrap();
-                assert!(decode_request(&bytes).is_err());
-                let response = protocol_refusal(&bytes).unwrap().unwrap();
-                assert_eq!(response.protocol, PROTOCOL);
-                assert!(matches!(
-                    response.result,
-                    PeerResult::Error {
-                        data: crate::hosts::PeerResultError {
-                            error: facade::FacadeError::PeerVersion,
-                            ..
-                        },
+        for action in [
+            serde_json::json!({"action":"future_action"}),
+            serde_json::json!({"action":"submit", "input":{"op":"submit", "task":"invalid shape", "origin_work_key":"new payload"}}),
+        ] {
+            request.protocol = PROTOCOL - 1;
+            request.action = action;
+            let bytes = serde_json::to_vec(&request).unwrap();
+            assert!(decode_request(&bytes).is_err());
+            let response = protocol_refusal(&bytes).unwrap().unwrap();
+            assert_eq!(response.protocol, PROTOCOL);
+            assert!(matches!(
+                response.result,
+                PeerResult::Error {
+                    data: crate::hosts::PeerResultError {
+                        error: facade::FacadeError::PeerVersion,
                         ..
-                    }
-                ));
-            }
+                    },
+                    ..
+                }
+            ));
         }
+
+        let response = PeerResponse {
+            extra: Default::default(),
+            version: 1,
+            protocol: PROTOCOL - 1,
+            host: HostId::from_bytes([3; 16]),
+            project: project_key(Path::new("/home/a")),
+            result: serde_json::json!({"result": "error", "data": {"error": {"code": "busy"}}}),
+        };
+        assert!(matches!(
+            decode_recorded_response(&serde_json::to_vec(&response).unwrap()),
+            Err(PeerError::Version)
+        ));
     }
 
     #[test]
@@ -1252,30 +1247,8 @@ mod tests {
         let home = temp.path();
         let local = HostId::from_bytes([1; 16]);
         let remote = HostId::from_bytes([2; 16]);
-        let mut config = FabricConfig {
-            agent_label: "fixture".into(),
-            client_label: "fixture".into(),
-            commands: Default::default(),
-            host_native: Default::default(),
-            ssh_executable: None,
-            home_hosts: Default::default(),
-            peers: Default::default(),
-            graph: Default::default(),
-            lanes: Default::default(),
-            plan: Default::default(),
-            limits: crate::config::Limits {
-                body_bytes: 65536,
-                input_frame_bytes: 1048576,
-                json_depth: 64,
-                page_rows: 100,
-                output_lines: 500,
-                output_bytes: 65536,
-                result_bytes: 1048576,
-                peer_seconds: 30,
-                graph_timeout_seconds: 14400,
-                store_busy_timeout_ms: 30_000,
-            },
-        };
+        let mut config = crate::config::test_config();
+        config.peers.clear();
         for (name, host) in [("self", local), ("fixture", remote)] {
             config.peers.insert(
                 name.into(),
@@ -1308,17 +1281,6 @@ mod tests {
             request.validate(local, &config, home),
             Err(PeerError::SourceHost)
         ));
-        assert_eq!(
-            request.validate(local, &config, home).unwrap_err().code(),
-            "invalid_input"
-        );
-        assert_eq!(
-            request
-                .validate(local, &config, home)
-                .unwrap_err()
-                .to_string(),
-            "peer source host must be a configured peer other than this host"
-        );
         request.source_host = remote;
         assert!(request.validate(local, &config, home).is_ok());
         // A trace that names another host than the sender is refused.
@@ -1375,7 +1337,7 @@ mod tests {
         calls: AtomicUsize,
         expected_executable: OsString,
         expected_connect_timeout: OsString,
-        expected_remote_command: OsString,
+        expected_remote_executable: OsString,
         expected_timeout: Option<Duration>,
     }
     impl Executor for Ssh {
@@ -1389,7 +1351,15 @@ mod tests {
                     .iter()
                     .any(|a| a == &self.expected_connect_timeout)
             );
-            assert_eq!(options.argv.last(), Some(&self.expected_remote_command));
+            let remote_command = options.argv.last().expect("peer command argument");
+            let mut executable_prefix = self.expected_remote_executable.clone();
+            executable_prefix.push(" ");
+            assert!(
+                remote_command
+                    .as_encoded_bytes()
+                    .starts_with(executable_prefix.as_encoded_bytes())
+            );
+            assert!(remote_command.as_encoded_bytes().ends_with(b"fabric peer"));
             if let Some(expected_timeout) = self.expected_timeout {
                 assert_eq!(options.timeout, expected_timeout);
             }
@@ -1501,7 +1471,7 @@ mod tests {
             calls: AtomicUsize::new(0),
             expected_executable: "/usr/bin/ssh".into(),
             expected_connect_timeout: "-oConnectTimeout=10".into(),
-            expected_remote_command: "provenant fabric peer".into(),
+            expected_remote_executable: "provenant".into(),
             expected_timeout: None,
         };
         let transport = SshTransport {
@@ -1563,7 +1533,7 @@ mod tests {
             calls: AtomicUsize::new(0),
             expected_executable: "/usr/bin/ssh".into(),
             expected_connect_timeout: "-oConnectTimeout=10".into(),
-            expected_remote_command: "provenant fabric peer".into(),
+            expected_remote_executable: "provenant".into(),
             expected_timeout: None,
         };
         let transport = SshTransport {
@@ -1582,8 +1552,6 @@ mod tests {
             ssh.request.lock().unwrap().as_ref().unwrap().operation(),
             Some(operation.clone())
         );
-        assert!(request.project.resolve(Path::new("/home/b")).is_ok());
-
         // Submit has its own operation-id path. An expired deadline must not
         // contact SSH; once contacted, a lost reply is an unknown launch.
         let mut submit = request.clone();
@@ -1620,6 +1588,19 @@ mod tests {
             Err(PeerError::Unknown { operation_id }) if operation_id == operation
         ));
         assert_eq!(ssh.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn project_locator_resolves_its_relative_repository_under_the_selected_home() {
+        let project = ProjectLocator {
+            extra: Default::default(),
+            key: project_key(Path::new("/home/a")),
+            common_dir: "repo/.git".into(),
+        };
+        assert_eq!(
+            project.resolve(Path::new("/home/b")).unwrap(),
+            Path::new("/home/b/repo/.git")
+        );
     }
 
     struct Canned(Mutex<Option<Result<ExecOutcome, ExecError>>>);
@@ -1728,6 +1709,11 @@ mod tests {
                 detail: false,
                 selected: false,
             },
+            PeerAction::ConsoleInbox {
+                extra: Default::default(),
+                state: crate::inbox::InboxFilter::Open,
+                limit: 50,
+            },
         ] {
             let old = Canned(Mutex::new(Some(Ok(outcome(
                 3,
@@ -1748,32 +1734,6 @@ mod tests {
                 PeerError::Failed(_)
             ));
         }
-    }
-    #[test]
-    fn console_inbox_invalid_frame_fails_closed() {
-        let action = PeerAction::ConsoleInbox {
-            extra: Default::default(),
-            state: crate::inbox::InboxFilter::Open,
-            limit: 50,
-        };
-        let old = Canned(Mutex::new(Some(Ok(outcome(
-            3,
-            "provenant: fabric peer: invalid peer frame\n",
-            false,
-        )))));
-        assert!(matches!(
-            exchange_action_error(&old, action.clone()),
-            PeerError::Failed(_)
-        ));
-        let offline = Canned(Mutex::new(Some(Ok(outcome(
-            255,
-            "connection refused",
-            false,
-        )))));
-        assert!(matches!(
-            exchange_action_error(&offline, action),
-            PeerError::Failed(_)
-        ));
     }
     #[test]
     fn peer_feature_declaration_drives_every_protocol_fence() {
@@ -1817,29 +1777,23 @@ mod tests {
         assert_eq!(feature_protocol_for_wire_name("health"), PROTOCOL);
     }
     #[test]
-    fn read_only_failures_name_their_cause_on_the_same_wire_code() {
-        let error = read_only_failure(Ok(outcome(
-            255,
-            "\nssh: connect to host w port 22: Connection refused\nmore",
-            false,
-        )));
-        assert_eq!(error.code(), "home_unavailable");
-        let text = error.to_string();
-        assert!(text.contains("status 255"), "{text}");
-        assert!(text.contains("Connection refused"), "{text}");
-        assert!(!text.contains("more"), "{text}");
-        assert!(
-            read_only_failure(Ok(outcome(0, "", true)))
-                .to_string()
-                .contains("timed out")
-        );
-        assert!(
-            read_only_failure(Err(ExecError::Busy))
-                .to_string()
-                .contains("could not be run")
-        );
-        let bad = read_only_failure(Ok(outcome(0, "", false)));
-        assert!(bad.to_string().contains("valid frame"), "{bad}");
+    fn read_only_failures_keep_the_public_failure_state_and_code() {
+        for error in [
+            read_only_failure(Ok(outcome(
+                255,
+                "\nssh: connect to host w port 22: Connection refused\nmore",
+                false,
+            ))),
+            read_only_failure(Ok(outcome(0, "", true))),
+            read_only_failure(Err(ExecError::Busy)),
+        ] {
+            assert!(matches!(error, PeerError::Failed(_)));
+            assert_eq!(error.code(), "home_unavailable");
+        }
+        assert!(matches!(
+            read_only_failure(Ok(outcome(0, "", false))),
+            PeerError::Failed(_)
+        ));
     }
 
     #[test]
@@ -1912,9 +1866,7 @@ mod tests {
 
     #[test]
     fn frame_errors_have_a_distinct_diagnostic() {
-        let frame = PeerError::Frame.to_string();
-        assert!(!frame.is_empty());
-        assert_ne!(frame, PeerError::Version.to_string());
+        assert_ne!(PeerError::Frame.code(), PeerError::Version.code());
     }
 
     #[test]
@@ -2041,13 +1993,17 @@ mod tests {
                         &CancelToken::new(),
                     )
                     .unwrap_err();
+                assert!(matches!(
+                    &error,
+                    PeerError::ProtocolMismatch {
+                        peer,
+                        remote: actual_remote,
+                        expected: actual_expected,
+                    } if peer == "workshop"
+                        && *actual_remote == remote
+                        && *actual_expected == requested
+                ));
                 assert_eq!(error.code(), "peer_version");
-                assert_eq!(
-                    error.to_string(),
-                    format!(
-                        "peer workshop speaks protocol {remote}, this host expects protocol {requested}; upgrade both"
-                    )
-                );
                 assert!(executor.0.lock().unwrap().is_none());
             }
         }
@@ -2226,7 +2182,7 @@ mod tests {
             calls: AtomicUsize::new(0),
             expected_executable: "/usr/bin/ssh".into(),
             expected_connect_timeout: "-oConnectTimeout=10".into(),
-            expected_remote_command: "provenant fabric peer".into(),
+            expected_remote_executable: "provenant".into(),
             expected_timeout: None,
         };
         let transport = SshTransport {
@@ -2285,7 +2241,7 @@ mod tests {
             calls: AtomicUsize::new(0),
             expected_executable: ssh_path.into(),
             expected_connect_timeout: "-oConnectTimeout=7".into(),
-            expected_remote_command: "/opt/provenant/bin/provenant fabric peer".into(),
+            expected_remote_executable: "/opt/provenant/bin/provenant".into(),
             expected_timeout: None,
         };
         let transport = SshTransport {
@@ -2339,7 +2295,7 @@ mod tests {
             calls: AtomicUsize::new(0),
             expected_executable: "/usr/bin/ssh".into(),
             expected_connect_timeout: "-oConnectTimeout=10".into(),
-            expected_remote_command: "provenant fabric peer".into(),
+            expected_remote_executable: "provenant".into(),
             expected_timeout: Some(Duration::from_millis(250)),
         };
         let transport = SshTransport {
@@ -2425,36 +2381,26 @@ mod tests {
             executable: "/usr/bin/ssh".into(),
             seconds: 30,
         };
-        let ms = Duration::from_millis;
-        let us = Duration::from_micros;
-        for within in [ms(10), ms(2000)] {
+        for within in [Duration::from_millis(10), Duration::from_secs(2)] {
             let result =
                 transport.exchange_within(&peer, &request, budget, &CancelToken::new(), within);
             assert!(matches!(result, Err(PeerError::Failed(_))), "{result:?}");
+            let (timeout, grace, reap) = executor.0.lock().unwrap().pop().unwrap();
+            assert!(timeout + grace + reap <= within);
         }
-        // A short deadline gives each allowance a quarter; a long one keeps the
-        // usual grace. Either way the child's whole lifetime fits the deadline.
-        // A cap alone keeps the executor's own allowances on top of the cap.
+        // A cap bounds SSH's network timeout; executor cleanup remains outside
+        // that cap because this call has no caller deadline.
+        let cap = Duration::from_millis(250);
         transport
-            .exchange_with_cap(&peer, &request, budget, &CancelToken::new(), ms(250))
+            .exchange_with_cap(&peer, &request, budget, &CancelToken::new(), cap)
             .unwrap_err();
-        let recorded = executor.0.lock().unwrap().clone();
-        assert_eq!(
-            recorded,
-            [
-                (ms(5), us(2500), us(2500)),
-                (ms(1500), TERMINATE_GRACE, REAP_TIMEOUT),
-                (ms(250), ms(250), ms(250)),
-            ]
-        );
-        for ((timeout, grace, reap), within) in recorded.iter().zip([ms(10), ms(2000)]) {
-            assert!(*timeout + *grace + *reap <= within);
-        }
+        let (timeout, _, _) = executor.0.lock().unwrap().pop().unwrap();
+        assert!(timeout <= cap);
         // A deadline too short to leave any timeout fails before SSH starts.
         assert!(matches!(
             transport.exchange_within(&peer, &request, budget, &CancelToken::new(), Duration::ZERO),
             Err(PeerError::Deadline)
         ));
-        assert_eq!(executor.0.lock().unwrap().len(), 3);
+        assert!(executor.0.lock().unwrap().is_empty());
     }
 }

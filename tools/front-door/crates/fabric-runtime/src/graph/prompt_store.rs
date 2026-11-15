@@ -2,7 +2,7 @@
 //!
 //! A saved checkpoint carries an envelope-owned map of text references. The
 //! bytes live in `graph-<id>.prompt-<hex>` files in the graph directory, so graph
-//! size does not grow with brief size times node count. Inline prompts remain valid.
+//! size does not grow with brief size times node count.
 use super::*;
 use serde_json::Value;
 use std::borrow::Cow;
@@ -146,8 +146,8 @@ pub(super) fn externalise(
     Ok(())
 }
 
-/// Restore inline prompts from the store. Bytes without digests are returned
-/// untouched.
+/// Restore prompt references from the store. Persisted prompt text must have a
+/// content-addressed reference; inline text is not a supported stored shape.
 pub(super) fn rehydrate<'a>(
     directory: &Directory,
     id: &str,
@@ -155,6 +155,14 @@ pub(super) fn rehydrate<'a>(
 ) -> Result<Cow<'a, [u8]>, JournalError> {
     let marker = b"\"stored_text\"";
     if !bytes.windows(marker.len()).any(|window| window == marker) {
+        let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
+            return Ok(Cow::Borrowed(bytes));
+        };
+        let mut paths = Vec::new();
+        text_paths(&value, "", &mut paths);
+        if !paths.is_empty() {
+            return Err(JournalError::BadEnvelope);
+        }
         return Ok(Cow::Borrowed(bytes));
     }
     let mut value: Value = serde_json::from_slice(bytes)
@@ -271,8 +279,25 @@ mod tests {
         let mut stored = original.clone();
         externalise(&directory, "snapshots", &mut stored).unwrap();
         let bytes = serde_json::to_vec(&stored).unwrap();
-        assert!(bytes.len() < 4_096);
-        assert_eq!(directory.entries().unwrap().count(), 1);
+        assert!(
+            !String::from_utf8(bytes.clone())
+                .unwrap()
+                .contains(brief.as_str())
+        );
+        let references = stored[STORED_TEXT].as_object().unwrap();
+        let digests: std::collections::BTreeSet<_> = references
+            .values()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        assert_eq!(digests.len(), 1);
+        let digest = digests.into_iter().next().unwrap();
+        let blob = directory
+            .read_stable(
+                &OsString::from(format!("{}{digest}", prefix("snapshots"))),
+                1 << 20,
+            )
+            .unwrap();
+        assert_eq!(hex(&blob), digest);
         let restored = rehydrate(&directory, "snapshots", &bytes).unwrap();
         assert_eq!(
             serde_json::from_slice::<Value>(&restored).unwrap(),

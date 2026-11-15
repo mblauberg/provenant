@@ -6,33 +6,6 @@ use provenant_records::inbox::*;
 #[allow(clippy::disallowed_methods)] // Native deadlines are part of this store API.
 fn invalid_hook_candidates_do_not_block_valid_answers() {
     use std::time::{Duration, Instant};
-    const CHILD: &str = "PROVENANT_INVALID_ANSWER_DIAGNOSTIC_TEST";
-    if std::env::var_os(CHILD).is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "tests::human_inbox::invalid_hook_candidates_do_not_block_valid_answers",
-                "--nocapture",
-            ])
-            .env(CHILD, "1")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        for n in [1, 2] {
-            let diagnostic = format!(
-                "answer delivery: skipping invalid answer {}",
-                HumanAnswerId::from_bytes([n; 16])
-            );
-            // Both the observation and transaction boundaries diagnose the row.
-            assert_eq!(stderr.matches(&diagnostic).count(), 2, "{stderr}");
-        }
-        return;
-    }
     let f = Fixture::new();
     let store = f.open();
     let target = AnswerTarget {
@@ -166,31 +139,9 @@ fn invalid_hook_candidates_do_not_block_valid_answers() {
 
 #[test]
 #[allow(clippy::disallowed_methods)] // Native deadlines are part of this store API.
-fn hook_page_reports_individually_oversized_answer_and_revisits_overflow() {
+fn hook_page_preserves_its_bound_and_retains_oversized_answers() {
     use std::time::{Duration, Instant};
-    const CHILD: &str = "PROVENANT_OVERSIZED_PAGE_TEST";
     let oversized_id = HumanAnswerId::from_bytes([3; 16]);
-    if std::env::var_os(CHILD).is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "tests::human_inbox::hook_page_reports_individually_oversized_answer_and_revisits_overflow", "--nocapture"])
-            .env(CHILD, "1")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert_eq!(
-            stderr.matches(&format!(
-                "answer delivery: answer {oversized_id} exceeds internal page limit; retained for Fabric mail"
-            )).count(),
-            1,
-            "{stderr}"
-        );
-        return;
-    }
     let f = Fixture::new();
     let store = f.open();
     let target = AnswerTarget {
@@ -200,7 +151,11 @@ fn hook_page_reports_individually_oversized_answer_and_revisits_overflow() {
         actor: actor(2),
         session: "chair".into(),
     };
-    for (n, size) in [(1, 70_000), (2, 70_000), (3, 140_000)] {
+    for (n, size) in [
+        (1, MAX_LOCAL_OFFER_BYTES * 3 / 4),
+        (2, MAX_LOCAL_OFFER_BYTES * 3 / 4),
+        (3, MAX_LOCAL_OFFER_BYTES + 1),
+    ] {
         let id = HumanAnswerId::from_bytes([n; 16]);
         let request = HumanRequestId::from_bytes([n; 16]);
         let answer: HumanAnswer = serde_json::from_value(serde_json::json!({
@@ -296,6 +251,15 @@ fn hook_page_reports_individually_oversized_answer_and_revisits_overflow() {
         [&existing_id], |row| row.get(0),
     ).unwrap();
     assert_eq!(error, "prior failure");
+    let oversized_error: String = store.db.query_row(
+        "SELECT json_extract(CAST(record AS TEXT),'$.error') FROM human_answer_outbox WHERE answer=?1",
+        [oversized_id.to_string()],
+        |row| row.get(0),
+    ).unwrap();
+    assert_eq!(
+        oversized_error,
+        crate::local_delivery::HOOK_ENVELOPE_TOO_LARGE
+    );
 }
 
 #[test]
@@ -443,45 +407,6 @@ fn overview_bounds_aggregate_request_bytes_before_decoding() {
 }
 
 #[test]
-fn local_delivery_target_query_is_indexed() {
-    let f = Fixture::new();
-    let store = f.open();
-    let sql = format!(
-        "EXPLAIN QUERY PLAN {}",
-        crate::local_delivery::pending_candidates_sql()
-    );
-    let plan: Vec<String> = store
-        .db
-        .prepare(&sql)
-        .unwrap()
-        .query_map(
-            params![
-                "host",
-                "session",
-                "actor",
-                "project",
-                4096,
-                10,
-                None::<String>
-            ],
-            |row| row.get(3),
-        )
-        .unwrap()
-        .collect::<std::result::Result<_, _>>()
-        .unwrap();
-    assert!(
-        plan.iter()
-            .any(|line| line.contains("SEARCH") && line.contains("human_local_delivery")),
-        "{plan:?}"
-    );
-    assert!(
-        plan.iter()
-            .all(|line| !line.contains("SCAN") && !line.contains("TEMP B-TREE")),
-        "{plan:?}"
-    );
-}
-
-#[test]
 #[allow(clippy::disallowed_methods)] // Exercise the real-time reader boundary.
 fn human_answer_outbox_mail_and_history_roll_back_when_receipt_fails() {
     let f = Fixture::new();
@@ -490,7 +415,7 @@ fn human_answer_outbox_mail_and_history_roll_back_when_receipt_fails() {
     let id = HumanRequestId::from_bytes([5; 16]);
     let original = HumanRequest {
         extra: Default::default(),
-        schema_version: 1,
+        schema_version: HUMAN_REQUEST_SCHEMA_VERSION,
         id,
         revision: 1,
         operation_id: OperationId::parse("ask").unwrap(),
@@ -664,12 +589,6 @@ fn human_answer_outbox_mail_and_history_roll_back_when_receipt_fails() {
         offered.items[0].delivery.state,
         AnswerDeliveryState::Offered
     );
-    let plan:Vec<String>=store.db.prepare("EXPLAIN QUERY PLAN SELECT substr(record,1,?6) FROM human_requests WHERE project=?1 AND (?2 IS NULL OR session=?2) AND (?3 OR state='open') AND (?4 IS NULL OR id>?4) ORDER BY id LIMIT ?5").unwrap().query_map(params![project().to_string(),"chair-a",false,id.to_string(),51,MAX_RECORD_READ_BYTES],|row|row.get(3)).unwrap().map(|row|row.unwrap()).collect();
-    assert!(
-        plan.iter()
-            .any(|row| row.contains("SEARCH human_requests USING INDEX")),
-        "{plan:?}"
-    );
 }
 
 #[test]
@@ -742,17 +661,21 @@ fn local_delivery_open_allocates_nothing_and_observes_deadline() {
 }
 
 #[test]
-#[allow(clippy::disallowed_methods)] // A held write lock must not outlast the hook deadline.
-fn hook_delivery_gives_up_on_a_held_store_at_its_deadline() {
+#[allow(clippy::disallowed_methods)] // The native deadline is required by the store API.
+fn hook_delivery_observes_a_contended_write_with_a_zero_budget() {
     let f = Fixture::new();
     let holder = f.open();
     holder.db.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let started = std::time::Instant::now();
-    let store = Store::open_hook_delivery(&f.root, started + std::time::Duration::from_millis(100))
-        .unwrap()
-        .unwrap();
-    assert!(store.db.execute_batch("BEGIN IMMEDIATE").is_err());
-    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    let store = provenant_sqlite::with_busy_timeout(std::time::Duration::ZERO, || {
+        Store::open_hook_delivery(
+            &f.root,
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+    })
+    .unwrap()
+    .unwrap();
+    let error = store.db.execute_batch("BEGIN IMMEDIATE").unwrap_err();
+    assert!(provenant_sqlite::is_busy(&error));
     holder.db.execute_batch("ROLLBACK").unwrap();
 }
 

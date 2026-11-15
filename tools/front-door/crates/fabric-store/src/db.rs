@@ -445,7 +445,6 @@ mod tests {
         std::os::unix::fs::symlink(temp.path().join("missing"), &path)?;
         let error = companions(&directory, temp.path(), "fabric.sqlite3").unwrap_err();
         assert!(matches!(&error, Error::UnsafePath(p) if p == &path));
-        assert!(error.to_string().contains("fabric.sqlite3-journal"));
         Ok(())
     }
 

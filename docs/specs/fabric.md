@@ -155,6 +155,10 @@ never instruct.
 
 ## Bounded graphs and route fallback
 
+Graph documents use schema version 2 exclusively. Unsupported document versions
+are refused with a typed schema-version error before admission or checkpoint replay.
+Planner fragments and other records use their own declared version.
+
 The graph runtime admits a template, document or planner fragment only after
 checking schema capability, structural limits, the fully expanded plan, the
 checkpoint envelope and selected outputs. A launch retry without a wall clock

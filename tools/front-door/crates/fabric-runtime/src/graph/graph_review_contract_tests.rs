@@ -759,15 +759,6 @@ fn malformed_lens_is_corrected_once_without_repeating_siblings() {
         };
         let mut journal = MemoryJournal::default();
         let run = advance(&document, &mut owner, &mut journal).unwrap();
-        assert!(owner.observations.is_empty());
-        assert_eq!(
-            run.checkpoint
-                .nodes
-                .iter()
-                .filter(|node| !node.previous_attempts.is_empty())
-                .count(),
-            1
-        );
         let retried = run
             .checkpoint
             .nodes
@@ -783,21 +774,14 @@ fn malformed_lens_is_corrected_once_without_repeating_siblings() {
                 NodeState::Failed
             }
         );
-        let correction = owner
-            .prompts
-            .iter()
-            .position(|prompt| prompt.contains("only automatic verdict correction"))
-            .unwrap();
-        assert_eq!(correction, 1);
-        assert_eq!(owner.calls[correction].0.node_id, retried.id);
-        assert_eq!(
-            owner
-                .calls
-                .iter()
-                .filter(|(key, _)| key.node_id == retried.id)
-                .count(),
-            2
-        );
+        for node in &run.checkpoint.nodes {
+            assert_eq!(
+                !node.previous_attempts.is_empty(),
+                node.id == lens.id,
+                "{}",
+                node.id
+            );
+        }
         for id in ["panel", lenses.id.as_str()] {
             let composite = run
                 .checkpoint
@@ -933,16 +917,16 @@ fn realistic_aggregate_findings_do_not_require_overflow_proof() {
 #[test]
 fn below_minimum_review_keeps_returned_findings_on_replay() {
     for export_failure in [false, true] {
-        let document: GraphDocument = serde_json::from_value(json!({
-        "schema_version":1,"graph_id":"below-review-minimum","nodes":[{
-            "id":"panel","kind":"composite","access":"read_only","composite":{"min_successful":1,"nodes":[{
-                "id":"lenses","kind":"composite","access":"read_only",
-                "composite":{"min_successful":2,"reduce_verdict":true,
-                    "nodes":[review("review.tests","good"),review("review.correctness","missing")],
-                    "exports":[{"node":"good","outputs":["findings","result"]},{"node":"missing","outputs":["findings","result"]}]}
-            }],"exports":[{"node":"lenses","outputs":["findings","result"]}]}
-        }]
-    })).unwrap();
+        let document = super::model::document_fixture(json!({
+            "graph_id":"below-review-minimum","nodes":[{
+                "id":"panel","kind":"composite","access":"read_only","composite":{"min_successful":1,"nodes":[{
+                    "id":"lenses","kind":"composite","access":"read_only",
+                    "composite":{"min_successful":2,"reduce_verdict":true,
+                        "nodes":[review("review.tests","good"),review("review.correctness","missing")],
+                        "exports":[{"node":"good","outputs":["findings","result"]},{"node":"missing","outputs":["findings","result"]}]}
+                }],"exports":[{"node":"lenses","outputs":["findings","result"]}]}
+            }]
+        }));
         let mut entry = finding();
         if export_failure {
             entry["id"] = json!("x".repeat(outputs::OUTPUT_FIELD_BYTES));

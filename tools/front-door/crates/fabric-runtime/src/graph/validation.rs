@@ -1,77 +1,33 @@
 use super::*;
 
-pub(super) fn nodes_have_v2(nodes: &[GraphNode]) -> bool {
-    nodes.iter().any(|node| {
-        node.review_base.is_some()
-            || node.family_group.is_some()
-            || node
-                .inputs
-                .iter()
-                .any(|input| !input.required_outputs.is_empty())
-            || node.composite.as_ref().is_some_and(|spec| {
-                spec.exports
-                    .iter()
-                    .any(|input| !input.required_outputs.is_empty())
-            })
-            || node.plan.as_ref().is_some_and(|spec| {
-                spec.templates.iter().any(|pattern| {
-                    pattern.nodes.iter().any(value_has_v2)
-                        || pattern
-                            .exports
-                            .iter()
-                            .any(|input| !input.required_outputs.is_empty())
-                }) || spec.fallback.as_ref().is_some_and(|fallback| {
-                    fallback
-                        .exports
-                        .iter()
-                        .any(|input| !input.required_outputs.is_empty())
-                })
-            })
-            || node
-                .composite
-                .as_ref()
-                .is_some_and(|spec| nodes_have_v2(&spec.nodes))
-            || node
-                .loop_body
-                .as_ref()
-                .is_some_and(|spec| nodes_have_v2(&spec.body))
-            || node
-                .plan
-                .as_ref()
-                .and_then(|spec| spec.fallback.as_ref())
-                .is_some_and(|spec| nodes_have_v2(&spec.nodes))
-    })
-}
-
-fn value_has_v2(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::Object(map) => {
-            map.contains_key("family_group")
-                || map.contains_key("review_base")
-                || map
-                    .get("required_outputs")
-                    .is_some_and(|value| value.as_array().is_none_or(|values| !values.is_empty()))
-                || map.values().any(value_has_v2)
-        }
-        serde_json::Value::Array(values) => values.iter().any(value_has_v2),
-        _ => false,
-    }
-}
-
 /// Minimum document schema capable of representing the document's fields.
-/// Schema 2 is a superset, so callers may retain an authored version 2 even
-/// when the minimum is 1.
+/// Graph documents use the frozen v2 schema.
 pub fn minimum_schema_version(document: &GraphDocument) -> u32 {
-    if document_requires_review_fields(document) {
-        2
-    } else {
-        1
-    }
+    let _ = document;
+    GRAPH_DOCUMENT_SCHEMA_VERSION as u32
 }
 
-pub(super) fn document_requires_review_fields(document: &GraphDocument) -> bool {
-    document.review_base.is_some() || nodes_have_v2(&document.nodes)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum OutputSupplyRule {
+    Always,
+    WriterOrLand,
+    WriterPinnedOrLand,
 }
+
+impl OutputSupplyRule {
+    pub(super) const ALL: &'static [Self] =
+        &[Self::Always, Self::WriterOrLand, Self::WriterPinnedOrLand];
+}
+
+/// Declared output kinds and the node shapes that supply them.
+pub(super) const SUPPLIED_KIND_RULES: &[(OutputKind, OutputSupplyRule)] = &[
+    (OutputKind::Result, OutputSupplyRule::Always),
+    (OutputKind::Findings, OutputSupplyRule::Always),
+    (OutputKind::Verdict, OutputSupplyRule::Always),
+    (OutputKind::Remaining, OutputSupplyRule::Always),
+    (OutputKind::Branch, OutputSupplyRule::WriterOrLand),
+    (OutputKind::Commit, OutputSupplyRule::WriterPinnedOrLand),
+];
 
 pub(super) fn supplied_kinds(node: &GraphNode) -> Vec<OutputKind> {
     if let Some(composite) = &node.composite {
@@ -90,24 +46,26 @@ pub(super) fn supplied_kinds(node: &GraphNode) -> Vec<OutputKind> {
         }
         return kinds;
     }
-    let mut kinds = vec![
-        OutputKind::Result,
-        OutputKind::Findings,
-        OutputKind::Verdict,
-        OutputKind::Remaining,
-    ];
-    if node.kind == Some(NodeKind::Loop) {
-        return kinds;
-    }
-    let write = node.access == AccessMode::WorktreeWrite;
-    if write || node.kind == Some(NodeKind::Land) {
-        kinds.push(OutputKind::Branch);
-    }
-    let pinned = node.source.is_some();
-    if write || pinned || node.kind == Some(NodeKind::Land) {
-        kinds.push(OutputKind::Commit);
-    }
-    kinds
+    SUPPLIED_KIND_RULES
+        .iter()
+        .filter_map(|(kind, rule)| {
+            let supplied = match rule {
+                OutputSupplyRule::Always => true,
+                OutputSupplyRule::WriterOrLand => {
+                    node.kind != Some(NodeKind::Loop)
+                        && (node.access == AccessMode::WorktreeWrite
+                            || node.kind == Some(NodeKind::Land))
+                }
+                OutputSupplyRule::WriterPinnedOrLand => {
+                    node.kind != Some(NodeKind::Loop)
+                        && (node.access == AccessMode::WorktreeWrite
+                            || node.source.is_some()
+                            || node.kind == Some(NodeKind::Land))
+                }
+            };
+            supplied.then_some(*kind)
+        })
+        .collect()
 }
 
 pub(super) fn validate_output_kinds(document: &GraphDocument) -> Result<(), AdmissionError> {
@@ -219,11 +177,11 @@ pub(super) fn validate_output_kinds(document: &GraphDocument) -> Result<(), Admi
 }
 
 pub(super) fn validate_schema(document: &GraphDocument) -> Result<(), AdmissionError> {
-    let has_v2 = document.review_base.is_some() || nodes_have_v2(&document.nodes);
-    // Version 2 is a superset: it may omit every v2 field, but version 1
-    // cannot carry one.
-    if !matches!(document.schema_version, 1 | 2) || document.schema_version == 1 && has_v2 {
-        return Err(AdmissionError::Schema("schema version".into()));
+    if document.schema_version != GRAPH_DOCUMENT_SCHEMA_VERSION {
+        return Err(AdmissionError::UnsupportedVersion {
+            found: document.schema_version,
+            supported: GRAPH_DOCUMENT_SCHEMA_VERSION,
+        });
     }
     Ok(())
 }
@@ -290,8 +248,11 @@ pub(super) fn validate_flat_plan(
     document: &GraphDocument,
     limits: &crate::config::GraphLimits,
 ) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), AdmissionError> {
-    if !matches!(document.schema_version, 1 | 2) {
-        return Err(AdmissionError::Plan("schema version".into()));
+    if document.schema_version != GRAPH_DOCUMENT_SCHEMA_VERSION {
+        return Err(AdmissionError::UnsupportedVersion {
+            found: document.schema_version,
+            supported: GRAPH_DOCUMENT_SCHEMA_VERSION,
+        });
     }
     let pruned = when::prune(document)?;
     let document = pruned.as_ref().unwrap_or(document);
@@ -475,7 +436,9 @@ pub(super) fn validate_flat_plan(
                 }
                 ci::validate_target(target, node, document)
                     .map_err(|reason| node_plan_error(node, reason))?;
-                if !(1..=604800).contains(timeout_seconds) || !node.inputs.is_empty() {
+                if !(MIN_CI_TIMEOUT_SECONDS..=MAX_CI_TIMEOUT_SECONDS).contains(timeout_seconds)
+                    || !node.inputs.is_empty()
+                {
                     return Err(node_plan_error(node, "invalid CI gate target or timeout"));
                 }
             }
@@ -531,18 +494,18 @@ pub(super) fn validate_flat_plan(
             return Err(node_plan_error(node, "invalid attachments"));
         }
         match &node.source {
-            Some(SourceBinding::Commit { commit })
+            Some(SourceBinding::Commit { commit, .. })
                 if commit.parse::<provenant_core::GitOid>().is_err() =>
             {
                 return Err(node_plan_error(node, "source requires a full commit ID"));
             }
-            Some(SourceBinding::Node { node: source }) if !node.depends_on.contains(source) => {
+            Some(SourceBinding::Node { node: source, .. }) if !node.depends_on.contains(source) => {
                 return Err(node_plan_error(
                     node,
                     "source node must be a direct dependency",
                 ));
             }
-            Some(SourceBinding::Integration) if document.integration_branch.is_none() => {
+            Some(SourceBinding::Integration { .. }) if document.integration_branch.is_none() => {
                 return Err(node_plan_error(
                     node,
                     "integration source requires an integration branch",
@@ -1202,7 +1165,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
     plan: &PlannedGraph,
     digest: &str,
 ) -> Result<(), GraphError<R, J>> {
-    if checkpoint.schema_version != 2
+    if checkpoint.schema_version != GraphCheckpoint::SCHEMA_VERSION
         || checkpoint.graph_id != plan.graph_id
         || checkpoint.delivery_required
             != (plan.delivery == Some(provenant_records::run::DeliveryMode::Pr))
@@ -1248,7 +1211,10 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         .count();
     if active_expansions > 1
         || (active_expansions == 1)
-            != (checkpoint.pause_cause() == Some(PauseCause::InvalidPlanExpansion))
+            != matches!(
+                checkpoint.pause_cause(),
+                Some(PauseCause::InvalidPlanExpansion { .. })
+            )
     {
         return Err(GraphError::BadCheckpoint {
             node: checkpoint.graph_id.clone(),
@@ -1307,14 +1273,14 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             &progress.loop_pause,
         ) {
             (None, None, None) => true,
-            (Some(NodeDecisionCause::LoopPaused), Some("loop_paused"), Some(_)) => {
+            (Some(NodeDecisionCause::LoopPaused { .. }), Some("loop_paused"), Some(_)) => {
                 node.loop_body.is_some()
             }
-            (Some(NodeDecisionCause::LoopAskClosed), Some("loop_ask_closed"), Some(_)) => {
+            (Some(NodeDecisionCause::LoopAskClosed { .. }), Some("loop_ask_closed"), Some(_)) => {
                 node.loop_body.is_some()
             }
             (
-                Some(NodeDecisionCause::InvalidLoopDecision),
+                Some(NodeDecisionCause::InvalidLoopDecision { .. }),
                 Some("invalid_loop_decision"),
                 Some(_),
             ) => node.loop_body.is_some(),
@@ -1333,8 +1299,8 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 plans::agent(node)
                     && (pause.is_some() || (*active && *fallback))
                     && fragment_error.is_none_or(|fact| match fact {
-                        PlanFailureFact::Structural(limit) => limit.actual > limit.max,
-                        PlanFailureFact::Envelope(limit) => {
+                        PlanFailureFact::Structural { limit, .. } => limit.actual > limit.max,
+                        PlanFailureFact::Envelope { limit, .. } => {
                             limit.bound > MAX_CHECKPOINT_BYTES as usize
                         }
                         _ => true,
@@ -1388,7 +1354,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 "composite completion edges must include every member",
             ),
             (
-                document.schema_version >= 2 && progress.source_binding != node.source,
+                progress.source_binding != node.source,
                 "source selection must match the expanded plan",
             ),
             (
@@ -1555,11 +1521,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 "pending review base must belong to an unlaunched reader",
             ));
         }
-        if document.schema_version >= 2
-            && requests_review_base
-            && progress.review_base.is_none()
-            && !progress.review_base_pending
-        {
+        if requests_review_base && progress.review_base.is_none() && !progress.review_base_pending {
             return Err(bad("reader must retain its review base binding"));
         }
         if progress.writer_binding_pending
@@ -1584,10 +1546,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                     "writer binding must retain its worktree and initial head",
                 ));
             }
-        } else if document.schema_version >= 2
-            && plans::writer(node)
-            && !progress.writer_binding_pending
-        {
+        } else if plans::writer(node) && !progress.writer_binding_pending {
             return Err(bad("writer must retain its binding"));
         }
         if !progress.attempts.is_empty()
@@ -1600,8 +1559,8 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         }
         if let Some(commit) = &progress.source_commit {
             let expected = match &node.source {
-                Some(SourceBinding::Commit { commit }) => Some(commit),
-                Some(SourceBinding::Node { node: source }) => positions
+                Some(SourceBinding::Commit { commit, .. }) => Some(commit),
+                Some(SourceBinding::Node { node: source, .. }) => positions
                     .get(source)
                     .and_then(|index| checkpoint.nodes[*index].outputs.as_ref())
                     .and_then(|outputs| outputs.commit.as_ref()),
@@ -1631,7 +1590,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             previous_number = attempt.key.attempt;
         }
         for (index, attempt) in progress.attempts.iter().enumerate() {
-            if document.schema_version >= 2 && attempt.input_manifest.is_none() {
+            if attempt.input_manifest.is_none() {
                 return Err(bad("attempt must retain its input manifest"));
             }
             if let Some(manifest) = &attempt.input_manifest {

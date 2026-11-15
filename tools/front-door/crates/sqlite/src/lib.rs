@@ -258,6 +258,36 @@ mod schema_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    thread_local! {
+        static CONTENDED: std::cell::RefCell<Option<std::sync::mpsc::SyncSender<()>>> = const {
+            std::cell::RefCell::new(None)
+        };
+    }
+
+    fn signal_contention(_: i32) -> bool {
+        CONTENDED.with(|slot| {
+            if let Some(sender) = slot.borrow_mut().take() {
+                let _ = sender.send(());
+            }
+        });
+        true
+    }
+
+    fn fresh_temp_dir(prefix: &str) -> std::io::Result<std::path::PathBuf> {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        loop {
+            let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path =
+                std::env::temp_dir().join(format!("{prefix}-{}-{serial}", std::process::id()));
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Ok(path),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
 
     fn safe_companion() -> Metadata {
         Metadata {
@@ -380,84 +410,74 @@ mod tests {
     fn a_thread_timeout_bounds_locks_and_then_restores() {
         let now = MonoTime::from_micros(0);
         let outer = busy_timeout();
-        with_busy_timeout(Duration::from_millis(50), || {
-            assert_eq!(busy_timeout(), Duration::from_millis(50));
-            assert_eq!(lock_budget(now).remaining(now).as_micros(), 50_000);
-        });
-        with_busy_timeout(Duration::ZERO, || {
-            assert!(lock_budget(now).is_nonblocking());
-        });
-        assert_eq!(busy_timeout(), outer);
+        for (timeout, expected_micros, nonblocking) in [
+            (Duration::from_millis(50), 50_000, false),
+            (Duration::ZERO, 0, true),
+        ] {
+            with_busy_timeout(timeout, || {
+                assert_eq!(busy_timeout(), timeout);
+                let budget = lock_budget(now);
+                assert_eq!(budget.is_nonblocking(), nonblocking);
+                assert_eq!(budget.remaining(now).as_micros(), expected_micros);
+            });
+            assert_eq!(busy_timeout(), outer);
+        }
     }
 
-    // Hold the writer until the contender has begun and is still waiting.
     #[test]
-    fn a_contended_store_waits_for_the_writer_instead_of_failing()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let temp = std::env::temp_dir().canonicalize()?.join(format!(
-            "provenant-sqlite-busy-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::create_dir_all(&temp)?;
+    fn contended_store_outcomes_follow_the_busy_budget() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = fresh_temp_dir("provenant-sqlite-busy")?;
         let path = temp.join("store.sqlite3");
         std::fs::File::create(&path)?;
         let writer = open_connection(&path, false)?;
         enable_wal(&writer).map_err(|_| "wal")?;
-        writer.execute_batch(
-            "CREATE TABLE t (v INTEGER); BEGIN IMMEDIATE; INSERT INTO t VALUES (1);",
-        )?;
-        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
-        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
-        let contender_path = path.clone();
-        let worker = std::thread::spawn(
-            move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-                let contender = open_connection(&contender_path, false)?;
-                started_tx.send(())?;
-                let result =
-                    contender.execute_batch("BEGIN IMMEDIATE; INSERT INTO t VALUES (2); COMMIT;");
-                done_tx.send(result)?;
-                Ok(())
-            },
-        );
-        started_rx.recv()?;
-        let blocked = matches!(
-            done_rx.recv_timeout(Duration::from_millis(100)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-        );
-        writer.execute_batch("COMMIT")?;
-        let result = done_rx.recv_timeout(Duration::from_secs(5));
-        worker
-            .join()
-            .map_err(|_| "contender thread")?
-            .map_err(|error| error.to_string())?;
-        assert!(blocked, "contender returned while the write lock was held");
-        result??;
+        writer.execute_batch("CREATE TABLE t (v INTEGER)")?;
+
+        for (value, release_after_contention) in [(1, true), (2, false)] {
+            writer.execute_batch("BEGIN IMMEDIATE")?;
+            if release_after_contention {
+                let (contended_tx, contended_rx) = std::sync::mpsc::sync_channel(0);
+                let (done_tx, done_rx) = std::sync::mpsc::channel();
+                let contender_path = path.clone();
+                let worker = std::thread::spawn(move || -> rusqlite::Result<()> {
+                    let contender = open_connection(&contender_path, false)?;
+                    CONTENDED.with(|slot| *slot.borrow_mut() = Some(contended_tx));
+                    contender.busy_handler(Some(signal_contention))?;
+                    let result = contender.execute_batch(&format!(
+                        "BEGIN IMMEDIATE; INSERT INTO t VALUES ({value}); COMMIT;"
+                    ));
+                    let _ = done_tx.send(result);
+                    Ok(())
+                });
+
+                // The busy handler signals that the contender reached the held
+                // writer lock; releasing it lets the same operation complete.
+                contended_rx.recv()?;
+                writer.execute_batch("COMMIT")?;
+                done_rx.recv()??;
+                worker.join().map_err(|_| "contender thread")??;
+            } else {
+                let contender =
+                    with_busy_timeout(Duration::ZERO, || open_connection(&path, false))?;
+                let error = match contender.execute_batch(&format!(
+                    "BEGIN IMMEDIATE; INSERT INTO t VALUES ({value}); COMMIT;"
+                )) {
+                    Ok(()) => {
+                        return Err("zero-timeout write succeeded while the lock was held".into());
+                    }
+                    Err(error) => error,
+                };
+                assert!(is_busy(&error));
+                writer.execute_batch("ROLLBACK")?;
+            }
+        }
+
         let contender = open_connection(&path, false)?;
-        let rows: i64 = contender.query_row("SELECT count(*) FROM t", [], |row| row.get(0))?;
-        assert_eq!(rows, 2);
-        std::fs::remove_dir_all(&temp)?;
-        Ok(())
-    }
-
-    #[test]
-    fn a_store_held_past_the_timeout_reports_busy() -> Result<(), Box<dyn std::error::Error>> {
-        let temp = std::env::temp_dir().canonicalize()?.join(format!(
-            "provenant-sqlite-held-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::create_dir_all(&temp)?;
-        let path = temp.join("store.sqlite3");
-        std::fs::File::create(&path)?;
-        let writer = open_connection(&path, false)?;
-        enable_wal(&writer).map_err(|_| "wal")?;
-        writer.execute_batch("CREATE TABLE t (v INTEGER); BEGIN IMMEDIATE;")?;
-        let contender =
-            with_busy_timeout(Duration::from_millis(20), || open_connection(&path, false))?;
-        let error = contender.execute_batch("BEGIN IMMEDIATE").unwrap_err();
-        assert!(is_busy(&error));
-        writer.execute_batch("COMMIT")?;
+        let rows = contender
+            .prepare("SELECT v FROM t ORDER BY v")?
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(rows, [1]);
         std::fs::remove_dir_all(&temp)?;
         Ok(())
     }

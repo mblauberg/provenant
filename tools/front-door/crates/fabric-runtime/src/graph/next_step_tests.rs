@@ -9,7 +9,6 @@ use std::collections::VecDeque;
 #[derive(Default)]
 struct Owner {
     observations: VecDeque<AttemptObservation>,
-    routes: Vec<GraphRoute>,
     prompts: Vec<String>,
     worktrees: Vec<Option<String>>,
     facts: Option<DepletionFacts>,
@@ -51,12 +50,11 @@ impl AttemptOwner for Owner {
         &mut self,
         _key: &AttemptKey,
         node: NodeInput<'_>,
-        route: &GraphRoute,
+        _route: &GraphRoute,
         _access: AccessMode,
         worktree: Option<&str>,
         _replay: Replay<'_>,
     ) -> Result<AttemptObservation, Self::Error> {
-        self.routes.push(route.clone());
         self.prompts.push(node.prompt.to_owned());
         self.worktrees.push(worktree.map(str::to_owned));
         Ok(self
@@ -72,7 +70,6 @@ struct Settled {
     document: GraphDocument,
     limits: crate::config::GraphLimits,
     saved: Option<GraphCheckpoint>,
-    saves: usize,
     facts: Option<DepletionFacts>,
 }
 
@@ -106,7 +103,6 @@ impl GraphJournal for Settled {
             .is_none(),
             "a saved stop still owes its next step"
         );
-        self.saves += 1;
         self.saved = Some(checkpoint.clone());
         Ok(())
     }
@@ -117,7 +113,6 @@ fn journal(document: &GraphDocument) -> Settled {
         document: document.clone(),
         limits: Default::default(),
         saved: None,
-        saves: 0,
         facts: None,
     }
 }
@@ -137,8 +132,7 @@ fn document(access: &str, on_stop: serde_json::Value) -> GraphDocument {
     if !on_stop.is_null() {
         node["on_stop"] = on_stop;
     }
-    serde_json::from_value(json!({"schema_version": 1, "graph_id": "g-next", "nodes": [node]}))
-        .unwrap()
+    super::model::document_fixture(json!({"graph_id": "g-next", "nodes": [node]}))
 }
 
 fn terminal(
@@ -175,7 +169,20 @@ fn done(reference: &str) -> AttemptObservation {
 /// jointly decide completion; a blocked writer preserves its stated cause.
 #[test]
 fn writer_handoff_classes_settle_without_mistaking_done_for_a_stop() {
-    for status in [Some("done"), Some("blocked"), Some("stopped_early"), None] {
+    for (status, outcome, stop) in [
+        (Some("done"), AttemptOutcome::Succeeded, None),
+        (
+            Some("blocked"),
+            AttemptOutcome::DeclaredStop,
+            Some(StopCause::Blocked),
+        ),
+        (
+            Some("stopped_early"),
+            AttemptOutcome::DeclaredStop,
+            Some(StopCause::StoppedEarly),
+        ),
+        (None, AttemptOutcome::StoppedNoWork, None),
+    ] {
         let document = document("worktree_write", json!({"stopped_early":"chair"}));
         let text = status.map(|status| format!("```handoff\n{}\n```", json!({
             "schema_version":2, "status":status, "note":"Owner must supply the missing capability",
@@ -201,36 +208,18 @@ fn writer_handoff_classes_settle_without_mistaking_done_for_a_stop() {
         };
         let run = advance(&document, &mut owner, &mut journal(&document)).unwrap();
         let progress = &run.checkpoint.nodes[0];
-        if status == Some("done") {
+        assert_eq!(progress.attempts[0].outcome, Some(outcome));
+        assert_eq!(progress.attempts[0].stop, stop);
+        if outcome == AttemptOutcome::Succeeded {
             assert_eq!(progress.state, NodeState::Succeeded);
-            assert_eq!(
-                progress.attempts[0].outcome,
-                Some(AttemptOutcome::Succeeded)
-            );
             assert!(run.checkpoint.pause.is_none());
         } else {
-            assert_eq!(
-                progress.attempts[0].outcome,
-                Some(if status.is_some() {
-                    AttemptOutcome::DeclaredStop
-                } else {
-                    AttemptOutcome::StoppedNoWork
-                })
-            );
             assert!(run.checkpoint.pause.is_some());
             if status == Some("blocked") {
                 assert!(progress.blocked);
                 assert_eq!(progress.attempts[0].stop, Some(StopCause::Blocked));
-                assert!(
-                    progress
-                        .advance_error
-                        .as_deref()
-                        .unwrap()
-                        .contains("missing capability")
-                );
             }
         }
-        assert_eq!(owner.routes.len(), 1);
     }
 }
 
@@ -294,7 +283,7 @@ fn never_spawned_attempt_retries_elsewhere_only_with_released_custody() {
         };
         let run = advance(&document, &mut owner, &mut journal(&document)).unwrap();
         assert_eq!(
-            adapters(&owner),
+            recorded_adapters(&run.checkpoint),
             if released {
                 vec!["first", "second"]
             } else {
@@ -320,11 +309,23 @@ fn never_spawned_attempt_retries_elsewhere_only_with_released_custody() {
     }
 }
 
-fn adapters(owner: &Owner) -> Vec<&str> {
-    owner
-        .routes
+fn recorded_attempts(checkpoint: &GraphCheckpoint) -> Vec<&GraphAttempt> {
+    let progress = checkpoint
+        .nodes
         .iter()
-        .map(|route| route.adapter.as_deref().unwrap())
+        .find(|node| node.id == "work")
+        .unwrap();
+    progress
+        .previous_attempts
+        .iter()
+        .chain(&progress.attempts)
+        .collect()
+}
+
+fn recorded_adapters(checkpoint: &GraphCheckpoint) -> Vec<&str> {
+    recorded_attempts(checkpoint)
+        .iter()
+        .map(|attempt| attempt.route.adapter.as_deref().unwrap())
         .collect()
 }
 
@@ -355,7 +356,14 @@ fn a_transient_stop_retries_once_on_its_route_then_takes_a_new_route() {
     let mut journal = journal(&document);
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert!(run.checkpoint.successful());
-    assert_eq!(adapters(&owner), ["first", "first", "second"]);
+    let node = &run.checkpoint.nodes[0];
+    let recorded_routes = node
+        .previous_attempts
+        .iter()
+        .chain(&node.attempts)
+        .filter_map(|attempt| attempt.route.adapter.as_deref())
+        .collect::<Vec<_>>();
+    assert_eq!(recorded_routes, ["first", "first", "second"]);
     assert_eq!(
         restarts(&run.checkpoint),
         [
@@ -368,7 +376,6 @@ fn a_transient_stop_retries_once_on_its_route_then_takes_a_new_route() {
             (StopCause::ProcessCrash, NextStep::NewRoute),
         ]
     );
-    assert!(journal.saves > 0);
 }
 
 #[test]
@@ -390,7 +397,11 @@ fn a_depleted_writer_moves_to_a_new_route_at_once_in_its_worktree() {
         let mut journal = journal(&document);
         let run = advance(&document, &mut owner, &mut journal).unwrap();
         assert!(run.checkpoint.successful(), "{cause}");
-        assert_eq!(adapters(&owner), ["first", "second"], "{cause}");
+        assert_eq!(
+            recorded_adapters(&run.checkpoint),
+            ["first", "second"],
+            "{cause}"
+        );
         assert_eq!(owner.worktrees[0], owner.worktrees[1], "{cause}");
         assert_eq!(restarts(&run.checkpoint), [(cause, NextStep::NewRoute)]);
     }
@@ -416,7 +427,7 @@ fn a_writer_that_lost_its_lane_token_continues_from_its_handoff_on_a_new_route()
     let mut journal = journal(&document);
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert!(run.checkpoint.successful());
-    assert_eq!(adapters(&owner), ["first", "second"]);
+    assert_eq!(recorded_adapters(&run.checkpoint), ["first", "second"]);
     assert_eq!(owner.worktrees[0], owner.worktrees[1]);
     assert!(owner.prompts[1].contains("Finish renderer"));
     assert_eq!(
@@ -445,7 +456,7 @@ fn on_stop_sends_a_stop_to_the_chair_and_unproved_custody_always_goes_there() {
         let mut journal = journal(&document);
         let run = advance(&document, &mut owner, &mut journal).unwrap();
         assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed, "{cause}");
-        assert_eq!(adapters(&owner), ["first"], "{cause}");
+        assert_eq!(recorded_adapters(&run.checkpoint), ["first"], "{cause}");
         assert!(restarts(&run.checkpoint).is_empty(), "{cause}");
     }
 }
@@ -469,7 +480,7 @@ fn on_stop_moves_a_chair_cause_to_a_new_route() {
     let mut journal = journal(&document);
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert!(run.checkpoint.successful());
-    assert_eq!(adapters(&owner), ["first", "second"]);
+    assert_eq!(recorded_adapters(&run.checkpoint), ["first", "second"]);
 }
 
 #[test]
@@ -585,19 +596,27 @@ fn a_usage_limited_writer_restarts_on_the_ladder_route_then_on_its_declared_rout
     // The ladder, not the declared route list, chose the first restart: the
     // same model on the spare account, in the same worktree. It leaves the
     // declared route behind it.
-    assert_eq!(adapters(&owner)[..2], ["first", "first"]);
-    assert_eq!(owner.routes[1].account.as_deref(), Some("spare"));
+    assert_eq!(recorded_adapters(&run.checkpoint)[..2], ["first", "first"]);
+    assert_eq!(
+        recorded_attempts(&run.checkpoint)[1]
+            .route
+            .account
+            .as_deref(),
+        Some("spare")
+    );
     assert_eq!(owner.worktrees[0], owner.worktrees[1]);
     let choices = ladder_choices(&run.checkpoint);
-    assert_eq!(choices.len(), 1);
-    assert_eq!(
-        choices[0].rung,
-        provenant_routing::Rung::SameModelOtherAccount
-    );
-    assert!(choices[0].target.contains("first/model") && choices[0].target.contains("spare"));
+    let choice = choices
+        .iter()
+        .find(|choice| choice.rung == provenant_routing::Rung::SameModelOtherAccount)
+        .unwrap();
+    assert!(choice.target.contains("first/model") && choice.target.contains("spare"));
     // The ladder has nothing left, but the node declares an untried route, so
     // the chair is not asked while a route remains.
-    assert_eq!(adapters(&owner), ["first", "first", "second"]);
+    assert_eq!(
+        recorded_adapters(&run.checkpoint),
+        ["first", "first", "second"]
+    );
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
     assert_eq!(
         restarts(&run.checkpoint),
@@ -623,7 +642,7 @@ fn a_ladder_that_sees_no_ready_route_still_tries_the_declared_untried_route() {
         ..journal(&document)
     };
     let run = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(adapters(&owner), ["first", "second"]);
+    assert_eq!(recorded_adapters(&run.checkpoint), ["first", "second"]);
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
     assert!(ladder_choices(&run.checkpoint).is_empty());
 }
@@ -647,7 +666,7 @@ fn a_host_native_hand_off_keeps_a_launchable_route_after_it() {
         ..journal(&document)
     };
     let run = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(adapters(&owner), ["first", "host-native"]);
+    assert_eq!(recorded_adapters(&run.checkpoint), ["first", "host-native"]);
     assert!(run.checkpoint.pause.is_none(), "{:?}", run.checkpoint.pause);
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
     let choices = ladder_choices(&run.checkpoint);

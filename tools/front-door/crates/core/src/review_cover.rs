@@ -187,19 +187,56 @@ mod tests {
     };
 
     #[test]
-    fn merge_in_from_the_target_keeps_the_review() {
-        let mut git = history();
-        git.commit("merged", &["h", "m1"], &[]);
-        let result = coverage(&mut git, REVIEWED, "merged", "m1");
-        assert_eq!(result, Ok(Coverage::CarriedOver));
-    }
-
-    #[test]
-    fn rebase_with_an_unchanged_delta_keeps_the_review() {
-        let mut git = history();
-        git.commit("rebased", &["m1"], &["x"]);
-        let result = coverage(&mut git, REVIEWED, "rebased", "m1");
-        assert_eq!(result, Ok(Coverage::CarriedOver));
+    fn unchanged_reviewed_delta_keeps_coverage_across_git_operations() {
+        let cases: [(
+            &str,
+            fn() -> (History, Reviewed<'static>, &'static str, &'static str),
+            Coverage,
+        ); 4] = [
+            (
+                "merge-in",
+                || {
+                    let mut git = history();
+                    git.commit("merged", &["h", "m1"], &[]);
+                    (git, REVIEWED, "merged", "m1")
+                },
+                Coverage::CarriedOver,
+            ),
+            (
+                "rebase",
+                || {
+                    let mut git = history();
+                    git.commit("rebased", &["m1"], &["x"]);
+                    (git, REVIEWED, "rebased", "m1")
+                },
+                Coverage::CarriedOver,
+            ),
+            (
+                "stacked-base",
+                || {
+                    let (git, reviewed) = stacked();
+                    (git, reviewed, "sh", "l1")
+                },
+                Coverage::Exact,
+            ),
+            (
+                "landed-stacked-base",
+                || {
+                    let (mut git, reviewed) = stacked();
+                    git.commit("m2", &["m1", "l1"], &[]);
+                    (git, reviewed, "sh", "m2")
+                },
+                Coverage::Exact,
+            ),
+        ];
+        for (operation, build, expected) in cases {
+            let (mut git, reviewed, head, target) = build();
+            assert_eq!(
+                coverage(&mut git, reviewed, head, target),
+                Ok(expected),
+                "{operation}"
+            );
+        }
     }
 
     #[test]
@@ -265,19 +302,5 @@ mod tests {
         let result = coverage(&mut git, reviewed, "sh", "m1");
         assert_eq!(result, Ok(Coverage::BaseNotForward));
         assert!(!result.unwrap().covers());
-    }
-
-    #[test]
-    fn an_unchanged_head_keeps_its_review_once_its_reviewed_base_lands() {
-        let (mut git, reviewed) = stacked();
-        assert_eq!(
-            coverage(&mut git, reviewed, "sh", "l1"),
-            Ok(Coverage::Exact)
-        );
-        git.commit("m2", &["m1", "l1"], &[]);
-        assert_eq!(
-            coverage(&mut git, reviewed, "sh", "m2"),
-            Ok(Coverage::Exact)
-        );
     }
 }

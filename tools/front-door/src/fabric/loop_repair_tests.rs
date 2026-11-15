@@ -114,7 +114,7 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
     let mut second_holder = fixture.settled.clone();
     second_holder.attempt_id = second_id;
     let document: graph::GraphDocument = serde_json::from_value(
-        serde_json::json!({"schema_version":1,"graph_id":"loop-settlement","nodes":[{"id":"revise","kind":"loop","access":"read_only","loop":{"max_rounds":2,"until":"approved","body":[{"id":"repair","prompt":"reply OK","access":"worktree_write","worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}},{"id":"approved","kind":"gate","access":"read_only","depends_on":["repair"],"inputs":[{"node":"repair","outputs":["verdict"]}],"condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}]}}]}),
+        serde_json::json!({"schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"loop-settlement","nodes":[{"id":"revise","kind":"loop","access":"read_only","loop":{"max_rounds":2,"until":"approved","body":[{"id":"repair","prompt":"reply OK","access":"worktree_write","worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}},{"id":"approved","kind":"gate","access":"read_only","depends_on":["repair"],"inputs":[{"node":"repair","outputs":["verdict"]}],"condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}]}}]}),
     )?;
     let mut journal = graph::FileJournal::open(
         &fixture.roots.state,
@@ -297,7 +297,7 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
         rounds: ask.rounds,
         session: ask.session.clone(),
         wake_at: ask.wake_at,
-        timeout: ask.timeout,
+        timeout: ask.timeout.clone(),
         request: filed.request,
     };
     let scope = AskScope {

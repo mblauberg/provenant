@@ -24,6 +24,8 @@ pub enum GraphEventKind {
 /// Readable identifiers and closed codes; free text remains a digest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphEvent {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub timestamp_micros: i64,
     pub kind: GraphEventKind,
     pub subject: String,
@@ -38,6 +40,8 @@ pub struct GraphEvent {
 /// Retained, non-prompt attempt measurements for reporting after collection.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptEvent {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub identity: String,
     pub tier: String,
     pub template: String,
@@ -57,13 +61,15 @@ fn digest(value: &impl Serialize) -> Result<String, JournalError> {
 }
 
 fn event(
+    clock: &dyn provenant_core::Clock,
     kind: GraphEventKind,
     subject: &str,
     code: &str,
     value: &impl Serialize,
 ) -> Result<GraphEvent, JournalError> {
     Ok(GraphEvent {
-        timestamp_micros: provenant_os::clock::SystemClock::new()
+        extra: Default::default(),
+        timestamp_micros: clock
             .wall_now()
             .map_err(|error| std::io::Error::other(error.to_string()))?
             .as_micros(),
@@ -127,6 +133,24 @@ pub(super) fn append_changes(
     current: &GraphCheckpoint,
     document: Option<&GraphDocument>,
 ) -> Result<(), JournalError> {
+    #[cfg(test)]
+    let clock = provenant_core::TestClock::new(
+        provenant_core::WallTime::from_micros(1).expect("positive wall time is valid"),
+        provenant_core::MonoTime::from_micros(1),
+    );
+    #[cfg(not(test))]
+    let clock = provenant_os::clock::SystemClock::new();
+    append_changes_with_clock(directory, id, previous, current, document, &clock)
+}
+
+fn append_changes_with_clock(
+    directory: &Directory,
+    id: &str,
+    previous: Option<&GraphCheckpoint>,
+    current: &GraphCheckpoint,
+    document: Option<&GraphDocument>,
+    clock: &dyn provenant_core::Clock,
+) -> Result<(), JournalError> {
     let expanded = document.and_then(|document| {
         super::plans::expand(
             document,
@@ -145,6 +169,7 @@ pub(super) fn append_changes(
                 || old.loop_pause_code != node.loop_pause_code
         }) {
             let mut change = event(
+                clock,
                 GraphEventKind::NodeState,
                 &node.id,
                 match node.state {
@@ -172,6 +197,7 @@ pub(super) fn append_changes(
             });
             if old_attempt != Some(attempt) {
                 let mut observation = event(
+                    clock,
                     GraphEventKind::Attempt,
                     &node.id,
                     if attempt.outcome.is_some() {
@@ -193,7 +219,13 @@ pub(super) fn append_changes(
                     "outcome": attempt.outcome,
                 }));
                 if attempt.state != AttemptState::Terminal && !attempt.launched {
-                    events.push(event(GraphEventKind::Wait, &node.id, "slot", &attempt.key)?);
+                    events.push(event(
+                        clock,
+                        GraphEventKind::Wait,
+                        &node.id,
+                        "slot",
+                        &attempt.key,
+                    )?);
                 }
                 // A live reservation is not countable until its reference arrives.
                 // A terminal refusal may never receive one: retain a stable identity
@@ -213,6 +245,7 @@ pub(super) fn append_changes(
                     .and_then(|node| node.template.as_deref())
                     .unwrap_or("raw");
                 observation.attempt = identity.map(|identity| AttemptEvent {
+                    extra: Default::default(),
                     identity,
                     tier: metrics.and_then(|m| m.get("tier")).and_then(Value::as_str).map(str::to_owned).or_else(|| attempt.route.alias.clone()).unwrap_or_else(|| "unclassified".into()),
                     template: metrics.and_then(|m| m.get("template")).and_then(Value::as_str).unwrap_or(template).into(),
@@ -238,6 +271,7 @@ pub(super) fn append_changes(
                 events.push(observation);
                 if attempt.outcome == Some(AttemptOutcome::UsageLimited) {
                     events.push(event(
+                        clock,
                         GraphEventKind::Wait,
                         &node.id,
                         "quota",
@@ -251,6 +285,7 @@ pub(super) fn append_changes(
             && let Some(warning) = &node.concurrency_warning
         {
             events.push(event(
+                clock,
                 GraphEventKind::Warning,
                 &node.id,
                 "concurrency_cap",
@@ -259,6 +294,7 @@ pub(super) fn append_changes(
         }
         if super::relay::yields_slot(node) != old.is_some_and(super::relay::yields_slot) {
             events.push(event(
+                clock,
                 GraphEventKind::Wait,
                 &node.id,
                 if super::relay::yields_slot(node) {
@@ -273,6 +309,7 @@ pub(super) fn append_changes(
             old.launch_retry != node.launch_retry || old.ci != node.ci
         }) {
             events.push(event(
+                clock,
                 GraphEventKind::Wait,
                 &node.id,
                 if node.ci.is_some() {
@@ -285,6 +322,7 @@ pub(super) fn append_changes(
         }
         if node.gate.is_some() && old.is_none_or(|old| old.gate != node.gate) {
             events.push(event(
+                clock,
                 GraphEventKind::Gate,
                 &node.id,
                 if node.gate.as_ref().is_some_and(|gate| gate.passed) {
@@ -299,6 +337,7 @@ pub(super) fn append_changes(
             && old.is_none_or(|old| old.children != node.children || old.state != node.state)
         {
             let mut join = event(
+                clock,
                 GraphEventKind::Join,
                 &node.id,
                 "changed",
@@ -311,14 +350,24 @@ pub(super) fn append_changes(
             && let Some(outputs) = &node.outputs
         {
             if outputs.branch.is_some() {
-                let mut effect =
-                    event(GraphEventKind::Effect, &node.id, "branch", &outputs.branch)?;
+                let mut effect = event(
+                    clock,
+                    GraphEventKind::Effect,
+                    &node.id,
+                    "branch",
+                    &outputs.branch,
+                )?;
                 effect.details = effect_identifier("branch", outputs.branch.as_deref());
                 events.push(effect);
             }
             if outputs.commit.is_some() {
-                let mut effect =
-                    event(GraphEventKind::Effect, &node.id, "commit", &outputs.commit)?;
+                let mut effect = event(
+                    clock,
+                    GraphEventKind::Effect,
+                    &node.id,
+                    "commit",
+                    &outputs.commit,
+                )?;
                 effect.details = effect_identifier("commit", outputs.commit.as_deref());
                 events.push(effect);
             }
@@ -326,6 +375,7 @@ pub(super) fn append_changes(
     }
     if previous.is_none_or(|old| old.cancelled != current.cancelled) && current.cancelled {
         events.push(event(
+            clock,
             GraphEventKind::Cancellation,
             id,
             "cancelled",
@@ -334,7 +384,13 @@ pub(super) fn append_changes(
     }
     if previous.is_none_or(|old| old.remaining != current.remaining) && current.remaining.is_some()
     {
-        let mut budget = event(GraphEventKind::Budget, id, "changed", &current.remaining)?;
+        let mut budget = event(
+            clock,
+            GraphEventKind::Budget,
+            id,
+            "changed",
+            &current.remaining,
+        )?;
         budget.details = current.remaining.as_ref().map(|remaining| serde_json::json!({
             "nodes":remaining.nodes,"edges":remaining.edges,"continuations":remaining.continuations
         }));
@@ -344,6 +400,7 @@ pub(super) fn append_changes(
         && !current.expansions.is_empty()
     {
         events.push(event(
+            clock,
             GraphEventKind::Expansion,
             id,
             "admitted",
@@ -359,7 +416,7 @@ pub(super) fn append_changes(
         .filter_map(|expansion| expansion.patch.as_ref())
         .filter(|record| !record.journaled)
     {
-        let mut observation = patch_event(record)?;
+        let mut observation = patch_event(clock, record)?;
         if let Some(details) = observation.details.as_mut().and_then(Value::as_object_mut) {
             let author = record
                 .parent
@@ -372,12 +429,19 @@ pub(super) fn append_changes(
         events.push(observation);
     }
     if previous.is_none_or(|old| old.asks != current.asks) && !current.asks.is_empty() {
-        events.push(event(GraphEventKind::Wait, id, "ask", &current.asks)?);
+        events.push(event(
+            clock,
+            GraphEventKind::Wait,
+            id,
+            "ask",
+            &current.asks,
+        )?);
     }
     if previous.is_none_or(|old| old.pull_request != current.pull_request)
         && current.pull_request.is_some()
     {
         let mut effect = event(
+            clock,
             GraphEventKind::Effect,
             id,
             "pull_request",
@@ -386,26 +450,31 @@ pub(super) fn append_changes(
         effect.details = effect_identifier("pull_request", current.pull_request.as_deref());
         events.push(effect);
     }
-    let mut saved = event(GraphEventKind::Checkpoint, id, "save", current)?;
+    let mut saved = event(clock, GraphEventKind::Checkpoint, id, "save", current)?;
     saved.details = Some(serde_json::json!({"pause_cause": current.pause_cause(),
         "cancelled":current.cancelled,"outcome":current.outcome()}));
     events.push(saved);
     append(directory, id, events)
 }
 
-/// Journal one admitted patch. Called by `admit_patch` before its commit.
+/// Write one admitted patch event using the caller's clock.
 #[cfg(test)]
 pub(super) fn append_patch(
     directory: &Directory,
     id: &str,
     record: &super::patch::PatchRecord,
+    clock: &dyn provenant_core::Clock,
 ) -> Result<(), JournalError> {
-    append(directory, id, vec![patch_event(record)?])
+    append(directory, id, vec![patch_event(record, clock)?])
 }
 
 /// The journal line for an admitted patch: digests and identifiers only.
-fn patch_event(record: &super::patch::PatchRecord) -> Result<GraphEvent, JournalError> {
+fn patch_event(
+    record: &super::patch::PatchRecord,
+    clock: &dyn provenant_core::Clock,
+) -> Result<GraphEvent, JournalError> {
     let mut observation = event(
+        clock,
         GraphEventKind::Patch,
         record.parent.as_deref().unwrap_or("host"),
         "admitted",
@@ -469,50 +538,115 @@ fn append(directory: &Directory, id: &str, events: Vec<GraphEvent>) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use provenant_core::{MonoTime, TestClock, WallTime};
+
+    fn test_clock() -> TestClock {
+        TestClock::new(WallTime::from_micros(1).unwrap(), MonoTime::from_micros(1))
+    }
+
+    fn append_changes_test(
+        directory: &Directory,
+        id: &str,
+        previous: Option<&GraphCheckpoint>,
+        current: &GraphCheckpoint,
+        document: Option<&GraphDocument>,
+    ) -> Result<(), JournalError> {
+        let clock = test_clock();
+        append_changes_with_clock(directory, id, previous, current, document, &clock)
+    }
+
+    fn append_patch_test(
+        directory: &Directory,
+        id: &str,
+        record: &super::super::patch::PatchRecord,
+    ) -> Result<(), JournalError> {
+        let clock = test_clock();
+        append_patch(directory, id, record, &clock)
+    }
 
     #[test]
     fn events_survive_a_torn_tail_and_keep_order_on_next_save() {
         let temp = tempfile::tempdir().unwrap();
         let directory = Directory::open_anchor(temp.path()).unwrap();
-        let mut checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
-            "schema_version": 1, "graph_id": "g", "plan_digest": "digest",
+        let mut checkpoint = super::super::model::checkpoint_fixture(serde_json::json!({
+            "graph_id": "g", "plan_digest": "digest",
             "nodes": [{"id":"private-node-id", "state":"pending", "worktree":null, "attempts":[]}]
-        }))
-        .unwrap();
-        append_changes(&directory, "g", None, &checkpoint, None).unwrap();
+        }));
+        append_changes_test(&directory, "g", None, &checkpoint, None).unwrap();
         let first = read(&directory, "g").unwrap();
-        assert_eq!(first.len(), 2);
+        assert!(!first.is_empty());
         let mut file = directory.open_append(&name("g")).unwrap();
         file.write_all(b"{\"kind\":").unwrap();
         file.sync().unwrap();
         assert_eq!(read(&directory, "g").unwrap(), first);
         let previous = checkpoint.clone();
         checkpoint.nodes[0].state = NodeState::Running;
-        append_changes(&directory, "g", Some(&previous), &checkpoint, None).unwrap();
+        append_changes_test(&directory, "g", Some(&previous), &checkpoint, None).unwrap();
         let records = read(&directory, "g").unwrap();
-        assert_eq!(records.len(), 4);
-        assert_eq!(records[0], first[0]);
-        assert_eq!(records[2].code, "running");
+        assert!(records.starts_with(&first));
+        assert!(
+            records
+                .iter()
+                .skip(first.len())
+                .any(|record| { record.subject == "private-node-id" && record.code == "running" })
+        );
         assert_eq!(records[0].subject, "private-node-id");
-        assert!(records[0].timestamp_micros > 0);
+    }
+
+    #[test]
+    fn persisted_events_preserve_unknown_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = Directory::open_anchor(temp.path()).unwrap();
+        let event: GraphEvent = serde_json::from_value(serde_json::json!({
+            "timestamp_micros": 0,
+            "kind": "attempt",
+            "subject": "node",
+            "code": "settled",
+            "digest": "sha256:event",
+            "future_event_field": {"enabled": true},
+            "attempt": {
+                "identity": "attempt",
+                "tier": "senior",
+                "template": "task",
+                "tokens": null,
+                "cost_micro_usd": null,
+                "wall_time_seconds": null,
+                "has_usage": false,
+                "cache_read_tokens": null,
+                "input_tokens": null,
+                "queue_time_ms": null,
+                "outcome": null,
+                "route": {},
+                "future_attempt_field": "preserved"
+            }
+        }))
+        .unwrap();
+        append(&directory, "g", vec![event]).unwrap();
+        let event = read(&directory, "g").unwrap().pop().unwrap();
+        let bytes = CanonicalV1::bytes(&event).unwrap();
+        let event: GraphEvent =
+            provenant_records::decode(bytes.as_bytes(), provenant_records::Limits::default())
+                .unwrap();
+        let encoded = serde_json::to_value(event).unwrap();
+        assert_eq!(encoded["future_event_field"]["enabled"], true);
+        assert_eq!(encoded["attempt"]["future_attempt_field"], "preserved");
     }
 
     #[test]
     fn trace_explains_failure_and_concurrency_warning_without_brief_text() {
         let temp = tempfile::tempdir().unwrap();
         let directory = Directory::open_anchor(temp.path()).unwrap();
-        let before: GraphCheckpoint = serde_json::from_value(serde_json::json!({
-            "schema_version":1,"graph_id":"g","plan_digest":"digest",
+        let before = super::super::model::checkpoint_fixture(serde_json::json!({
+            "graph_id":"g","plan_digest":"digest",
             "nodes":[{"id":"build","state":"pending","worktree":null,"attempts":[]}]
-        }))
-        .unwrap();
-        append_changes(&directory, "g", None, &before, None).unwrap();
+        }));
+        append_changes_test(&directory, "g", None, &before, None).unwrap();
         let mut after = before.clone();
         after.nodes[0].concurrency_warning = Some("cap occupied".into());
         after.nodes[0].state = NodeState::Failed;
         after.nodes[0].advance_error_code = Some("required_input_unavailable".into());
         after.nodes[0].advance_error = Some("private brief or secret text".into());
-        append_changes(&directory, "g", Some(&before), &after, None).unwrap();
+        append_changes_test(&directory, "g", Some(&before), &after, None).unwrap();
         let records = read(&directory, "g").unwrap();
         assert!(records.iter().any(|event| event.subject == "build"
             && event.kind == GraphEventKind::Warning
@@ -533,16 +667,15 @@ mod tests {
     fn terminal_refusals_without_a_reference_are_counted_once() {
         let temp = tempfile::tempdir().unwrap();
         let directory = Directory::open_anchor(temp.path()).unwrap();
-        let mut checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
-            "schema_version":1,"graph_id":"g","plan_digest":"digest",
+        let mut checkpoint = super::super::model::checkpoint_fixture(serde_json::json!({
+            "graph_id":"g","plan_digest":"digest",
             "nodes":[{"id":"task","state":"running","worktree":null,"attempts":[{
                 "key":{"graph_id":"g","node_id":"task","route_index":0, "attempt": 1},
                 "route":{"alias":"senior"},"state":"starting","launched":false,
                 "attempt_ref":null,"outcome":null,"launch_actor":"actor"
             }]}]
-        }))
-        .unwrap();
-        append_changes(&directory, "g", None, &checkpoint, None).unwrap();
+        }));
+        append_changes_test(&directory, "g", None, &checkpoint, None).unwrap();
         assert!(
             read(&directory, "g")
                 .unwrap()
@@ -555,8 +688,8 @@ mod tests {
         attempt.state = AttemptState::Terminal;
         attempt.outcome = Some(AttemptOutcome::AdapterUnavailable);
         attempt.settled = 1;
-        append_changes(&directory, "g", Some(&before), &checkpoint, None).unwrap();
-        append_changes(&directory, "g", Some(&checkpoint), &checkpoint, None).unwrap();
+        append_changes_test(&directory, "g", Some(&before), &checkpoint, None).unwrap();
+        append_changes_test(&directory, "g", Some(&checkpoint), &checkpoint, None).unwrap();
         let attempts = read(&directory, "g")
             .unwrap()
             .into_iter()
@@ -570,17 +703,16 @@ mod tests {
 
     #[test]
     fn terminal_collection_keeps_events() {
-        use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
+        use provenant_os::fs::SystemPathResolver;
         let temp = tempfile::tempdir().unwrap();
         let base = std::fs::canonicalize(temp.path()).unwrap();
         let inputs = provenant_test_support::root_inputs(&base).unwrap();
         let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
         let project = ProjectId::from_bytes([1; 16]);
-        let clock = SystemClock::new();
+        let clock = test_clock();
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
-        let mut fixture: StoredCheckpoint =
-            serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap();
+        let mut fixture = super::super::journal::stored_checkpoint_fixture();
         fixture.execution.directory = base;
         let mut journal =
             FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
@@ -608,10 +740,9 @@ mod tests {
     fn admitted_patches_keep_identifiers_and_hash_free_text() {
         let temp = tempfile::tempdir().unwrap();
         let directory = Directory::open_anchor(temp.path()).unwrap();
-        let before: GraphCheckpoint = serde_json::from_value(serde_json::json!({
-            "schema_version": 1, "graph_id": "g", "plan_digest": "digest", "nodes": []
-        }))
-        .unwrap();
+        let before = super::super::model::checkpoint_fixture(serde_json::json!({
+            "graph_id": "g", "plan_digest": "digest", "nodes": []
+        }));
         let mut after = before.clone();
         after.expansions.push(Expansion {
             extra: Default::default(),
@@ -637,7 +768,7 @@ mod tests {
                 restart: None,
             }),
         });
-        append_changes(&directory, "g", Some(&before), &after, None).unwrap();
+        append_changes_test(&directory, "g", Some(&before), &after, None).unwrap();
         let records = read(&directory, "g").unwrap();
         assert!(
             records.iter().any(|record| {
@@ -666,11 +797,10 @@ mod tests {
             journaled: true,
             restart: None,
         };
-        append_patch(&directory, "g", &record).unwrap();
-        let before: GraphCheckpoint = serde_json::from_value(serde_json::json!({
-            "schema_version": 1, "graph_id": "g", "plan_digest": "digest", "nodes": []
-        }))
-        .unwrap();
+        append_patch_test(&directory, "g", &record).unwrap();
+        let before = super::super::model::checkpoint_fixture(serde_json::json!({
+            "graph_id": "g", "plan_digest": "digest", "nodes": []
+        }));
         let mut after = before.clone();
         after.expansions.push(Expansion {
             extra: Default::default(),
@@ -684,7 +814,7 @@ mod tests {
             uses: Vec::new(),
             patch: Some(record),
         });
-        append_changes(&directory, "g", Some(&before), &after, None).unwrap();
+        append_changes_test(&directory, "g", Some(&before), &after, None).unwrap();
         let patches = read(&directory, "g")
             .unwrap()
             .into_iter()

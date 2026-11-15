@@ -1,7 +1,7 @@
 use super::*;
 
 /// Stored execution/checkpoint contract; older duplicate-pin records are rejected.
-pub(super) const CHECKPOINT_SCHEMA_VERSION: u64 = 2;
+pub const CHECKPOINT_SCHEMA_VERSION: u64 = 2;
 
 #[path = "events.rs"]
 pub(super) mod events;
@@ -373,7 +373,7 @@ impl FileJournal {
     pub fn integration_base(&self) -> Option<provenant_core::GitOid> {
         self.execution
             .as_ref()
-            .and_then(|execution| execution.bases)
+            .and_then(|execution| execution.bases.as_ref())
             .and_then(|bases| bases.integration)
     }
 
@@ -1134,7 +1134,7 @@ impl GraphJournal for FileJournal {
             schema_version: CHECKPOINT_SCHEMA_VERSION,
             digest: CanonicalV1::record_digest(
                 "fabric-graph-checkpoint",
-                2,
+                CHECKPOINT_SCHEMA_VERSION,
                 &(checkpoint, execution),
             )?
             .to_string(),
@@ -1456,10 +1456,16 @@ fn decode_verified_checkpoint(
         .into());
     }
     for (found, supported) in [
-        (stored.checkpoint.schema_version, 2),
-        (stored.execution.document.schema_version, 2),
+        (
+            stored.checkpoint.schema_version,
+            GraphCheckpoint::SCHEMA_VERSION,
+        ),
+        (
+            stored.execution.document.schema_version,
+            GRAPH_DOCUMENT_SCHEMA_VERSION,
+        ),
     ] {
-        if found > supported {
+        if found != supported {
             return Err(DecodeError::UnsupportedVersion {
                 found,
                 line: 1,
@@ -1468,30 +1474,10 @@ fn decode_verified_checkpoint(
             .into());
         }
     }
-    if stored.checkpoint.schema_version != 2 {
-        return Err(JournalError::BadEnvelope);
-    }
     let document = &stored.execution.document;
-    let has_v2 = document_requires_review_fields(document)
-        || stored
-            .execution
-            .bases
-            .is_some_and(|bases| bases.review.is_some())
-        || stored
-            .checkpoint
-            .expansions
-            .iter()
-            .any(|expansion| nodes_have_v2(&expansion.nodes));
-    // Matches validate_schema: version 2 may omit every v2 field.
-    if !matches!(document.schema_version, 1 | 2)
-        || document.schema_version < u64::from(minimum_schema_version(document))
-        || document.schema_version == 1 && has_v2
-    {
-        return Err(JournalError::BadEnvelope);
-    }
     let digest = CanonicalV1::record_digest(
         "fabric-graph-checkpoint",
-        2,
+        CHECKPOINT_SCHEMA_VERSION,
         &(&stored.checkpoint, &stored.execution),
     )?;
     if digest.to_string() != stored.digest {
@@ -1508,7 +1494,7 @@ fn decode_verified_checkpoint(
     }
 
     let mut stored = stored;
-    stored.checkpoint.bases = stored.execution.bases;
+    stored.checkpoint.bases = stored.execution.bases.clone();
     Ok(stored)
 }
 
@@ -1522,6 +1508,74 @@ pub(super) struct StoredCheckpoint {
     pub(super) digest: String,
     pub(super) checkpoint: GraphCheckpoint,
     pub(super) execution: GraphExecution,
+}
+
+#[cfg(test)]
+pub(super) fn stored_checkpoint_fixture() -> StoredCheckpoint {
+    let mut stored: StoredCheckpoint =
+        serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json"))
+            .expect("typed stored checkpoint fixture");
+    stored.checkpoint.schema_version = GraphCheckpoint::SCHEMA_VERSION;
+    stored.execution.document.schema_version = GRAPH_DOCUMENT_SCHEMA_VERSION;
+    let (plan, _) = validate_plan_with_limits(
+        &stored.execution.document,
+        &crate::config::GraphLimits::default(),
+    )
+    .expect("fixture graph plan");
+    for (progress, node) in stored.checkpoint.nodes.iter_mut().zip(&plan.nodes) {
+        for attempt in &mut progress.attempts {
+            attempt.input_manifest = Some(AttemptInputManifest {
+                extra: Default::default(),
+                schema_version: 1,
+                source_commit: progress.source_commit.clone(),
+                source_producer: None,
+                writer_head: progress
+                    .writer_binding
+                    .as_ref()
+                    .map(|binding| binding.head.clone()),
+                review_base: progress.review_base.clone(),
+                graph_review_base: stored
+                    .checkpoint
+                    .bases
+                    .as_ref()
+                    .and_then(|bases| bases.review)
+                    .map(|base| base.to_string()),
+                integration_base: stored
+                    .checkpoint
+                    .bases
+                    .as_ref()
+                    .and_then(|bases| bases.integration)
+                    .map(|base| base.to_string()),
+                integration_source: stored.checkpoint.integration_pin.clone(),
+                applied_route: Some(attempt.route.clone()),
+                dependencies: Some(node.depends_on.clone()),
+                dependencies_omitted: 0,
+                inputs: Vec::new(),
+                omitted: 0,
+            });
+        }
+    }
+    stored.checkpoint.plan_digest = CanonicalV1::record_digest("fabric-graph-plan", 1, &plan)
+        .expect("encode fixture graph plan")
+        .to_string();
+    super::validation::validate_checkpoint::<std::io::Error, std::io::Error>(
+        &stored.execution.document,
+        &stored.checkpoint,
+        &plan,
+        &stored.checkpoint.plan_digest,
+    )
+    .expect("fixture checkpoint matches graph plan");
+    stored.digest = CanonicalV1::record_digest(
+        "fabric-graph-checkpoint",
+        CHECKPOINT_SCHEMA_VERSION,
+        &(&stored.checkpoint, &stored.execution),
+    )
+    .expect("encode fixture checkpoint")
+    .to_string();
+    let bytes = CanonicalV1::bytes(&stored).expect("encode fixture envelope");
+    decode_checkpoint(bytes.as_bytes(), &stored.checkpoint.graph_id)
+        .expect("decode fixture checkpoint");
+    stored
 }
 
 /// Read typed Provenant review settlements covering exactly `head`.

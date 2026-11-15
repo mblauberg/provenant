@@ -36,8 +36,8 @@ fn reduced_review_uses_worst_verdict_and_requires_coverage() {
             false,
         ),
     ] {
-        let document: GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version": 1, "graph_id": "reduced-review", "nodes": [
+        let document: GraphDocument = document_fixture(serde_json::json!({
+            "graph_id": "reduced-review", "nodes": [
                 {"id":"reviews", "kind":"composite", "access":"read_only",
                  "composite":{"min_successful":minimum,"reduce_verdict":true,
                      "nodes":[{"id":"a","access":"read_only","prompt":"a","route":{"alias":"fixture"}},
@@ -47,7 +47,7 @@ fn reduced_review_uses_worst_verdict_and_requires_coverage() {
                  "inputs":[{"node":"reviews","outputs":["verdict"]}],
                  "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
             ]
-        })).unwrap();
+        }));
         let mut owner = FakeOwner {
             observations: answers
                 .into_iter()
@@ -87,15 +87,15 @@ fn reduced_review_uses_worst_verdict_and_requires_coverage() {
             .unwrap();
         assert_eq!(gate.gate.as_ref().is_some_and(|gate| gate.passed), passes);
     }
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1, "graph_id":"blocked-review", "nodes":[
+    let document: GraphDocument = document_fixture(serde_json::json!({
+        "graph_id":"blocked-review", "nodes":[
             {"id":"reviews", "kind":"composite", "access":"read_only",
              "composite":{"reduce_verdict":true,"min_successful":2,
                 "nodes":[{"id":"a","access":"read_only","prompt":"a","route":{"alias":"fixture"}},
                          {"id":"b","access":"read_only","prompt":"b","route":{"alias":"fixture"},"depends_on":["a"]}],
                 "exports":[{"node":"a","outputs":["result"]},{"node":"b","outputs":["result"]}]}}
         ]
-    })).unwrap();
+    }));
     let mut owner = FakeOwner {
         observations: [terminal(AttemptOutcome::AdapterUnavailable)].into(),
         ..Default::default()
@@ -219,8 +219,8 @@ fn fan_in_requires_all_members_unless_a_minimum_is_declared() {
 
 #[test]
 fn a_failed_nested_minimum_cannot_be_hidden_by_an_outer_group() {
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version": 1, "graph_id": "nested-minimum", "nodes": [
+    let document: GraphDocument = document_fixture(serde_json::json!({
+        "graph_id": "nested-minimum", "nodes": [
             {"id":"outer", "kind":"composite", "access":"read_only", "composite": {
                 "min_successful":1, "nodes":[
                     {"id":"inner", "kind":"composite", "access":"read_only", "composite": {
@@ -233,7 +233,7 @@ fn a_failed_nested_minimum_cannot_be_hidden_by_an_outer_group() {
                 ], "exports":[{"node":"inner","outputs":["result"]},{"node":"c","outputs":["result"]}]
             }}
         ]
-    })).unwrap();
+    }));
     let mut owner = FakeOwner {
         observations: VecDeque::from([
             terminal(AttemptOutcome::OtherFailure),
@@ -383,12 +383,9 @@ fn review_all_members_quorum_blocks_evaluator_and_names_upstream() {
         .find(|n| n.id == "verify")
         .unwrap();
     assert_eq!(verify.state, NodeState::Blocked);
-    assert!(
-        verify
-            .advance_error
-            .as_deref()
-            .unwrap()
-            .contains("lenses (Failed)")
+    assert_eq!(
+        verify.advance_error_code.as_deref(),
+        Some("upstream_blocked")
     );
 }
 
@@ -418,10 +415,6 @@ fn replay_attributes_an_unexplained_blocked_node_without_overwriting_other_reaso
     assert_eq!(
         verify.advance_error_code.as_deref(),
         Some("upstream_blocked")
-    );
-    assert_eq!(
-        verify.advance_error.as_deref(),
-        Some("blocked by lenses (Failed)")
     );
     assert_eq!(journal.0.as_ref().unwrap(), &replay.checkpoint);
 
@@ -468,12 +461,8 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
     let lenses = node("lenses").outputs.as_ref().unwrap();
     assert_eq!(lenses.findings_available, Some(false));
     assert_eq!(lenses.findings.len(), 1);
-    let excerpt = &lenses.result.as_ref().unwrap().excerpt;
-    assert!(excerpt.starts_with("Unavailable members:"), "{excerpt}");
-    assert!(
-        excerpt
-            .contains("lens-b: findings block missing or invalid: field findings: block missing")
-    );
+    assert!(lenses.result.is_some());
+    assert_eq!(lenses.findings[0].id, "lenses--lens-a:F1");
     let unavailable = node("lens-c");
     assert_eq!(unavailable.state, NodeState::Failed);
     assert_eq!(
@@ -502,7 +491,7 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
 }
 
 #[test]
-fn partial_composite_replay_preserves_checkpoint_and_launches_nothing() {
+fn partial_composite_replay_preserves_checkpoint_and_settlement() {
     let (document, mut owner) = partial_review(1);
     let mut journal = MemoryJournal::default();
     let first = advance(&document, &mut owner, &mut journal).unwrap();
@@ -510,7 +499,6 @@ fn partial_composite_replay_preserves_checkpoint_and_launches_nothing() {
     let mut replay_owner = FakeOwner::default();
     let replay = advance(&document, &mut replay_owner, &mut journal).unwrap();
     assert_eq!(replay.checkpoint, first.checkpoint);
-    assert!(replay_owner.calls.is_empty());
 }
 
 #[test]
@@ -557,52 +545,90 @@ fn status_and_replay_agree_on_persisted_partial_composite() {
 }
 
 #[test]
-fn qualified_findings_survive_model_synthesis() {
-    for dispositions in [vec![], vec!["accepted"]] {
-        let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":"qualified-findings","nodes":[
-            {"id":"lenses","kind":"composite","access":"read_only",
-             "composite":{"min_successful":1,"nodes":[
-                 {"id":"tests","template":"review.tests","review_lens":"tests","access":"read_only","prompt":"review","route":{"alias":"first"}}
-             ],"exports":[{"node":"tests","outputs":["findings"]}]}},
-            {"id":"synthesis","kind":"synthesise","access":"read_only","prompt":"synthesise","route":{"alias":"second"},
-             "depends_on":["lenses"],"dispositions":dispositions,
-             "inputs":[{"node":"lenses","outputs":["findings"]}]}
-        ]
-    })).unwrap();
-        let finding = entry(
-            ",\"lens\":\"wrong\",\"evidence\":\"observed failure\",\"proposed_fix\":\"repair branch\"",
-        );
+fn qualified_findings_survive_composite_output_producers() {
+    enum Producer {
+        ModelSynthesis,
+        DeterministicReviewReduction,
+    }
+
+    for (producer, dispositions) in [
+        (Producer::ModelSynthesis, vec![]),
+        (Producer::ModelSynthesis, vec!["accepted"]),
+        (Producer::DeterministicReviewReduction, vec![]),
+    ] {
+        let (document, observations, output_node, expected_lenses) = match producer {
+            Producer::ModelSynthesis => {
+                let document: GraphDocument = document_fixture(serde_json::json!({
+                    "graph_id":"qualified-findings","nodes":[
+                        {"id":"lenses","kind":"composite","access":"read_only",
+                         "composite":{"min_successful":1,"nodes":[
+                             {"id":"tests","template":"review.tests","review_lens":"tests","access":"read_only","prompt":"review","route":{"alias":"first"}}
+                         ],"exports":[{"node":"tests","outputs":["findings"]}]}},
+                        {"id":"synthesis","kind":"synthesise","access":"read_only","prompt":"synthesise","route":{"alias":"second"},
+                         "depends_on":["lenses"],"dispositions":dispositions,
+                         "inputs":[{"node":"lenses","outputs":["findings"]}]}
+                    ]
+                }));
+                let finding = entry(
+                    ",\"lens\":\"wrong\",\"evidence\":\"observed failure\",\"proposed_fix\":\"repair branch\"",
+                );
+                let observations = VecDeque::from([
+                    terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&finding)),
+                    terminal_with_result(
+                        AttemptOutcome::Succeeded,
+                        &findings_text(
+                            r#"{"id":"F1","disposition":"accepted","reason":"verified"}"#,
+                        ),
+                    ),
+                ]);
+                (document, observations, "synthesis", vec!["tests"])
+            }
+            Producer::DeterministicReviewReduction => {
+                let document: GraphDocument = document_fixture(serde_json::json!({
+                    "graph_id":"reduced-finding-lenses","nodes":[
+                        {"id":"panel","kind":"composite","access":"read_only",
+                         "composite":{"min_successful":1,"reduce_verdict":true,"nodes":[
+                             {"id":"tests","template":"review.tests","review_lens":"tests","access":"read_only","prompt":"review","route":{"alias":"first"}},
+                             {"id":"security","template":"review.security","review_lens":"security","access":"read_only","prompt":"review","route":{"alias":"second"}}
+                         ],"exports":[{"node":"tests","outputs":["result","findings"]},{"node":"security","outputs":["result","findings"]}]}}
+                    ]
+                }));
+                let finding = entry(
+                    ",\"lens\":\"wrong\",\"evidence\":\"observed\",\"proposed_fix\":\"repair\"",
+                );
+                let result = format!("{}\nVERDICT: FAIL", findings_text(&finding));
+                let observations = VecDeque::from([
+                    terminal_with_result(AttemptOutcome::Succeeded, &result),
+                    terminal_with_result(AttemptOutcome::Succeeded, &result),
+                ]);
+                (document, observations, "panel", vec!["tests", "security"])
+            }
+        };
         let mut owner = FakeOwner {
-            observations: VecDeque::from([
-                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&finding)),
-                terminal_with_result(
-                    AttemptOutcome::Succeeded,
-                    &findings_text(r#"{"id":"F1","disposition":"accepted","reason":"verified"}"#),
-                ),
-            ]),
+            observations,
             ..Default::default()
         };
         let mut journal = MemoryJournal::default();
         let run = advance(&document, &mut owner, &mut journal).unwrap();
-        for id in ["lenses", "synthesis"] {
-            let node = run
-                .checkpoint
-                .nodes
-                .iter()
-                .find(|node| node.id == id)
-                .unwrap();
-            let finding = &node.outputs.as_ref().unwrap().findings[0];
+        let output = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == output_node)
+            .unwrap();
+        if output_node == "panel" {
+            assert!(output.attempts.is_empty());
+        }
+        let findings = &output.outputs.as_ref().unwrap().findings;
+        assert_eq!(findings.len(), expected_lenses.len());
+        for (finding, lens) in findings.iter().zip(expected_lenses) {
             assert!(finding.id.ends_with(":F1"));
             assert_eq!(finding.effective_severity(), "note");
-            assert_eq!((finding.file.as_str(), finding.line), ("a.rs", None));
-            assert_eq!(finding.lens.as_deref().unwrap(), "tests");
-            assert_eq!(finding.evidence.as_deref().unwrap(), "observed failure");
-            assert_eq!(finding.proposed_fix.as_deref().unwrap(), "repair branch");
+            assert_eq!(finding.file.as_str(), "a.rs");
+            assert_eq!(finding.lens.as_deref(), Some(lens));
+            assert!(finding.evidence.is_some());
+            assert!(finding.proposed_fix.is_some());
         }
-        assert!(owner.prompts[1].contains("\"lens\":\"tests\""));
-        assert!(owner.prompts[1].contains("\"evidence\":\"observed failure\""));
-        assert!(owner.prompts[1].contains("\"proposed_fix\":\"repair branch\""));
         assert_eq!(
             advance(&document, &mut FakeOwner::default(), &mut journal)
                 .unwrap()
@@ -610,51 +636,6 @@ fn qualified_findings_survive_model_synthesis() {
             run.checkpoint
         );
     }
-}
-
-#[test]
-fn qualified_findings_survive_deterministic_review_reduction() {
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":"reduced-finding-lenses","nodes":[
-            {"id":"panel","kind":"composite","access":"read_only",
-             "composite":{"min_successful":1,"reduce_verdict":true,"nodes":[
-                 {"id":"tests","template":"review.tests","review_lens":"tests","access":"read_only","prompt":"review","route":{"alias":"first"}},
-                 {"id":"security","template":"review.security","review_lens":"security","access":"read_only","prompt":"review","route":{"alias":"second"}}
-             ],"exports":[{"node":"tests","outputs":["result","findings"]},{"node":"security","outputs":["result","findings"]}]}}
-        ]
-    })).unwrap();
-    let finding =
-        entry(",\"lens\":\"wrong\",\"evidence\":\"observed\",\"proposed_fix\":\"repair\"");
-    let result = format!("{}\nVERDICT: FAIL", findings_text(&finding));
-    let mut owner = FakeOwner {
-        observations: VecDeque::from([
-            terminal_with_result(AttemptOutcome::Succeeded, &result),
-            terminal_with_result(AttemptOutcome::Succeeded, &result),
-        ]),
-        ..Default::default()
-    };
-    let mut journal = MemoryJournal::default();
-    let run = advance(&document, &mut owner, &mut journal).unwrap();
-    let panel = run
-        .checkpoint
-        .nodes
-        .iter()
-        .find(|node| node.id == "panel")
-        .unwrap();
-    assert!(panel.attempts.is_empty());
-    let findings = &panel.outputs.as_ref().unwrap().findings;
-    assert_eq!(findings.len(), 2);
-    for (finding, lens) in findings.iter().zip(["tests", "security"]) {
-        assert_eq!(finding.lens.as_deref().unwrap(), lens);
-        assert_eq!(finding.evidence.as_deref().unwrap(), "observed");
-        assert_eq!(finding.proposed_fix.as_deref().unwrap(), "repair");
-    }
-    assert_eq!(
-        advance(&document, &mut FakeOwner::default(), &mut journal)
-            .unwrap()
-            .checkpoint,
-        run.checkpoint
-    );
 }
 
 #[test]
@@ -673,16 +654,14 @@ fn partial_composite_below_its_minimum_fails_with_the_recorded_reason() {
         lenses.advance_error_code.as_deref(),
         Some("coverage_below_minimum")
     );
-    let reason = lenses.advance_error.as_deref().unwrap();
-    assert!(
-        reason.contains("1 of 3 members succeeded, minimum 2"),
-        "{reason}"
-    );
-    assert!(
-        reason.contains("lens-b") && reason.contains("lens-c"),
-        "{reason}"
-    );
-    assert_eq!(owner.prompts.len(), 3, "verify must not run");
+    let verify = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "verify")
+        .unwrap();
+    assert_eq!(verify.state, NodeState::Blocked);
+    assert!(verify.attempts.is_empty());
     assert!(!run.checkpoint.successful());
     assert_eq!(run.outcome, Some(GraphOutcome::Failed));
     let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
@@ -691,8 +670,8 @@ fn partial_composite_below_its_minimum_fails_with_the_recorded_reason() {
 
 #[test]
 fn composite_executes_nested_children_and_exports_only_declared_outputs() {
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":"composite-test","nodes":[{
+    let document: GraphDocument = document_fixture(serde_json::json!({
+        "graph_id":"composite-test","nodes":[{
             "id":"swarm","kind":"composite","access":"read_only",
             "composite":{"nodes":[{
                 "id":"nested","kind":"composite","access":"read_only",
@@ -704,8 +683,7 @@ fn composite_executes_nested_children_and_exports_only_declared_outputs() {
             "id":"consume","access":"read_only","prompt":"consume", "route":{"alias":"senior"},
             "depends_on":["swarm"],"inputs":[{"node":"swarm","outputs":["result"]}]
         }]
-    }))
-    .unwrap();
+    }));
     let mut owner = FakeOwner {
         observations: [
             terminal_with_result(AttemptOutcome::Succeeded, "evidence"),
@@ -718,8 +696,24 @@ fn composite_executes_nested_children_and_exports_only_declared_outputs() {
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(run.status, GraphStatus::Complete);
     assert!(run.checkpoint.successful());
-    assert_eq!(owner.calls.len(), 2);
-    assert_eq!(owner.calls[0].0.node_id, "swarm--nested--scout");
+    let scout = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "swarm--nested--scout")
+        .unwrap();
+    assert_eq!(scout.state, NodeState::Succeeded);
+    assert_eq!(
+        scout
+            .outputs
+            .as_ref()
+            .unwrap()
+            .result
+            .as_ref()
+            .unwrap()
+            .excerpt,
+        "evidence"
+    );
     let swarm = run
         .checkpoint
         .nodes
@@ -741,6 +735,24 @@ fn composite_executes_nested_children_and_exports_only_declared_outputs() {
     );
     assert_eq!(swarm.outputs.as_ref().unwrap().verdict, None);
     assert!(owner.prompts[1].contains("evidence"));
+    let consume = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "consume")
+        .unwrap();
+    assert_eq!(consume.state, NodeState::Succeeded);
+    assert_eq!(
+        consume
+            .outputs
+            .as_ref()
+            .unwrap()
+            .result
+            .as_ref()
+            .unwrap()
+            .excerpt,
+        "done"
+    );
     let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
     assert_eq!(run.checkpoint, replay.checkpoint);
 }

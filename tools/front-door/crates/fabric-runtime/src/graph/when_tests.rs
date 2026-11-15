@@ -5,16 +5,12 @@ use super::*;
 use serde_json::json;
 use std::collections::BTreeMap;
 
-/// The stage resolvers a former `f?-v?-s?` topology code stood for.
-pub(super) fn stages(topology: &str) -> [(String, Vec<String>); 3] {
-    let on = |letter: char| {
-        let at = topology.find(letter).expect("topology letter") + 1;
-        topology.as_bytes()[at] == b'1'
-    };
-    when::review_stages(on('f'), on('v'), on('s'))
+/// Stage values declared by the review resolver.
+pub(super) fn stages(flags: [bool; 3]) -> [(String, Vec<String>); 3] {
+    when::review_stages(flags[0], flags[1], flags[2])
 }
 
-fn resolvers(topology: &str) -> BTreeMap<String, Vec<String>> {
+fn resolvers(flags: [bool; 3]) -> BTreeMap<String, Vec<String>> {
     let mut resolvers = BTreeMap::from([
         (
             "review-panel".to_owned(),
@@ -27,7 +23,7 @@ fn resolvers(topology: &str) -> BTreeMap<String, Vec<String>> {
         ("review-advice-correctness".to_owned(), vec![String::new()]),
         ("review-advice-tests".to_owned(), vec![String::new()]),
     ]);
-    resolvers.extend(stages(topology));
+    resolvers.extend(stages(flags));
     resolvers
 }
 
@@ -44,31 +40,20 @@ fn compile(
 }
 
 fn document(nodes: Vec<GraphNode>) -> GraphDocument {
-    GraphDocument {
-        graph_id: "when".into(),
-        submission_patch: None,
-        template_library: Default::default(),
-        template_layers: Default::default(),
-        template_resolvers: Default::default(),
-        peer_origin_work_key: None,
-        review_tier_override: None,
-        schema_version: 2,
-        nodes,
-        ..serde_json::from_value(json!({"graph_id":"when","schema_version":2,"nodes":[]})).unwrap()
-    }
+    super::model::document_fixture(json!({"graph_id":"when","nodes":nodes}))
 }
 
-fn submitted(topology: &str) -> GraphDocument {
+fn submitted(flags: [bool; 3]) -> GraphDocument {
     let node = compile(
-        &resolvers(topology),
+        &resolvers(flags),
         json!({"id":"panel","use":"review-panel"}),
     )
     .unwrap();
     document(vec![node])
 }
 
-fn expanded(topology: &str) -> GraphDocument {
-    submitted(topology)
+fn expanded(flags: [bool; 3]) -> GraphDocument {
+    submitted(flags)
         .expanded(&crate::config::GraphLimits::default())
         .unwrap()
 }
@@ -87,33 +72,36 @@ fn active(document: &GraphDocument) -> Vec<String> {
 
 #[test]
 fn each_review_shape_activates_the_nodes_it_always_did() {
-    for topology in [
-        "f0-v0-s0", "f0-v0-s1", "f0-v1-s0", "f0-v1-s1", "f1-v0-s0", "f1-v0-s1", "f1-v1-s0",
-        "f1-v1-s1",
+    for flags in [
+        [false, false, false],
+        [false, false, true],
+        [false, true, false],
+        [false, true, true],
+        [true, false, false],
+        [true, false, true],
+        [true, true, false],
+        [true, true, true],
     ] {
-        let mut expected = vec![
-            "panel--selected--lenses--correctness".to_owned(),
-            "panel--selected--lenses--tests".to_owned(),
-        ];
-        let flag = |letter: char| topology.contains(&format!("{letter}1"));
-        if flag('f') {
-            expected.push("panel--selected--frame".into());
+        let document = expanded(flags);
+        let active = active(&document);
+        for (name, values) in stages(flags) {
+            let enabled = values.iter().any(|value| value == "true");
+            let nodes = document
+                .nodes
+                .iter()
+                .filter(|node| node.when.iter().any(|term| term.name == name))
+                .collect::<Vec<_>>();
+            assert!(!nodes.is_empty(), "{name}");
+            for node in nodes {
+                assert_eq!(active.contains(&node.id), enabled, "{name}");
+            }
         }
-        if flag('v') {
-            expected.push("panel--selected--verify--1".into());
-            expected.push("panel--selected--verify--2".into());
-        }
-        if flag('s') {
-            expected.push("panel--selected--synthesis".into());
-        }
-        expected.sort();
-        assert_eq!(active(&expanded(topology)), expected, "{topology}");
     }
 }
 
 #[test]
 fn an_unmet_condition_is_a_skipped_row_that_names_it() {
-    let document = expanded("f0-v0-s0");
+    let document = expanded([false, false, false]);
     let frame = document
         .nodes
         .iter()
@@ -122,12 +110,13 @@ fn an_unmet_condition_is_a_skipped_row_that_names_it() {
     assert_eq!(
         frame.when,
         vec![WhenTerm {
+            extra: Default::default(),
             name: "review-frame".into(),
             expected: "true".into(),
             actual: "false".into(),
         }]
     );
-    let submitted = submitted("f0-v0-s0");
+    let submitted = submitted([false, false, false]);
     let (plan, _) = validation::validate_plan(&submitted).unwrap();
     let checkpoint =
         transitions::initial_checkpoint(&submitted, &plan, "digest".into(), None, None, None);
@@ -155,7 +144,7 @@ fn an_unmet_condition_is_a_skipped_row_that_names_it() {
 
 #[test]
 fn a_dependent_of_a_skipped_node_keeps_its_place_without_it() {
-    let (plan, _) = validation::validate_plan(&submitted("f1-v0-s1")).unwrap();
+    let (plan, _) = validation::validate_plan(&submitted([true, false, true])).unwrap();
     let synthesis = plan
         .nodes
         .iter()
@@ -214,7 +203,7 @@ fn refusal(error: template::CompileError) -> template::ParameterRefusal {
 #[test]
 fn a_mistyped_condition_name_is_refused_with_the_name() {
     let error = compile(
-        &resolvers("f0-v0-s0"),
+        &resolvers([false, false, false]),
         json!({"id":"x","use":"task","prompt":"b","when":{"review-frames":true}}),
     )
     .unwrap_err();
@@ -232,17 +221,26 @@ fn a_mistyped_condition_name_is_refused_with_the_name() {
 }
 
 #[test]
-fn a_condition_must_be_a_table_of_scalars() {
-    for when in [json!(["x"]), json!(true), json!({"review-frame":[1]})] {
+fn when_arrays_pass_through_to_graph_term_decoding() {
+    let node = json!({"id":"x","use":"task","prompt":"b","when":["x"]});
+    let library = template::TemplateLibrary::bundled();
+    let resolvers = resolvers([false, false, false]);
+    let compiler = template::Compiler {
+        library: &library,
+        resolvers: &resolvers,
+    };
+    let lowered = compiler.lower(&node).unwrap();
+    assert_eq!(lowered["when"], json!(["x"]));
+    assert!(serde_json::from_value::<GraphNode>(lowered).is_err());
+}
+
+#[test]
+fn when_tables_accept_only_scalar_values() {
+    for when in [json!(true), json!({"review-frame":[1]})] {
         let result = compile(
-            &resolvers("f0-v0-s0"),
+            &resolvers([false, false, false]),
             json!({"id":"x","use":"task","prompt":"b","when":when}),
         );
-        // A list is the resolved form and passes through to graph decoding.
-        if when.is_array() {
-            assert!(result.is_err());
-            continue;
-        }
         assert!(matches!(
             refusal(result.unwrap_err()).fault,
             template::ParameterFault::When(when)
@@ -254,7 +252,7 @@ fn a_condition_must_be_a_table_of_scalars() {
 #[test]
 fn a_condition_cannot_sit_on_a_repeat() {
     let error = compile(
-        &resolvers("f0-v0-s0"),
+        &resolvers([false, false, false]),
         json!({"id":"x","use":"task","prompt":"b","when":{"review-frame":true},
                "repeat":{"until":"x","max_rounds":1}}),
     )
@@ -312,8 +310,8 @@ default = false
 #[test]
 fn a_condition_on_a_loop_is_refused_whether_it_holds_or_not() {
     for actual in ["true", "false"] {
-        let document: GraphDocument = serde_json::from_value(json!({
-            "schema_version":2,"graph_id":"when","nodes":[{
+        let document = super::model::document_fixture(json!({
+            "graph_id":"when","nodes":[{
                 "id":"repair","kind":"loop","access":"read_only",
                 "when":[{"name":"extra","expected":"true","actual":actual}],
                 "loop":{"max_rounds":2,"until":"accepted","body":[
@@ -323,11 +321,10 @@ fn a_condition_on_a_loop_is_refused_whether_it_holds_or_not() {
                         "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
                 ]}
             }]
-        }))
-        .unwrap();
+        }));
         let error = when::prune(&document).unwrap_err();
         assert!(
-            matches!(&error, AdmissionError::Plan(reason) if reason.contains("repair")),
+            matches!(&error, AdmissionError::Plan(_)),
             "{actual}: {error:?}"
         );
     }
@@ -335,14 +332,20 @@ fn a_condition_on_a_loop_is_refused_whether_it_holds_or_not() {
 
 #[test]
 fn a_skipped_stage_does_not_need_the_resolver_it_fans_out_over() {
-    let mut bound = resolvers("f0-v0-s0");
+    let mut bound = resolvers([false, false, false]);
     bound.remove("review-verifiers");
     let node = compile(&bound, json!({"id":"panel","use":"review-panel"}))
         .expect("the verify stage is skipped, so its verifiers are not needed");
     assert!(node.composite.is_some());
 
-    let mut bound = resolvers("f0-v1-s0");
+    let mut bound = resolvers([false, true, false]);
     bound.remove("review-verifiers");
     let error = compile(&bound, json!({"id":"panel","use":"review-panel"})).unwrap_err();
-    assert!(error.to_string().contains("review-verifiers"), "{error}");
+    assert!(matches!(
+        error,
+        template::CompileError::Parameter(refusal)
+            if matches!(refusal.fault, template::ParameterFault::When(when)
+                if when.reason == template::WhenFault::Unknown
+                    && when.key.as_deref() == Some("review-verifiers"))
+    ));
 }

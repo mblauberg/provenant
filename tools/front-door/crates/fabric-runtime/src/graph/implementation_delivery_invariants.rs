@@ -58,11 +58,11 @@ fn unplanned_delivery_links_resolve_to_its_exported_writer() {
             assert_eq!(node.worktree, writer.worktree);
             continuations += 1;
         }
-        if let Some(SourceBinding::Head { node: target }) = &node.source {
+        if let Some(SourceBinding::Head { node: target, .. }) = &node.source {
             assert_eq!(target, &writer.id);
             head_sources += 1;
         }
-        if let Some(SourceBinding::Node { node: target }) = &node.source
+        if let Some(SourceBinding::Node { node: target, .. }) = &node.source
             && target == &writer.id
         {
             assert!(node.depends_on.contains(&writer.id));

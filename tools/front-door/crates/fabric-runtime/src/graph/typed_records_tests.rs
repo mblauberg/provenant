@@ -44,10 +44,8 @@ fn acceptance(
 }
 
 fn stored_with(node: Value, pause: Value) -> Value {
-    let mut checkpoint: Value = serde_json::from_str::<Value>(include_str!(
-        "../fixtures/graph-checkpoint.json"
-    ))
-    .unwrap()["checkpoint"]
+    let mut checkpoint = serde_json::to_value(super::journal::stored_checkpoint_fixture()).unwrap()
+        ["checkpoint"]
         .clone();
     for (key, value) in node.as_object().unwrap() {
         checkpoint["nodes"][0][key] = value.clone();
@@ -83,7 +81,10 @@ fn a_checkpoint_round_trips_its_handoff_pause_and_decision_typed() {
         json!({"cause": {"kind": "budget_exceeded"}, "reason": "budget spent"}),
     );
     let decoded: GraphCheckpoint = serde_json::from_value(checkpoint).unwrap();
-    assert_eq!(decoded.pause_cause(), Some(PauseCause::BudgetExceeded));
+    assert!(matches!(
+        decoded.pause_cause(),
+        Some(PauseCause::BudgetExceeded { .. })
+    ));
     assert_eq!(decoded.pause_reason(), Some("budget spent"));
     let node = &decoded.nodes[0];
     assert_eq!(node.handoff.as_ref().unwrap().remaining, ["tests"]);
@@ -103,8 +104,7 @@ fn a_checkpoint_round_trips_its_handoff_pause_and_decision_typed() {
 
 #[test]
 fn a_review_decision_without_a_reviewed_base_fails_closed_at_the_landing_check() {
-    let document: GraphDocument = serde_json::from_value(json!({
-        "schema_version": 1,
+    let document = super::model::document_fixture(json!({
         "graph_id": "decision-land",
         "nodes": [
             {
@@ -351,7 +351,11 @@ fn graph_document_host_metadata_round_trips_and_rejects_malformed_values() {
             json!("not a provenance record"),
         ),
     ];
-    let mut raw = json!({"schema_version": 1, "graph_id": "metadata", "nodes": []});
+    let mut raw = json!({
+        "schema_version": GRAPH_DOCUMENT_SCHEMA_VERSION,
+        "graph_id": "metadata",
+        "nodes": []
+    });
     for (field, valid, _) in &fields {
         raw[*field] = valid.clone();
     }
@@ -404,7 +408,11 @@ fn graph_execution_peer_fields_round_trip_and_reject_malformed_values() {
     let digest = provenant_core::Digest::from_bytes([0x4d; 32]);
     let raw = json!({
         "directory": "/tmp/graph",
-        "document": {"schema_version": 1, "graph_id": "receiver", "nodes": []},
+        "document": {
+            "schema_version": GRAPH_DOCUMENT_SCHEMA_VERSION,
+            "graph_id": "receiver",
+            "nodes": []
+        },
         "peer_origin_context": {
             "graph_id": "origin-graph",
             "node_id": "origin-node",
@@ -552,8 +560,7 @@ fn writer_binding_identity_round_trips_and_rejects_malformed_values() {
     let wire = serde_json::json!({"worktree":"checkout","head":"1".repeat(40),"source_directory_identity":{"device":7,"inode":9}});
     let bytes = serde_json::to_vec(&wire).unwrap();
     let binding: WriterWorktreeBinding =
-        provenant_records::decode(bytes.as_slice(), provenant_records::Limits::default())
-            .unwrap();
+        provenant_records::decode(bytes.as_slice(), provenant_records::Limits::default()).unwrap();
     assert_eq!(serde_json::to_value(binding).unwrap(), wire);
     let mut malformed = wire;
     malformed["source_directory_identity"]["device"] = serde_json::json!(false);

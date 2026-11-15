@@ -154,9 +154,10 @@ pub enum DecideTimeoutSource {
     DomainDefault,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DecideTimeout {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub seconds: u64,
     pub source: DecideTimeoutSource,
 }
@@ -256,10 +257,13 @@ fn unanswered_disposition_text(disposition: UnansweredDisposition) -> &'static s
 }
 
 /// The longest rendered timeout, for byte bounds computed before a deadline.
-pub(super) const WORST_DECIDE_TIMEOUT: DecideTimeout = DecideTimeout {
-    seconds: u64::MAX,
-    source: DecideTimeoutSource::Configured,
-};
+pub(super) fn worst_decide_timeout() -> DecideTimeout {
+    DecideTimeout {
+        extra: Default::default(),
+        seconds: u64::MAX,
+        source: DecideTimeoutSource::Configured,
+    }
+}
 
 fn timeout_source_text(source: DecideTimeoutSource) -> &'static str {
     match source {
@@ -275,7 +279,7 @@ fn decide_body(
     graph_id: &str,
     node_id: &str,
     spec: &DecideSpec,
-    timeout: DecideTimeout,
+    timeout: &DecideTimeout,
     previous: Option<&str>,
 ) -> String {
     let fallback = match decide_default(spec) {
@@ -342,7 +346,7 @@ pub(super) fn decide_ask(
     session: &str,
     sequence: u64,
     wake_at: Option<WallTime>,
-    timeout: DecideTimeout,
+    timeout: &DecideTimeout,
     previous: Option<&str>,
 ) -> AskRequest {
     let mut ask = ask(
@@ -359,7 +363,7 @@ pub(super) fn decide_ask(
     ask.options = spec.options.clone();
     ask.default = decide_default(spec);
     ask.wake_at = wake_at;
-    ask.timeout = Some(timeout);
+    ask.timeout = Some(timeout.clone());
     ask
 }
 
@@ -454,15 +458,17 @@ pub(super) fn validate_decide(
     }
     let timeout = spec.timeout_seconds.map_or(
         DecideTimeout {
+            extra: Default::default(),
             seconds: crate::config::MAX_DECIDE_TIMEOUT_SECONDS,
             source: DecideTimeoutSource::Configured,
         },
         |seconds| DecideTimeout {
+            extra: Default::default(),
             seconds,
             source: DecideTimeoutSource::Graph,
         },
     );
-    if decide_body(graph_id, &node.id, spec, timeout, None).len()
+    if decide_body(graph_id, &node.id, spec, &timeout, None).len()
         > provenant_records::inbox::REQUEST_BODY_BYTES
     {
         return Err("decide question makes the request body longer than the inbox's 8192 bytes");
@@ -560,7 +566,7 @@ pub(super) fn file<R: AttemptOwner, J: GraphJournal>(
         rounds: request.rounds,
         session: request.session.clone(),
         wake_at: filed.deadline,
-        timeout: request.timeout,
+        timeout: request.timeout.clone(),
         request: bounded(&filed.request, REQUEST_ID_BYTES),
     };
     Ok((link, filed.closed))
@@ -611,6 +617,7 @@ fn effective_decide_timeout<R: AttemptOwner, J: Error + 'static>(
 ) -> Result<DecideTimeout, GraphError<R::Error, J>> {
     let timeout = match spec.timeout_seconds {
         Some(seconds) => DecideTimeout {
+            extra: Default::default(),
             seconds,
             source: DecideTimeoutSource::Graph,
         },
@@ -632,7 +639,7 @@ fn effective_decide_timeout<R: AttemptOwner, J: Error + 'static>(
 /// the advance is refused and retried, so the timeout is never lost.
 fn decide_deadline<R: AttemptOwner, J: Error + 'static>(
     node: &PlannedNode,
-    timeout: DecideTimeout,
+    timeout: &DecideTimeout,
     owner: &R,
 ) -> Result<Option<WallTime>, GraphError<R::Error, J>> {
     let seconds = timeout.seconds;
@@ -666,7 +673,7 @@ fn decide_request(
     session: &str,
     sequence: u64,
     wake_at: Option<WallTime>,
-    timeout: DecideTimeout,
+    timeout: &DecideTimeout,
     previous: Option<&str>,
 ) -> AskRequest {
     let mut ask = decide_ask(
@@ -716,7 +723,7 @@ fn file_decide<R: AttemptOwner, J: GraphJournal>(
     journal: &mut J,
     session: &str,
     first: u64,
-    timeout: DecideTimeout,
+    timeout: &DecideTimeout,
     previous: Option<&str>,
 ) -> Result<AskLink, GraphError<R::Error, J::Error>> {
     let wake_at = decide_deadline::<R, J::Error>(node, timeout, owner)?;
@@ -768,7 +775,7 @@ pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
                 .to_owned();
             let timeout = effective_decide_timeout::<R, J::Error>(spec, owner)?;
             let link = file_decide(
-                index, node, spec, plan, checkpoint, owner, journal, &session, 1, timeout, None,
+                index, node, spec, plan, checkpoint, owner, journal, &session, 1, &timeout, None,
             )?;
             checkpoint.asks.push(link);
             checkpoint.nodes[index].state = NodeState::Running;
@@ -777,12 +784,14 @@ pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
             checkpoint.asks.len() - 1
         }
     };
-    let timeout = checkpoint.asks[position]
-        .timeout
-        .ok_or_else(|| GraphError::BadCheckpoint {
-            node: node.id.clone(),
-            invariant: "a decide ask must retain its effective timeout",
-        })?;
+    let timeout =
+        checkpoint.asks[position]
+            .timeout
+            .clone()
+            .ok_or_else(|| GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "a decide ask must retain its effective timeout",
+            })?;
     let reply = poll(checkpoint, position, owner);
     let now = owner.wall_now();
     let link = &checkpoint.asks[position];
@@ -809,7 +818,12 @@ pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
         };
         let progress = &mut checkpoint.nodes[index];
         progress.state = state;
-        progress.outputs = Some(decision_outputs(&link.ask_id, DecideOutcome::Unanswered));
+        progress.outputs = Some(decision_outputs(
+            &link.ask_id,
+            DecideOutcome::Unanswered {
+                extra: Default::default(),
+            },
+        ));
         checkpoint.asks.remove(position);
         refresh_wake(checkpoint);
         return journal.save(checkpoint).map_err(GraphError::Journal);
@@ -836,9 +850,11 @@ pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
         progress.state = NodeState::Succeeded;
         let outcome = match answer.source {
             AnswerSource::Default => DecideOutcome::AnsweredByDefault {
+                extra: Default::default(),
                 option: chosen.clone(),
             },
             AnswerSource::Answered => DecideOutcome::Answered {
+                extra: Default::default(),
                 option: chosen.clone(),
                 actor: answer
                     .actor
@@ -874,7 +890,7 @@ pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
         journal,
         &session,
         sequence,
-        timeout,
+        &timeout,
         answer.rejected.as_deref(),
     )?;
     checkpoint.asks[position] = link;
@@ -887,16 +903,18 @@ const APPROVED_SCOPE_RULE: &str = "approved_repair_scope";
 fn decision_outputs(ask_id: &str, outcome: DecideOutcome) -> NodeOutputs {
     let excerpt = bounded(
         &match &outcome {
-            DecideOutcome::Answered { option, actor } => {
+            DecideOutcome::Answered { option, actor, .. } => {
                 format!("decision {ask_id}: {option}, answered by {actor}")
             }
-            DecideOutcome::AnsweredByDefault { option } => {
+            DecideOutcome::AnsweredByDefault { option, .. } => {
                 format!("decision {ask_id}: {option}, the declared default at the deadline")
             }
-            DecideOutcome::AnsweredByPolicy { option, rule } => {
+            DecideOutcome::AnsweredByPolicy { option, rule, .. } => {
                 format!("decision {ask_id}: {option}, applied policy {rule}")
             }
-            DecideOutcome::Unanswered => format!("decision {ask_id}: unanswered at the deadline"),
+            DecideOutcome::Unanswered { .. } => {
+                format!("decision {ask_id}: unanswered at the deadline")
+            }
         },
         OUTPUT_FIELD_BYTES,
     );
@@ -929,10 +947,10 @@ fn decision_outputs(ask_id: &str, outcome: DecideOutcome) -> NodeOutputs {
         commit: None,
         warnings: match outcome {
             DecideOutcome::Answered { .. } | DecideOutcome::AnsweredByPolicy { .. } => Vec::new(),
-            DecideOutcome::AnsweredByDefault { option } => vec![format!(
+            DecideOutcome::AnsweredByDefault { option, .. } => vec![format!(
                 "decide timeout: applied declared default {option}; no answer arrived before the deadline"
             )],
-            DecideOutcome::Unanswered => {
+            DecideOutcome::Unanswered { .. } => {
                 vec!["decide timeout: no answer or declared default; recorded unanswered".into()]
             }
         },
@@ -1198,7 +1216,10 @@ pub(super) fn validate(checkpoint: &GraphCheckpoint, plan: &PlannedGraph) -> Res
                 (AskKind::Decide, Some(node)) => {
                     decide_sequence(&ask.ask_id, &node.id).is_some()
                         && ask.wake_at.is_some()
-                        && ask.timeout.is_some_and(|timeout| timeout.seconds > 0)
+                        && ask
+                            .timeout
+                            .as_ref()
+                            .is_some_and(|timeout| timeout.seconds > 0)
                         && node.decide.as_ref().is_some_and(|spec| {
                             decide_session(spec, plan.decision_session.as_deref()).or_else(|| {
                                 node.repair_scope_gate.then_some(plan.graph_id.as_str())
@@ -1251,7 +1272,11 @@ pub(super) fn validate_progress(
                         outputs.verdict.as_deref() == Some("approve")
                             && matches!(
                                 outputs.decide_outcome,
-                                Some(DecideOutcome::AnsweredByPolicy { ref option, ref rule })
+                                Some(DecideOutcome::AnsweredByPolicy {
+                                    ref option,
+                                    ref rule,
+                                    ..
+                                })
                                     if option == "approve" && rule == APPROVED_SCOPE_RULE
                             )
                     })
@@ -1288,7 +1313,10 @@ fn unanswered_progress(progress: &NodeProgress, node: &PlannedNode) -> bool {
         };
         progress.state == expected
             && progress.outputs.as_ref().is_some_and(|outputs| {
-                outputs.decide_outcome == Some(DecideOutcome::Unanswered)
+                outputs
+                    .decide_outcome
+                    .as_ref()
+                    .is_some_and(|outcome| matches!(outcome, DecideOutcome::Unanswered { .. }))
                     && outputs.verdict.is_none()
             })
     })
@@ -1390,6 +1418,7 @@ fn repair_scope<R: AttemptOwner, J: GraphJournal>(
         checkpoint.nodes[index].outputs = Some(decision_outputs(
             &format!("{}.approved-scope", node.id),
             DecideOutcome::AnsweredByPolicy {
+                extra: Default::default(),
                 option: "approve".into(),
                 rule: APPROVED_SCOPE_RULE.into(),
             },

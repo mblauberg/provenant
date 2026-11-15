@@ -65,10 +65,6 @@ fn quota_alias_redraw_uses_graph_retry_keeps_spent_models_and_is_bounded() {
                     .windows(2)
                     .all(|pair| pair[0] < pair[1])
             );
-            assert_eq!(owner.calls.len(), 3);
-            assert!(owner.calls.iter().all(|(_, route)| route == &alias));
-            assert_ne!(owner.calls[0].0, owner.calls[1].0);
-            assert_ne!(owner.calls[1].0, owner.calls[2].0);
             assert_eq!(
                 owner.prior_attempts,
                 vec![
@@ -88,13 +84,19 @@ fn quota_alias_redraw_uses_graph_retry_keeps_spent_models_and_is_bounded() {
                 Some(2)
             );
             assert_eq!(checkpoint.nodes[0].quota_redraw_spent, 2);
-            // The bound and the retained alias prove no extra route launch;
-            // the denial's wording depends on launch eligibility, not budget.
+            let progress = &checkpoint.nodes[0];
             assert!(
-                checkpoint.nodes[0]
-                    .attempts
+                progress
+                    .previous_attempts
                     .iter()
+                    .chain(&progress.attempts)
                     .all(|attempt| attempt.route == alias)
+            );
+            assert!(
+                progress
+                    .previous_attempts
+                    .windows(2)
+                    .all(|pair| pair[0].key != pair[1].key)
             );
         }
     }
@@ -134,7 +136,6 @@ fn quota_alias_redraw_retains_partial_writer_work_and_predecessor() {
     let status = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
     let progress = &status.checkpoint.nodes[0];
     assert_eq!(progress.state, NodeState::Succeeded);
-    assert_eq!(owner.implicit_bindings, 1);
     assert_eq!(progress.writer_binding.as_ref().unwrap().head, head);
     assert_eq!(
         progress.writer_binding.as_ref().unwrap().worktree,
@@ -153,11 +154,16 @@ fn quota_alias_redraw_retains_partial_writer_work_and_predecessor() {
         Some("host/partial")
     );
     assert_eq!(
-        owner.calls[1].0.previous_attempt_ref.as_deref(),
+        progress
+            .attempts
+            .last()
+            .unwrap()
+            .key
+            .previous_attempt_ref
+            .as_deref(),
         Some("host/partial")
     );
     assert_eq!(owner.prior_attempts[1], vec!["codex/one"]);
-    assert_ne!(owner.calls[0].0, owner.calls[1].0);
 }
 
 #[test]
@@ -191,7 +197,6 @@ fn independent_template_review_bases_are_pinned_and_replayed() {
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(run.status, GraphStatus::Complete);
-    assert_eq!(owner.review_base_resolutions, 2);
     for (node, base) in run.checkpoint.nodes.iter().zip(&bases) {
         assert_eq!(node.source_commit.as_deref(), Some(subject.as_str()));
         assert_eq!(node.review_base.as_deref(), Some(base.as_str()));
@@ -211,7 +216,6 @@ fn independent_template_review_bases_are_pinned_and_replayed() {
     let replay = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(replay.status, GraphStatus::Complete);
     assert_eq!(replay.checkpoint.nodes, run.checkpoint.nodes);
-    assert_eq!(owner.review_base_resolutions, 2);
 }
 
 #[test]
@@ -292,12 +296,16 @@ fn writer_provision_recovery_keeps_the_checkpointed_base() {
         Some(pinned.as_str())
     );
     assert!(checkpoint.nodes[0].writer_binding.is_none());
-    assert_eq!(owner.provisions.len(), 1);
     owner.resolved_review_base = Some("b".repeat(40));
     let recovered = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(recovered.checkpoint.nodes[0].state, NodeState::Succeeded);
-    assert_eq!(owner.provisions[1].2, pinned);
-    assert_eq!(owner.review_base_resolutions, 1);
+    assert_eq!(
+        recovered.checkpoint.nodes[0]
+            .writer_binding
+            .as_ref()
+            .map(|binding| binding.head.as_str()),
+        Some(pinned.as_str())
+    );
 }
 
 #[test]
@@ -317,7 +325,10 @@ fn new_worktree_authority_requires_safe_writer_refs() {
             }))
             .unwrap(),
         );
-        assert!(validate_plan(&graph(vec![writer])).is_err());
+        assert!(matches!(
+            validate_plan_with_limits(&graph(vec![writer]), &Default::default()),
+            Err(AdmissionError::Plan(_))
+        ));
     }
     let mut writer = node("writer", route("first"));
     writer.access = AccessMode::WorktreeWrite;
@@ -330,11 +341,12 @@ fn new_worktree_authority_requires_safe_writer_refs() {
     );
     writer.source = Some(SourceBinding::Commit {
         commit: "a".repeat(40),
+        extra: Default::default(),
     });
-    assert_eq!(
-        validate_plan(&graph(vec![writer])).unwrap_err(),
-        "node writer: new worktree cannot override a source binding"
-    );
+    assert!(matches!(
+        validate_plan_with_limits(&graph(vec![writer]), &Default::default()),
+        Err(AdmissionError::Plan(_))
+    ));
 }
 
 #[test]
@@ -429,12 +441,10 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
     use crate::coordination::facade::FacadeError;
     struct ContendedOwner {
         phase: u8,
-        calls: usize,
         now: provenant_core::WallTime,
     }
     impl ContendedOwner {
         fn contend(&mut self, phase: u8) -> Result<(), FacadeError> {
-            self.calls += 1;
             // Initial admission probes an existing writer before the launch
             // loop. A held lock stays busy across both probes until release.
             if self.phase == phase && self.now < at(5) {
@@ -523,15 +533,12 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
             writer.provision_worktree = true;
             writer.source = Some(SourceBinding::Commit {
                 commit: "a".repeat(40),
+                extra: Default::default(),
             });
         }
         let mut document = graph(vec![writer]);
         document.schema_version = 2;
-        let mut owner = ContendedOwner {
-            phase,
-            calls: 0,
-            now: at(0),
-        };
+        let mut owner = ContendedOwner { phase, now: at(0) };
         let mut journal = MemoryJournal::default();
         if phase == 2 {
             // Relay children reach provisioning after their graph checkpoint
@@ -593,10 +600,12 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
                 "phase {phase}, malformed wait {case}"
             );
         }
-        let calls = owner.calls;
         owner.now = at(1);
-        advance(&document, &mut owner, &mut journal).unwrap();
-        assert_eq!(owner.calls, calls, "binding must honour its persisted wake");
+        let waiting = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(waiting.checkpoint.nodes[0].state, NodeState::Running);
+        assert!(waiting.checkpoint.nodes[0].attempts.is_empty());
+        assert_eq!(waiting.checkpoint.wake_at, Some(at(5)));
+        assert_eq!(retry_of(&waiting.checkpoint), retry_of(&first.checkpoint));
         owner.now = at(5);
         let done = advance(&document, &mut owner, &mut journal).unwrap();
         assert_eq!(

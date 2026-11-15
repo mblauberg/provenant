@@ -26,10 +26,9 @@ fn settlement_and_selection_share_the_stop_rule_and_custody_guards() {
             if held {
                 raw["on_stop"] = json!({"auth_required":"chair", "usage_limited":"chair", "adapter_unavailable":"chair"});
             }
-            let document: GraphDocument = serde_json::from_value(json!({
-                "schema_version":1, "graph_id":"g", "nodes":[raw]
-            }))
-            .unwrap();
+            let document = super::model::document_fixture(json!({
+                "graph_id":"g", "nodes":[raw]
+            }));
             let (plan, _) = validate_plan(&document).unwrap();
             let node = &plan.nodes[0];
             for local in [false, true] {
@@ -56,14 +55,13 @@ fn settlement_and_selection_share_the_stop_rule_and_custody_guards() {
                             skipped_accounts: &[],
                         },
                     );
-                    let progress: NodeProgress = serde_json::from_value(json!({
+                    let progress = super::model::node_progress_fixture(json!({
                         "id":"n", "state":"running", "worktree":null, "attempts":[{
                             "launched":false, "key":{"graph_id":"g","node_id":"n","route_index":0, "attempt": 1},
                             "route":{"adapter":"a","model":"a/m"}, "state":"terminal",
                             "attempt_ref":"attempt-1", "outcome":outcome, "launch_actor":"chair"
                         }]
-                    }))
-                    .unwrap();
+                    }));
                     let facts = next_attempt::NextAttemptFacts {
                         launch_accepted: None,
                         fallback: Some(next_attempt::PreparationObservation {

@@ -1,7 +1,25 @@
 use super::*;
 
-#[test]
-fn attempt_manifests_retain_selected_evidence_across_fallback_and_replay() {
+struct FallbackManifestFixture {
+    source: String,
+    base: String,
+    document: GraphDocument,
+    run: GraphRun,
+    journal: MemoryJournal,
+}
+
+impl FallbackManifestFixture {
+    fn child(&self) -> &NodeProgress {
+        self.run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "child")
+            .unwrap()
+    }
+}
+
+fn fallback_manifest_fixture() -> FallbackManifestFixture {
     let source = "1".repeat(40);
     let base = "2".repeat(40);
     let mut child = node("child", route("first"));
@@ -10,6 +28,7 @@ fn attempt_manifests_retain_selected_evidence_across_fallback_and_replay() {
     child.depends_on.push("parent".into());
     child.source = Some(SourceBinding::Node {
         node: "parent".into(),
+        extra: Default::default(),
     });
     child.review_base = Some(base.clone());
     child.inputs.push(GraphInput {
@@ -21,9 +40,9 @@ fn attempt_manifests_retain_selected_evidence_across_fallback_and_replay() {
     let mut producer = node("parent", route("fixture"));
     producer.source = Some(SourceBinding::Commit {
         commit: source.clone(),
+        extra: Default::default(),
     });
-    let mut document = graph(vec![child, producer]);
-    document.schema_version = 2;
+    let document = graph(vec![child, producer]);
     let mut parent = terminal_from("private input content", "host/parent");
     if let AttemptObservation::Terminal { commit, .. } = &mut parent {
         *commit = Some(source.clone());
@@ -57,18 +76,33 @@ fn attempt_manifests_retain_selected_evidence_across_fallback_and_replay() {
     };
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
-    let child = run
-        .checkpoint
-        .nodes
-        .iter()
-        .find(|node| node.id == "child")
-        .unwrap();
-    assert_eq!(child.attempts.len(), 2);
+    FallbackManifestFixture {
+        source,
+        base,
+        document,
+        run,
+        journal,
+    }
+}
+
+#[test]
+fn attempt_manifests_record_selected_evidence_across_route_fallback() {
+    let fixture = fallback_manifest_fixture();
+    let child = fixture.child();
+    let first = child.attempts.first().unwrap();
+    let last = child.attempts.last().unwrap();
+    assert_eq!(first.route.alias.as_deref(), Some("first"));
+    assert_eq!(first.outcome, Some(AttemptOutcome::AuthRequired));
+    assert_eq!(last.route.alias.as_deref(), Some("second"));
+    assert!(last.launched);
     for attempt in &child.attempts {
         let manifest = attempt.input_manifest.as_ref().unwrap();
         assert_eq!(manifest.schema_version, 1);
-        assert_eq!(manifest.source_commit.as_deref(), Some(source.as_str()));
-        assert_eq!(manifest.review_base.as_deref(), Some(base.as_str()));
+        assert_eq!(
+            manifest.source_commit.as_deref(),
+            Some(fixture.source.as_str())
+        );
+        assert_eq!(manifest.review_base.as_deref(), Some(fixture.base.as_str()));
         assert_eq!(
             manifest.graph_review_base.as_deref(),
             Some("3333333333333333333333333333333333333333")
@@ -79,11 +113,15 @@ fn attempt_manifests_retain_selected_evidence_across_fallback_and_replay() {
         );
         assert_eq!(manifest.integration_source, None);
         assert_eq!(manifest.inputs.len(), 2);
-        let input = &manifest.inputs[0];
+        let input = manifest
+            .inputs
+            .iter()
+            .find(|input| input.kind == OutputKind::Result)
+            .unwrap();
         assert_eq!(input.producer_attempt.as_ref().unwrap().node_id, "parent");
         assert_eq!(
             input.producer_attempt.as_ref().unwrap().graph_id,
-            document.graph_id
+            fixture.document.graph_id
         );
         assert!(
             input
@@ -93,30 +131,79 @@ fn attempt_manifests_retain_selected_evidence_across_fallback_and_replay() {
                 .starts_with("sha256:")
         );
         assert_eq!(input.file_delivery, InputDelivery::Capped);
-        assert_eq!(manifest.inputs[1].commit.as_deref(), Some(source.as_str()));
-        assert!(manifest.inputs[1].required);
+        assert_eq!(
+            manifest
+                .inputs
+                .iter()
+                .find(|input| input.kind == OutputKind::Commit)
+                .unwrap()
+                .commit
+                .as_deref(),
+            Some(fixture.source.as_str())
+        );
+        assert!(
+            manifest
+                .inputs
+                .iter()
+                .find(|input| input.kind == OutputKind::Commit)
+                .unwrap()
+                .required
+        );
+    }
+}
+
+#[test]
+fn attempt_manifest_records_the_applied_fallback_route() {
+    let fixture = fallback_manifest_fixture();
+    let attempt = fixture.child().attempts.last().unwrap();
+    let route = attempt
+        .input_manifest
+        .as_ref()
+        .unwrap()
+        .applied_route
+        .as_ref()
+        .unwrap();
+    assert_eq!(route.model.as_deref(), Some("fixture/model"));
+}
+
+#[test]
+fn attempt_manifest_excludes_private_payloads_and_paths() {
+    let fixture = fallback_manifest_fixture();
+    for attempt in &fixture.child().attempts {
+        let manifest = attempt.input_manifest.as_ref().unwrap();
         let encoded = serde_json::to_string(manifest).unwrap();
         assert!(!encoded.contains("private input content"));
         assert!(!encoded.contains("/private/inputs"));
     }
-    assert_eq!(
-        child.attempts[1]
-            .input_manifest
-            .as_ref()
-            .unwrap()
-            .applied_route
-            .as_ref()
-            .and_then(|route| route.model.as_deref()),
-        Some("fixture/model")
-    );
-    let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
-    assert_eq!(replay.checkpoint, run.checkpoint);
+}
+
+#[test]
+fn attempt_manifest_replay_keeps_the_checkpoint() {
+    let mut fixture = fallback_manifest_fixture();
+    let prior = fixture.run.checkpoint.clone();
+    let replay = advance(
+        &fixture.document,
+        &mut FakeOwner::default(),
+        &mut fixture.journal,
+    )
+    .unwrap();
+    assert_eq!(replay.checkpoint, prior);
+}
+
+#[test]
+fn attempt_manifest_preserves_unknown_fields() {
+    let fixture = fallback_manifest_fixture();
     let mut value =
-        serde_json::to_value(child.attempts[1].input_manifest.as_ref().unwrap()).unwrap();
+        serde_json::to_value(fixture.child().attempts[1].input_manifest.as_ref().unwrap()).unwrap();
     value["future_field"] = serde_json::json!({"kept":true});
     let decoded: AttemptInputManifest = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(serde_json::to_value(decoded).unwrap(), value);
-    let mut broken = run.checkpoint.clone();
+}
+
+#[test]
+fn checkpoint_without_an_attempt_manifest_is_rejected() {
+    let fixture = fallback_manifest_fixture();
+    let mut broken = fixture.run.checkpoint.clone();
     broken
         .nodes
         .iter_mut()
@@ -126,7 +213,7 @@ fn attempt_manifests_retain_selected_evidence_across_fallback_and_replay() {
         .input_manifest = None;
     assert!(matches!(
         advance(
-            &document,
+            &fixture.document,
             &mut FakeOwner::default(),
             &mut MemoryJournal(Some(broken))
         ),
@@ -186,40 +273,99 @@ fn attempt_manifest_bounds_the_number_of_selected_values() {
 }
 
 #[test]
-fn upstream_files_are_listed_next_to_the_excerpts_and_the_launch_is_unchanged() {
-    let (document, mut owner) = parent_and_child(Some(|requests| MaterialisedInputs {
-        index: None,
-        directory: Some("/state/graph-inputs/child-0".into()),
-        entries: requests
+fn materialised_upstream_delivery_is_recorded_by_manifest_status() {
+    fn file(requests: &[InputRequest]) -> MaterialisedInputs {
+        MaterialisedInputs {
+            index: None,
+            directory: Some("/inputs".into()),
+            entries: requests
+                .iter()
+                .map(|request| MaterialisedInput::File {
+                    label: request.label.clone(),
+                    path: format!("/inputs/{}.md", request.label).into(),
+                    bytes: 9,
+                    omitted: 0,
+                })
+                .collect(),
+        }
+    }
+    fn capped_file(requests: &[InputRequest]) -> MaterialisedInputs {
+        MaterialisedInputs {
+            index: None,
+            directory: Some("/inputs".into()),
+            entries: requests
+                .iter()
+                .map(|request| MaterialisedInput::File {
+                    label: request.label.clone(),
+                    path: format!("/inputs/{}.md", request.label).into(),
+                    bytes: outputs::NODE_INPUT_FILE_BYTES as u64,
+                    omitted: 1,
+                })
+                .collect(),
+        }
+    }
+    fn omitted(requests: &[InputRequest]) -> MaterialisedInputs {
+        MaterialisedInputs {
+            index: None,
+            directory: Some("/inputs".into()),
+            entries: requests
+                .iter()
+                .map(|request| MaterialisedInput::Capped {
+                    label: request.label.clone(),
+                })
+                .collect(),
+        }
+    }
+    fn unavailable(requests: &[InputRequest]) -> MaterialisedInputs {
+        MaterialisedInputs {
+            index: None,
+            directory: None,
+            entries: requests
+                .iter()
+                .map(|request| MaterialisedInput::Unavailable {
+                    label: request.label.clone(),
+                    reason: "peer unavailable".into(),
+                })
+                .collect(),
+        }
+    }
+
+    let cases: [(fn(&[InputRequest]) -> MaterialisedInputs, InputDelivery); 4] = [
+        (file, InputDelivery::Delivered),
+        (capped_file, InputDelivery::Capped),
+        (omitted, InputDelivery::Omitted),
+        (unavailable, InputDelivery::Unavailable),
+    ];
+    for (materialise, expected_file_delivery) in cases {
+        let (document, mut owner) = parent_and_child(Some(materialise));
+        let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+        let child = run
+            .checkpoint
+            .nodes
             .iter()
-            .map(|request| MaterialisedInput::File {
-                label: request.label.clone(),
-                path: format!("/state/graph-inputs/child-0/{}.md", request.label).into(),
-                bytes: 9000,
-                omitted: 0,
-            })
-            .collect(),
-    }));
-    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert!(run.checkpoint.successful());
-    // The parent selects nothing, so only the child is asked to materialise.
-    assert_eq!(
-        owner.file_requests,
-        vec![vec![InputRequest {
-            label: "parent".into(),
-            attempt_ref: Some("host-a/attempt-1".into()),
-            attempt_key: Some(run.checkpoint.nodes[0].attempts[0].key.clone()),
-            inline_findings: None,
-            finding_prefix: None,
-        }]]
-    );
-    assert_eq!(owner.file_caps, vec![outputs::NODE_INPUT_FILE_BYTES]);
-    let prompt = &owner.prompts[1];
-    let excerpt_at = prompt.find("short excerpt").expect("excerpt kept");
-    let files_at = prompt.find("<UPSTREAM_FILES>").expect("files block");
-    assert!(excerpt_at < files_at, "{prompt}");
-    assert!(prompt.contains("- parent: /state/graph-inputs/child-0/parent.md (9000 bytes)"));
-    assert!(!owner.prompts[0].contains("UPSTREAM_FILES"));
+            .find(|node| node.id == "child")
+            .unwrap();
+        let evidence = &child.attempts[0].input_manifest.as_ref().unwrap().inputs[0];
+        assert_eq!(evidence.file_delivery, expected_file_delivery);
+        assert_eq!(evidence.delivery, InputDelivery::Delivered);
+        assert_eq!(child.state, NodeState::Succeeded);
+    }
+
+    let entries: Vec<_> = (0..=UPSTREAM_INPUT_LIST_LIMIT)
+        .map(|index| MaterialisedInput::File {
+            label: format!("member-{index}"),
+            path: format!("/inputs/{index}").into(),
+            bytes: 1,
+            omitted: 0,
+        })
+        .collect();
+    let index = std::path::Path::new("/inputs/upstream-index.json");
+    let listing = outputs::render_files(&entries, &[], Some(index));
+    let last_listed = format!("member-{}", UPSTREAM_INPUT_LIST_LIMIT - 1);
+    let first_omitted = format!("member-{UPSTREAM_INPUT_LIST_LIMIT}");
+    assert!(listing.contains(&last_listed));
+    assert!(!listing.contains(&first_omitted));
+    assert!(listing.contains(index.to_str().unwrap()));
 }
 
 #[test]
@@ -261,59 +407,6 @@ fn file_notices_must_fit_the_prompt_before_a_consumer_attempt() {
         Some("upstream_outputs_too_large")
     );
     assert!(consumer.attempts.is_empty());
-    assert_eq!(owner.calls.len(), 1);
-}
-
-#[test]
-fn a_remote_upstream_is_named_unavailable_and_the_node_still_runs() {
-    let (document, mut owner) = parent_and_child(Some(|requests| MaterialisedInputs {
-        index: None,
-        directory: None,
-        entries: requests
-            .iter()
-            .map(|request| MaterialisedInput::Unavailable {
-                label: request.label.clone(),
-                reason: "its result could not be read: peer unavailable".into(),
-            })
-            .collect(),
-    }));
-    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert!(run.checkpoint.successful());
-    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
-    assert!(
-        owner.prompts[1]
-            .contains("- parent: unavailable: its result could not be read: peer unavailable; full result attempt: host-a/attempt-1")
-    );
-}
-
-#[test]
-fn capped_upstream_results_are_named_in_the_prompt() {
-    let (document, mut owner) = parent_and_child(Some(|requests| MaterialisedInputs {
-        index: Some("/state/graph-inputs/child-0/upstream-index.json".into()),
-        directory: Some("/state/graph-inputs/child-0".into()),
-        entries: vec![
-            MaterialisedInput::File {
-                label: requests[0].label.clone(),
-                path: "/state/graph-inputs/child-0/parent.md".into(),
-                bytes: 2_097_300,
-                omitted: 1234,
-            },
-            MaterialisedInput::Capped {
-                label: "later".into(),
-            },
-        ],
-    }));
-    advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
-    let prompt = &owner.prompts[1];
-    assert!(
-        prompt.contains("CAPPED: 1234 more bytes omitted"),
-        "{prompt}"
-    );
-    assert!(
-        prompt.contains("full result attempt: host-a/attempt-1"),
-        "{prompt}"
-    );
-    assert!(prompt.contains("- later: CAPPED: not written"), "{prompt}");
 }
 
 #[test]
@@ -342,26 +435,6 @@ fn manifest_reports_a_file_omitted_at_the_delivery_cap() {
 }
 
 #[test]
-fn long_upstream_listing_points_to_complete_index() {
-    let (document, mut owner) = parent_and_child(Some(|_| MaterialisedInputs {
-        directory: Some("/inputs".into()),
-        index: Some("/inputs/upstream-index.json".into()),
-        entries: (0..=UPSTREAM_INPUT_LIST_LIMIT)
-            .map(|i| MaterialisedInput::File {
-                label: format!("member-{i}"),
-                path: format!("/inputs/{i}").into(),
-                bytes: 1,
-                omitted: 0,
-            })
-            .collect(),
-    }));
-    advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
-    let prompt = &owner.prompts[1];
-    assert!(prompt.contains("Complete input index: /inputs/upstream-index.json"));
-    assert!(prompt.contains("1 more upstream results are not listed"));
-}
-
-#[test]
 fn truncation_notice_names_readable_staged_results() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("reviews--a.md");
@@ -380,14 +453,13 @@ fn truncation_notice_names_readable_staged_results() {
         finding_prefix: Some("reviews--a:".into()),
     }];
     let notice = render_files(&entries, &requests, None);
-    let source = notice
-        .lines()
-        .find_map(|line| line.strip_prefix("composite findings truncated: full member result: "))
-        .unwrap();
-    let source: serde_json::Value = serde_json::from_str(source).unwrap();
-    assert_eq!(source["label"], "reviews--a");
+    let MaterialisedInput::File { label, path, .. } = &entries[0] else {
+        unreachable!("fixture declares a staged file")
+    };
+    assert_eq!(label, "reviews--a");
+    assert!(notice.contains(path.to_str().unwrap()));
     assert_eq!(
-        std::fs::read_to_string(source["path"].as_str().unwrap()).unwrap(),
+        std::fs::read_to_string(path).unwrap(),
         "full findings from a"
     );
 }

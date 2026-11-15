@@ -16,9 +16,15 @@ pub(super) fn set_expansion_pause(
         active: false,
         fallback,
         fragment_error,
+        extra: Default::default(),
     });
     checkpoint.activate_expansion_pause(index);
-    checkpoint.set_pause(PauseCause::InvalidPlanExpansion, &reason);
+    checkpoint.set_pause(
+        PauseCause::InvalidPlanExpansion {
+            extra: Default::default(),
+        },
+        &reason,
+    );
 }
 
 pub(super) fn clear_expansion_pause(checkpoint: &mut GraphCheckpoint, index: usize, refresh: bool) {
@@ -49,7 +55,12 @@ pub(super) fn clear_expansion_pause(checkpoint: &mut GraphCheckpoint, index: usi
         checkpoint.deactivate_expansion_pauses();
         checkpoint.pause = None;
         if let Some((_, reason)) = &next {
-            checkpoint.set_pause(PauseCause::InvalidPlanExpansion, reason);
+            checkpoint.set_pause(
+                PauseCause::InvalidPlanExpansion {
+                    extra: Default::default(),
+                },
+                reason,
+            );
         }
         if let Some((next, _)) = next {
             checkpoint.activate_expansion_pause(next);
@@ -123,8 +134,9 @@ impl PlanSpec {
 /// document remains the digest authority, just as it does for loop rounds.
 /// The prior topology and progress retained by a container redo tombstone.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RetiredExpansion {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub reason: String,
     pub expansion: Expansion,
     pub progress: Vec<NodeProgress>,
@@ -605,7 +617,7 @@ fn check_patch_topology(
             .nodes
             .iter()
             .filter(|node| node.composite.is_none() && node.loop_body.is_none())
-            .any(|node| node.source != planner.source)
+            .any(|node| !same_source_binding(node.source.as_ref(), planner.source.as_ref()))
     {
         return Err((
             addition.source.clone(),
@@ -638,6 +650,27 @@ fn check_patch_topology(
         ));
     }
     Ok(())
+}
+
+/// Compare the declared source identity; flattened extras stay opaque metadata.
+fn same_source_binding(left: Option<&SourceBinding>, right: Option<&SourceBinding>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (
+            Some(SourceBinding::Commit { commit: left, .. }),
+            Some(SourceBinding::Commit { commit: right, .. }),
+        ) => left == right,
+        (
+            Some(SourceBinding::Node { node: left, .. }),
+            Some(SourceBinding::Node { node: right, .. }),
+        )
+        | (
+            Some(SourceBinding::Head { node: left, .. }),
+            Some(SourceBinding::Head { node: right, .. }),
+        ) => left == right,
+        (Some(SourceBinding::Integration { .. }), Some(SourceBinding::Integration { .. })) => true,
+        _ => false,
+    }
 }
 
 pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
@@ -915,7 +948,7 @@ fn prepare_nested(
             ));
         }
         if let Some(source) = &child.source
-            && node.source.as_ref() != Some(source)
+            && !same_source_binding(node.source.as_ref(), Some(source))
         {
             return Err(format!(
                 "fragment node {} sets source; planner-emitted nodes may only repeat the planner's own source",
@@ -1166,7 +1199,9 @@ fn fragment(
         super::patch::Preparation::FinalFragment,
     )
     .map_err(|error| {
-        *safe_reason = error.cause.unwrap_or(PlanFailureFact::InvalidFragment);
+        *safe_reason = error.cause.unwrap_or(PlanFailureFact::InvalidFragment {
+            extra: Default::default(),
+        });
         error.message
     })? {
         super::patch::Prepared::Ready(admission) => {
@@ -1492,7 +1527,7 @@ pub(super) fn flatten_fragment(
                 input.node = id(&input.node);
             }
             if let Some(
-                SourceBinding::Node { node: source } | SourceBinding::Head { node: source },
+                SourceBinding::Node { node: source, .. } | SourceBinding::Head { node: source, .. },
             ) = &mut child.source
             {
                 *source = id(source);
@@ -1808,7 +1843,9 @@ pub(super) fn settle(
     }
     // Source and deserialisation errors can contain captured provider output.
     // Retain a closed, safe explanation for status and fallback diagnostics.
-    let mut safe_reason = PlanFailureFact::InvalidGraph;
+    let mut safe_reason = PlanFailureFact::InvalidGraph {
+        extra: Default::default(),
+    };
     let final_patch = capture.map(|capture| {
         block(capture, "patch")
             .and_then(|patch| match patch {
@@ -1830,22 +1867,30 @@ pub(super) fn settle(
                     json
                 }),
                 Ok(None) => {
-                    safe_reason = PlanFailureFact::MissingBlock;
+                    safe_reason = PlanFailureFact::MissingBlock {
+                        extra: Default::default(),
+                    };
                     Err("fragment block missing".into())
                 }
                 Err(error) => {
-                    safe_reason = PlanFailureFact::InvalidBlock;
+                    safe_reason = PlanFailureFact::InvalidBlock {
+                        extra: Default::default(),
+                    };
                     Err(error)
                 }
             }
         } else {
             checkpoint.nodes[index].fragment.clone().ok_or_else(|| {
-                safe_reason = PlanFailureFact::MissingResult;
+                safe_reason = PlanFailureFact::MissingResult {
+                    extra: Default::default(),
+                };
                 "planner result missing".into()
             })
         };
         json.and_then(|json| {
-            safe_reason = PlanFailureFact::InvalidFragment;
+            safe_reason = PlanFailureFact::InvalidFragment {
+                extra: Default::default(),
+            };
             fragment(
                 node,
                 source,
@@ -1896,28 +1941,45 @@ pub(super) fn settle(
             }
         }
         validate_schema(&preview).map_err(|error| {
-            safe_reason = PlanFailureFact::Schema;
+            safe_reason = PlanFailureFact::Schema {
+                extra: Default::default(),
+            };
             error.to_string()
         })?;
         let (plan, positions) = validate_flat_plan(&preview, &generous()).map_err(|error| {
-            safe_reason = PlanFailureFact::InvalidGraph;
+            safe_reason = PlanFailureFact::InvalidGraph {
+                extra: Default::default(),
+            };
             error.to_string()
         })?;
         validate_output_kinds(&preview).map_err(|error| {
-            safe_reason = PlanFailureFact::OutputKind;
+            safe_reason = PlanFailureFact::OutputKind {
+                extra: Default::default(),
+            };
             error.to_string()
         })?;
         if let Some(limit) = structural_limit(&preview, &plan, limits) {
-            safe_reason = PlanFailureFact::Structural(limit);
-            return Err(limit.to_string());
+            let reason = limit.to_string();
+            safe_reason = PlanFailureFact::Structural {
+                limit,
+                extra: Default::default(),
+            };
+            return Err(reason);
         }
         let mut expansions = checkpoint.expansions.clone();
         expansions.push(addition.clone());
         let bound = graph_envelope_bound(source, &expansions, &checkpoint.extensions, &plan);
         if bound > MAX_CHECKPOINT_BYTES as usize {
-            let limit = GraphEnvelopeLimit { bound };
-            safe_reason = PlanFailureFact::Envelope(limit);
-            return Err(limit.to_string());
+            let limit = GraphEnvelopeLimit {
+                extra: Default::default(),
+                bound,
+            };
+            let reason = limit.to_string();
+            safe_reason = PlanFailureFact::Envelope {
+                limit,
+                extra: Default::default(),
+            };
+            return Err(reason);
         }
         Ok((addition, plan, positions, preview))
     });
@@ -1956,7 +2018,7 @@ pub(super) fn settle(
                     Some(NodeDecisionCause::PlanExpansionPaused {
                         fragment_error: Some(error),
                         ..
-                    }) => *error,
+                    }) => error.clone(),
                     _ => safe_reason,
                 };
                 let fallback_reason = bounded(

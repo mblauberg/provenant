@@ -18,10 +18,8 @@ fn tick_advances_expired_asks_and_cancelled_graphs_and_skips_future_and_busy_gra
     let now = clock.wall_now()?;
     let actor = context.identity.inbox.actor.to_string();
     let seed_at = provenant_core::WallTime::from_micros(now.as_micros() - 120_000_000)?;
-    let seed_clock = provenant_core::TestClock::new(
-        seed_at,
-        provenant_core::MonoTime::from_micros(0),
-    );
+    let seed_clock =
+        provenant_core::TestClock::new(seed_at, provenant_core::MonoTime::from_micros(0));
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 10)?;
     let inbox = provenant_fabric_runtime::inbox::InboxService::open(
@@ -34,7 +32,7 @@ fn tick_advances_expired_asks_and_cancelled_graphs_and_skips_future_and_busy_gra
     // IDs sort the busy graph before the due graph, exercising failure isolation.
     for id in ["a-busy", "b-due", "c-future", "d-cancelled"] {
         let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version":1, "graph_id":id, "decision_session":"chair-session",
+            "schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION, "graph_id":id, "decision_session":"chair-session",
             "nodes":[{"id":"choose", "kind":"decide", "access":"read_only", "decide":{"on_unanswered":"block_dependants",
                 "question":"Ship?", "options":[{"id":"ship","label":"Ship"},{"id":"hold","label":"Hold"}],
                 "default":"hold", "timeout_seconds":60

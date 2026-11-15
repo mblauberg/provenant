@@ -559,10 +559,15 @@ impl Default for CargoSeed {
     fn default() -> Self {
         Self {
             enabled: true,
-            max_generations: 3,
-            max_bytes: 20 * 1024 * 1024 * 1024,
+            max_generations: CargoSeed::DEFAULT_MAX_GENERATIONS,
+            max_bytes: CargoSeed::DEFAULT_MAX_BYTES,
         }
     }
+}
+
+impl CargoSeed {
+    pub const DEFAULT_MAX_GENERATIONS: usize = 3;
+    pub const DEFAULT_MAX_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 }
 
 /// Nice values applied by the host before entering lane confinement.
@@ -582,6 +587,10 @@ impl Default for LanePriority {
             build_heavy: provenant_records::run::DEFAULT_BUILD_HEAVY_PRIORITY,
         }
     }
+}
+
+impl LanePriority {
+    pub const MAX_NICE_VALUE: u8 = 19;
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -871,7 +880,7 @@ impl DomainConfig for FabricConfig {
             ("read-only", self.lanes.priority.read_only),
             ("build-heavy", self.lanes.priority.build_heavy),
         ] {
-            if value > 19 {
+            if value > LanePriority::MAX_NICE_VALUE {
                 reject(format!("lanes.priority.{name}"));
             }
         }
@@ -965,6 +974,43 @@ fn boundary_existing(error: &SectionError) -> bool {
             .strip_prefix("peers.")
             .and_then(|rest| rest.split_once('.'))
             .is_some_and(|(_, leaf)| leaf == "remote_executable")
+}
+
+#[cfg(test)]
+pub(crate) fn test_config() -> FabricConfig {
+    let host = HostId::from_bytes([1; 16]);
+    FabricConfig {
+        agent_label: "agent".into(),
+        client_label: "agent".into(),
+        commands: BTreeMap::new(),
+        host_native: BTreeMap::new(),
+        home_hosts: BTreeMap::new(),
+        peers: BTreeMap::from([(
+            "worker".into(),
+            Peer {
+                host,
+                destination: "worker".into(),
+                remote_executable: Some(std::path::PathBuf::from("/opt/provenant/bin/provenant")),
+                connect_timeout_seconds: 10,
+            },
+        )]),
+        ssh_executable: Some(std::path::PathBuf::from("/opt/homebrew/bin/ssh")),
+        graph: GraphConfig::default(),
+        lanes: Lanes::default(),
+        plan: Default::default(),
+        limits: Limits {
+            body_bytes: 65536,
+            input_frame_bytes: 1048576,
+            json_depth: 64,
+            page_rows: 100,
+            output_lines: 500,
+            output_bytes: 65536,
+            result_bytes: 1048576,
+            peer_seconds: 30,
+            graph_timeout_seconds: 14400,
+            store_busy_timeout_ms: 30_000,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -1197,87 +1243,65 @@ mod tests {
     }
 
     fn config() -> FabricConfig {
-        let host = HostId::from_bytes([1; 16]);
-        FabricConfig {
-            agent_label: "agent".into(),
-            client_label: "agent".into(),
-            commands: BTreeMap::new(),
-            host_native: BTreeMap::new(),
-            home_hosts: BTreeMap::new(),
-            peers: BTreeMap::from([(
-                "worker".into(),
-                Peer {
-                    host,
-                    destination: "worker".into(),
-                    remote_executable: Some(PathBuf::from("/opt/provenant/bin/provenant")),
-                    connect_timeout_seconds: 10,
-                },
-            )]),
-            ssh_executable: Some(PathBuf::from("/opt/homebrew/bin/ssh")),
-            graph: GraphConfig::default(),
-            lanes: Lanes::default(),
-            plan: Default::default(),
-            limits: Limits {
-                body_bytes: 65536,
-                input_frame_bytes: 1048576,
-                json_depth: 64,
-                page_rows: 100,
-                output_lines: 500,
-                output_bytes: 65536,
-                result_bytes: 1048576,
-                peer_seconds: 30,
-                graph_timeout_seconds: 14400,
-                store_busy_timeout_ms: 30_000,
-            },
+        super::test_config()
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct ConfigDomains {
+        fabric: FabricConfig,
+    }
+
+    const CONFIG_TEST_SECTIONS: &[DomainSection] = &[SECTION];
+
+    struct Resolver;
+    impl provenant_core::PathResolver for Resolver {
+        fn resolve_existing_ancestor(&self, path: &std::path::Path) -> std::io::Result<PathBuf> {
+            Ok(path.to_owned())
         }
+    }
+
+    fn config_roots() -> provenant_core::Roots {
+        let mut inputs =
+            provenant_core::RootInputs::new("/fixture/home".into(), "/fixture/checkout".into());
+        inputs.state_dir = Some("/fixture/state".into());
+        inputs.resolve(&Resolver).unwrap()
+    }
+
+    fn config_sections() -> provenant_config::DomainSections<ConfigDomains> {
+        provenant_config::DomainSections::new(CONFIG_TEST_SECTIONS)
     }
 
     #[test]
     fn lane_priority_defaults_and_bounds() {
         let mut config = config();
-        assert!(config.lanes.cargo_seed.enabled);
-        assert_eq!(config.lanes.cargo_seed.max_generations, 3);
-        assert_eq!(config.lanes.cargo_seed.max_bytes, 20 * 1024 * 1024 * 1024);
-        assert_eq!(config.lanes.priority.for_lane(true, false), 10);
-        assert_eq!(config.lanes.priority.for_lane(false, false), 5);
-        assert_eq!(config.lanes.priority.for_lane(true, true), 15);
-        assert_eq!(config.lanes.priority.for_lane(false, true), 15);
-        let mut value = serde_json::to_value(&config).unwrap();
-        value["lanes"]["cargo_seed"]["enabled"] = true.into();
-        value["lanes"]["cargo_seed"]["max_generations"] = 0.into();
-        value["lanes"]["cargo_seed"]["max_bytes"] = 0.into();
-        let limits = serde_json::from_value::<FabricConfig>(value.clone())
-            .unwrap()
-            .lanes
-            .cargo_seed;
-        assert_eq!((limits.max_generations, limits.max_bytes), (0, 0));
-        assert!(
-            serde_json::from_value::<FabricConfig>(value.clone())
-                .unwrap()
-                .lanes
-                .cargo_seed
-                .enabled
-        );
-        value.as_object_mut().unwrap().remove("lanes");
-        assert!(
-            serde_json::from_value::<FabricConfig>(value.clone())
-                .unwrap()
-                .lanes
-                .cargo_seed
-                .enabled
+        assert_eq!(
+            config.lanes.priority.for_lane(true, false),
+            provenant_records::run::DEFAULT_WRITER_PRIORITY
         );
         assert_eq!(
-            serde_json::from_value::<FabricConfig>(value)
-                .unwrap()
-                .lanes
-                .priority,
+            config.lanes.priority.for_lane(false, false),
+            provenant_records::run::DEFAULT_READER_PRIORITY
+        );
+        assert_eq!(
+            config.lanes.priority.for_lane(true, true),
+            provenant_records::run::DEFAULT_BUILD_HEAVY_PRIORITY
+        );
+        assert_eq!(
+            config.lanes.priority.for_lane(false, true),
+            provenant_records::run::DEFAULT_BUILD_HEAVY_PRIORITY
+        );
+        let mut value = serde_json::to_value(&config).unwrap();
+        value.as_object_mut().unwrap().remove("lanes");
+        let defaults = serde_json::from_value::<FabricConfig>(value).unwrap();
+        assert_eq!(
+            defaults.lanes.priority,
             LanePriority {
-                writer: 10,
-                read_only: 5,
-                build_heavy: 15
+                writer: provenant_records::run::DEFAULT_WRITER_PRIORITY,
+                read_only: provenant_records::run::DEFAULT_READER_PRIORITY,
+                build_heavy: provenant_records::run::DEFAULT_BUILD_HEAVY_PRIORITY
             }
         );
-        config.lanes.priority.writer = 20;
+        config.lanes.priority.writer = LanePriority::MAX_NICE_VALUE + 1;
         assert!(
             config
                 .validate()
@@ -1285,8 +1309,28 @@ mod tests {
                 .any(|e| e.field == "lanes.priority.writer")
         );
         config.lanes.priority.writer = 0;
-        config.lanes.priority.read_only = 19;
+        config.lanes.priority.read_only = LanePriority::MAX_NICE_VALUE;
         assert!(config.validate().is_empty());
+    }
+
+    #[test]
+    fn cargo_seed_defaults_and_zero_values_follow_the_declaration() {
+        let seed = CargoSeed::default();
+        assert!(seed.enabled);
+        assert_eq!(seed.max_generations, CargoSeed::DEFAULT_MAX_GENERATIONS);
+        assert_eq!(seed.max_bytes, CargoSeed::DEFAULT_MAX_BYTES);
+
+        let mut value = serde_json::to_value(config()).unwrap();
+        value["lanes"]["cargo_seed"]["max_generations"] = 0.into();
+        value["lanes"]["cargo_seed"]["max_bytes"] = 0.into();
+        let decoded = serde_json::from_value::<FabricConfig>(value).unwrap();
+        assert_eq!(
+            (
+                decoded.lanes.cargo_seed.max_generations,
+                decoded.lanes.cargo_seed.max_bytes
+            ),
+            (0, 0)
+        );
     }
 
     #[test]
@@ -1361,22 +1405,6 @@ mod tests {
     }
 
     #[test]
-    fn retired_graph_ceiling_is_rejected() {
-        let mut value = serde_json::to_value(config()).unwrap();
-        value["graph"]["limit_ceiling"] = serde_json::json!({"nodes": 1});
-        let error = serde_json::from_value::<FabricConfig>(value).unwrap_err();
-        assert!(error.to_string().contains("unknown field `limit_ceiling`"));
-        for pointer in ["graph", "limits", "peers"] {
-            let mut unknown = serde_json::to_value(config()).unwrap();
-            unknown[pointer]["unexpected"] = serde_json::json!({"nodes": 1});
-            assert!(serde_json::from_value::<FabricConfig>(unknown).is_err());
-        }
-        let mut unknown = serde_json::to_value(config()).unwrap();
-        unknown["graph"]["limits"]["unexpected"] = true.into();
-        assert!(serde_json::from_value::<FabricConfig>(unknown).is_err());
-    }
-
-    #[test]
     fn land_policy_layers_project_then_host_then_default() {
         use provenant_records::workflow::RiskTier;
         let mut land = GraphLand::default();
@@ -1432,7 +1460,7 @@ mod tests {
         let default_busy_timeout = config.limits.store_busy_timeout_ms;
         config.limits.store_busy_timeout_ms = 0;
         assert!(config.validate().is_empty());
-        config.limits.store_busy_timeout_ms = 600_001;
+        config.limits.store_busy_timeout_ms = provenant_config::STORE_BUSY_TIMEOUT_CEILING_MS + 1;
         assert!(
             config
                 .validate()
@@ -1445,7 +1473,7 @@ mod tests {
         config.graph.limits.continuations = 0;
         assert!(config.validate().is_empty());
         assert!(config.graph.budget.per_graph.tokens.is_none());
-        config.graph.limits.nodes = 513;
+        config.graph.limits.nodes = GraphLimits::default().nodes + 1;
         assert!(config.validate().is_empty());
         config.graph.budget.per_node.cost_usd = Some(-1.0);
         assert!(
@@ -1457,77 +1485,10 @@ mod tests {
     }
 
     #[test]
-    fn configured_graph_limits_and_diagnostics_survive_config_layering() {
-        #[derive(Serialize, Deserialize)]
-        struct Domains {
-            fabric: FabricConfig,
-        }
-        struct Resolver;
-        impl provenant_core::PathResolver for Resolver {
-            fn resolve_existing_ancestor(
-                &self,
-                path: &std::path::Path,
-            ) -> std::io::Result<PathBuf> {
-                Ok(path.to_owned())
-            }
-        }
-        let mut inputs =
-            provenant_core::RootInputs::new("/fixture/home".into(), "/fixture/checkout".into());
-        inputs.state_dir = Some("/fixture/state".into());
-        let roots = inputs.resolve(&Resolver).unwrap();
-        let sections = provenant_config::DomainSections::<Domains>::new(&[SECTION]);
-        for stale in [
-            "[domains.fabric.pipelines.experiment.trial]\ncontrol='private-sentinel'",
-            "[domains.fabric.pipelines.experiment]",
-            "[domains.fabric.pipelines]\ntypo=true",
-            "[domains.fabric]\npipelines={experiment={trial={control='private-sentinel'}}}",
-        ] {
-            let text = format!("schema_version=1\n{stale}\n");
-            let loaded =
-                provenant_config::load_with_domains(&roots, Some(text.as_bytes()), &sections)
-                    .unwrap();
-            assert!(loaded.warnings.iter().any(|warning| {
-                warning.rule == "unknown_key"
-                    && warning.message.starts_with("domains.fabric.pipelines:")
-            }));
-            assert!(!format!("{:?}", loaded.warnings).contains("private-sentinel"));
-        }
+    fn configured_graph_limits_keep_user_values_and_sources() {
+        let roots = config_roots();
+        let sections = config_sections();
         let text = b"schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 10\nedges = 20\n[domains.fabric.graph.ci_poll_backoff]\ninitial_seconds = 60\nmax_seconds = 300\n[domains.fabric.graph.ci_poll_overrides.build]\ninitial_seconds = 120\nmax_seconds = 600\n";
-        let retired = b"schema_version = 1\n[domains.fabric.graph.limit_ceiling]\nnodes = 1\n";
-        let loaded =
-            provenant_config::load_with_domains(&roots, Some(&retired[..]), &sections).unwrap();
-        assert!(format!("{:?}", loaded.warnings).contains("limit_ceiling"));
-        let retired = b"schema_version=1\n[domains.fabric.graph]\nwriter_launch_seconds=123\n";
-        let loaded =
-            provenant_config::load_with_domains(&roots, Some(&retired[..]), &sections).unwrap();
-        let warning = loaded
-            .warnings
-            .iter()
-            .find(|warning| warning.message.contains("writer_launch_seconds"))
-            .unwrap();
-        assert!(warning.message.contains("launch_wait_seconds"));
-        assert!(warning.message.contains("writer_provision_seconds"));
-        assert_eq!(
-            loaded.domains.fabric.graph.launch_wait_seconds,
-            config().graph.launch_wait_seconds
-        );
-        assert_eq!(
-            loaded.domains.fabric.graph.writer_provision_seconds,
-            config().graph.writer_provision_seconds
-        );
-        let unknown =
-            b"schema_version = 1\n[domains.fabric.graph.limits]\nunknown_limit = 1\nnodes = 10\n";
-        let loaded =
-            provenant_config::load_with_domains(&roots, Some(&unknown[..]), &sections).unwrap();
-        assert_eq!(loaded.domains.fabric.graph.limits.nodes, 10);
-        for section in ["graph.budget", "plan"] {
-            let unknown =
-                format!("schema_version = 1\n[domains.fabric.{section}]\nunknown_field = 1\n");
-            let loaded =
-                provenant_config::load_with_domains(&roots, Some(unknown.as_bytes()), &sections)
-                    .unwrap();
-            assert!(!loaded.warnings.is_empty());
-        }
         let config =
             provenant_config::load_with_domains(&roots, Some(&text[..]), &sections).unwrap();
         assert_eq!(config.domains.fabric.graph.limits.nodes, 10);
@@ -1555,42 +1516,101 @@ mod tests {
             defaults.origins["domains.fabric.graph.ci_poll_backoff.initial_seconds"],
             provenant_config::Origin::Compiled { .. }
         ));
+    }
 
-        for (text, key, rejected, should_echo, rule) in [
+    #[test]
+    fn unknown_graph_configuration_fields_warn_at_their_source() {
+        let roots = config_roots();
+        let sections = config_sections();
+        for (text, key, line) in [
+            (
+                "schema_version = 1\n[domains.fabric.graph]\nbrief = 'private-sentinel'\n",
+                "domains.fabric.graph.brief",
+                3,
+            ),
+            (
+                "schema_version = 1\n[domains.fabric.graph.limit_ceiling]\nnodes = 1\n",
+                "domains.fabric.graph.limit_ceiling",
+                3,
+            ),
+            (
+                "schema_version = 1\n[domains.fabric.graph]\nwriter_launch_seconds = 123\n",
+                "domains.fabric.graph.writer_launch_seconds",
+                3,
+            ),
+            (
+                "schema_version = 1\n[domains.fabric.graph.limits]\nunknown_limit = 1\nnodes = 10\n",
+                "domains.fabric.graph.limits.unknown_limit",
+                3,
+            ),
+            (
+                "schema_version = 1\n[domains.fabric.plan]\nunknown_field = 1\n",
+                "domains.fabric.plan.unknown_field",
+                3,
+            ),
+        ] {
+            let loaded =
+                provenant_config::load_with_domains(&roots, Some(text.as_bytes()), &sections)
+                    .unwrap();
+            let warning = loaded
+                .warnings
+                .iter()
+                .find(|warning| {
+                    warning.rule == "unknown_key" && warning.message.starts_with(&format!("{key}:"))
+                })
+                .unwrap_or_else(|| {
+                    panic!("missing source warning for {key}: {:?}", loaded.warnings)
+                });
+            assert_eq!(
+                warning.path.to_relative_path().unwrap().as_path(),
+                std::path::Path::new("config.toml")
+            );
+            assert_eq!(warning.line, line);
+            assert!(!warning.message.contains("private-sentinel"));
+            if key.ends_with("unknown_limit") {
+                assert_eq!(loaded.domains.fabric.graph.limits.nodes, 10);
+            }
+            if key.ends_with("writer_launch_seconds") {
+                assert_eq!(
+                    loaded.domains.fabric.graph.launch_wait_seconds,
+                    config().graph.launch_wait_seconds
+                );
+                assert_eq!(
+                    loaded.domains.fabric.graph.writer_provision_seconds,
+                    config().graph.writer_provision_seconds
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn known_graph_configuration_failures_keep_typed_paths() {
+        let roots = config_roots();
+        let sections = config_sections();
+        for (text, key, rule) in [
             (
                 "schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 0\n",
                 "graph.limits.nodes",
-                "rejected value: 0",
-                true,
                 "range",
             ),
             (
                 "schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 'private-sentinel'\n",
                 "graph.limits.nodes",
-                "private-sentinel",
-                false,
                 "type",
             ),
             (
                 "schema_version = 1\n[domains.fabric.graph.budget]\nunknown_usage = 'bad'\n",
                 "graph.budget.unknown_usage",
-                "bad",
-                false,
                 "range",
             ),
-            // A zero budget must not recover to unlimited.
             (
                 "schema_version = 1\n[domains.fabric.graph.budget.per_graph]\ntokens = 0\n",
                 "graph.budget.per_graph.tokens",
-                "rejected value: 0",
-                true,
                 "range",
             ),
             (
                 "schema_version = 1\n[domains.fabric.graph.budget.per_node]\nwall_time_seconds = 0\n",
                 "graph.budget.per_node.wall_time_seconds",
-                "rejected value: 0",
-                true,
                 "range",
             ),
         ] {
@@ -1603,26 +1623,32 @@ mod tests {
             };
             assert_eq!(source.field, format!("domains.fabric.{key}"), "{error}");
             assert_eq!(source.code, rule, "{error}");
-            assert_eq!(error.to_string().contains(rejected), should_echo, "{error}");
+            assert!(!error.to_string().contains("private-sentinel"));
         }
+    }
 
-        // Lane tuning is not a boundary: it recovers with a warning that names
-        // the field, keeping a valid budget beside it.
-        let config = provenant_config::load_with_domains(
-            &roots,
-            Some(&b"schema_version = 1\n[domains.fabric.lanes.priority]\nwriter = 40\n[domains.fabric.graph.budget.per_graph]\ntokens = 1000\n"[..]),
-            &sections,
+    #[test]
+    fn lane_priority_recovers_without_dropping_valid_graph_budget() {
+        let loaded = provenant_config::load_with_domains(
+            &config_roots(),
+            Some(
+                &b"schema_version = 1\n[domains.fabric.lanes.priority]\nwriter = 40\n[domains.fabric.graph.budget.per_graph]\ntokens = 1000\n"[..],
+            ),
+            &config_sections(),
         )
         .unwrap();
-        assert_eq!(config.domains.fabric.lanes.priority.writer, 10);
         assert_eq!(
-            config.domains.fabric.graph.budget.per_graph.tokens,
+            loaded.domains.fabric.lanes.priority.writer,
+            provenant_records::run::DEFAULT_WRITER_PRIORITY
+        );
+        assert_eq!(
+            loaded.domains.fabric.graph.budget.per_graph.tokens,
             Some(1000)
         );
-        assert!(
-            config.warnings[0]
+        assert!(loaded.warnings.iter().any(|warning| {
+            warning
                 .message
                 .starts_with("domains.fabric.lanes.priority.writer:")
-        );
+        }));
     }
 }

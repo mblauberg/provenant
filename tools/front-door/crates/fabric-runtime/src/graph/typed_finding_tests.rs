@@ -10,11 +10,13 @@ fn finding_typed_fields_round_trip_and_reject_malformed_values() {
         .into(),
         url: Some("https://checks/1".into()),
         trigger: Some(FindingTrigger {
+            extra: Default::default(),
             sequence: "invoke default path".into(),
             reach: FindingReach::DefaultPath,
             observed: true,
         }),
         triage: Some(FindingTriage {
+            extra: Default::default(),
             decision: "confirmed".into(),
             reason: "reproduced".into(),
             worth_fixing: true,

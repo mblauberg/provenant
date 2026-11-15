@@ -8,15 +8,17 @@ use std::{ffi::OsStr, io::ErrorKind};
 const MAX_REQUEST_BYTES: u64 = super::MAX_CHECKPOINT_BYTES;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RequestSet {
+    #[serde(flatten)]
+    extra: provenant_records::ExtraFields,
     schema_version: u8,
     requests: Vec<CancellationRequest>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct CancellationRequest {
+    #[serde(flatten)]
+    extra: provenant_records::ExtraFields,
     id: String,
     graph_id: String,
     plan_digest: String,
@@ -28,6 +30,7 @@ struct CancellationRequest {
 impl Default for RequestSet {
     fn default() -> Self {
         Self {
+            extra: Default::default(),
             schema_version: 1,
             requests: Vec::new(),
         }
@@ -144,6 +147,7 @@ pub(super) fn record(
     }
     let id = provenant_core::hex(&provenant_os::fs::entropy_128()?);
     set.requests.push(CancellationRequest {
+        extra: Default::default(),
         id: id.clone(),
         graph_id: graph_id.to_owned(),
         plan_digest: checkpoint.plan_digest,
@@ -252,10 +256,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cancellation_request_records_preserve_unknown_fields_at_each_level() {
+        let limits = provenant_records::Limits {
+            max_bytes: MAX_REQUEST_BYTES,
+            max_depth: 64,
+            max_members: super::super::MAX_CHECKPOINT_MEMBERS,
+        };
+        let payload = serde_json::json!({
+            "schema_version": 1,
+            "future_set": {"generation": 3},
+            "requests": [{
+                "id": "request-id",
+                "graph_id": "graph-id",
+                "plan_digest": "sha256:fixture",
+                "instance_id": null,
+                "node": null,
+                "reason": null,
+                "future_request": {"source": "newer-writer"}
+            }]
+        });
+        let bytes = provenant_records::encode(&payload).unwrap();
+        let stored: RequestSet = provenant_records::decode(bytes.as_slice(), limits).unwrap();
+        let rewritten = provenant_records::encode(&stored).unwrap();
+        let round_trip: serde_json::Value =
+            provenant_records::decode(rewritten.as_slice(), limits).unwrap();
+
+        assert_eq!(round_trip, payload);
+    }
+
+    #[test]
     fn cancellation_intent_survives_graph_lock_and_is_acknowledged_after_save() {
         use crate::graph::GraphExecution;
         use provenant_core::ProjectId;
-        use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
+        use provenant_os::fs::SystemPathResolver;
         use std::os::unix::fs::PermissionsExt;
 
         let temp = crate::test_support::tempdir().unwrap();
@@ -264,15 +297,12 @@ mod tests {
         let inputs = provenant_test_support::root_inputs(&base).unwrap();
         let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
         let project = ProjectId::from_bytes([1; 16]);
-        let clock = SystemClock::new();
+        let clock = provenant_core::TestClock::default();
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
-        let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap();
-        let execution: GraphExecution =
-            serde_json::from_value(fixture["execution"].clone()).unwrap();
-        let checkpoint: GraphCheckpoint =
-            serde_json::from_value(fixture["checkpoint"].clone()).unwrap();
+        let fixture = super::super::journal::stored_checkpoint_fixture();
+        let execution = fixture.execution;
+        let checkpoint = fixture.checkpoint;
         let mut journal =
             FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
         journal.bind(execution).unwrap();

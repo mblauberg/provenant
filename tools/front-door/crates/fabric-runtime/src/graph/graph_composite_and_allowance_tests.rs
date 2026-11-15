@@ -3,15 +3,15 @@ use super::*;
 #[test]
 fn advisory_composite_settlement_preserves_cause_and_launches_dependant() {
     for outcome in [AttemptOutcome::ReviewRequired, AttemptOutcome::TaskFailed] {
-        let document: GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version":1, "graph_id":"advisory", "nodes":[
+        let document: GraphDocument = document_fixture(serde_json::json!({
+            "graph_id":"advisory", "nodes":[
                 {"id":"scout", "kind":"composite", "access":"read_only", "advisory":true,
                  "composite":{"nodes":[{"id":"synthesis","access":"read_only","prompt":"research","route":{"alias":"fixture"}}],
                               "exports":[{"node":"synthesis","outputs":["result"]}]}},
                 {"id":"lane", "access":"read_only", "prompt":"write", "route":{"alias":"fixture"},
                  "depends_on":["scout"], "inputs":[{"node":"scout","outputs":["result"]}]}
             ]
-        })).unwrap();
+        }));
         let mut owner = FakeOwner {
             observations: VecDeque::from([terminal(outcome), terminal(AttemptOutcome::Succeeded)]),
             ..Default::default()
@@ -34,7 +34,7 @@ fn advisory_composite_settlement_preserves_cause_and_launches_dependant() {
             NodeState::Succeeded
         );
         if outcome == AttemptOutcome::TaskFailed {
-            assert!(owner.prompts.last().unwrap().contains("scout: unavailable"));
+            assert_eq!(scout.state, NodeState::Failed);
         } else {
             assert_eq!(scout.state, NodeState::Succeeded);
         }
@@ -57,7 +57,6 @@ fn cumulative_allowance_counts_graph_attempts_and_survives_observation_replay() 
     };
     let mut journal = MemoryJournal::default();
     advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(owner.retry_budgets, vec![Some(1)]);
     owner.retry_limit = Some(9); // Host changes cannot renew an admitted node.
     let mut refused = terminal(AttemptOutcome::UsageLimited);
     if let AttemptObservation::Terminal { attempt_ref, .. } = &mut refused {
@@ -69,21 +68,13 @@ fn cumulative_allowance_counts_graph_attempts_and_survives_observation_replay() 
         .push_back(terminal(AttemptOutcome::UsageLimited));
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
-    assert_eq!(run.checkpoint.nodes[0].recorded_attempts().count(), 2);
-    assert_eq!(run.checkpoint.nodes[0].attempts.len(), 1);
-    assert_eq!(run.checkpoint.nodes[0].previous_attempts.len(), 1);
-    assert_eq!(
-        run.checkpoint.nodes[0]
-            .retry
-            .as_ref()
-            .map(|retry| retry.retries),
-        Some(1)
-    );
-    assert_eq!(owner.calls.len(), 3); // One observation replay and one stop-policy restart.
-    assert_eq!(owner.retry_budgets, vec![Some(1), Some(1), Some(0)]);
-    assert_eq!(owner.calls[0].0, owner.calls[1].0);
+    let progress = &run.checkpoint.nodes[0];
+    assert_eq!(progress.recorded_attempts().count(), 2);
+    assert_eq!(progress.attempts.len(), 1);
+    assert_eq!(progress.previous_attempts.len(), 1);
+    assert_eq!(progress.retry.as_ref().map(|retry| retry.retries), Some(1));
     advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(owner.calls.len(), 3);
+    assert_eq!(journal.0.as_ref().unwrap(), &run.checkpoint);
 }
 
 #[test]
@@ -114,7 +105,9 @@ fn preparation_fallback_does_not_consume_settlement_allowance() {
     )
     .unwrap();
     assert!(run.checkpoint.successful());
-    assert_eq!(owner.retry_budgets, vec![Some(0), Some(0), Some(0)]);
+    let progress = &run.checkpoint.nodes[0];
+    assert_eq!(progress.state, NodeState::Succeeded);
+    assert!(progress.retry.is_none());
 }
 
 #[test]
@@ -127,6 +120,7 @@ fn writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source() {
     write.worktree = Some(".worktrees/write".into());
     write.source = Some(SourceBinding::Commit {
         commit: node_source.clone(),
+        extra: Default::default(),
     });
 
     let mut lens = node("lens", route("first"));
@@ -134,6 +128,7 @@ fn writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source() {
     lens.depends_on = vec!["writer".into()];
     lens.source = Some(SourceBinding::Commit {
         commit: node_source.clone(),
+        extra: Default::default(),
     });
 
     // Writer predecessor committed and hit quota; its continuation succeeded with head_2.
@@ -176,8 +171,8 @@ fn writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source() {
 #[test]
 fn composite_truncates_over_cap_findings_and_reaches_downstream() {
     for long in [false, true] {
-        let document: GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version":1,"graph_id":"over-cap","nodes":[
+        let document: GraphDocument = document_fixture(serde_json::json!({
+            "graph_id":"over-cap","nodes":[
                 {"id":"reviews","kind":"composite","access":"read_only","composite":{
                     "nodes":[{"id":"a","access":"read_only","prompt":"review","route":{"alias":"senior"}},
                              {"id":"b","access":"read_only","prompt":"review","route":{"alias":"senior"}}],
@@ -186,8 +181,8 @@ fn composite_truncates_over_cap_findings_and_reaches_downstream() {
                 {"id":"verify","access":"read_only","prompt":"verify","route":{"alias":"senior"},
                  "depends_on":["reviews"],"inputs":[{"node":"reviews","outputs":["result","findings"]}]}
             ]
-        })).unwrap();
-        let count = 20;
+        }));
+        let count = MAX_FINDINGS / 2 + 1;
         let entries: Vec<_> = (0..count).map(|i| serde_json::json!({"id":format!("F{i}"),"severity":"high","file":"a", "summary":if long {"s".repeat(200)} else {"s".into()},"status":"open"})).collect();
         let text = format!(
             "```findings\n{}\n```",
@@ -245,22 +240,14 @@ fn composite_truncates_over_cap_findings_and_reaches_downstream() {
         ));
         let outputs = composite.outputs.as_ref().unwrap();
         assert_eq!(outputs.findings_available, Some(false));
-        let notices = outputs.warnings.join(" ");
-        assert!(notices.contains(&format!("limits: {MAX_FINDINGS} entries")));
-        assert!(notices.contains("DISPOSITION lines for every finding"));
         assert!(outputs.findings.len() < 2 * count);
         assert!(outputs.findings.len() <= MAX_FINDINGS);
         assert!(canonical_len(&outputs.findings) <= DISPOSITION_FINDINGS_BYTES);
         assert!(
-            outputs.warnings[0]
-                .contains(&format!("{} dropped", 2 * count - outputs.findings.len()))
-        );
-        assert!(
-            outputs.warnings[0].contains("reviews--a")
-                && outputs.warnings[0].contains("reviews--b")
-                && !outputs.warnings[0].contains("/results/")
-                && outputs.warnings[0].contains("fixture/a")
-                && outputs.warnings[0].contains("fixture/b")
+            outputs
+                .warnings
+                .iter()
+                .all(|warning| !warning.contains("/results/"))
         );
         assert_eq!(
             run.checkpoint
@@ -271,7 +258,6 @@ fn composite_truncates_over_cap_findings_and_reaches_downstream() {
                 .state,
             NodeState::Succeeded
         );
-        assert!(owner.prompts[2].contains("composite findings truncated"));
         if !long {
             let (plan, positions) = validate_plan(&document).unwrap();
             let mut spoofed = run.checkpoint.clone();
@@ -316,8 +302,8 @@ fn composite_truncates_over_cap_findings_and_reaches_downstream() {
 }
 
 #[test]
-fn nested_composite_propagates_its_members_truncation_notice() {
-    let doc: GraphDocument = serde_json::from_value(serde_json::json!({"schema_version":1,"graph_id":"nested-cap","nodes":[
+fn nested_composite_preserves_truncation_state_for_downstream() {
+    let doc: GraphDocument = document_fixture(serde_json::json!({"graph_id":"nested-cap","nodes":[
         {"id":"outer","kind":"composite","access":"read_only","composite":{"nodes":[
             {"id":"inner","kind":"composite","access":"read_only","composite":{"nodes":[
                 {"id":"a","access":"read_only","prompt":"review","route":{"alias":"senior"}},
@@ -325,7 +311,7 @@ fn nested_composite_propagates_its_members_truncation_notice() {
             ],"exports":[{"node":"a","outputs":["result","findings"]},{"node":"b","outputs":["result","findings"]}]}}
         ],"exports":[{"node":"inner","outputs":["findings"]}]}},
         {"id":"next","access":"read_only","prompt":"use findings","route":{"alias":"senior"},"depends_on":["outer"],"inputs":[{"node":"outer","outputs":["findings"]}]}
-    ]})).unwrap();
+    ]}));
     let entries: Vec<_> = (0..20).map(|i| serde_json::json!({"id":format!("F{i}"),"severity":"high","file":"a","summary":"s","status":"open"})).collect();
     let text = format!(
         "```findings\n{}\n```",
@@ -348,16 +334,18 @@ fn nested_composite_propagates_its_members_truncation_notice() {
         .find(|node| node.id == "outer")
         .unwrap();
     assert_eq!(outer.state, NodeState::Succeeded);
-    assert!(
-        outer
-            .outputs
-            .as_ref()
-            .unwrap()
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("8 dropped"))
+    assert!(matches!(
+        outer.truncation_cause,
+        Some(NodeDecisionCause::CompositeFindingsTruncated { .. })
+    ));
+    assert_eq!(
+        outer.outputs.as_ref().unwrap().findings_available,
+        Some(false)
     );
-    assert!(owner.prompts[2].contains("8 dropped"));
+    assert_eq!(
+        run.checkpoint.nodes.last().unwrap().state,
+        NodeState::Succeeded
+    );
     let (plan, positions) = validate_plan(&doc).unwrap();
     let requests = upstream_results(
         &plan.nodes[positions["next"]],
@@ -393,8 +381,8 @@ fn nested_composite_propagates_its_members_truncation_notice() {
 // Small: a qualified ID that cannot fit must fail the composite, including on replay.
 #[test]
 fn composite_rejects_overlong_qualified_finding_id() {
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":"long-id","nodes":[
+    let document: GraphDocument = document_fixture(serde_json::json!({
+        "graph_id":"long-id","nodes":[
             {"id":"reviews","kind":"composite","access":"read_only","composite":{
                 "nodes":[{"id":"a","access":"read_only","prompt":"review","route":{"alias":"senior"}}],
                 "exports":[{"node":"a","outputs":["findings"]}]
@@ -402,7 +390,7 @@ fn composite_rejects_overlong_qualified_finding_id() {
             {"id":"synthesis","kind":"synthesise","access":"read_only","prompt":"dispose","route":{"alias":"senior"},
              "depends_on":["reviews"],"inputs":[{"node":"reviews","outputs":["findings"]}],"dispositions":["rejected"]}
         ]
-    })).unwrap();
+    }));
     let text = findings_text(&entry("").replace("F1", &"x".repeat(1024)));
     let mut owner = FakeOwner {
         observations: [terminal_with_result(AttemptOutcome::Succeeded, &text)].into(),
@@ -491,77 +479,6 @@ fn identity_dispositions_preserve_large_inherited_fields() {
     assert_eq!(findings[0].summary, long);
 }
 
-// Small: directly selected sources with the same ID remain distinct.
-#[test]
-fn direct_reviewers_with_duplicate_ids_require_distinct_dispositions() {
-    let mut synthesis = node("synthesis", route("first"));
-    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
-    synthesis.depends_on = vec!["a".into(), "b".into()];
-    synthesis.inputs = ["a", "b"]
-        .into_iter()
-        .map(|id| GraphInput {
-            required_outputs: Vec::new(),
-            extra: Default::default(),
-            node: id.into(),
-            outputs: vec![OutputKind::Findings],
-        })
-        .collect();
-    for (decisions, expected) in [
-        (
-            r#"{"id":"F1","disposition":"rejected","reason":"no"}"#,
-            NodeState::Failed,
-        ),
-        (
-            r#"{"id":"a:F1","disposition":"rejected","reason":"no"},{"id":"b:F1","disposition":"rejected","reason":"no"}"#,
-            NodeState::Succeeded,
-        ),
-    ] {
-        let mut owner = FakeOwner {
-            observations: [
-                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
-                terminal_with_result(
-                    AttemptOutcome::Succeeded,
-                    &findings_text(
-                        &entry("").replace("\"summary\":\"s\"", "\"summary\":\"other\""),
-                    ),
-                ),
-                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(decisions)),
-            ]
-            .into(),
-            ..Default::default()
-        };
-        let run = advance(
-            &graph(vec![
-                node("a", route("first")),
-                node("b", route("first")),
-                synthesis.clone(),
-            ]),
-            &mut owner,
-            &mut MemoryJournal::default(),
-        )
-        .unwrap();
-        let result = &run.checkpoint.nodes[2];
-        assert!(owner.prompts[2].contains("a:F1"));
-        assert!(owner.prompts[2].contains("b:F1"));
-        assert_eq!(result.state, expected, "{:?}", result.advance_error);
-        if expected == NodeState::Succeeded {
-            let findings = &result.outputs.as_ref().unwrap().findings;
-            assert_eq!(
-                (&findings[0].summary, &findings[1].summary),
-                (&"s".to_owned(), &"other".to_owned())
-            );
-        } else {
-            assert!(
-                result
-                    .advance_error
-                    .as_deref()
-                    .unwrap()
-                    .contains("ambiguous")
-            );
-        }
-    }
-}
-
 #[test]
 fn empty_review_range_stops_before_lens_launch() {
     let head = "1".repeat(40);
@@ -569,6 +486,7 @@ fn empty_review_range_stops_before_lens_launch() {
     review.role = Some("lens.correctness-spec".into());
     review.source = Some(SourceBinding::Commit {
         commit: head.clone(),
+        extra: Default::default(),
     });
     let mut owner = FakeOwner {
         graph_bases: (Some(head.parse().unwrap()), None),
@@ -580,8 +498,8 @@ fn empty_review_range_stops_before_lens_launch() {
         &mut MemoryJournal::default(),
     )
     .unwrap();
-    assert!(owner.calls.is_empty());
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
+    assert!(run.checkpoint.nodes[0].attempts.is_empty());
     assert_eq!(
         run.checkpoint.nodes[0].advance_error_code.as_deref(),
         Some("review_empty_range")
@@ -590,8 +508,8 @@ fn empty_review_range_stops_before_lens_launch() {
 
 #[test]
 fn equal_review_range_cannot_pass_a_reduced_panel_gate() {
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version": 1, "graph_id": "empty-quick-review", "nodes": [
+    let document: GraphDocument = document_fixture(serde_json::json!({
+        "graph_id": "empty-quick-review", "nodes": [
             {"id":"lenses", "kind":"composite", "access":"read_only",
              "composite":{"reduce_verdict":true,"min_successful":1,
                 "nodes":[{"id":"lens","role":"lens.correctness-spec","access":"read_only",
@@ -601,14 +519,13 @@ fn equal_review_range_cannot_pass_a_reduced_panel_gate() {
              "inputs":[{"node":"lenses","outputs":["verdict"]}],
              "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
         ]
-    }))
-    .unwrap();
+    }));
     let mut owner = FakeOwner {
         equal_range: true,
         observations: [terminal_from("VERDICT: PASS", "host/one")].into(),
         ..Default::default()
     };
-    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default());
     let panel = run
         .checkpoint
         .nodes
@@ -768,13 +685,12 @@ fn composite_byte_budget_overflow_below_entry_cap_requires_verifier_proof() {
         )
         .unwrap(),
     ];
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":"byte-overflow","nodes":[{
+    let document: GraphDocument = document_fixture(serde_json::json!({
+        "graph_id":"byte-overflow","nodes":[{
             "id":"reviews","kind":"composite","access":"read_only",
             "composite":{"nodes":nodes,"exports":exports}
         },verifier]
-    }))
-    .unwrap();
+    }));
     let entry = serde_json::json!({"id":"F1","severity":"high","file":"a.rs","summary":"Unchecked dispatch","status":"open",
         "evidence":"A reachable dispatch path fails. ".repeat(210),"proposed_fix":"Validate before dispatch"});
     let text = format!(

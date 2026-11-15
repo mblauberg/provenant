@@ -74,8 +74,8 @@ fn extension(
 
 #[test]
 fn loop_composite_review_pins_each_repaired_commit() {
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":"repair-composite","nodes":[{
+    let document = super::model::document_fixture(serde_json::json!({
+        "graph_id":"repair-composite","nodes":[{
             "id":"repair","kind":"loop","access":"read_only",
             "loop":{"max_rounds":2,"until":"accepted","body":[
                 {"id":"writer","access":"worktree_write","worktree":"/fixture/writer", "prompt":"repair","route":{"alias":"senior"}},
@@ -89,7 +89,7 @@ fn loop_composite_review_pins_each_repaired_commit() {
                     "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
             ]}
         }]
-    })).unwrap();
+    }));
     let commit1 = "1".repeat(40);
     let commit2 = "2".repeat(40);
     let writer = |commit: &str| AttemptObservation::Terminal {
@@ -145,19 +145,39 @@ fn loop_fixture_passes_on_round_two_and_status_retains_outputs() {
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(run.status, GraphStatus::Complete);
     assert!(run.checkpoint.successful());
-    assert_eq!(owner.calls.len(), 2);
-    assert!(owner.prompts[1].contains("revise--r1--review verdict: "));
-    assert!(owner.prompts[1].contains("VERDICT: FAIL"));
-    assert_ne!(owner.calls[0].0, owner.calls[1].0);
-    let status = serde_json::to_value(&run).unwrap();
-    let rows = status["checkpoint"]["nodes"].as_array().unwrap();
-    let review = rows
+    let prior_review = run
+        .checkpoint
+        .nodes
         .iter()
-        .find(|row| row["id"] == "revise--r2--review")
+        .find(|progress| progress.id == "revise--r1--review")
         .unwrap();
-    assert_eq!(review["round"]["round"], 2);
-    assert_eq!(review["round"]["loop_id"], "revise");
-    assert_eq!(review["outputs"]["verdict"], "VERDICT: PASS");
+    let first_round = prior_review.round.as_ref().unwrap();
+    assert_eq!(first_round.loop_id, "revise");
+    assert_eq!(
+        (first_round.round, first_round.node_id.as_str()),
+        (1, "review")
+    );
+    assert_eq!(
+        prior_review.outputs.as_ref().unwrap().verdict.as_deref(),
+        Some("VERDICT: FAIL")
+    );
+    let review = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|progress| progress.id == "revise--r2--review")
+        .unwrap();
+    let second_round = review.round.as_ref().unwrap();
+    assert_eq!(second_round.loop_id, "revise");
+    assert_eq!(
+        (second_round.round, second_round.node_id.as_str()),
+        (2, "review")
+    );
+    assert!(second_round.previous_gate.is_some());
+    assert_eq!(
+        review.outputs.as_ref().unwrap().verdict.as_deref(),
+        Some("VERDICT: PASS")
+    );
     assert!(
         run.checkpoint
             .nodes
@@ -180,14 +200,22 @@ fn loop_fixture_exhausts_and_pauses_without_delivery() {
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
-    assert_eq!(run.checkpoint.pause_cause(), Some(PauseCause::LoopPaused));
+    assert_eq!(
+        run.checkpoint.pause_cause(),
+        Some(PauseCause::LoopPaused {
+            extra: Default::default()
+        })
+    );
     let gate = run
         .checkpoint
         .nodes
         .iter()
         .find(|node| node.id == "revise")
         .unwrap();
-    assert_eq!(gate.loop_cause, Some(NodeDecisionCause::LoopPaused));
+    assert!(matches!(
+        &gate.loop_cause,
+        Some(NodeDecisionCause::LoopPaused { .. })
+    ));
     let decoded: GraphCheckpoint =
         serde_json::from_slice(&serde_json::to_vec(&run.checkpoint).unwrap()).unwrap();
     assert_eq!(decoded, run.checkpoint);
@@ -288,7 +316,9 @@ fn loop_admission_counts_every_round_before_any_launch() {
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(
         run.checkpoint.pause_cause(),
-        Some(PauseCause::StructuralLimit)
+        Some(PauseCause::StructuralLimit {
+            extra: Default::default()
+        })
     );
     assert!(owner.calls.is_empty());
 }
@@ -672,7 +702,9 @@ fn loop_budget_counts_prior_round_attempts() {
     assert_eq!(owner.calls.len(), 1);
     assert_eq!(
         paused.checkpoint.pause_cause(),
-        Some(PauseCause::BudgetExceeded)
+        Some(PauseCause::BudgetExceeded {
+            extra: Default::default()
+        })
     );
     let run = resume_with_budget(
         &document,
@@ -823,7 +855,9 @@ fn loop_invalid_inbox_answers_pause_and_keep_observing_other_attempts() {
         );
         assert_eq!(
             paused.checkpoint.pause_cause(),
-            Some(PauseCause::InvalidLoopDecision)
+            Some(PauseCause::InvalidLoopDecision {
+                extra: Default::default()
+            })
         );
         assert_eq!(
             paused
@@ -1063,7 +1097,9 @@ fn loop_host_ceiling_rejects_third_round_before_saving_and_can_accept() {
     assert_eq!(rejected.status, GraphStatus::Paused);
     assert_eq!(
         rejected.checkpoint.pause_cause(),
-        Some(PauseCause::InvalidLoopDecision)
+        Some(PauseCause::InvalidLoopDecision {
+            extra: Default::default()
+        })
     );
     assert_eq!(
         rejected.checkpoint.nodes.len(),
@@ -1105,7 +1141,9 @@ fn loop_inbox_extension_respects_host_ceiling_and_keeps_the_rejected_ask_until_r
     assert_eq!(paused.status, GraphStatus::Paused);
     assert_eq!(
         paused.checkpoint.pause_cause(),
-        Some(PauseCause::InvalidLoopDecision)
+        Some(PauseCause::InvalidLoopDecision {
+            extra: Default::default()
+        })
     );
     assert!(paused.checkpoint.extensions.is_empty());
     // The rejected answer stays inspectable through its link until a resume
@@ -1235,7 +1273,9 @@ fn loop_inbox_failure_pauses_without_stopping_later_attempt_observation() {
     assert_eq!(paused.status, GraphStatus::Paused);
     assert_eq!(
         paused.checkpoint.pause_cause(),
-        Some(PauseCause::InvalidLoopDecision)
+        Some(PauseCause::InvalidLoopDecision {
+            extra: Default::default()
+        })
     );
     assert_eq!(
         paused
@@ -1325,37 +1365,34 @@ fn loop_simultaneous_exhaustion_keeps_both_reasons_and_resolves_individually() {
 
 #[test]
 fn loop_rejects_nested_routing_worktree_prefix_and_identifier_ambiguities() {
-    for case in 0..5 {
+    for mutate in [
+        Box::new(|document: &mut GraphDocument| {
+            let nested = document.nodes[0].clone();
+            document.nodes[0].loop_body.as_mut().unwrap().body[0] = nested;
+        }) as Box<dyn FnOnce(&mut GraphDocument)>,
+        Box::new(|document: &mut GraphDocument| {
+            document.nodes[0].loop_body.as_mut().unwrap().body[1].on_fail = Some("review".into());
+        }),
+        Box::new(|document: &mut GraphDocument| {
+            let spec = document.nodes[0].loop_body.as_mut().unwrap();
+            spec.body[0].access = AccessMode::WorktreeWrite;
+            spec.body[0].worktree = Some("/one".into());
+            let mut writer = node("other", route("fixture"));
+            writer.access = AccessMode::WorktreeWrite;
+            writer.worktree = Some("/two".into());
+            spec.body.push(writer);
+        }),
+        Box::new(|document: &mut GraphDocument| {
+            document.nodes[0].loop_body.as_mut().unwrap().body[0].id = "previous.reserved".into();
+        }),
+        Box::new(|document: &mut GraphDocument| document.nodes[0].id = "x".repeat(198)),
+    ] {
         let mut document = fixture("extend");
-        let nested = document.nodes[0].clone();
-        let spec = document.nodes[0].loop_body.as_mut().unwrap();
-        match case {
-            0 => spec.body[0] = nested,
-            1 => spec.body[1].on_fail = Some("review".into()),
-            2 => {
-                spec.body[0].access = AccessMode::WorktreeWrite;
-                spec.body[0].worktree = Some("/one".into());
-                let mut writer = node("other", route("fixture"));
-                writer.access = AccessMode::WorktreeWrite;
-                writer.worktree = Some("/two".into());
-                spec.body.push(writer);
-            }
-            3 => spec.body[0].id = "previous.reserved".into(),
-            _ => document.nodes[0].id = "x".repeat(198),
-        }
-        let expected = match case {
-            0 | 1 => {
-                "loop body cannot nest loops or route on_fail, and may only deliver by integrate:"
-            }
-            2 => "loop writers must share one worktree",
-            3 => "previous. is reserved for prior round inputs",
-            _ => "expanded loop node id exceeds 200 bytes",
-        };
-        assert_eq!(
-            validate_plan(&document).unwrap_err(),
-            expected,
-            "case {case}"
-        );
+        mutate(&mut document);
+        assert!(matches!(
+            document.admit(&crate::config::GraphLimits::default()),
+            Err(AdmissionError::Composite(_))
+        ));
     }
 }
 
@@ -1367,8 +1404,8 @@ fn integrating_repair(delivery: Option<&str>) -> GraphDocument {
     if let Some(delivery) = delivery {
         writer["delivery"] = delivery.into();
     }
-    serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":"integrating-repair","integration_branch":"batch/graph",
+    super::model::document_fixture(serde_json::json!({
+        "graph_id":"integrating-repair","integration_branch":"batch/graph",
         "nodes":[
             {"id":"principal","access":"worktree_write","worktree":"/fixture/batch",
                 "prompt":"refactor","route":{"alias":"senior"},"delivery":"integrate:batch/graph"},
@@ -1384,7 +1421,6 @@ fn integrating_repair(delivery: Option<&str>) -> GraphDocument {
                 ]}}
         ]
     }))
-    .unwrap()
 }
 
 fn commit_terminal(commit: &str) -> AttemptObservation {
@@ -1403,36 +1439,37 @@ fn commit_terminal(commit: &str) -> AttemptObservation {
 }
 
 #[test]
-fn loop_body_integrate_requires_the_graph_integration_branch() {
-    const REASON: &str =
-        "loop body integrate: requires graph integration_branch equal to the node target";
-    let mut missing = integrating_repair(Some("integrate:batch/graph"));
-    missing.integration_branch = None;
-    // The principal's own integrate: also needs the branch, so drop it.
-    missing.nodes[0].delivery = None;
-    assert_eq!(validate_plan(&missing).unwrap_err(), REASON);
-    let mut other = integrating_repair(Some("integrate:batch/other"));
-    assert_eq!(validate_plan(&other).unwrap_err(), REASON);
-    other.integration_branch = Some("batch/other".into());
-    // The principal still targets the graph branch, so the flat check refuses.
-    assert_eq!(
-        validate_plan(&other).unwrap_err(),
-        "node principal: node integration target differs from graph integration branch"
-    );
-}
-
-#[test]
 fn loop_body_delivers_only_by_integrate() {
     use provenant_records::run::DeliveryMode;
-    validate_plan(&integrating_repair(Some("integrate:batch/graph"))).unwrap();
-    validate_plan(&integrating_repair(None)).unwrap();
+    integrating_repair(Some("integrate:batch/graph"))
+        .admit(&crate::config::GraphLimits::default())
+        .unwrap();
+    integrating_repair(None)
+        .admit(&crate::config::GraphLimits::default())
+        .unwrap();
     for refused in ["push", "pr"] {
-        assert_eq!(
-            validate_plan(&integrating_repair(Some(refused))).unwrap_err(),
-            "loop body cannot nest loops or route on_fail, and may only deliver by integrate:",
-            "{refused}"
-        );
+        assert!(matches!(
+            integrating_repair(Some(refused)).admit(&crate::config::GraphLimits::default()),
+            Err(AdmissionError::Composite(_))
+        ));
     }
+    let mut missing_branch = integrating_repair(Some("integrate:batch/graph"));
+    missing_branch.integration_branch = None;
+    missing_branch.nodes[0].delivery = None;
+    assert!(matches!(
+        missing_branch.admit(&crate::config::GraphLimits::default()),
+        Err(AdmissionError::Composite(_))
+    ));
+    let mut mismatched_branch = integrating_repair(Some("integrate:batch/other"));
+    assert!(matches!(
+        mismatched_branch.admit(&crate::config::GraphLimits::default()),
+        Err(AdmissionError::Composite(_))
+    ));
+    mismatched_branch.integration_branch = Some("batch/other".into());
+    assert!(matches!(
+        mismatched_branch.admit(&crate::config::GraphLimits::default()),
+        Err(AdmissionError::Plan(_))
+    ));
     // The accepted mode reaches every expanded round.
     let document = integrating_repair(Some("integrate:batch/graph"));
     let expanded = document.expanded(&Default::default()).unwrap();
@@ -1587,7 +1624,9 @@ fn loop_cancel_and_manual_decisions_close_unanswered_asks() {
             .unwrap();
             assert_eq!(
                 resumed.checkpoint.pause_cause(),
-                Some(PauseCause::LoopAskClosed)
+                Some(PauseCause::LoopAskClosed {
+                    extra: Default::default()
+                })
             );
         } else {
             let extension = if action == "extend" {
@@ -1640,7 +1679,9 @@ fn loop_inbox_large_extension_cannot_bypass_host_node_limit() {
     assert_eq!(paused.status, GraphStatus::Paused);
     assert_eq!(
         paused.checkpoint.pause_cause(),
-        Some(PauseCause::InvalidLoopDecision)
+        Some(PauseCause::InvalidLoopDecision {
+            extra: Default::default()
+        })
     );
     assert_eq!(paused.checkpoint.nodes.len(), 5);
     assert!(paused.checkpoint.extensions.is_empty());
@@ -1830,7 +1871,9 @@ fn loop_inbox_recovery_clears_stale_unavailable_pause_durably() {
     .unwrap();
     assert_eq!(
         recovered.checkpoint.pause_cause(),
-        Some(PauseCause::LoopPaused)
+        Some(PauseCause::LoopPaused {
+            extra: Default::default()
+        })
     );
     assert_eq!(journal.0.as_ref().unwrap(), &recovered.checkpoint);
 }
@@ -2010,7 +2053,12 @@ fn loop_decision_recovery_resets_pause_even_after_prior_ask_cleanup() {
         &Default::default(),
     )
     .unwrap();
-    assert_eq!(run.checkpoint.pause_cause(), Some(PauseCause::LoopPaused));
+    assert_eq!(
+        run.checkpoint.pause_cause(),
+        Some(PauseCause::LoopPaused {
+            extra: Default::default()
+        })
+    );
 }
 
 #[test]
@@ -2055,8 +2103,8 @@ fn repair_reviews(results: &[&str]) -> FakeOwner {
 }
 
 fn review_repair_document() -> GraphDocument {
-    serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":"review-repair","nodes":[
+    super::model::document_fixture(serde_json::json!({
+        "graph_id":"review-repair","nodes":[
             {"id":"initial","access":"read_only","prompt":"review", "route":{"alias":"senior"},"require_findings":true},
             {"id":"repair","kind":"loop","access":"read_only","depends_on":["initial"],"on_fail":"design",
                 "inputs":[{"node":"initial","outputs":["findings","verdict"]}],
@@ -2068,7 +2116,7 @@ fn review_repair_document() -> GraphDocument {
                 ]}},
             {"id":"design","access":"read_only","depends_on":["repair"],"prompt":"principal", "route":{"alias":"principal"}}
         ]
-    })).unwrap()
+    }))
 }
 
 fn repair_finding(design: bool) -> String {
@@ -2718,6 +2766,7 @@ fn principal_recovery_completes_enclosing_composite_and_delivery_continues() {
         "assurance".into(),
         vec![],
         CompositeSpec {
+            extra: Default::default(),
             nodes: members,
             min_successful: None,
             reduce_verdict: false,
@@ -2772,6 +2821,7 @@ fn compiled_repair_design_continuation_keeps_the_original_writer() {
         "delivery".into(),
         vec![],
         CompositeSpec {
+            extra: Default::default(),
             nodes: vec![implement, initial, assurance],
             min_successful: None,
             reduce_verdict: false,
@@ -2873,7 +2923,9 @@ fn compiled_repair_design_continuation_keeps_the_original_writer() {
     assert_eq!(refused.status, GraphStatus::Paused);
     assert_eq!(
         refused.checkpoint.pause_cause(),
-        Some(PauseCause::InvalidPlanExpansion)
+        Some(PauseCause::InvalidPlanExpansion {
+            extra: Default::default()
+        })
     );
     assert!(refused.checkpoint.expansions.is_empty());
 }

@@ -28,9 +28,6 @@ pub const TEMPLATE_FIELD: &str = "template";
 /// decodes as a known optional field or fails its known type; an unknown field
 /// instead survives in `extra`.
 fn compiled_field(field: &str) -> bool {
-    if provenant_config::removed::graph_field_replacement(field).is_some() {
-        return false;
-    }
     let mut probe = serde_json::json!({"id":"probe", "access":"read_only"});
     probe[field] = Value::Null;
     match serde_json::from_value::<GraphNode>(probe) {
@@ -39,15 +36,37 @@ fn compiled_field(field: &str) -> bool {
     }
 }
 
+fn compiled_composite_field(field: &str) -> bool {
+    let mut probe = serde_json::json!({"nodes":[], "exports":[]});
+    probe[field] = Value::Null;
+    match serde_json::from_value::<super::composites::CompositeSpec>(probe) {
+        Ok(composite) => !composite.extra.contains_key(field),
+        Err(_) => true,
+    }
+}
+
+fn check_authored_source_fields(value: &Value, stage: &str) -> Result<(), String> {
+    let Ok(source) = serde_json::from_value::<SourceBinding>(value.clone()) else {
+        return Ok(());
+    };
+    let extra = match source {
+        SourceBinding::Commit { extra, .. }
+        | SourceBinding::Node { extra, .. }
+        | SourceBinding::Head { extra, .. }
+        | SourceBinding::Integration { extra } => extra,
+    };
+    if let Some(field) = extra.keys().next() {
+        return Err(format!("node {stage}: unknown field source.{field}"));
+    }
+    Ok(())
+}
+
 fn check_extensions(node: &Map<String, Value>) -> Result<(), String> {
     if let Some(extensions) = node.get("extensions") {
         let fields = extensions
             .as_object()
             .ok_or("node extensions must be a table")?;
         for field in fields.keys() {
-            if let Some(replacement) = provenant_config::removed::graph_field_replacement(field) {
-                return Err(format!("node field {field} is removed; use {replacement}"));
-            }
             if compiled_field(field) || template_syntax(field) || field == "extensions" {
                 return Err(format!("reserved node field {field} in extensions"));
             }
@@ -72,9 +91,11 @@ fn flatten_extensions(node: &mut Map<String, Value>) -> Result<(), String> {
 /// Validate supplied document metadata before lowering an authored document.
 pub fn validate_document_schema_version(document: &Value) -> Result<(), String> {
     if let Some(version) = document.get("schema_version")
-        && !matches!(version.as_u64(), Some(1 | 2))
+        && version.as_u64() != Some(GRAPH_DOCUMENT_SCHEMA_VERSION)
     {
-        return Err("schema_version must be the integer 1 or 2".into());
+        return Err(format!(
+            "schema_version must be the integer {GRAPH_DOCUMENT_SCHEMA_VERSION}"
+        ));
     }
     Ok(())
 }
@@ -120,11 +141,6 @@ fn check_authored_fields(
 ) -> Result<(), String> {
     check_extensions(node).map_err(|error| format!("node {stage}: {error}"))?;
     for field in node.keys() {
-        if let Some(replacement) = provenant_config::removed::graph_field_replacement(field) {
-            return Err(format!(
-                "node {stage}: field {field} is removed; use {replacement}"
-            ));
-        }
         // This control selects findings collection for review-panel instances.
         if field != "extensions"
             && !matches!(field.as_str(), "after" | "tier")
@@ -133,6 +149,19 @@ fn check_authored_fields(
         {
             return Err(format!("node {stage}: unknown field {field}"));
         }
+    }
+    if let Some(composite) = node.get("composite") {
+        let fields = composite
+            .as_object()
+            .ok_or_else(|| format!("node {stage}: composite must be a table"))?;
+        for field in fields.keys() {
+            if !compiled_composite_field(field) {
+                return Err(format!("node {stage}: unknown field composite.{field}"));
+            }
+        }
+    }
+    if let Some(source) = node.get("source") {
+        check_authored_source_fields(source, stage)?;
     }
     for (container, members) in [("composite", "nodes"), ("loop", "body")] {
         if let Some(children) = node
@@ -1767,6 +1796,7 @@ impl<'a> Compiler<'a> {
                 )
             })?;
             terms.push(WhenTerm {
+                extra: Default::default(),
                 name: name.clone(),
                 expected,
                 actual,
@@ -1951,6 +1981,22 @@ impl<'a> Compiler<'a> {
         repeat: Value,
         stack: &mut Vec<String>,
     ) -> Result<Value, CompileError> {
+        const REPEAT_FIELDS: &[&str] = &[
+            "until",
+            "max_rounds",
+            "max_extension_rounds",
+            "review_repair",
+        ];
+
+        let stage = node.get("id").and_then(Value::as_str).unwrap_or("node");
+        if let Some(field) = repeat.as_object().and_then(|fields| {
+            fields
+                .keys()
+                .find(|field| !REPEAT_FIELDS.contains(&field.as_str()))
+        }) {
+            return Err(format!("node {stage}: unknown field repeat.{field}").into());
+        }
+
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Repeat {

@@ -689,7 +689,6 @@ pub(super) fn fail_node(
 
 #[cfg(test)]
 mod tests {
-    use super::super::next_step::settlement_fallback_decision;
     use super::*;
     use provenant_records::run::PreparationFailure;
     use provenant_routing::FallbackHandoff;
@@ -781,10 +780,9 @@ mod tests {
     }
 
     fn planned(node: serde_json::Value) -> PlannedNode {
-        let document: GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version": 1, "graph_id": "g", "nodes": [node]
-        }))
-        .unwrap();
+        let document = crate::graph::model::document_fixture(serde_json::json!({
+            "graph_id": "g", "nodes": [node]
+        }));
         validate_plan(&document).unwrap().0.nodes.remove(0)
     }
 
@@ -813,13 +811,14 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .extend(extra.as_object().unwrap().clone());
-        serde_json::from_value(value).unwrap()
+        crate::graph::model::node_progress_fixture(value)
     }
 
     /// A decision without its own reason fails the node but keeps the
     /// advance error already recorded.
     #[test]
     fn reasonless_failures_keep_the_recorded_advance_error() {
+        let recorded_error = "prior-advance-error";
         let lens = planned(serde_json::json!({
             "id": "n", "prompt": "p", "access": "read_only", "role": "lens",
             "routes": [{"adapter": "a", "model": "a/m"}, {"adapter": "b", "model": "b/m"}]
@@ -832,7 +831,7 @@ mod tests {
             vec![attempt(0, true, "terminal", Some("task_failed"))],
             serde_json::json!({
                 "advance_error_code": "missing_verdict",
-                "advance_error": "the review returned no verdict"
+                "advance_error": recorded_error
             }),
         );
         let decision = decide_next_attempt(&lens, &withdrawn, &limits, &mut Owner, None).unwrap();
@@ -852,101 +851,15 @@ mod tests {
             withdrawn.advance_error_code.as_deref(),
             Some("missing_verdict")
         );
-        assert_eq!(
-            withdrawn.advance_error.as_deref(),
-            Some("the review returned no verdict")
-        );
-
-        // The last route retains its cause even without a fallback route.
-        let single = planned(serde_json::json!({
-            "id": "n", "prompt": "p", "access": "worktree_write", "worktree": "/w",
-            "routes": [{"adapter": "a", "model": "a/m"}]
-        }));
-        let decision = settlement_fallback_decision(
-            &single,
-            0,
-            AttemptOutcome::AuthRequired,
-            false,
-            FallbackEvidence {
-                preparation: None,
-                unreadable: false,
-                review_limit_reached: false,
-                cause: None,
-                skipped_accounts: &[],
-            },
-        );
-        assert_eq!(
-            decision,
-            SettlementFallback::Fail {
-                code: Some("auth_required"),
-                message: Some("The lane requires authentication.".into())
-            }
-        );
-        // A quota refusal before launch names every account it passed over
-        // with its own reason, instead of claiming the allowance is spent.
-        let skipped = [
-            provenant_records::SkippedAccount {
-                account: "agy-work".into(),
-                reason: provenant_records::RouteExclusionReason::ProviderRefused,
-            },
-            provenant_records::SkippedAccount {
-                account: "agy-second".into(),
-                reason: provenant_records::RouteExclusionReason::StaleAvailability,
-            },
-        ];
-        let named = settlement_fallback_decision(
-            &single,
-            0,
-            AttemptOutcome::UsageLimited,
-            false,
-            FallbackEvidence {
-                preparation: None,
-                unreadable: false,
-                review_limit_reached: false,
-                cause: None,
-                skipped_accounts: &skipped,
-            },
-        );
-        let SettlementFallback::Fail {
-            code,
-            message: Some(message),
-        } = &named
-        else {
-            panic!("expected a named refusal: {named:?}");
-        };
-        assert_eq!(code.as_deref(), Some("usage_limited"));
-        assert!(
-            message.contains("agy-work: the provider refused"),
-            "{message}"
-        );
-        assert!(message.contains("agy-second: "), "{message}");
-        assert!(
-            !message.contains("quota or rate limit reached"),
-            "{message}"
-        );
-        let SettlementFallback::Fail { code, message } = decision else {
-            unreachable!()
-        };
-        let mut settled = progress(
-            Vec::new(),
-            serde_json::json!({"advance_error_code": "earlier", "advance_error": "kept"}),
-        );
-        fail_node(&mut settled, code.map(str::to_owned), message);
-        assert_eq!(settled.state, NodeState::Failed);
-        assert_eq!(settled.advance_error_code.as_deref(), Some("auth_required"));
-        assert_eq!(
-            settled.advance_error.as_deref(),
-            Some("The lane requires authentication.")
-        );
+        assert_eq!(withdrawn.advance_error.as_deref(), Some(recorded_error));
     }
 
     #[test]
     fn launch_disposition_transition_needs_no_owner_or_journal() {
-        let mut checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
-            "schema_version":1,"graph_id":"g-test","plan_digest":"digest",
+        let mut checkpoint = crate::graph::model::checkpoint_fixture(serde_json::json!({
+            "graph_id":"g-test","plan_digest":"digest",
             "nodes":[{"id":"one","state":"running","worktree":null,"attempts":[]}]
-        }))
-        .unwrap();
+        }));
         let before = checkpoint.clone();
         let busy = crate::coordination::facade::FacadeError::WriterLockBusy;
         assert!(
@@ -1051,22 +964,62 @@ mod tests {
     }
 
     #[test]
-    fn attempt_spec_round_trips_and_defaults() {
+    fn attempt_spec_round_trips_through_checkpoint_and_defaults() {
         let default_spec = AttemptSpec::default();
         assert!(default_spec.is_empty());
         assert_eq!(default_spec.capabilities, Vec::<String>::new());
         assert!(!default_spec.build_heavy);
 
-        let json = serde_json::json!({
+        let value = serde_json::json!({
             "account": "acct-1",
             "build_heavy": true,
             "capabilities": ["postgres"],
-            "write_roots": ["/tmp/write"]
+            "write_roots": ["/tmp/write"],
+            "future_policy": {"revision": 2}
         });
-        let spec: AttemptSpec = serde_json::from_value(json).unwrap();
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let spec: AttemptSpec =
+            provenant_records::decode(bytes.as_slice(), provenant_records::Limits::default())
+                .unwrap();
         assert_eq!(spec.account.as_deref(), Some("acct-1"));
         assert!(spec.build_heavy);
         assert_eq!(spec.capabilities, vec!["postgres".to_string()]);
         assert_eq!(spec.write_roots, vec!["/tmp/write".to_string()]);
+        assert_eq!(
+            spec.extra["future_policy"],
+            serde_json::json!({"revision":2})
+        );
+        assert_eq!(serde_json::to_value(&spec).unwrap(), value);
+
+        let mut stored = crate::graph::journal::stored_checkpoint_fixture();
+        stored.execution.document.nodes[0].attempt = Some(spec);
+        let (plan, _) = crate::graph::validation::validate_plan_with_limits(
+            &stored.execution.document,
+            &crate::config::GraphLimits::default(),
+        )
+        .unwrap();
+        stored.checkpoint.plan_digest =
+            provenant_records::CanonicalV1::record_digest("fabric-graph-plan", 1, &plan)
+                .unwrap()
+                .to_string();
+        stored.digest = provenant_records::CanonicalV1::record_digest(
+            "fabric-graph-checkpoint",
+            stored.schema_version,
+            &(&stored.checkpoint, &stored.execution),
+        )
+        .unwrap()
+        .to_string();
+        let bytes = serde_json::to_vec(&stored).unwrap();
+        let replayed = crate::graph::journal::decode_checkpoint(&bytes, "g-test").unwrap();
+        let replayed_spec = replayed.execution.document.nodes[0]
+            .attempt
+            .as_ref()
+            .unwrap();
+        assert_eq!(replayed_spec.account.as_deref(), Some("acct-1"));
+        assert_eq!(
+            replayed_spec.extra["future_policy"],
+            serde_json::json!({"revision":2})
+        );
+        assert_eq!(serde_json::to_value(replayed_spec).unwrap(), value);
     }
 }

@@ -58,7 +58,7 @@ fn tick_reports_unreadable_once_and_advances_another_graph()
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 10)?;
     let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1, "graph_id":"b-good", "decision_session":"chair-session",
+        "schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION, "graph_id":"b-good", "decision_session":"chair-session",
         "nodes":[{"id":"choose", "kind":"decide", "access":"read_only", "decide":{"on_unanswered":"block_dependants",
             "question":"Ship?", "options":[{"id":"ship","label":"Ship"},{"id":"hold","label":"Hold"}],
             "default":"hold", "timeout_seconds":60
@@ -76,10 +76,8 @@ fn tick_reports_unreadable_once_and_advances_another_graph()
         document: document.clone(),
     })?;
     let seed_at = provenant_core::WallTime::from_micros(now.as_micros() - 120_000_000)?;
-    let seed_clock = provenant_core::TestClock::new(
-        seed_at,
-        provenant_core::MonoTime::from_micros(0),
-    );
+    let seed_clock =
+        provenant_core::TestClock::new(seed_at, provenant_core::MonoTime::from_micros(0));
     let inbox = provenant_fabric_runtime::inbox::InboxService::open(
         &roots.state,
         &context.identity,
@@ -166,7 +164,7 @@ fn tick_dispatches_waiting_node_without_a_deadline() -> Result<(), Box<dyn std::
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 30)?;
     let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":"waiter", "template_library":{},"nodes":[{"id":"one","prompt":"reply OK",
+        "schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"waiter", "template_library":{},"nodes":[{"id":"one","prompt":"reply OK",
         "access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
     }))?;
     let mut journal =
@@ -245,7 +243,7 @@ fn tick_dispatches_capacity_waiter_with_future_decision() -> Result<(), Box<dyn 
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 30)?;
     let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":"waiter", "template_library":{},"decision_session":"chair-session","nodes":[
+        "schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"waiter", "template_library":{},"decision_session":"chair-session","nodes":[
         {"id":"choose","kind":"decide","access":"read_only","decide":{"on_unanswered":"block_dependants", "question":"Ship?",
         "options":[{"id":"ship","label":"Ship"},{"id":"hold","label":"Hold"}],"default":"hold","timeout_seconds":3600}},
         {"id":"one","prompt":"reply OK","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
@@ -356,10 +354,8 @@ fn tick_warns_once_for_missing_worktree_and_advances_another_graph()
     let clock = SystemClock;
     let now = clock.wall_now()?;
     let seed_at = provenant_core::WallTime::from_micros(now.as_micros() - 120_000_000)?;
-    let seed_clock = provenant_core::TestClock::new(
-        seed_at,
-        provenant_core::MonoTime::from_micros(0),
-    );
+    let seed_clock =
+        provenant_core::TestClock::new(seed_at, provenant_core::MonoTime::from_micros(0));
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 10)?;
     let inbox = provenant_fabric_runtime::inbox::InboxService::open(
@@ -372,7 +368,7 @@ fn tick_warns_once_for_missing_worktree_and_advances_another_graph()
     for id in ["a-missing", "b-present"] {
         seed.at = if id == "a-missing" { now } else { seed_at };
         let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version":1, "graph_id":id, "decision_session":"chair-session",
+            "schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION, "graph_id":id, "decision_session":"chair-session",
             "nodes":[{"id":"choose", "kind":"decide", "access":"read_only", "decide":{"on_unanswered":"block_dependants",
                 "question":"Ship?", "options":[{"id":"ship","label":"Ship"},{"id":"hold","label":"Hold"}],
                 "default":"hold", "timeout_seconds":60
@@ -489,10 +485,10 @@ fn graph_wait_observes_settlement_and_budget() -> Result<(), Box<dyn std::error:
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
     let project = factory.context.identity.project;
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1, "graph_id":"wait-test", "nodes":[{"id":"one", "prompt":"work", "access":"read_only", "route":{"alias":"senior"}}]
+        "schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION, "graph_id":"wait-test", "nodes":[{"id":"one", "prompt":"work", "access":"read_only", "route":{"alias":"senior"}}]
     }))?;
     let mut checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
-        "schema_version":2, "graph_id":"wait-test", "plan_digest":"digest", "nodes":[{"id":"one", "state":"running", "worktree":null, "attempts":[]}]
+        "schema_version":provenant_fabric_runtime::graph::GraphCheckpoint::SCHEMA_VERSION, "graph_id":"wait-test", "plan_digest":"digest", "nodes":[{"id":"one", "state":"running", "worktree":null, "attempts":[]}]
     }))?;
     let mut journal = FileJournal::open(
         &roots.state,
@@ -563,7 +559,9 @@ fn graph_wait_observes_settlement_and_budget() -> Result<(), Box<dyn std::error:
     drop(pause);
     checkpoint.nodes[0].state = NodeState::Running;
     checkpoint.set_pause(
-        provenant_records::pause::PauseCause::LoopPaused,
+        provenant_records::pause::PauseCause::LoopPaused {
+            extra: Default::default(),
+        },
         "decision required",
     );
     let mut journal = FileJournal::open(
@@ -614,12 +612,12 @@ fn graph_cancel_persists_reason_and_skips_pending_node() -> Result<(), Box<dyn s
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
     let project = factory.context.identity.project;
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version": 1, "graph_id": "reason-test", "nodes": [
+        "schema_version": provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION, "graph_id": "reason-test", "nodes": [
             {"id":"one", "prompt":"work", "access":"read_only", "route":{"alias":"senior"}}
         ]
     }))?;
     let checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
-        "schema_version": 2, "graph_id": "reason-test", "plan_digest": "digest", "nodes": [
+        "schema_version": provenant_fabric_runtime::graph::GraphCheckpoint::SCHEMA_VERSION, "graph_id": "reason-test", "plan_digest": "digest", "nodes": [
             {"id":"one", "state":"pending", "worktree":null, "attempts":[]}
         ]
     }))?;

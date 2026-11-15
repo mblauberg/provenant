@@ -1,19 +1,17 @@
 //! Stored checkpoint review fields and admission recovery.
 use super::*;
-use serde_json::{Value, json};
+use serde_json::json;
 
-fn stored() -> Value {
-    serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap()
+fn stored() -> StoredCheckpoint {
+    super::journal::stored_checkpoint_fixture()
 }
 
 #[test]
-fn review_schema_versions_and_stored_digests() {
-    let fixture = stored();
-    let legacy: StoredCheckpoint = serde_json::from_value(fixture.clone()).unwrap();
-    assert_eq!(serde_json::to_value(&legacy).unwrap(), fixture);
+fn graph_schema_v2_is_required_and_stored_digests_validate() {
+    let legacy = stored();
     let digest = CanonicalV1::record_digest(
         "fabric-graph-checkpoint",
-        2,
+        CHECKPOINT_SCHEMA_VERSION,
         &(&legacy.checkpoint, &legacy.execution),
     )
     .unwrap();
@@ -27,11 +25,17 @@ fn review_schema_versions_and_stored_digests() {
         legacy.checkpoint.plan_digest
     );
 
-    let mut value = fixture["execution"]["document"].clone();
+    let mut value = serde_json::to_value(&legacy.execution.document).unwrap();
     value["nodes"][0]["review_base"] = json!("main");
+    value["schema_version"] = json!(GRAPH_DOCUMENT_SCHEMA_VERSION - 1);
     let v1: GraphDocument = serde_json::from_value(value.clone()).unwrap();
-    assert!(validate_plan_with_limits(&v1, &Default::default()).is_err());
-    value["schema_version"] = json!(2);
+    assert!(matches!(
+        validate_plan_with_limits(&v1, &Default::default()),
+        Err(AdmissionError::UnsupportedVersion { found, supported })
+            if found == GRAPH_DOCUMENT_SCHEMA_VERSION - 1
+                && supported == GRAPH_DOCUMENT_SCHEMA_VERSION
+    ));
+    value["schema_version"] = json!(GRAPH_DOCUMENT_SCHEMA_VERSION);
     let v2: GraphDocument = serde_json::from_value(value).unwrap();
     assert_eq!(
         serde_json::from_slice::<GraphDocument>(&serde_json::to_vec(&v2).unwrap()).unwrap(),
@@ -41,16 +45,16 @@ fn review_schema_versions_and_stored_digests() {
 
 #[test]
 fn journal_requires_and_projects_execution_bases_for_review_documents() {
-    let mut record: StoredCheckpoint = serde_json::from_value(stored()).unwrap();
+    let mut record = stored();
     record.execution.document.review_base = Some("base".into());
-    record.execution.document.schema_version = 2;
+    record.execution.document.schema_version = GRAPH_DOCUMENT_SCHEMA_VERSION;
     record.execution.bases = GraphBaseBinding::new(
         Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap()),
         None,
     );
     record.digest = CanonicalV1::record_digest(
         "fabric-graph-checkpoint",
-        2,
+        CHECKPOINT_SCHEMA_VERSION,
         &(&record.checkpoint, &record.execution),
     )
     .unwrap()
@@ -61,7 +65,7 @@ fn journal_requires_and_projects_execution_bases_for_review_documents() {
     record.execution.bases = None;
     record.digest = CanonicalV1::record_digest(
         "fabric-graph-checkpoint",
-        2,
+        CHECKPOINT_SCHEMA_VERSION,
         &(&record.checkpoint, &record.execution),
     )
     .unwrap()
@@ -70,11 +74,12 @@ fn journal_requires_and_projects_execution_bases_for_review_documents() {
         decode_checkpoint(&serde_json::to_vec(&record).unwrap(), "g-test"),
         Err(JournalError::BadEnvelope)
     ));
-    record.execution.document.schema_version = 1;
+    record.execution.document.schema_version = GRAPH_DOCUMENT_SCHEMA_VERSION - 1;
     let bytes = serde_json::to_vec(&record).unwrap();
     assert!(matches!(
         decode_checkpoint(&bytes, "g-test"),
-        Err(JournalError::BadEnvelope)
+        Err(JournalError::Decode(DecodeError::UnsupportedVersion { found, .. }))
+            if found == GRAPH_DOCUMENT_SCHEMA_VERSION - 1
     ));
 }
 
@@ -83,14 +88,14 @@ fn admission_recovery_capability() {
     fn bytes(mut record: StoredCheckpoint) -> Vec<u8> {
         record.digest = CanonicalV1::record_digest(
             "fabric-graph-checkpoint",
-            2,
+            CHECKPOINT_SCHEMA_VERSION,
             &(&record.checkpoint, &record.execution),
         )
         .unwrap()
         .to_string();
         serde_json::to_vec(&record).unwrap()
     }
-    let seed = || -> StoredCheckpoint { serde_json::from_value(stored()).unwrap() };
+    let seed = stored;
 
     let mut execution_base = seed();
     execution_base.execution.bases = GraphBaseBinding::new(
@@ -123,17 +128,17 @@ fn admission_recovery_capability() {
     ));
 
     let mut plain_v2 = seed();
-    plain_v2.execution.document.schema_version = 2;
+    plain_v2.execution.document.schema_version = GRAPH_DOCUMENT_SCHEMA_VERSION;
     assert!(decode_checkpoint(&bytes(plain_v2), "g-test").is_ok());
 
     let mut unsupported = seed();
-    unsupported.execution.document.schema_version = 3;
+    unsupported.execution.document.schema_version = GRAPH_DOCUMENT_SCHEMA_VERSION + 1;
     assert!(matches!(
         decode_checkpoint(&bytes(unsupported), "g-test"),
         Err(JournalError::Decode(DecodeError::UnsupportedVersion {
-            found: 3,
+            found,
             ..
-        }))
+        })) if found == GRAPH_DOCUMENT_SCHEMA_VERSION + 1
     ));
 
     let mut bad_digest = seed();

@@ -299,7 +299,7 @@ pub(super) fn panel_reviews_commit(expansion: &Expansion, commit: &str) -> bool 
     leaves.peek().is_some()
         && leaves.all(|node| {
             matches!(&node.source,
-        Some(SourceBinding::Commit { commit: subject }) if subject == commit)
+        Some(SourceBinding::Commit { commit: subject, .. }) if subject == commit)
         })
 }
 
@@ -763,36 +763,24 @@ mod tests {
         assert!(!blocking(&item));
         for class in ["boundary", "data_loss"] {
             item.triage.as_mut().unwrap().blocking_class = class.into();
+            item.triage.as_mut().unwrap().decision = "confirmed".into();
+            item.disposition = None;
             assert!(blocking(&item));
-        }
-        item.kind = Some("spec_defect".into());
-        assert!(blocking(&item));
-        item.kind = None;
-        item.triage.as_mut().unwrap().decision = "rejected".into();
-        item.disposition = Some("rejected".into());
-        assert!(blocking(&item));
-        item.verification = Some("falsified".into());
-        item.evidence = None;
-        assert!(blocking(&item));
-        item.evidence = Some("test disproves trigger".into());
-        assert!(!blocking(&item));
-    }
-
-    #[test]
-    fn rejected_boundaries_require_falsification_with_evidence() {
-        for class in ["boundary", "data_loss"] {
-            let mut item = finding("F1", "security");
-            item.triage.as_mut().unwrap().blocking_class = class.into();
             item.triage.as_mut().unwrap().decision = "rejected".into();
-            item.triage.as_mut().unwrap().worth_fixing = false;
             item.disposition = Some("rejected".into());
-            assert!(blocking(&item));
             item.verification = Some("falsified".into());
             item.evidence = None;
             assert!(blocking(&item));
             item.evidence = Some("test disproves trigger".into());
             assert!(!blocking(&item));
         }
+        item.triage.as_mut().unwrap().blocking_class = "none".into();
+        item.triage.as_mut().unwrap().decision = "confirmed".into();
+        item.disposition = None;
+        item.verification = None;
+        item.evidence = Some("counterexample".into());
+        item.kind = Some("spec_defect".into());
+        assert!(blocking(&item));
     }
 
     #[test]

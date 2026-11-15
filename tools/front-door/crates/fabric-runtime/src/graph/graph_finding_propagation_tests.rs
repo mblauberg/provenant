@@ -2,8 +2,8 @@ use super::*;
 
 #[test]
 fn verifier_markers_without_the_composite_prefix_keep_each_lens_finding_separate() {
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1, "graph_id":"short-markers", "nodes":[
+    let document: GraphDocument = document_fixture(serde_json::json!({
+        "graph_id":"short-markers", "nodes":[
             {"id":"lenses", "kind":"composite", "access":"read_only", "composite":{
                 "nodes":[
                     {"id":"lens-a", "access":"read_only", "prompt":"review", "route":{"alias":"senior"}},
@@ -20,7 +20,7 @@ fn verifier_markers_without_the_composite_prefix_keep_each_lens_finding_separate
              "depends_on":["lenses", "verify"], "inputs":[{"node":"lenses", "outputs":["findings"]}, {"node":"verify", "outputs":["findings"]}],
              "dispositions":["accepted", "rejected", "deferred"]}
         ]
-    })).unwrap();
+    }));
     let verified = [
         entry(",\"propagates\":\"lenses--lens-a:F1\""),
         entry(",\"propagates\":\"lenses--lens-b:F1\""),
@@ -89,8 +89,8 @@ fn verifier_markers_without_the_composite_prefix_keep_each_lens_finding_separate
 // A bare id shared by two roots names neither of them.
 #[test]
 fn a_marker_shared_by_several_findings_stays_unresolved() {
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1, "graph_id":"ambiguous-marker", "nodes":[
+    let document: GraphDocument = document_fixture(serde_json::json!({
+        "graph_id":"ambiguous-marker", "nodes":[
             {"id":"lenses", "kind":"composite", "access":"read_only", "composite":{
                 "nodes":[
                     {"id":"lens-a", "access":"read_only", "prompt":"review", "route":{"alias":"senior"}},
@@ -104,7 +104,7 @@ fn a_marker_shared_by_several_findings_stays_unresolved() {
             {"id":"verify", "access":"read_only", "prompt":"verify", "route":{"alias":"senior"},
              "depends_on":["lenses"], "inputs":[{"node":"lenses", "outputs":["findings"]}]}
         ]
-    })).unwrap();
+    }));
     let mut owner = FakeOwner {
         observations: [
             terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
@@ -438,6 +438,53 @@ fn qualified_id_collision_requires_three_distinct_dispositions() {
     };
     for (decisions, expected) in [
         (
+            r#"{"id":"F1","disposition":"rejected","reason":"no"}"#,
+            NodeState::Failed,
+        ),
+        (
+            r#"{"id":"a:F1","disposition":"rejected","reason":"no"},{"id":"b:F1","disposition":"rejected","reason":"no"}"#,
+            NodeState::Succeeded,
+        ),
+    ] {
+        let mut synth = node("synthesis", route("first"));
+        synth.dispositions = DISPOSITIONS.map(String::from).to_vec();
+        synth.depends_on = vec!["a".into(), "b".into()];
+        synth.inputs = vec![input("a"), input("b")];
+        let mut owner = FakeOwner {
+            observations: [
+                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+                terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    &findings_text(
+                        &entry("").replace("\"summary\":\"s\"", "\"summary\":\"other\""),
+                    ),
+                ),
+                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(decisions)),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let run = advance(
+            &graph(vec![
+                node("a", route("first")),
+                node("b", route("first")),
+                synth,
+            ]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
+        let result = &run.checkpoint.nodes[2];
+        assert_eq!(result.state, expected);
+        if expected == NodeState::Succeeded {
+            let findings = &result.outputs.as_ref().unwrap().findings;
+            assert_eq!(findings.len(), 2);
+            assert_eq!(findings[0].summary, "s");
+            assert_eq!(findings[1].summary, "other");
+        }
+    }
+    for (decisions, expected) in [
+        (
             r#"{"id":"a:F1","disposition":"accepted","reason":"yes"},{"id":"b:F1","disposition":"rejected","reason":"no"}"#,
             NodeState::Failed,
         ),
@@ -480,6 +527,7 @@ fn qualified_id_collision_requires_three_distinct_dispositions() {
             run.checkpoint.nodes[3].advance_error
         );
     }
+    dependent_reviewers_with_independent_same_ids_require_distinct_dispositions();
 }
 
 #[test]
@@ -532,11 +580,13 @@ fn ambiguous_propagation_warns_and_remains_independent() {
         &mut MemoryJournal::default(),
     )
     .unwrap();
-    let warning = &run.checkpoint.nodes[3].outputs.as_ref().unwrap().warnings;
+    let verifier = run.checkpoint.nodes[3].outputs.as_ref().unwrap();
+    assert!(!verifier.warnings.is_empty());
     assert!(
-        warning
+        verifier
+            .findings
             .iter()
-            .any(|w| w.contains("unresolved propagates marker") && w.contains("a:b:F1"))
+            .any(|finding| finding.propagates.as_deref() == Some("a:b:F1"))
     );
     assert_eq!(
         run.checkpoint.nodes[4].state,
@@ -587,14 +637,13 @@ fn unresolved_marker_warns_and_remains_an_independent_identity() {
         &mut MemoryJournal::default(),
     )
     .unwrap();
+    let verifier = run.checkpoint.nodes[1].outputs.as_ref().unwrap();
+    assert!(!verifier.warnings.is_empty());
     assert!(
-        run.checkpoint.nodes[1]
-            .outputs
-            .as_ref()
-            .unwrap()
-            .warnings
+        verifier
+            .findings
             .iter()
-            .any(|w| w.contains("unresolved propagates marker") && w.contains("not-an-input"))
+            .any(|finding| finding.propagates.as_deref() == Some("not-an-input:F1"))
     );
     assert_eq!(run.checkpoint.nodes[2].state, NodeState::Succeeded);
     let findings = &run.checkpoint.nodes[2].outputs.as_ref().unwrap().findings;
@@ -604,7 +653,6 @@ fn unresolved_marker_warns_and_remains_an_independent_identity() {
     );
 }
 
-#[test]
 fn dependent_reviewers_with_independent_same_ids_require_distinct_dispositions() {
     let a = node("a", route("first"));
     let mut b = node("b", route("first"));

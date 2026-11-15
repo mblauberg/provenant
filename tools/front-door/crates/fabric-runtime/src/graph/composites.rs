@@ -3,8 +3,9 @@ use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CompositeSpec {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     /// Accept partial success: members that fail are recorded as unavailable
     /// and only successful members are exported. The composite itself fails
     /// when fewer than this many of its exporting members succeeded, capped at
@@ -116,8 +117,8 @@ pub(super) fn resolve_writer_targets(document: &mut GraphDocument) {
         };
         for node in nodes {
             match &mut node.source {
-                Some(SourceBinding::Head { node }) => bind(node, &writer_aliases),
-                Some(SourceBinding::Node { node: target }) => {
+                Some(SourceBinding::Head { node, .. }) => bind(node, &writer_aliases),
+                Some(SourceBinding::Node { node: target, .. }) => {
                     if let Some(writer) = result_aliases.get(target) {
                         *target = writer.clone();
                         // Keep the composite dependency as its settlement gate,
@@ -261,13 +262,13 @@ fn children(
         if let Some(target) = &mut node.on_fail {
             *target = scoped(prefix, target);
         }
-        if let Some(SourceBinding::Node { node: source }) = &mut node.source
+        if let Some(SourceBinding::Node { node: source, .. }) = &mut node.source
             && !source.starts_with("previous.")
         {
             *source = reference(prefix, source, &locals, incoming)
                 .unwrap_or_else(|| scoped(prefix, source));
         }
-        if let Some(SourceBinding::Head { node: writer }) = &mut node.source {
+        if let Some(SourceBinding::Head { node: writer, .. }) = &mut node.source {
             *writer = visible_names
                 .get(writer)
                 .cloned()
@@ -346,7 +347,7 @@ fn children(
         }
         if node.source.is_none() {
             node.source = source.cloned();
-            if let Some(SourceBinding::Node { node: source }) = &node.source
+            if let Some(SourceBinding::Node { node: source, .. }) = &node.source
                 && !node.depends_on.contains(source)
             {
                 node.depends_on.push(source.clone());
@@ -471,6 +472,7 @@ fn children(
             node.read_roots.clear();
             node.attachments.clear();
             node.composite = Some(CompositeSpec {
+                extra: spec.extra,
                 min_successful: spec.min_successful,
                 reduce_verdict: spec.reduce_verdict,
                 nodes: Vec::new(),
@@ -778,6 +780,7 @@ fn outputs(
             .map(|header| NodeDecisionCause::CompositeFindingsTruncated {
                 warning_indices: truncation_warning_indices,
                 notice_lines: bounded(header, COMPOSITE_EXCERPT_BYTES).lines().count(),
+                extra: Default::default(),
             });
     if !unavailable.is_empty() || truncation_header.is_some() || !family_notices.is_empty() {
         // The unavailable list leads and is bounded on its own, so a long
@@ -1186,6 +1189,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn composite_spec_preserves_unknown_fields() {
+        let document = document_fixture(serde_json::json!({
+            "graph_id": "composite-forward",
+            "nodes": [{
+                "id": "group",
+                "kind": "composite",
+                "access": "read_only",
+                "composite": {
+                    "nodes": [],
+                    "exports": [],
+                    "future_field": {"enabled": true}
+                }
+            }]
+        }));
+        let encoded = serde_json::to_value(document).unwrap();
+        assert_eq!(
+            encoded["nodes"][0]["composite"]["future_field"],
+            serde_json::json!({"enabled": true})
+        );
+    }
+
+    #[test]
     fn bounded_findings_reserves_members_then_prefers_severity() {
         let finding = |id: &str, severity: &str| {
             serde_json::from_value::<Finding>(serde_json::json!({
@@ -1193,14 +1218,23 @@ mod tests {
             }))
             .unwrap()
         };
-        let mut findings: Vec<_> = (0..40)
-            .map(|i| finding(&format!("a:F{i}"), if i < 34 { "high" } else { "low" }))
+        let high_count = MAX_FINDINGS + 2;
+        let mut findings: Vec<_> = (0..high_count + 2)
+            .map(|i| {
+                finding(
+                    &format!("a:F{i}"),
+                    if i < high_count { "high" } else { "low" },
+                )
+            })
             .collect();
         findings.push(finding("b:F1", "low"));
         let selected = bounded_findings(findings);
         assert_eq!(selected.len(), MAX_FINDINGS);
         assert!(selected.iter().any(|f| f.id == "b:F1"));
-        assert_eq!(selected.iter().filter(|f| f.severity == "high").count(), 31);
+        assert_eq!(
+            selected.iter().filter(|f| f.severity == "high").count(),
+            MAX_FINDINGS - 1
+        );
         assert!(canonical_len(&selected) <= DISPOSITION_FINDINGS_BYTES);
     }
     #[test]

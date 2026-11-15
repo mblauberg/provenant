@@ -124,23 +124,26 @@ mod tests {
     };
 
     #[test]
-    fn folds_ascii_and_non_ascii_case() {
-        assert!(refs_collide("main", "Main"));
-        assert!(refs_collide("Éclair", "éclair"));
-        assert!(!refs_collide("main", "other"));
-    }
-
-    #[test]
-    fn folds_unicode_normalisation() {
+    fn folds_case_and_unicode_normalisation() {
         let (nfc, nfd) = ("caf\u{e9}", "cafe\u{301}");
-        assert!(refs_collide(nfc, nfd));
-        assert!(refs_collide("Caf\u{c9}/x", "cafe\u{301}"));
-        assert!(refs_collide_by_normalisation(nfc, nfd));
-        assert!(refs_collide_by_normalisation("Caf\u{c9}", nfd));
-        assert!(refs_collide_by_normalisation(nfd, "caf\u{e9}/x"));
-        assert!(!refs_collide_by_normalisation("main", "Main"));
-        assert!(!refs_collide_by_normalisation(nfc, nfc));
-        assert!(!refs_collide(nfc, "cafe"));
+        for (left, right, collides, normalization_alias) in [
+            ("main", "Main", true, false),
+            ("Éclair", "éclair", true, false),
+            (nfc, nfd, true, true),
+            ("Caf\u{c9}/x", nfd, true, true),
+            (nfd, "caf\u{e9}/x", true, true),
+            ("main", "other", false, false),
+            ("main", "main", false, false),
+            (nfc, nfc, false, false),
+            (nfc, "cafe", false, false),
+        ] {
+            assert_eq!(refs_collide(left, right), collides, "{left:?} vs {right:?}");
+            assert_eq!(
+                refs_collide_by_normalisation(left, right),
+                normalization_alias,
+                "{left:?} vs {right:?}"
+            );
+        }
     }
 
     #[test]

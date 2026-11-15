@@ -179,11 +179,11 @@ fn resumed_lane_settlement_ignores_terminal_graph() -> Result<(), Box<dyn std::e
     let clock = SystemClock;
     let cancel = CancelToken::new();
     let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":"terminal-unrelated","nodes":[{"id":"one","prompt":"work",
+        "schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"terminal-unrelated","nodes":[{"id":"one","prompt":"work",
             "access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
     }))?;
     let checkpoint: graph::GraphCheckpoint = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":"terminal-unrelated","plan_digest":"digest",
+        "schema_version":provenant_fabric_runtime::graph::GraphCheckpoint::SCHEMA_VERSION,"graph_id":"terminal-unrelated","plan_digest":"digest",
         "nodes":[{"id":"one","state":"succeeded","attempts":[]}]
     }))?;
     let mut journal = graph::FileJournal::open(
@@ -411,7 +411,8 @@ fn unsuccessful_lanes_retain_the_worktree_even_after_delivery()
 }
 
 #[test]
-fn settlement_intent_keeps_prune_pending_until_custody_replay() -> Result<(), Box<dyn std::error::Error>> {
+fn settlement_intent_keeps_prune_pending_until_custody_replay()
+-> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let worktree = temp.path().join("lane");
     std::fs::create_dir(&worktree)?;
@@ -438,25 +439,8 @@ fn settlement_intent_keeps_prune_pending_until_custody_replay() -> Result<(), Bo
 }
 
 #[test]
-fn submit_io_keeps_the_inner_operation_without_inventing_a_path() {
-    let error = super::scope_io(super::FacadeError::io("access Fabric database"), "submit");
-    assert_eq!(
-        error,
-        super::FacadeError::Io {
-            delivery_limit: None,
-            delivery_stage: None,
-            resource: None,
-            input_failure: None,
-            cause: None,
-            operation: "submit: access Fabric database".into(),
-            path: None,
-        }
-    );
-}
-
-#[test]
-fn submit_io_retains_single_prefix_for_peer_error_and_scopes_local_error() {
-    let peer_error = super::FacadeError::Io {
+fn submit_io_preserves_operation_and_path_by_error_origin() {
+    let already_scoped = super::FacadeError::Io {
         delivery_limit: None,
         delivery_stage: None,
         resource: None,
@@ -465,20 +449,6 @@ fn submit_io_retains_single_prefix_for_peer_error_and_scopes_local_error() {
         operation: "submit: open writer repository".into(),
         path: Some("/repo".into()),
     };
-    let rescoped = super::scope_io(peer_error.clone(), "submit");
-    assert_eq!(
-        rescoped,
-        super::FacadeError::Io {
-            delivery_limit: None,
-            delivery_stage: None,
-            resource: None,
-            input_failure: None,
-            cause: None,
-            operation: "submit: open writer repository".into(),
-            path: Some("/repo".into()),
-        }
-    );
-
     let local_error = super::FacadeError::Io {
         delivery_limit: None,
         delivery_stage: None,
@@ -488,19 +458,31 @@ fn submit_io_retains_single_prefix_for_peer_error_and_scopes_local_error() {
         operation: "open writer repository".into(),
         path: Some("/repo".into()),
     };
-    let scoped = super::scope_io(local_error, "submit");
-    assert_eq!(
-        scoped,
-        super::FacadeError::Io {
-            delivery_limit: None,
-            delivery_stage: None,
-            resource: None,
-            input_failure: None,
-            cause: None,
-            operation: "submit: open writer repository".into(),
-            path: Some("/repo".into()),
-        }
-    );
+    for (cause, operation, path) in [
+        (
+            super::FacadeError::io("access Fabric database"),
+            "submit: access Fabric database",
+            None,
+        ),
+        (
+            already_scoped,
+            "submit: open writer repository",
+            Some("/repo"),
+        ),
+        (local_error, "submit: open writer repository", Some("/repo")),
+    ] {
+        let scoped = super::scope_io(cause, "submit");
+        let super::FacadeError::Io {
+            operation: actual_operation,
+            path: actual_path,
+            ..
+        } = scoped
+        else {
+            panic!("submit I/O must remain a typed I/O failure")
+        };
+        assert_eq!(actual_operation, operation);
+        assert_eq!(actual_path.as_deref(), path);
+    }
 }
 
 #[test]
@@ -527,7 +509,7 @@ fn writer_repository_open_failure_hides_unanchored_project_path()
 }
 
 #[test]
-fn typed_run_errors_keep_their_codes() {
+fn run_and_peer_errors_keep_typed_cli_codes() -> Result<(), Box<dyn std::error::Error>> {
     for (error, expected) in [
         (provenant_run::RunError::Nonterminal, "not_terminal"),
         (
@@ -558,10 +540,6 @@ fn typed_run_errors_keep_their_codes() {
     ] {
         assert_eq!(super::run_error(error).code(), expected);
     }
-}
-
-#[test]
-fn peer_run_errors_stay_typed_through_cli_rendering() -> Result<(), Box<dyn std::error::Error>> {
     for error in [
         super::FacadeError::NotTerminal,
         super::FacadeError::OperationConflict,

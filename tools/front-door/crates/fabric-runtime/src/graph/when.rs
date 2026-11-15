@@ -13,6 +13,8 @@ use std::collections::{BTreeMap, BTreeSet};
 /// One resolved condition of a node's `when`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WhenTerm {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub name: String,
     pub expected: String,
     pub actual: String,
@@ -68,6 +70,7 @@ fn removed_requirements(nodes: &[GraphNode], producer: &str) -> Vec<RemovedRequi
             .filter(|input| input.node == producer && !input.required_outputs.is_empty())
         {
             removed.push(RemovedRequirement {
+                extra: Default::default(),
                 consumer: node.id.clone(),
                 required_outputs: input.required_outputs.clone(),
                 verdict_input: false,
@@ -80,6 +83,7 @@ fn removed_requirements(nodes: &[GraphNode], producer: &str) -> Vec<RemovedRequi
             })
         {
             removed.push(RemovedRequirement {
+                extra: Default::default(),
                 consumer: node.id.clone(),
                 required_outputs: Vec::new(),
                 verdict_input: true,
@@ -177,7 +181,9 @@ pub(super) fn prune(document: &GraphDocument) -> Result<Option<GraphDocument>, A
             .source
             .as_ref()
             .and_then(|source| match source {
-                SourceBinding::Node { node } | SourceBinding::Head { node } => Some(node.as_str()),
+                SourceBinding::Node { node, .. } | SourceBinding::Head { node, .. } => {
+                    Some(node.as_str())
+                }
                 _ => None,
             })
             .into_iter()

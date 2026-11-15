@@ -29,11 +29,31 @@ pub(super) fn graph_ci_waiting<'a>(
 /// Counts of nodes by state, then the nodes that need attention (failed,
 /// paused, running), then the command that shows the rest.
 #[cfg(test)]
+#[derive(Debug, Default)]
+pub(super) struct GraphSummary {
+    pub summary: provenant_cli::Summary,
+    pub rejected_boundary_findings: Vec<provenant_fabric_runtime::graph::Finding>,
+    pub spec_concern_count: u64,
+    pub spec_concerns: Vec<provenant_records::handoff::SpecConcern>,
+    pub spec_defects: Vec<(Option<String>, String)>,
+    pub full_concern_source: Option<String>,
+}
+
+#[cfg(test)]
+impl std::ops::Deref for GraphSummary {
+    type Target = provenant_cli::Summary;
+
+    fn deref(&self) -> &Self::Target {
+        &self.summary
+    }
+}
+
+#[cfg(test)]
 #[allow(
     dead_code,
     reason = "the custom worktree driver omits libtest functions"
 )]
-pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
+pub(super) fn graph_summary(run: &serde_json::Value) -> GraphSummary {
     let text = |value: &serde_json::Value, key: &str| {
         value
             .get(key)
@@ -125,6 +145,7 @@ pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
         Some(error) => format!("{node} {state}: {error}"),
         None => format!("{node} {state}"),
     }));
+    let mut summary = GraphSummary::default();
     if let Some(nodes) = checkpoint
         .get("nodes")
         .and_then(serde_json::Value::as_array)
@@ -142,6 +163,12 @@ pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
                     .pointer("/outputs/spec_concern_count")
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(concerns.len() as u64);
+                summary.spec_concern_count += full_count;
+                summary.spec_concerns.extend(
+                    concerns
+                        .iter()
+                        .filter_map(|value| serde_json::from_value(value.clone()).ok()),
+                );
                 rows.push(format!(
                     "{}: {} spec concerns for chair judgement ({} retained)",
                     bounded_reason(node_id),
@@ -153,6 +180,7 @@ pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
                         .pointer("/outputs/result/path")
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("the attempt result artifact and handoff.json");
+                    summary.full_concern_source = Some(source.to_owned());
                     rows.push(format!("full spec concerns: {}", bounded_reason(source)));
                 }
                 for concern in concerns {
@@ -184,6 +212,9 @@ pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
                         finding.rejected_boundary()
                     })
                     .collect();
+                summary
+                    .rejected_boundary_findings
+                    .extend(rejected.iter().cloned());
                 if !rejected.is_empty() {
                     rows.push(format!(
                         "{}: {} rejected boundary or data-loss findings for chair judgement",
@@ -223,6 +254,19 @@ pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
                             == Some("spec_defect")
                     })
                     .collect();
+                summary.spec_defects.extend(defects.iter().map(|finding| {
+                    (
+                        finding
+                            .get("id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned),
+                        finding
+                            .get("summary")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                    )
+                }));
                 if !defects.is_empty() {
                     rows.push(format!(
                         "{}: {} spec defects for chair judgement",
@@ -253,11 +297,12 @@ pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
         "paused" => Some(format!("provenant retry {id}")),
         _ => Some(format!("provenant status {id}")),
     };
-    provenant_cli::Summary::new(
+    summary.summary = provenant_cli::Summary::new(
         format!("graph {id} {status}: {} nodes ({tally})", nodes.len()),
         rows,
         next,
-    )
+    );
+    summary
 }
 
 /// Sanitise and bound even pause reasons from older checkpoints before printing.
@@ -290,20 +335,19 @@ mod test_presentation {
             .flat_map(|node| node.children.iter())
             .collect();
         let mut human = format!("Graph {}: {:?}\n", run.checkpoint.graph_id, run.status);
-        if full && run.checkpoint.bases.is_some() {
-            let bases = run.checkpoint.bases.unwrap_or_default();
+        if full && let Some(bases) = run.checkpoint.bases.as_ref() {
+            let review = bases
+                .review
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "unavailable".into());
+            let integration = bases
+                .integration
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "unavailable".into());
             human.push_str(&format!(
-                "Graph bases: review={} integration={}\n",
-                bases
-                    .review
-                    .map(|base| base.to_string())
-                    .as_deref()
-                    .unwrap_or("unavailable"),
-                bases
-                    .integration
-                    .map(|base| base.to_string())
-                    .as_deref()
-                    .unwrap_or("unavailable")
+                "Graph bases: review={review} integration={integration}\n"
             ));
         }
         if let Some(outcome) = run.outcome {
@@ -520,11 +564,17 @@ mod spec_chair_tests {
                 }]}}
             ]}
         }));
-        let summary = summary.lines.join("\n");
-        assert!(summary.contains("1 rejected boundary or data-loss findings for chair judgement"));
-        assert!(summary.contains(
-            "boundary violation; reason: synthesis disagrees; evidence: reachable credential write"
-        ));
+        let finding = summary
+            .rejected_boundary_findings
+            .iter()
+            .find(|finding| finding.id == "F1")
+            .unwrap();
+        assert_eq!(finding.class.as_deref(), Some("boundary"));
+        assert_eq!(finding.reason.as_deref(), Some("synthesis disagrees"));
+        assert_eq!(
+            finding.evidence.as_deref(),
+            Some("reachable credential write")
+        );
     }
 
     #[test]
@@ -540,22 +590,28 @@ mod spec_chair_tests {
                 }]}}
             ]}
         }));
-        let text = summary.lines.join("\n");
-        assert!(text.contains("1 spec concerns"));
-        assert!(text.contains("format retired") && text.contains("approved scope"));
-        assert!(text.contains("remove reader") && text.contains("diverged"));
-        assert!(text.contains("1 spec defects"));
-        assert!(text.contains("criterion conflicts with scope"));
+        assert_eq!(summary.spec_concern_count, 1);
+        assert_eq!(summary.spec_concerns[0].claim, "format retired");
+        assert_eq!(summary.spec_concerns[0].evidence, "approved scope");
+        assert_eq!(summary.spec_concerns[0].proposed_change, "remove reader");
+        assert_eq!(
+            summary.spec_concerns[0].status,
+            provenant_records::handoff::SpecConcernStatus::Diverged
+        );
+        assert_eq!(summary.spec_defects.len(), 1);
+        assert_eq!(summary.spec_defects[0].1, "criterion conflicts with scope");
         let clipped = super::graph_summary(&serde_json::json!({
             "status":"complete", "checkpoint":{"graph_id":"g","nodes":[
                 {"id":"writer","state":"succeeded","outputs":{
                     "spec_concerns":[],"spec_concern_count":2,"result":{"path":"/attempt/result.md"}
                 }}
             ]}
-        }))
-        .lines
-        .join("\n");
-        assert!(clipped.contains("2 spec concerns") && clipped.contains("0 retained"));
-        assert!(clipped.contains("/attempt/result.md"));
+        }));
+        assert_eq!(clipped.spec_concern_count, 2);
+        assert!(clipped.spec_concerns.is_empty());
+        assert_eq!(
+            clipped.full_concern_source.as_deref(),
+            Some("/attempt/result.md")
+        );
     }
 }

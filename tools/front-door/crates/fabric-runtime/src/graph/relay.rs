@@ -116,8 +116,9 @@ fn task() -> String {
 
 /// What the host returns to the lane for an admitted child.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ChildReceipt {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub graph_id: String,
     pub parent: String,
     pub node: String,
@@ -357,6 +358,7 @@ pub fn fence_provisioning(checkpoint: &mut GraphCheckpoint, node: &str, path: &s
     checkpoint.pending_writer_provisioning.insert(
         node.to_owned(),
         PendingWriterProvisioning {
+            extra: Default::default(),
             path: path.to_owned(),
             source: source.to_owned(),
         },
@@ -521,6 +523,7 @@ pub fn admit_child_bound(
         }
     }
     let receipt_for = |revision| ChildReceipt {
+        extra: Default::default(),
         graph_id: graph_id.clone(),
         parent: parent.to_owned(),
         node: node.clone(),
@@ -568,6 +571,7 @@ pub fn admit_child_bound(
         progress.children_cancelled = false;
     }
     Ok(ChildReceipt {
+        extra: Default::default(),
         graph_id,
         parent: parent.to_owned(),
         node,
@@ -1044,7 +1048,7 @@ pub fn child_source(
         let Some(node) = expanded.nodes.iter().find(|node| node.id == id) else {
             return Ok(None);
         };
-        if let Some(SourceBinding::Commit { commit }) = &node.source {
+        if let Some(SourceBinding::Commit { commit, .. }) = &node.source {
             return Ok(Some(commit.clone()));
         }
         let Some(export) = node.composite.as_ref().and_then(|spec| {

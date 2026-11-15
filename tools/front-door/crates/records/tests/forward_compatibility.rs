@@ -749,14 +749,38 @@ fn handoff_round_trip() -> TestResult {
 
 fn pause_round_trip() -> TestResult {
     use pause::{Pause, PauseCause};
-    round_trip::<Pause>(
-        "pause",
-        serde_json::to_value(Pause::new(
-            PauseCause::BudgetExceeded,
-            None,
-            "Budget paused.",
-        )?)?,
-    )
+    use std::collections::HashSet;
+
+    let mut causes = PauseCause::ALL.to_vec();
+    causes.extend(stop::StopCause::ALL.map(|stop| PauseCause::Stop {
+        stop,
+        extra: Default::default(),
+    }));
+    for cause in causes {
+        assert_pause_cause_variant_is_declared(&cause);
+        let pause = Pause::new(cause.clone(), None, "Budget paused.")?;
+        let mut value = serde_json::to_value(pause)?;
+        add_future_fields(&mut value);
+        let bytes = serde_json::to_vec(&value)?;
+        let decoded: Pause = decode(bytes.as_slice(), Limits::default())?;
+        assert_eq!(decoded.cause(), cause);
+        assert!(HashSet::from([cause.clone()]).contains(&decoded.cause()));
+        assert_preserved::<Pause>("pause", value)?;
+    }
+    Ok(())
+}
+
+fn assert_pause_cause_variant_is_declared(cause: &PauseCause) {
+    match cause {
+        PauseCause::Stop { .. } => {}
+        PauseCause::ContinuationBudget { .. } => {}
+        PauseCause::BudgetExceeded { .. } => {}
+        PauseCause::InvalidPlanExpansion { .. } => {}
+        PauseCause::InvalidLoopDecision { .. } => {}
+        PauseCause::LoopAskClosed { .. } => {}
+        PauseCause::LoopPaused { .. } => {}
+        PauseCause::StructuralLimit { .. } => {}
+    }
 }
 
 fn stop_round_trip() -> TestResult {

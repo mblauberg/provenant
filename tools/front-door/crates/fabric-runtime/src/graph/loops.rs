@@ -387,7 +387,7 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                 .retain(|i| spec.body.iter().any(|node| node.id == i.node));
             // A head source naming a writer outside the body is checked
             // against the expanded graph, as an external CI subject is.
-            if let Some(SourceBinding::Head { node: writer }) = &child.source
+            if let Some(SourceBinding::Head { node: writer, .. }) = &child.source
                 && !spec.body.iter().any(|node| &node.id == writer)
             {
                 child.source = None;
@@ -467,7 +467,7 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                         export.node = id(&node.id, round, &export.node);
                     }
                 }
-                if let Some(SourceBinding::Node { node: source }) = &mut child.source {
+                if let Some(SourceBinding::Node { node: source, .. }) = &mut child.source {
                     *source = if let Some(previous) = source.strip_prefix("previous.") {
                         if round == 1 {
                             return Err("previous source requires an initial commit binding".into());
@@ -480,7 +480,7 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                         child.depends_on.push(source.clone());
                     }
                 }
-                if let Some(SourceBinding::Head { node: writer }) = &mut child.source
+                if let Some(SourceBinding::Head { node: writer, .. }) = &mut child.source
                     && spec.body.iter().any(|node| &node.id == writer)
                 {
                     *writer = id(&node.id, round, writer);
@@ -658,7 +658,7 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 min_successful: n.composite.as_ref().and_then(|spec| spec.min_successful),
                 source_binding: n.source.clone(),
                 source_commit: match &n.source {
-                    Some(SourceBinding::Commit { commit }) => Some(commit.clone()),
+                    Some(SourceBinding::Commit { commit, .. }) => Some(commit.clone()),
                     _ => None,
                 },
                 writer_binding: None,
@@ -894,7 +894,9 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
     } else if settled && dependency_state(node, plan, checkpoint, positions).is_none() {
         if checkpoint.nodes[index].loop_pause.is_none() {
             checkpoint.nodes[index].loop_pause_code = Some("loop_paused".into());
-            checkpoint.nodes[index].loop_cause = Some(NodeDecisionCause::LoopPaused);
+            checkpoint.nodes[index].loop_cause = Some(NodeDecisionCause::LoopPaused {
+                extra: Default::default(),
+            });
             checkpoint.nodes[index].loop_pause = Some(format!(
                 "loop {} exhausted after {rounds} rounds; stop, extend or accept as is",
                 node.id
@@ -949,7 +951,9 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
         match asks::poll(checkpoint, position, owner) {
             Ok(reply) => {
                 checkpoint.nodes[index].loop_pause_code = Some("loop_paused".into());
-                checkpoint.nodes[index].loop_cause = Some(NodeDecisionCause::LoopPaused);
+                checkpoint.nodes[index].loop_cause = Some(NodeDecisionCause::LoopPaused {
+                    extra: Default::default(),
+                });
                 checkpoint.nodes[index].loop_pause = Some(paused);
                 refresh_pause(checkpoint);
                 let Some(reply) = reply else {
@@ -982,9 +986,15 @@ fn ask_closed<R: Error + 'static, J: GraphJournal>(
     checkpoint: &mut GraphCheckpoint,
     journal: &mut J,
 ) -> Result<Option<String>, GraphError<R, J::Error>> {
-    if checkpoint.nodes[index].loop_cause != Some(NodeDecisionCause::LoopAskClosed) {
+    if !checkpoint.nodes[index]
+        .loop_cause
+        .as_ref()
+        .is_some_and(|cause| matches!(cause, NodeDecisionCause::LoopAskClosed { .. }))
+    {
         checkpoint.nodes[index].loop_pause_code = Some("loop_ask_closed".into());
-        checkpoint.nodes[index].loop_cause = Some(NodeDecisionCause::LoopAskClosed);
+        checkpoint.nodes[index].loop_cause = Some(NodeDecisionCause::LoopAskClosed {
+            extra: Default::default(),
+        });
         checkpoint.nodes[index].loop_pause = Some(format!(
             "loop {node} exhausted after {rounds} rounds; ask closed; use graph resume --extend loop.{node}.rounds=N or --extend loop.{node}.decision=stop|accept"
         ));
@@ -1033,7 +1043,9 @@ pub(super) fn pause_invalid_decision<R: Error + 'static, J: GraphJournal>(
 ) -> Result<(), GraphError<R, J::Error>> {
     if let Some(progress) = checkpoint.nodes.iter_mut().find(|n| n.id == node) {
         progress.loop_pause_code = Some("invalid_loop_decision".into());
-        progress.loop_cause = Some(NodeDecisionCause::InvalidLoopDecision);
+        progress.loop_cause = Some(NodeDecisionCause::InvalidLoopDecision {
+            extra: Default::default(),
+        });
         progress.loop_pause = Some(format!(
             "loop {node} exhausted; decision cannot be applied: {}; use graph resume --extend loop.{node}.rounds=N or --extend loop.{node}.decision=stop|accept",
             bounded(reason, MAX_ADVANCE_ERROR_BYTES)
@@ -1100,13 +1112,21 @@ pub(super) fn refresh_pause(checkpoint: &mut GraphCheckpoint) {
             .iter()
             .filter_map(|node| node.loop_cause.as_ref())
             .find_map(|cause| match cause {
-                NodeDecisionCause::LoopAskClosed => Some(PauseCause::LoopAskClosed),
-                NodeDecisionCause::InvalidLoopDecision => Some(PauseCause::InvalidLoopDecision),
-                NodeDecisionCause::LoopPaused
+                NodeDecisionCause::LoopAskClosed { .. } => Some(PauseCause::LoopAskClosed {
+                    extra: Default::default(),
+                }),
+                NodeDecisionCause::InvalidLoopDecision { .. } => {
+                    Some(PauseCause::InvalidLoopDecision {
+                        extra: Default::default(),
+                    })
+                }
+                NodeDecisionCause::LoopPaused { .. }
                 | NodeDecisionCause::PlanExpansionPaused { .. }
                 | NodeDecisionCause::CompositeFindingsTruncated { .. } => None,
             })
-            .unwrap_or(PauseCause::LoopPaused);
+            .unwrap_or(PauseCause::LoopPaused {
+                extra: Default::default(),
+            });
         if reasons.is_empty() {
             checkpoint.pause = None;
         } else {

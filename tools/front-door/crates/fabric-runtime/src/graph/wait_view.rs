@@ -3,6 +3,64 @@ use super::{AttemptOutcome, CiState, GraphCheckpoint, NodeState};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WaitKind {
+    Approval,
+    LaunchRetry,
+    Ci,
+    Land,
+    None,
+}
+
+impl WaitKind {
+    const ALL: [Self; 5] = [
+        Self::Approval,
+        Self::LaunchRetry,
+        Self::Ci,
+        Self::Land,
+        Self::None,
+    ];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Approval => "approval",
+            Self::LaunchRetry => "launch_retry",
+            Self::Ci => "ci",
+            Self::Land => "land",
+            Self::None => "none",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Disposition {
+    Blocked,
+    Terminal,
+    Retry,
+    Pending,
+    Running,
+}
+
+impl Disposition {
+    const ALL: [Self; 5] = [
+        Self::Blocked,
+        Self::Terminal,
+        Self::Retry,
+        Self::Pending,
+        Self::Running,
+    ];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Blocked => "blocked",
+            Self::Terminal => "terminal",
+            Self::Retry => "retry",
+            Self::Pending => "pending",
+            Self::Running => "running",
+        }
+    }
+}
+
 /// A node's current wait and the evidence the checkpoint retains about it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct GraphNodeWait {
@@ -51,34 +109,34 @@ pub fn graph_waits(checkpoint: &GraphCheckpoint) -> Vec<GraphNodeWait> {
                 .filter(|retry| retry.failures > 0)
                 .or(node.last_launch_retry.as_ref());
             let (wait, wake) = if let Some(ask) = approval {
-                ("approval", ask.wake_at)
+                (WaitKind::Approval, ask.wake_at)
             } else if let Some(retry) = node
                 .launch_retry
                 .as_ref()
                 .filter(|retry| retry.failures > 0 && retry.wake_at.is_some())
             {
-                ("launch_retry", retry.wake_at)
+                (WaitKind::LaunchRetry, retry.wake_at)
             } else if let Some(ci) = node.ci.as_ref().filter(|ci| ci.state == CiState::Pending) {
-                ("ci", ci.wake_at)
+                (WaitKind::Ci, ci.wake_at)
             } else if node.state == NodeState::Running
                 && let Some(land) = node.land.as_ref()
             {
-                ("land", land.wake_at)
+                (WaitKind::Land, land.wake_at)
             } else {
-                ("none", None)
+                (WaitKind::None, None)
             };
             let disposition = if node.state == NodeState::Blocked {
-                "blocked"
+                Disposition::Blocked
             } else if quota && node.state != NodeState::Running {
-                "terminal"
-            } else if wait == "launch_retry" {
-                "retry"
+                Disposition::Terminal
+            } else if wait == WaitKind::LaunchRetry {
+                Disposition::Retry
             } else if node.state == NodeState::Pending {
-                "pending"
+                Disposition::Pending
             } else if node.state != NodeState::Running {
-                "terminal"
+                Disposition::Terminal
             } else {
-                "running"
+                Disposition::Running
             };
             let code = node
                 .advance_owner_code
@@ -100,8 +158,8 @@ pub fn graph_waits(checkpoint: &GraphCheckpoint) -> Vec<GraphNodeWait> {
             GraphNodeWait {
                 node: node.id.clone(),
                 state: node.state,
-                wait,
-                disposition,
+                wait: wait.as_str(),
+                disposition: disposition.as_str(),
                 code,
                 attempt: attempt
                     .and_then(|attempt| attempt.attempt_ref.clone())
@@ -119,7 +177,7 @@ pub fn graph_waits(checkpoint: &GraphCheckpoint) -> Vec<GraphNodeWait> {
                     .map(|retry| retry.policy.limit_source.clone())
                     .unwrap_or_else(|| "unavailable".into()),
                 wake_at: wake.map(|wake| wake.to_string()).unwrap_or_else(|| {
-                    if wait == "none" {
+                    if wait == WaitKind::None {
                         "none".into()
                     } else {
                         "unavailable".into()
@@ -210,9 +268,21 @@ mod tests {
     use crate::graph::{GraphRun, GraphStatus};
 
     #[test]
+    fn wait_kind_and_disposition_tables_use_unique_wire_names() {
+        let wait_names: std::collections::BTreeSet<_> =
+            WaitKind::ALL.into_iter().map(WaitKind::as_str).collect();
+        let disposition_names: std::collections::BTreeSet<_> = Disposition::ALL
+            .into_iter()
+            .map(Disposition::as_str)
+            .collect();
+        assert_eq!(wait_names.len(), WaitKind::ALL.len());
+        assert_eq!(disposition_names.len(), Disposition::ALL.len());
+    }
+
+    #[test]
     fn wait_view_uses_only_recorded_facts_without_changing_checkpoint() {
-        let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
-            "schema_version":1,"graph_id":"g","plan_digest":"digest",
+        let checkpoint = super::super::model::checkpoint_fixture(json!({
+            "graph_id":"g","plan_digest":"digest",
             "asks":[{"ask_id":"ask","kind":"decide","node":"approval","session":"chair","request":"hrq-ask"}],
             "nodes":[
                 {"id":"approval","state":"running","worktree":null,"attempts":[]},
@@ -224,13 +294,14 @@ mod tests {
                 {"id":"pending","state":"pending","worktree":null,"attempts":[]},
                 {"id":"done","state":"succeeded","worktree":null,"handoff":{"schema_version":2,"status":"stopped_early","note":"done","remaining":[],"decisions":[],"verify":[]},"outputs":{"schema_version":1,"result":{"digest":"sha256:test","excerpt":"","truncated":false,"path":"result.txt"},"verdict":null,"findings":[],"findings_available":null,"branch":"lane","commit":"abc","warnings":[]},"attempts":[]}
             ]
-        })).unwrap();
+        }));
         let before = serde_json::to_vec(&checkpoint).unwrap();
         let waits = graph_waits(&checkpoint);
         let by_id = |id: &str| waits.iter().find(|wait| wait.node == id).unwrap();
         assert_eq!(waits.len(), checkpoint.nodes.len());
-        assert_eq!(by_id("pending").disposition, "pending");
-        assert_eq!(by_id("done").disposition, "terminal");
+        assert_eq!(by_id("pending").wait, WaitKind::None.as_str());
+        assert_eq!(by_id("pending").disposition, Disposition::Pending.as_str());
+        assert_eq!(by_id("done").disposition, Disposition::Terminal.as_str());
         assert_eq!(by_id("done").branch.as_deref(), Some("lane"));
         assert_eq!(by_id("done").head.as_deref(), Some("abc"));
         assert_eq!(
@@ -242,20 +313,21 @@ mod tests {
             by_id("blocked").cause.as_deref(),
             Some("launch_retry_exhausted")
         );
-        assert_eq!(by_id("approval").wait, "approval");
-        assert_eq!(by_id("ci").wait, "ci");
-        assert_eq!(by_id("land").wait, "land");
-        assert_eq!(by_id("retry").wait, "launch_retry");
-        assert_eq!(by_id("retry").disposition, "retry");
+        assert_eq!(by_id("approval").wait, WaitKind::Approval.as_str());
+        assert_eq!(by_id("ci").wait, WaitKind::Ci.as_str());
+        assert_eq!(by_id("land").wait, WaitKind::Land.as_str());
+        assert_eq!(by_id("land").disposition, Disposition::Running.as_str());
+        assert_eq!(by_id("retry").wait, WaitKind::LaunchRetry.as_str());
+        assert_eq!(by_id("retry").disposition, Disposition::Retry.as_str());
         assert_eq!(by_id("retry").attempt, "host/attempt");
         assert_eq!(by_id("retry").failures, json!(2));
         assert_eq!(by_id("retry").limit, json!(3));
         assert_eq!(by_id("retry").limit_source, "host");
-        assert_eq!(by_id("blocked").disposition, "blocked");
+        assert_eq!(by_id("blocked").disposition, Disposition::Blocked.as_str());
         assert_eq!(by_id("blocked").code, "launch_retry_exhausted");
         assert_eq!(by_id("quota").code, "usage_limited");
         assert_eq!(by_id("quota").cause.as_deref(), Some("usage_limited"));
-        assert_eq!(by_id("quota").disposition, "terminal");
+        assert_eq!(by_id("quota").disposition, Disposition::Terminal.as_str());
         assert_eq!(by_id("quota").wake_at, "none");
         assert_eq!(by_id("approval").next, "unavailable");
         assert_eq!(by_id("approval").wake_at, "unavailable");

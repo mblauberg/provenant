@@ -276,17 +276,29 @@ fn peer_remote_base_pins_a_commit_reachable_from_the_remote()
 #[cfg(test)]
 #[test]
 fn graph_document_decoder_checks_header_before_typed_graph() {
-    for version in [1, 2] {
-        let source = format!(r#"{{"schema_version":{version},"graph_id":"test","nodes":[]}}"#);
-        let document = decode_graph_document(source.as_bytes()).unwrap();
-        assert_eq!(document.schema_version, version);
+    let current = serde_json::json!({
+        "schema_version": provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION,
+        "graph_id": "test",
+        "nodes": []
+    });
+    let document = decode_graph_document(&serde_json::to_vec(&current).unwrap()).unwrap();
+    assert_eq!(
+        document.schema_version,
+        provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION
+    );
+    for version in [1_u64, 3] {
+        let unsupported = serde_json::json!({
+            "schema_version": version,
+            "graph_id": "test",
+            "nodes": []
+        });
+        assert!(matches!(
+            decode_graph_document(&serde_json::to_vec(&unsupported).unwrap()),
+            Err(FacadeError::UpgradeRequired { version: found, .. }) if found == version
+        ));
     }
-    assert!(matches!(
-        decode_graph_document(br#"{"schema_version":3,"nodes":"future shape"}"#),
-        Err(FacadeError::UpgradeRequired { version: 3, .. })
-    ));
-    assert!(decode_graph_document(br#"{"schema_version":1,"schema_version":2}"#).is_err());
-    assert!(decode_graph_document(br#"{"schema_version":1,"nodes":"invalid"}"#).is_err());
+    assert!(decode_graph_document(br#"{"schema_version":2,"schema_version":2}"#).is_err());
+    assert!(decode_graph_document(br#"{"schema_version":2,"nodes":"invalid"}"#).is_err());
     assert!(decode_graph_document(br#"{"graph_id":"test","nodes":[]}"#).is_err());
 }
 
@@ -348,7 +360,7 @@ fn peer_output_binding_is_consumed_before_the_cli_projection() {
         "peer_origin_context":{"graph_id":"origin","node_id":"worker","attempt":1},
         "peer_graph_collected":true,
         "peer_subtree":{"status":"complete","outcome":"succeeded","next_node":null,
-            "checkpoint":{"schema_version":1,"graph_id":"peer-graph","plan_digest":"digest","cancelled":false,"nodes":[]}}
+            "checkpoint":{"schema_version":provenant_fabric_runtime::graph::GraphCheckpoint::SCHEMA_VERSION,"graph_id":"peer-graph","plan_digest":"digest","cancelled":false,"nodes":[]}}
     }))
     .unwrap();
     let checked = peer::checked_output_origin(output, &origin).unwrap();
@@ -519,16 +531,17 @@ fn process_limit_retains_io_code_and_safe_resource_facts() {
 #[test]
 fn tick_wakes_graph_without_deadline_but_respects_future_deadline()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
-        serde_json::from_value(serde_json::json!({
-            "schema_version": 1, "graph_id": "waiter", "plan_digest": "plan", "nodes": [
+    let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint = serde_json::from_value(
+        serde_json::json!({
+            "schema_version": provenant_fabric_runtime::graph::GraphCheckpoint::SCHEMA_VERSION, "graph_id": "waiter", "plan_digest": "plan", "nodes": [
                 {"id":"branch", "worktree":null, "state":"running", "attempts":[{
                     "key":{"graph_id":"waiter", "node_id":"branch", "route_index":0, "attempt": 1},
                     "route":{"adapter":"fixture", "model":"fixture/model"},
                     "state":"running", "launched":true, "launch_actor":"actor"
                 }]}
             ]
-        }))?;
+        }),
+    )?;
     let now = provenant_core::WallTime::from_micros(1_000_000)?;
     assert!(graph_wake_due(&checkpoint, now));
     checkpoint.nodes[0].state = provenant_fabric_runtime::graph::NodeState::Pending;
@@ -638,7 +651,12 @@ pub(crate) mod peer_tests {
             inbox: &'a provenant_fabric_runtime::inbox::InboxService<'a>,
             cancel: &'a provenant_core::CancelToken,
         ) -> Self {
-            Self { actor, at, inbox, cancel }
+            Self {
+                actor,
+                at,
+                inbox,
+                cancel,
+            }
         }
     }
 
@@ -1176,7 +1194,7 @@ pub(crate) mod peer_tests {
         std::fs::write(
             &document,
             serde_json::to_vec(&serde_json::json!({
-                "schema_version":1, "graph_id":id,
+                "schema_version":provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION, "graph_id":id,
                 "nodes":[
                     {"id":"one","prompt":"reply OK","access":"worktree_write",
                         "worktree":fixture.worktree,"delivery":format!("integrate:{target}"),
@@ -1357,7 +1375,7 @@ pub(crate) mod peer_tests {
         // 2. Set up graph with writer node and dependent lens node.
         let graph_id = "writer-output-lens-graph";
         let mut document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version": 1,
+            "schema_version": provenant_fabric_runtime::graph::GRAPH_DOCUMENT_SCHEMA_VERSION,
             "graph_id": graph_id,
             "nodes": [
                 {

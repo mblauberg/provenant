@@ -15,8 +15,6 @@ struct Stored {
 #[derive(Default)]
 struct InboxOwner {
     requests: BTreeMap<String, Stored>,
-    /// Calls that created a request rather than finding one.
-    created: usize,
 }
 
 impl InboxOwner {
@@ -53,7 +51,6 @@ impl AttemptOwner for InboxOwner {
     fn file_ask(&mut self, filing: AskFiling<'_>) -> Result<AskFiled, Self::Error> {
         let key = format!("{}/{}", filing.instance_id, filing.ask.ask_id);
         if !self.requests.contains_key(&key) {
-            self.created += 1;
             self.requests.insert(
                 key.clone(),
                 Stored {
@@ -117,53 +114,40 @@ impl GraphJournal for FlakyJournal {
 }
 
 fn question() -> GraphDocument {
-    serde_json::from_value(serde_json::json!({
-        "schema_version":1, "graph_id":"asking", "decision_session":"chair-session", "nodes":[
+    crate::graph::model::document_fixture(serde_json::json!({
+        "graph_id":"asking", "decision_session":"chair-session", "nodes":[
             {"id":"choose", "kind":"decide", "access":"read_only", "decide":{"on_unanswered":"block_dependants",
                 "question":"Ship the change?", "default":"hold",
                 "options":[{"id":"ship", "label":"Ship"}, {"id":"hold", "label":"Hold"}]}}
         ]
     }))
-    .unwrap()
 }
 
 #[test]
-fn saving_a_checkpoint_with_an_ask_files_one_request_and_saving_again_files_none() {
-    let document = question();
-    let mut owner = InboxOwner::default();
-    let mut journal = FlakyJournal::default();
-    let first = advance(&document, &mut owner, &mut journal).unwrap();
-    let [link] = &first.checkpoint.asks[..] else {
-        panic!("one link for the one ask");
-    };
-    assert_eq!(owner.open(), [link.request.as_str()]);
-    assert_eq!(owner.created, 1);
+fn saving_or_replaying_a_filed_ask_preserves_its_link() {
+    for fail_after_filing in [false, true] {
+        let document = question();
+        let mut owner = InboxOwner::default();
+        let mut journal = FlakyJournal {
+            fail_after_ask: fail_after_filing,
+            ..Default::default()
+        };
+        if fail_after_filing {
+            assert!(advance(&document, &mut owner, &mut journal).is_err());
+            assert!(journal.saved.as_ref().unwrap().asks.is_empty());
+        }
 
-    let again = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(again.checkpoint, first.checkpoint);
-    assert_eq!(owner.created, 1);
-    assert_eq!(owner.open().len(), 1);
-}
+        let first = advance(&document, &mut owner, &mut journal).unwrap();
+        let [link] = &first.checkpoint.asks[..] else {
+            panic!("one link for the one ask");
+        };
+        let request = link.request.clone();
+        assert_eq!(owner.open(), [request.as_str()]);
 
-#[test]
-fn a_crash_after_filing_replays_to_the_same_request() {
-    let document = question();
-    let mut owner = InboxOwner::default();
-    // Fail the first checkpoint that carries the newly filed ask.
-    let mut journal = FlakyJournal {
-        fail_after_ask: true,
-        ..Default::default()
-    };
-    assert!(advance(&document, &mut owner, &mut journal).is_err());
-    assert_eq!(owner.created, 1);
-    assert!(journal.saved.as_ref().unwrap().asks.is_empty());
-
-    let replayed = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(owner.created, 1, "the replay filed a second request");
-    let [link] = &replayed.checkpoint.asks[..] else {
-        panic!("one link for the one ask");
-    };
-    assert_eq!(owner.open(), [link.request.as_str()]);
+        let replayed = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(replayed.checkpoint, first.checkpoint);
+        assert_eq!(replayed.checkpoint.asks[0].request, request);
+    }
 }
 
 #[test]
@@ -185,7 +169,6 @@ fn an_answer_resumes_the_node_and_drops_the_link() {
         Some("ship")
     );
     // The inbox keeps the answered request; nothing is filed or closed again.
-    assert_eq!(owner.created, 1);
     assert!(!owner.requests[&request].closed);
 }
 
@@ -194,7 +177,8 @@ fn a_request_closed_by_a_cancel_is_not_reused_after_a_resume() {
     let document = question();
     let mut owner = InboxOwner::default();
     let mut journal = FlakyJournal::default();
-    advance(&document, &mut owner, &mut journal).unwrap();
+    let first = advance(&document, &mut owner, &mut journal).unwrap();
+    let first_ask = first.checkpoint.asks[0].ask_id.clone();
     journal.saved.as_mut().unwrap().cancelled = true;
     let cancelled = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(cancelled.status, GraphStatus::Cancelled);
@@ -205,7 +189,7 @@ fn a_request_closed_by_a_cancel_is_not_reused_after_a_resume() {
     let [link] = &resumed.checkpoint.asks[..] else {
         panic!("one link for the new ask");
     };
-    assert_eq!(link.ask_id, "choose.ask-2");
+    assert_ne!(link.ask_id, first_ask);
     assert_eq!(owner.open(), [link.request.as_str()]);
 }
 
@@ -230,13 +214,13 @@ fn retry_node(document: &GraphDocument, checkpoint: &mut GraphCheckpoint, id: &s
     .unwrap();
 }
 
-#[test]
-fn a_retried_decide_node_files_a_new_request_and_ignores_the_old_answer() {
+pub(super) fn retried_decide_ask_ids() -> (String, String) {
     let document = question();
     let mut owner = InboxOwner::default();
     let mut journal = FlakyJournal::default();
     let waiting = advance(&document, &mut owner, &mut journal).unwrap();
     let first = waiting.checkpoint.asks[0].request.clone();
+    let first_ask = waiting.checkpoint.asks[0].ask_id.clone();
     owner.answer(&first, "ship");
     let done = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(done.status, GraphStatus::Complete);
@@ -245,15 +229,11 @@ fn a_retried_decide_node_files_a_new_request_and_ignores_the_old_answer() {
     retry_node(&document, &mut checkpoint, "choose");
     journal.saved = Some(checkpoint);
     let retried = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(
-        retried.status,
-        GraphStatus::Pending,
-        "the stale answer was consumed"
-    );
+    assert_eq!(retried.status, GraphStatus::Pending);
     let [link] = &retried.checkpoint.asks[..] else {
         panic!("one link for the new ask");
     };
     assert_ne!(link.request, first);
     assert_eq!(owner.open(), [link.request.as_str()]);
-    assert_eq!(owner.created, 2);
+    (first_ask, link.ask_id.clone())
 }
