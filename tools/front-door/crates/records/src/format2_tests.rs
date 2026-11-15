@@ -42,7 +42,8 @@ fn every_settlement_reason_has_one_source_and_node_outcome() {
         );
         let rule = reason.rule();
         assert_eq!(rule.reason, *reason);
-        let stop = Stop::sealed(None, crate::run::Outcome::ReviewRequired, *reason, None).unwrap();
+        let stop =
+            Stop::sealed(None, crate::run::Outcome::ReviewRequired, *reason, Ok(None)).unwrap();
         let stop_cause = stop.as_ref().map(Stop::cause);
         let expected = if stop_cause.is_some()
             && rule.terminal_outcome != crate::run::SettlementTerminalOutcome::Succeeded
@@ -110,9 +111,14 @@ fn one_terminal_classification_binds_reason_stop_source_and_graph_result() {
     }
 
     let evidence = TerminalEvidence::ProcessExit;
-    let completed =
-        SettlementReason::classify(Outcome::ReviewRequired, Some(&evidence), &[], None, None)
-            .unwrap();
+    let completed = SettlementReason::classify(
+        Outcome::ReviewRequired,
+        Some(&evidence),
+        &[],
+        None,
+        Ok(None),
+    )
+    .unwrap();
     assert_eq!(completed.reason, SettlementReason::Completed);
     assert_eq!(completed.source, CauseSource::Provider);
     assert_eq!(completed.node_outcome, SettlementNodeOutcome::Succeeded);
@@ -123,7 +129,7 @@ fn one_terminal_classification_binds_reason_stop_source_and_graph_result() {
         Some(&evidence),
         &[PartialSignal::HandoffMissing],
         None,
-        None,
+        Ok(None),
     )
     .unwrap();
     assert_eq!(handoff_missing.reason, SettlementReason::HandoffMissing);
@@ -139,7 +145,7 @@ fn one_terminal_classification_binds_reason_stop_source_and_graph_result() {
         Some(&evidence),
         &[PartialSignal::HandoffMissing],
         Some(TerminalCause::EmptyWriterResult),
-        None,
+        Ok(None),
     )
     .unwrap();
     assert_eq!(empty.reason, SettlementReason::EmptyResult);
@@ -154,7 +160,7 @@ fn one_terminal_classification_binds_reason_stop_source_and_graph_result() {
         Some(&evidence),
         &[],
         Some(TerminalCause::Blocked),
-        Some(&blocked_handoff),
+        Ok(Some(&blocked_handoff)),
     )
     .unwrap();
     assert_eq!(blocked.reason, SettlementReason::DeclaredStop);
@@ -200,7 +206,7 @@ fn host_stops_preserve_complete_handoffs_and_completed_budgets_succeed() {
             Some(&TerminalEvidence::ProcessExit),
             &partial,
             Some(TerminalCause::TokenBudget),
-            Some(&handoff),
+            Ok(Some(&handoff)),
         )
         .unwrap();
         assert_eq!(classified.source, CauseSource::Host);
@@ -221,7 +227,7 @@ fn the_spec_table_matches_the_stop_table() {
     )
     .unwrap();
     let (_, section) = spec.split_once("## What follows a stop").unwrap();
-    let rows: Vec<(String, String, bool, u8)> = section
+    let mut rows: Vec<(String, String, bool, u8)> = section
         .lines()
         .take_while(|line| !line.starts_with("## "))
         .filter_map(|line| {
@@ -239,7 +245,7 @@ fn the_spec_table_matches_the_stop_table() {
             ))
         })
         .collect();
-    let expected: Vec<(String, String, bool, u8)> = STOP_TABLE
+    let mut expected: Vec<(String, String, bool, u8)> = STOP_TABLE
         .iter()
         .map(|rule| {
             let step = serde_json::to_value(rule.default).unwrap();
@@ -251,6 +257,9 @@ fn the_spec_table_matches_the_stop_table() {
             )
         })
         .collect();
+    // Documentation order is presentation; the declared rows and uniqueness matter.
+    rows.sort_unstable();
+    expected.sort_unstable();
     assert_eq!(rows, expected);
 }
 
@@ -540,7 +549,7 @@ fn a_declared_stop_survives_uncommitted_edits_but_not_uncertain_custody() {
         } else {
             crate::run::SettlementReason::UncommittedWork
         };
-        Stop::sealed(None, outcome, reason, handoff.cloned())
+        Stop::sealed(None, outcome, reason, Ok(handoff.cloned()))
             .unwrap()
             .map(|stop| stop.cause())
     };

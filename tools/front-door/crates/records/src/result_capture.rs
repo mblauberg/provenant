@@ -27,7 +27,7 @@ pub struct ResultCapture {
 pub struct CapturedResult {
     /// The settled attempt's sealed handoff. Capture never parses it from text;
     /// the caller that holds the sealed snapshot sets it.
-    pub handoff: Result<Option<crate::handoff::Handoff>, &'static str>,
+    pub handoff: crate::handoff::HandoffResult,
     /// Exactly one well-formed verdict among the lines outside fenced blocks
     /// that start with `VERDICT:` (after emphasis or list markers; not
     /// blockquotes), wherever it sits. Independent of the required-line contract.

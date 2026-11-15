@@ -6,7 +6,49 @@ pub const NOTE_BYTES: usize = 4096;
 const ITEMS: usize = 64;
 const OPEN: &str = "```handoff";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Absent, valid, or malformed. Never discard the error to classify absence.
+pub type HandoffResult = Result<Option<Handoff>, HandoffError>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffFieldError {
+    pub field: String,
+    pub error: String,
+}
+
+/// Invalid fields are dropped whole; independently decoded fields survive.
+/// The remainder is evidence, never a valid completion declaration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffError {
+    pub dropped: Vec<HandoffFieldError>,
+    pub retained: crate::ExtraFields,
+}
+
+impl HandoffError {
+    pub fn new(field: impl Into<String>, error: impl Into<String>) -> Self {
+        Self {
+            dropped: vec![HandoffFieldError {
+                field: field.into(),
+                error: error.into(),
+            }],
+            retained: Default::default(),
+        }
+    }
+}
+
+impl std::fmt::Display for HandoffError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (i, issue) in self.dropped.iter().enumerate() {
+            if i > 0 {
+                write!(f, "; ")?;
+            }
+            write!(f, "handoff field {}: {}", issue.field, issue.error)?;
+        }
+        Ok(())
+    }
+}
+impl std::error::Error for HandoffError {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HandoffStatus {
     Done,
@@ -14,8 +56,22 @@ pub enum HandoffStatus {
     Blocked,
 }
 
+impl<'de> Deserialize<'de> for HandoffStatus {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(d)?;
+        match text.trim().to_ascii_lowercase().as_str() {
+            "done" => Ok(Self::Done),
+            "stopped_early" => Ok(Self::StoppedEarly),
+            "blocked" => Ok(Self::Blocked),
+            _ => Err(serde::de::Error::custom(
+                "expected status done, stopped_early or blocked",
+            )),
+        }
+    }
+}
+
 /// A writer's evidenced challenge to a criterion, for the chair to settle.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct SpecConcern {
     pub criterion: String,
     pub claim: String,
@@ -24,69 +80,172 @@ pub struct SpecConcern {
     pub status: SpecConcernStatus,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for SpecConcern {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Fields {
+            #[serde(default)]
+            criterion: String,
+            claim: String,
+            #[serde(default)]
+            evidence: String,
+            #[serde(default)]
+            proposed_change: String,
+            #[serde(default)]
+            status: SpecConcernStatus,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Input {
+            Text(String),
+            Object(Fields),
+        }
+        Ok(match Input::deserialize(d)? {
+            Input::Text(claim) => Self {
+                criterion: String::new(),
+                claim,
+                evidence: String::new(),
+                proposed_change: String::new(),
+                status: SpecConcernStatus::default(),
+            },
+            Input::Object(v) => Self {
+                criterion: v.criterion,
+                claim: v.claim,
+                evidence: v.evidence,
+                proposed_change: v.proposed_change,
+                status: v.status,
+            },
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SpecConcernStatus {
+    #[default]
     AsWritten,
     Diverged,
     Stopped,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Handoff {
-    pub schema_version: u64,
-    pub status: HandoffStatus,
-    pub note: String,
-    pub remaining: Vec<String>,
-    pub decisions: Vec<String>,
-    pub verify: Vec<String>,
+fn strings<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    // A visitor preserves the item path (e.g. verify[0]) on an invalid array.
+    struct Strings;
+    impl<'de> serde::de::Visitor<'de> for Strings {
+        type Value = Vec<String>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a string or array of strings")
+        }
+        fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<Self::Value, E> {
+            Ok(vec![text.to_owned()])
+        }
+        fn visit_string<E: serde::de::Error>(self, text: String) -> Result<Self::Value, E> {
+            Ok(vec![text])
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut items = Vec::new();
+            while let Some(item) = seq.next_element::<String>()? {
+                items.push(item);
+            }
+            Ok(items)
+        }
+    }
+    d.deserialize_any(Strings)
+}
+
+fn text_valid(s: &str) -> bool {
+    !s.trim().is_empty() && s.len() <= NOTE_BYTES
+}
+fn strings_valid(items: &[String]) -> bool {
+    items.len() <= ITEMS && items.iter().all(|s| text_valid(s))
+}
+fn concerns_valid(items: &[SpecConcern]) -> bool {
+    items.len() <= ITEMS
+        && items.iter().all(|c| {
+            text_valid(&c.claim)
+                && [&c.criterion, &c.evidence, &c.proposed_change]
+                    .iter()
+                    .all(|s| s.len() <= NOTE_BYTES)
+        })
+}
+
+// The fields, decoding rules, validation and test field list have one owner.
+macro_rules! handoff_fields {
+    ($( $(#[$attr:meta])* $name:ident: $ty:ty => $valid:expr; )*) => {
+        #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        pub struct Handoff {
+            $($(#[$attr])* pub $name: $ty,)*
+            #[serde(flatten)] pub extra: crate::ExtraFields,
+        }
+        impl Handoff {
+            #[cfg(test)]
+            const FIELDS: &'static [&'static str] = &[$(stringify!($name)),*];
+
+            pub fn validate(&self) -> Result<(), &'static str> {
+                $(if !($valid)(&self.$name) { return Err(concat!("invalid handoff field ", stringify!($name))); })*
+                Ok(())
+            }
+
+            fn decode(value: serde_json::Value) -> Result<Self, HandoffError> {
+                let Some(object) = value.as_object() else { return Err(HandoffError::new("$", "expected a handoff object")); };
+                let mut retained = crate::ExtraFields::default();
+                let mut dropped = Vec::new();
+                $({
+                    // Decode each field independently with its own serde attributes.
+                    #[derive(Serialize, Deserialize)]
+                    struct Field { $(#[$attr])* $name: $ty }
+                    let mut input = serde_json::Map::new();
+                    if let Some(value) = object.get(stringify!($name)) { input.insert(stringify!($name).into(), value.clone()); }
+                    let input = serde_json::Value::Object(input);
+                    match serde_path_to_error::deserialize::<_, Field>(input) {
+                        Ok(field) if ($valid)(&field.$name) => { retained.insert(stringify!($name).into(), serde_json::json!(field.$name)); }
+                        Ok(_) => dropped.push(HandoffFieldError { field: stringify!($name).into(), error: "value exceeds bounds or has no required text".into() }),
+                        Err(error) => {
+                            let path = error.path().to_string();
+                            dropped.push(HandoffFieldError { field: if path.is_empty() || path == "." { stringify!($name).into() } else { path }, error: error.inner().to_string() });
+                        }
+                    }
+                })*
+                for (key, value) in object {
+                    if !matches!(key.as_str(), $(stringify!($name))|*) { retained.insert(key.clone(), value.clone()); }
+                }
+                if !dropped.is_empty() { return Err(HandoffError { dropped, retained }); }
+                serde_json::from_value(serde_json::json!(retained)).map_err(|error| HandoffError::new("$", error.to_string()))
+            }
+        }
+    };
+}
+
+handoff_fields! {
+    schema_version: u64 => |v: &u64| *v == 2;
+    status: HandoffStatus => |_: &HandoffStatus| true;
+    note: String => |v: &String| text_valid(v);
+    #[serde(deserialize_with = "strings")]
+    remaining: Vec<String> => |v: &Vec<String>| strings_valid(v);
+    #[serde(deserialize_with = "strings")]
+    decisions: Vec<String> => |v: &Vec<String>| strings_valid(v);
+    #[serde(deserialize_with = "strings")]
+    verify: Vec<String> => |v: &Vec<String>| strings_valid(v);
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub spec_concerns: Vec<SpecConcern>,
-    #[serde(flatten)]
-    pub extra: crate::ExtraFields,
+    spec_concerns: Vec<SpecConcern> => |v: &Vec<SpecConcern>| concerns_valid(v);
 }
 
 impl Handoff {
-    pub fn from_json(json: &[u8]) -> Result<Self, &'static str> {
+    pub fn from_json(json: &[u8]) -> Result<Self, HandoffError> {
         if json.len() > HANDOFF_BYTES {
-            return Err("handoff exceeds 12288 bytes");
+            return Err(HandoffError::new("$", "handoff exceeds 12288 bytes"));
         }
-        let handoff: Self = serde_json::from_slice(json).map_err(|_| "invalid handoff JSON")?;
-        handoff.validate()?;
-        Ok(handoff)
-    }
-
-    /// The declaration bounds, for a handoff decoded inside another record.
-    pub fn validate(&self) -> Result<(), &'static str> {
-        let handoff = self;
-        let text_valid = |s: &str| !s.trim().is_empty() && s.len() <= NOTE_BYTES;
-        if handoff.schema_version != 2
-            || !text_valid(&handoff.note)
-            || handoff.spec_concerns.len() > ITEMS
-            || handoff.spec_concerns.iter().any(|concern| {
-                [
-                    &concern.criterion,
-                    &concern.claim,
-                    &concern.evidence,
-                    &concern.proposed_change,
-                ]
-                .iter()
-                .any(|text| !text_valid(text))
-            })
-            || [&handoff.remaining, &handoff.decisions, &handoff.verify]
-                .iter()
-                .any(|items| items.len() > ITEMS || items.iter().any(|s| !text_valid(s)))
-        {
-            return Err(
-                "handoff requires schema_version 2, a note of 1..4096 bytes and arrays of at most 64 non-empty strings of 1..4096 bytes",
-            );
-        }
-        Ok(())
+        let value = serde_json::from_slice(json)
+            .map_err(|error| HandoffError::new("$", format!("invalid handoff JSON: {error}")))?;
+        Self::decode(value)
     }
 
     /// Only one complete fence at the end of the answer is a declaration.
-    /// Missing and malformed declarations never imply unfinished work.
-    pub fn from_result(result: &str) -> Result<Option<Self>, &'static str> {
+    /// A malformed declaration is explicit evidence, never an absent handoff.
+    pub fn from_result(result: &str) -> HandoffResult {
         let mut capture = HandoffCapture::default();
         capture.push(result.as_bytes());
         capture.finish()
@@ -99,7 +258,7 @@ impl Handoff {
     /// leaves the earlier declaration standing; a later declaration, a later
     /// malformed one or later tool work replaces it. Without usable turn
     /// boundaries this is exactly [`Handoff::from_result`].
-    pub fn from_turns(result: &str, turns: &[TurnEnd]) -> Result<Option<Self>, &'static str> {
+    pub fn from_turns(result: &str, turns: &[TurnEnd]) -> HandoffResult {
         let mut start = 0;
         let mut segments = Vec::with_capacity(turns.len());
         for turn in turns {
@@ -151,7 +310,7 @@ pub struct HandoffCapture {
     fence: Option<(u8, usize)>,
     json: Option<Vec<u8>>,
     declaration: Option<Handoff>,
-    error: Option<&'static str>,
+    error: Option<HandoffError>,
 }
 
 impl HandoffCapture {
@@ -182,22 +341,22 @@ impl HandoffCapture {
                     .get(indent..indent + 3)
                     .is_some_and(|prefix| prefix == b"```" || prefix == b"~~~");
             if self.json.is_some() || self.declaration.is_some() || fence_prefix {
-                self.error = Some("handoff line exceeds 12288 bytes");
+                self.error = Some(HandoffError::new("$", "handoff line exceeds 12288 bytes"));
             }
             return;
         }
         let Ok(text) = std::str::from_utf8(&line) else {
-            self.error = Some("invalid handoff UTF-8");
+            self.error = Some(HandoffError::new("$", "invalid handoff UTF-8"));
             return;
         };
         let marker = text.trim_end_matches('\r');
         if self.declaration.is_some() {
             if !marker.trim().is_empty() {
-                self.error = Some("handoff must end the answer");
+                self.error = Some(HandoffError::new("$", "handoff must end the answer"));
             }
         } else if let Some(json) = &mut self.json {
             if marker == OPEN {
-                self.error = Some("handoff block repeated");
+                self.error = Some(HandoffError::new("$", "handoff block repeated"));
             } else if marker == "```" {
                 // The line ending preceding the closer is fence syntax, not
                 // part of the bounded JSON payload.
@@ -211,7 +370,7 @@ impl HandoffCapture {
                 }
                 self.json = None;
             } else if json.len().saturating_add(line.len() + 1) > HANDOFF_BYTES + 2 {
-                self.error = Some("handoff exceeds 12288 bytes");
+                self.error = Some(HandoffError::new("$", "handoff exceeds 12288 bytes"));
             } else {
                 json.extend_from_slice(&line);
                 json.push(b'\n');
@@ -233,12 +392,19 @@ impl HandoffCapture {
         }
     }
 
-    pub fn finish(mut self) -> Result<Option<Handoff>, &'static str> {
+    pub fn finish(mut self) -> HandoffResult {
         self.end_line();
-        if let Some(error) = self.error {
+        if let Some(mut error) = self.error {
+            if error.retained.is_empty()
+                && let Some(handoff) = self.declaration
+            {
+                if let Ok(fields) = serde_json::from_value(serde_json::json!(handoff)) {
+                    error.retained = fields;
+                }
+            }
             Err(error)
         } else if self.json.is_some() {
-            Err("handoff block incomplete")
+            Err(HandoffError::new("$", "handoff block incomplete"))
         } else {
             Ok(self.declaration)
         }
@@ -367,7 +533,8 @@ mod tests {
     }
 
     #[test]
-    fn spec_concerns_round_trip_and_absence_is_unchanged() {
+    fn declared_fields_round_trip_and_malformed_fields_are_retained_as_typed_outcomes() {
+        use crate::run::{Outcome, SettlementNodeOutcome, SettlementReason, TerminalEvidence};
         let original = Handoff::from_result(STOP).unwrap().unwrap();
         assert!(original.spec_concerns.is_empty());
         assert!(!original.fenced().contains("spec_concerns"));
@@ -378,16 +545,90 @@ mod tests {
         ] {
             let mut handoff = original.clone();
             handoff.spec_concerns.push(SpecConcern {
-                criterion: "Retain old format".into(),
-                claim: "The format is retired".into(),
-                evidence: "The approved scope removes the old reader".into(),
-                proposed_change: "Accept the current format only".into(),
+                criterion: "Criterion".into(),
+                claim: "Claim".into(),
+                evidence: "Evidence".into(),
+                proposed_change: "Change".into(),
                 status,
             });
+            handoff
+                .extra
+                .insert("future".into(), serde_json::json!({"any": [true, null]}));
+            let value = serde_json::to_value(&handoff).unwrap();
             assert_eq!(
-                Handoff::from_result(&handoff.fenced()).unwrap(),
-                Some(handoff)
+                Handoff::from_result(&handoff.fenced()),
+                Ok(Some(handoff.clone()))
             );
+            for field in Handoff::FIELDS {
+                assert!(
+                    value.get(field).is_some(),
+                    "declared field {field} missing from roundtrip fixture"
+                );
+                let mut wrong = value.clone();
+                wrong[field] = serde_json::json!(false);
+                let parsed = Handoff::from_result(&format!("```handoff\n{wrong}\n```"));
+                let error = parsed.as_ref().unwrap_err();
+                assert_eq!(error.dropped[0].field, *field);
+                assert!(!error.retained.contains_key(*field));
+                for other in Handoff::FIELDS.iter().filter(|other| *other != field) {
+                    assert_eq!(error.retained[*other], value[*other]);
+                }
+                assert_eq!(error.retained["future"], value["future"]);
+                let classified = SettlementReason::classify(
+                    Outcome::Succeeded,
+                    Some(&TerminalEvidence::ProcessExit),
+                    &[],
+                    None,
+                    parsed.as_ref().map(Option::as_ref),
+                )
+                .unwrap();
+                assert_eq!(classified.reason, SettlementReason::HandoffMalformed);
+                assert_eq!(classified.outcome, Outcome::ReviewRequired);
+                assert_eq!(classified.node_outcome, SettlementNodeOutcome::Failed);
+                let stop = classified.stop.unwrap();
+                assert_eq!(stop.cause(), crate::StopCause::HandoffMalformed);
+                assert_eq!(stop.handoff_result(), &parsed);
+                assert_eq!(
+                    serde_json::from_value::<crate::Stop>(serde_json::json!(stop)).unwrap(),
+                    stop
+                );
+            }
+        }
+        // A malformed array item reports its serde path, not just the parent.
+        for field in Handoff::FIELDS {
+            let mut value = serde_json::to_value(&original).unwrap();
+            if value.get(field).is_some_and(serde_json::Value::is_array)
+                || *field == "spec_concerns"
+            {
+                value[field] = serde_json::json!([false]);
+                let error = Handoff::from_json(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+                assert_eq!(error.dropped[0].field, format!("{field}[0]"));
+            }
+        }
+    }
+
+    #[test]
+    fn unambiguous_agent_spellings_decode_through_the_types() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(STOP.split('\n').nth(1).unwrap()).unwrap();
+        value["spec_concerns"] =
+            serde_json::json!(["Question this criterion", {"claim": "Need evidence"}]);
+        for field in ["remaining", "decisions", "verify"] {
+            value[field] = serde_json::json!("One item");
+        }
+        for status in ["DONE", "Stopped_Early", " Blocked "] {
+            value["status"] = serde_json::json!(status);
+            let handoff = Handoff::from_json(&serde_json::to_vec(&value).unwrap()).unwrap();
+            assert_eq!(handoff.spec_concerns[0].claim, "Question this criterion");
+            assert_eq!(
+                handoff.spec_concerns[0].status,
+                SpecConcernStatus::AsWritten
+            );
+            assert!(handoff.spec_concerns[0].criterion.is_empty());
+            assert_eq!(handoff.remaining, ["One item"]);
+            assert_eq!(handoff.decisions, ["One item"]);
+            assert_eq!(handoff.verify, ["One item"]);
+            assert_eq!(Handoff::from_result(&handoff.fenced()), Ok(Some(handoff)));
         }
     }
 
@@ -460,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_malformed_and_ambiguous_blocks_are_no_declaration() {
+    fn absent_blocks_remain_absent_and_malformed_or_ambiguous_blocks_are_errors() {
         for result in [
             "Work remains.",
             "Status: incomplete",

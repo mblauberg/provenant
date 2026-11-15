@@ -1061,7 +1061,7 @@ fn refused_planner_fragment_retries_after_file_journal_reopen() {
 }
 
 #[test]
-fn malformed_optional_handoff_warns_and_still_delivers() {
+fn malformed_handoff_is_a_typed_failure_and_prevents_delivery() {
     for output in [
         "```handoff\n{}\n```".to_owned(),
         format!("{STOP}\n{STOP}"),
@@ -1079,21 +1079,11 @@ fn malformed_optional_handoff_warns_and_still_delivers() {
         let mut owner = fixture_owner(&[&output, "checked"]);
         let mut journal = MemoryJournal::default();
         let run = advance(&doc, &mut owner, &mut journal).unwrap();
-        assert_eq!(run.status, GraphStatus::Complete);
-        assert!(run.checkpoint.successful());
-        assert!(run.checkpoint.expansions.is_empty());
-        let warnings = &run.checkpoint.nodes[0].outputs.as_ref().unwrap().warnings;
-        assert!(
-            warnings
-                .iter()
-                .any(|warning| warning.contains("ignored optional handoff"))
-        );
-        assert!(warnings.iter().all(|warning| !warning.contains("TOKEN_SENTINEL") && !warning.contains("/private")));
-        assert_eq!(owner.deliveries, 1);
-        assert_eq!(
-            advance(&doc, &mut owner, &mut journal).unwrap().checkpoint,
-            run.checkpoint
-        );
+        assert!(!run.checkpoint.successful());
+        let progress = &run.checkpoint.nodes[0];
+        assert_eq!(progress.attempts.last().unwrap().stop, Some(provenant_records::StopCause::HandoffMalformed));
+        assert!(progress.outputs.as_ref().unwrap().warnings.iter().any(|warning| warning.contains("handoff_malformed")));
+        assert_eq!(owner.deliveries, 0);
     }
 }
 

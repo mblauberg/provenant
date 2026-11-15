@@ -666,14 +666,33 @@ fn a_reply_to_a_late_notification_keeps_the_turn_ending_handoff() -> TestResult 
             ..
         }
     ));
-    // Without boundaries, or after later tool work, the trailing text
-    // displaces it as before.
-    for turns in [
-        Vec::new(),
-        vec![turn(first.len(), true), turn(answer.len(), true)],
+    // Without boundaries the trailing text makes a malformed declaration;
+    // later tool work explicitly invalidates the old turn's declaration.
+    for (turns, malformed) in [
+        (Vec::new(), true),
+        (
+            vec![turn(first.len(), true), turn(answer.len(), true)],
+            false,
+        ),
     ] {
         let record = settle_with_turns(&answer, Some(Outcome::Succeeded), Vec::new(), None, turns)?;
-        assert!(record.partial_signals.is_empty());
+        if malformed {
+            assert_eq!(
+                record.settlement_reason,
+                Some(provenant_records::run::SettlementReason::HandoffMalformed)
+            );
+            assert_eq!(
+                record.state.stop()?.unwrap().cause(),
+                provenant_records::StopCause::HandoffMalformed
+            );
+            assert_eq!(record.partial_signals, [PartialSignal::HandoffMalformed]);
+        } else {
+            assert_eq!(
+                record.settlement_reason,
+                Some(provenant_records::run::SettlementReason::Completed)
+            );
+            assert!(record.partial_signals.is_empty());
+        }
     }
     Ok(())
 }
@@ -688,7 +707,7 @@ fn a_read_only_answer_without_handoff_settles_succeeded() -> TestResult {
         "All of the brief is done.".to_owned(),
         "Work remains in the renderer, which I did not finish.".to_owned(),
         // A block quoted mid-answer is not the lane's closing statement.
-        format!("The contract says:\n{STOPPED_EARLY}\nI followed it and finished."),
+        format!("The contract says:\n````text\n{STOPPED_EARLY}\n````\nI followed it and finished."),
     ] {
         let record = settle_with(&answer, Some(Outcome::Succeeded), Vec::new())?;
         assert!(record.partial_signals.is_empty(), "{answer}");
@@ -999,7 +1018,7 @@ fn graph_readers_get_the_sealed_handoff_not_a_rereading_of_the_text() -> TestRes
     // The text ends with an acknowledgement, which the whole-answer rule
     // would call "no handoff"; the graph's capture carries the settled one.
     let capture = store.stream_result(id, &call, None)?;
-    let sealed = store.handoff(&record)?.ok_or("sealed handoff")?;
+    let sealed = store.handoff(&record)??.ok_or("sealed handoff")?;
     assert_eq!(capture.handoff, Ok(Some(sealed)));
     Ok(())
 }

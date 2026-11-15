@@ -21,6 +21,12 @@ macro_rules! lane_row {
     }
 }
 
+fn settlement_reason_schema() -> Value {
+    let mut schema = choices(&[]);
+    schema["enum"] = json!(crate::run::SettlementReason::ALL);
+    schema
+}
+
 lane_row! {
     required {
         project_id: String => string();
@@ -30,7 +36,7 @@ lane_row! {
         attempt_number: u64 => unsigned();
         retry_of: Option<String> => nullable(string());
         superseded_by: Option<String> => nullable(string());
-        cause: Option<crate::run::SettlementReason> => nullable(choices(&["completed", "handoff_missing", "declared_stop", "provider_stop", "uncommitted_work", "pre_launch_refusal", "cancelled", "lost", "unsettled", "failed"]));
+        cause: Option<crate::run::SettlementReason> => nullable(settlement_reason_schema());
         state: String => string();
         exit_code: Option<i64> => nullable(integer());
         reason: Option<String> => nullable(string());
@@ -102,6 +108,18 @@ impl LaneRow {
         detail: bool,
     ) -> (String, Option<String>) {
         use crate::run::AttemptState;
+        if let Ok(Some(stop)) = state.stop()
+            && let Err(error) = stop.handoff_result()
+            && let AttemptState::Terminal { outcome, .. } = state
+        {
+            return (
+                serde_json::to_value(outcome)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_default(),
+                Some(crate::diagnostic::safe_text(&error.to_string())),
+            );
+        }
         match state {
             AttemptState::Terminal {
                 outcome,
@@ -230,6 +248,9 @@ impl LaneRow {
         {
             use crate::run::SettlementReason;
             let detail = match reason {
+                SettlementReason::HandoffMalformed => Some(
+                    "the lane finished with a malformed handoff; inspect its field diagnostics",
+                ),
                 SettlementReason::HandoffMissing => {
                     Some("the lane finished without a handoff; inspect its result")
                 }
@@ -255,6 +276,11 @@ impl LaneRow {
             };
             if let Some(detail) = detail {
                 terminal_reason = Some(detail.to_owned());
+            }
+        }
+        if let Ok(Some(stop)) = lane.state.stop() {
+            if let Err(error) = stop.handoff_result() {
+                terminal_reason = Some(crate::diagnostic::safe_text(&error.to_string()));
             }
         }
         if matches!(
@@ -454,7 +480,12 @@ impl LaneRow {
                 .map(i64::from),
             provider_seconds: facts.provider_seconds,
             limits: lane.limits.as_ref().map(|limits| json!(limits)),
-            handoff: None,
+            handoff: lane
+                .state
+                .stop()
+                .ok()
+                .flatten()
+                .map(|stop| json!(stop.handoff_result())),
             provider_error: None,
             capabilities: None,
             payload: facts.payload_evicted.then(|| "evicted".to_owned()),

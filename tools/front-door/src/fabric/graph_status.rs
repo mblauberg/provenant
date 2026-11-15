@@ -79,8 +79,9 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
                     .filter(|outcome| state != "failed" || outcome.as_str() != "succeeded")
                     .unwrap_or_else(|| state.clone())
             };
-            let cause =
-                text(&node["cause_code"], 128).or_else(|| text(&attempt["cause_code"], 128));
+            let cause = text(&node["cause_code"], 128)
+                .or_else(|| text(&attempt["cause_code"], 128))
+                .or_else(|| text(&attempt["cause"], 128));
             let branch =
                 text(&attempt["branch"], 256).or_else(|| text(&attempt["delivery"]["branch"], 256));
             let pr = if attempt["pr"].is_null() {
@@ -95,7 +96,15 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
             };
             let result_path = path_text(&attempt["result_path"]);
             let provider_error = text(&attempt["provider_error"], 1024);
-            let handoff_status = text(&attempt["handoff"]["status"], 64);
+            let handoff_error = attempt["handoff"].get("Err").and_then(|value| {
+                serde_json::from_value::<provenant_records::handoff::HandoffError>(value.clone())
+                    .ok()
+            });
+            let handoff_status = if handoff_error.is_some() {
+                Some("malformed".to_owned())
+            } else {
+                text(&attempt["handoff"]["Ok"]["status"], 64)
+            };
             let open_asks = node["open_asks"].as_array().cloned().unwrap_or_default();
             let evidence_error = text(&attempt["evidence_error"], 200);
             let mut line = format!(
@@ -125,6 +134,12 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
             );
             if let Some(status) = &handoff_status {
                 line.push_str(&format!(" handoff_status={status}"));
+            }
+            if let Some(error) = &handoff_error {
+                line.push_str(&format!(
+                    " {}",
+                    provenant_fabric_runtime::hosts::plain_text(&error.to_string(), 1024)
+                ));
             }
             if !open_asks.is_empty() {
                 line.push_str(&format!(

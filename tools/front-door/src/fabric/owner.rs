@@ -4660,21 +4660,28 @@ mod journal_error_tests {
 /// The serving host verifies each artifact read; capture remains on the chair.
 /// A peer's handoff is untrusted at this boundary: validate it as any decoded
 /// handoff, then redact it, before a continuation prompt can carry it.
-/// An absent key or an explicit null means no handoff.
-fn peer_handoff(
-    sealed: Option<&serde_json::Value>,
-) -> Result<Option<provenant_records::handoff::Handoff>, &'static str> {
-    let handoff = match sealed {
-        None | Some(serde_json::Value::Null) => return Ok(None),
-        Some(value) => {
-            let bytes = serde_json::to_vec(value).map_err(|_| "peer handoff unreadable")?;
-            provenant_records::handoff::Handoff::from_json(&bytes)
-                .map_err(|_| "peer handoff unreadable")?
-        }
+/// An absent key means no captured handoff; a present key uses the sealed typed outcome.
+fn peer_handoff(sealed: Option<&serde_json::Value>) -> provenant_records::handoff::HandoffResult {
+    use provenant_records::handoff::{HandoffError, HandoffResult};
+    let Some(value) = sealed else {
+        return Ok(None);
     };
-    provenant_run::sanitise_handoff(&handoff)
-        .map(Some)
-        .map_err(|_| "peer handoff unreadable")
+    // Peers send the same sealed parse outcome, not a fresh text parse.
+    let handoff: HandoffResult = serde_json::from_value(value.clone()).unwrap_or_else(|error| {
+        Err(HandoffError::new(
+            "$",
+            format!("peer handoff unreadable: {error}"),
+        ))
+    });
+    let handoff = match handoff {
+        Ok(Some(handoff)) => {
+            let bytes = serde_json::to_vec(&handoff)
+                .map_err(|_| HandoffError::new("$", "peer handoff unreadable"))?;
+            provenant_records::handoff::Handoff::from_json(&bytes).map(Some)
+        }
+        other => other,
+    };
+    provenant_run::sanitise_handoff_result(handoff)
 }
 
 fn remote_graph_result(
@@ -4765,24 +4772,27 @@ mod peer_handoff_tests {
     #[test]
     fn peer_handoff_is_validated_and_redacted_before_it_reaches_the_capture() {
         let sealed = |note: &str| {
-            serde_json::json!({"schema_version":2,"status":"done","note":note,
-                "remaining":[],"decisions":[],"verify":[]})
+            serde_json::json!({"Ok":{"schema_version":2,"status":"done","note":note,
+                "remaining":[],"decisions":[],"verify":[]}})
         };
         let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
         let clean = peer_handoff(Some(&sealed(&format!("key {token}"))));
         let note = clean.unwrap().unwrap().note;
         assert!(!note.contains(token));
         let mut bad = sealed("x");
-        bad["schema_version"] = 1.into();
-        assert!(peer_handoff(Some(&bad)).is_err());
+        bad["Ok"]["schema_version"] = 1.into();
+        let error = peer_handoff(Some(&bad)).unwrap_err();
+        assert_eq!(error.dropped[0].field, "schema_version");
         assert!(peer_handoff(Some(&sealed(" "))).is_err());
         assert!(peer_handoff(Some(&sealed(&"n".repeat(5000)))).is_err());
-        assert!(
-            peer_handoff(Some(&serde_json::Value::Null))
-                .unwrap()
-                .is_none()
+        let malformed = serde_json::json!({"Err": error});
+        assert_eq!(peer_handoff(Some(&malformed)), Err(error));
+        assert_eq!(
+            peer_handoff(Some(&serde_json::json!({"Ok":null}))),
+            Ok(None)
         );
-        assert!(peer_handoff(None).unwrap().is_none());
+        assert!(peer_handoff(Some(&serde_json::Value::Null)).is_err());
+        assert_eq!(peer_handoff(None), Ok(None));
     }
 }
 

@@ -85,7 +85,7 @@ pub(crate) fn work_key(
 pub struct TerminalPublication<'a> {
     pub terminal_cause: Option<TerminalCause>,
     /// Provider handoff evidence decoded by the common terminal classifier.
-    pub handoff: Option<provenant_records::handoff::Handoff>,
+    pub handoff: provenant_records::handoff::HandoffResult,
     /// A bounded sentence Provenant composed from fixed text and typed values,
     /// such as a retry decision. It is never provider output.
     pub terminal_note: Option<String>,
@@ -926,7 +926,7 @@ impl RunStore {
                         Some(&TerminalEvidence::ProcessExit),
                         &publication.partial_signals,
                         publication.terminal_cause,
-                        publication.handoff.as_ref(),
+                        publication.handoff.as_ref().map(Option::as_ref),
                     )
                     .rule()
                     .terminal_outcome,
@@ -1143,7 +1143,7 @@ impl RunStore {
             };
         old.preparation_failure = preparation_failure;
         let publication = TerminalPublication {
-            handoff: None,
+            handoff: Ok(None),
             terminal_cause,
             terminal_note,
             outcome,
@@ -1480,7 +1480,7 @@ impl RunStore {
             Some(&terminal_evidence),
             &next.partial_signals,
             publication.terminal_cause,
-            publication.handoff.as_ref(),
+            publication.handoff.as_ref().map(Option::as_ref),
         )
         .map_err(|_| RunError::Validation("terminal classification could not be sealed"))?;
         let mut terminal_extra = provenant_records::ExtraFields::default();

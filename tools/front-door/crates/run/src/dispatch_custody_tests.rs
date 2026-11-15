@@ -389,7 +389,7 @@ fn private_temporary_directories_are_removed_after_terminal_and_withdrawal() -> 
     observed.termination = Some(Termination::Exit(1));
     seal_exit(&store, &observed)?;
     let publication = TerminalPublication {
-        handoff: None,
+        handoff: Ok(None),
         terminal_cause: None,
         terminal_note: None,
         outcome: Outcome::Failed,
