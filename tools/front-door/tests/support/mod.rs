@@ -79,11 +79,7 @@ pub fn git(rig: &TestRig, args: &[&str]) -> Result<String> {
 /// Parse every JSON record in a command stream and return its final envelope.
 /// Event-producing commands retain their summary as the last record.
 pub fn last_json_record(bytes: &[u8]) -> Result<serde_json::Value> {
-    bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
-        .map(serde_json::from_slice::<serde_json::Value>)
-        .collect::<std::result::Result<Vec<_>, _>>()?
+    json_lines(bytes)?
         .pop()
         .ok_or_else(|| "command emitted no JSON records".into())
 }
