@@ -365,7 +365,6 @@ fn natural_exit_beats_pipe_drain_expiry(root: &Path, env: &[(OsString, OsString)
             let mut options = ExecOptions::new(&args, &root, Duration::from_secs(30));
             options.env = Some(&env);
             options.stdout = StreamPolicy::Capture { limit: 32 };
-            options.reap_timeout = Duration::from_millis(50);
             SystemExecutor::new(1)?.execute(options)
         })();
         let _ = sender.send(result);
@@ -383,7 +382,7 @@ fn natural_exit_beats_pipe_drain_expiry(root: &Path, env: &[(OsString, OsString)
     worker
         .join()
         .map_err(|_| io::Error::other("drain worker panicked"))?;
-    let outcome = result??;
+    let outcome = result?;
     assert_eq!(outcome.termination, Termination::Exit(0));
     assert!(!outcome.timed_out);
     assert!(outcome.drain_truncated);

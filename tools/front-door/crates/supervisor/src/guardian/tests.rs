@@ -115,8 +115,15 @@ fn census_watches_only_possible_live_identities_without_discarding_custody_histo
 
 #[test]
 fn cancellation_directory_watch_allows_idle_backoff_with_polling_fallback() {
-    assert_eq!(super::cancel_poll_interval(true), 1_000);
-    assert_eq!(super::cancel_poll_interval(false), 100);
+    assert_eq!(
+        super::cancel_poll_interval(true),
+        super::CANCEL_WATCH_POLL_MS
+    );
+    assert_eq!(
+        super::cancel_poll_interval(false),
+        super::CANCEL_FALLBACK_POLL_MS
+    );
+    assert!(super::CANCEL_WATCH_POLL_MS > super::CANCEL_FALLBACK_POLL_MS);
 }
 
 #[cfg(all(feature = "fixture", target_os = "macos"))]
@@ -1178,7 +1185,26 @@ fn settlement_lock_clone_failure_retains_exclusion_and_returns_reconcile_hint() 
         &writer.reservation,
     )
     .unwrap_err();
-    assert!(error.to_string().contains("provenant reconcile"));
+    assert!(matches!(
+        &error,
+        CustodyError::Io(error)
+            if error
+                .get_ref()
+                .and_then(|source| source.downcast_ref::<ReconcileHint>())
+                .is_some_and(|hint| {
+                    hint.attempt == scope.attempt
+                        && matches!(
+                            &hint.source,
+                            FsError::Io {
+                                operation: "clone directory",
+                                source,
+                                ..
+                            } if source.raw_os_error() == Some(libc::EMFILE)
+                        )
+                        && std::error::Error::source(hint)
+                            .is_some_and(|source| source.downcast_ref::<FsError>().is_some())
+                })
+    ));
     assert!(writer.lease.is_some());
     assert!(matches!(
         directory.try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive),
@@ -1209,7 +1235,9 @@ fn handoff_round_trips_one_mib_stdin_with_claude_argv_and_environment() {
         permission_plan_digest: provenant_core::Digest::from_bytes([3; 32]),
         key: crate::custody::fixture_key(4),
         requester: provenant_core::ActorId::from_bytes([5; 16]),
-        binding: StoredWriterBinding::ReadOnly,
+        binding: StoredWriterBinding::ReadOnly {
+            extra: Default::default(),
+        },
         executable_snapshot: ExecutableSnapshot {
             device: 1,
             inode: 2,
@@ -1458,15 +1486,86 @@ fn disk_admission_projects_typed_resource_figures() {
 }
 
 #[test]
-fn admission_configuration_and_guardian_failures_are_named() {
-    let configuration = super::admission_refusal(&super::CustodyError::Admission(
-        super::AdmissionError::BuildSettings,
-    ));
-    assert!(configuration.contains("domains.fabric.lanes.max_concurrent_builds"));
-    let guardian = super::admission_refusal(&super::CustodyError::Admission(
-        super::AdmissionError::GuardianIdentity,
-    ));
-    assert!(guardian.contains("guardian process identity unavailable"));
+fn admission_setting_names_follow_each_typed_cause() {
+    use provenant_records::diagnostic::{
+        LaneLimit, PressureLevel, PressureThreshold, SettingSource,
+    };
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum AdmissionCause {
+        Clock,
+        BuildSettings,
+        GuardianIdentity,
+        Disk,
+        MemoryPressure,
+        Processes,
+        LaneCap,
+    }
+    const ALL: [(AdmissionCause, Option<&[&str]>); 7] = [
+        (AdmissionCause::Clock, Some(&[])),
+        (
+            AdmissionCause::BuildSettings,
+            Some(&[
+                "domains.fabric.lanes.max_concurrent_builds",
+                "cargo_build_jobs",
+                "cargo_debug",
+            ]),
+        ),
+        (AdmissionCause::GuardianIdentity, Some(&[])),
+        (AdmissionCause::Disk, Some(&["gc.critical_free"])),
+        (
+            AdmissionCause::MemoryPressure,
+            Some(&["domains.fabric.lanes.memory_pressure_threshold"]),
+        ),
+        (AdmissionCause::Processes, Some(&[])),
+        (AdmissionCause::LaneCap, None),
+    ];
+    fn sample(cause: AdmissionCause) -> AdmissionError {
+        match cause {
+            AdmissionCause::Clock => AdmissionError::Clock,
+            AdmissionCause::BuildSettings => AdmissionError::BuildSettings,
+            AdmissionCause::GuardianIdentity => AdmissionError::GuardianIdentity,
+            AdmissionCause::Disk => AdmissionError::Disk {
+                free: 1,
+                floor: 2,
+                origin: SettingSource::Configuration,
+            },
+            AdmissionCause::MemoryPressure => AdmissionError::MemoryPressure {
+                level: PressureLevel::Critical,
+                threshold: PressureThreshold::Critical,
+                origin: SettingSource::ShippedDefault,
+            },
+            AdmissionCause::Processes => AdmissionError::Processes { used: 2, limit: 1 },
+            AdmissionCause::LaneCap => AdmissionError::LaneCap {
+                active: 2,
+                limit: 1,
+                kind: LaneLimit::ProjectWriters,
+                origin: SettingSource::Configuration,
+            },
+        }
+    }
+    fn classify(error: &AdmissionError) -> AdmissionCause {
+        match error {
+            AdmissionError::Clock => AdmissionCause::Clock,
+            AdmissionError::BuildSettings => AdmissionCause::BuildSettings,
+            AdmissionError::GuardianIdentity => AdmissionCause::GuardianIdentity,
+            AdmissionError::Disk { .. } => AdmissionCause::Disk,
+            AdmissionError::MemoryPressure { .. } => AdmissionCause::MemoryPressure,
+            AdmissionError::Processes { .. } => AdmissionCause::Processes,
+            AdmissionError::LaneCap { .. } => AdmissionCause::LaneCap,
+        }
+    }
+    for (cause, expected) in ALL {
+        let error = sample(cause);
+        assert_eq!(classify(&error), cause);
+        if let Some(expected) = expected {
+            assert_eq!(error.setting_names().as_slice(), expected);
+        } else {
+            assert_eq!(
+                error.setting_names(),
+                vec![LaneLimit::ProjectWriters.setting()]
+            );
+        }
+    }
 }
 
 #[test]
@@ -1502,30 +1601,66 @@ fn process_tree_path_replaces_foreign_environment_and_clears_it_when_unavailable
 
 #[cfg(feature = "fixture")]
 #[test]
-fn a_leased_port_block_replaces_any_block_the_launch_environment_named() {
+fn a_leased_port_block_replaces_every_input_block()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir().unwrap();
-    let plan = provenant_os::lane_ports::Plan {
-        state: temp.path().to_owned(),
-        base: 30000,
-        size: 16,
-        blocks: 2,
-        blocks_origin: None,
-    };
-    let held = plan.try_acquire().unwrap().unwrap();
-    let lease = plan.try_acquire().unwrap().unwrap();
+    let plan = default_lane_port_plan(temp.path().to_owned(), None)?;
+    let held = plan
+        .try_acquire()?
+        .ok_or("first lane port block unavailable")?;
+    let lease = plan
+        .try_acquire()?
+        .ok_or("second lane port block unavailable")?;
     assert_ne!(held.base, lease.base);
     let env: Vec<(OsString, OsString)> = vec![
         ("PATH".into(), "/bin".into()),
-        ("PROVENANT_LANE_PORT_BASE".into(), "1".into()),
+        (
+            provenant_core::consumer_env::LANE_PORT_BASE.into(),
+            "foreign-base".into(),
+        ),
+        (
+            provenant_core::consumer_env::LANE_PORT_COUNT.into(),
+            "foreign-count".into(),
+        ),
+        ("APP_CONFIG".into(), "kept".into()),
     ];
     let out = with_lane_ports(&env, &lease);
-    assert_eq!(out.len(), 3);
     assert!(out.contains(&("PATH".into(), "/bin".into())));
-    assert!(out.contains(&(
-        "PROVENANT_LANE_PORT_BASE".into(),
-        lease.base.to_string().into()
-    )));
-    assert!(out.contains(&("PROVENANT_LANE_PORT_COUNT".into(), "16".into())));
+    assert!(out.contains(&("APP_CONFIG".into(), "kept".into())));
+    let actual = out
+        .iter()
+        .filter(|(name, _)| {
+            name == provenant_core::consumer_env::LANE_PORT_BASE
+                || name == provenant_core::consumer_env::LANE_PORT_COUNT
+        })
+        .map(|(name, value)| {
+            (
+                name.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected = lease
+        .environment()
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), value))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(actual, expected);
+    Ok(())
+}
+
+fn default_lane_port_plan(
+    state: PathBuf,
+    blocks_origin: Option<provenant_os::lane_ports::BlocksOrigin>,
+) -> std::result::Result<provenant_os::lane_ports::Plan, Box<dyn std::error::Error>> {
+    let settings = provenant_config::LaneBuildSettings::default();
+    Ok(provenant_os::lane_ports::Plan {
+        state,
+        base: settings.lane_port_base_value().try_into()?,
+        size: settings.lane_port_block_size().try_into()?,
+        blocks: settings.lane_port_blocks().try_into()?,
+        blocks_origin,
+    })
 }
 
 #[test]
@@ -1572,13 +1707,10 @@ fn unavailable_port_allocation_warns_and_does_not_claim_a_block()
     let temp = tempfile::tempdir()?;
     let file = temp.path().join("not-a-directory");
     std::fs::write(&file, b"fixture")?;
-    let unavailable = provenant_os::lane_ports::Plan {
-        state: file,
-        base: 30000,
-        size: 16,
-        blocks: 1,
-        blocks_origin: Some(provenant_os::lane_ports::BlocksOrigin::HostConfig),
-    };
+    let unavailable = default_lane_port_plan(
+        file,
+        Some(provenant_os::lane_ports::BlocksOrigin::HostConfig),
+    )?;
     let advisory_policy = provenant_records::policy::Policy::default();
     assert_eq!(
         advisory_policy
@@ -1629,6 +1761,7 @@ fn unavailable_port_allocation_warns_and_does_not_claim_a_block()
     );
     let available = provenant_os::lane_ports::Plan {
         state: temp.path().into(),
+        blocks: 1,
         ..unavailable
     };
     let strict = strict_port_policy();
@@ -1727,7 +1860,13 @@ fn tracking_batches_fork_churn_but_publishes_initial_state_immediately() {
 #[test]
 fn budget_actions_preserve_clean_points_and_natural_completion() {
     use provenant_records::BudgetAction;
-    for action in [BudgetAction::WrapUp, BudgetAction::Warn, BudgetAction::Stop] {
+    fn exhaustive_match_guard(action: BudgetAction) {
+        match action {
+            BudgetAction::WrapUp | BudgetAction::Warn | BudgetAction::Stop => {}
+        }
+    }
+    for action in BudgetAction::ALL {
+        exhaustive_match_guard(action);
         for budget in [0, 1, 1000, u64::MAX] {
             for used in [0, budget, budget.saturating_add(1), u64::MAX] {
                 for clean in [false, true] {

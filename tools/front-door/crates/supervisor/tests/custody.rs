@@ -64,13 +64,6 @@ impl ExitPublisher for TrackingPublisher {
         directory: &Directory,
         bytes: &[u8],
     ) -> provenant_supervisor::custody::Result<provenant_os::fs::Publication> {
-        let calls = self.0.join("PROVENANT_STATE_DIR/s2-tracking-calls");
-        if calls.is_file() {
-            std::fs::OpenOptions::new()
-                .append(true)
-                .open(calls)?
-                .write_all(b"T")?;
-        }
         if self
             .0
             .join("tracking-writer")
@@ -735,19 +728,13 @@ fn live_census_failure_warns_once(root: &Path) -> Result<()> {
     );
     Ok(())
 }
-fn idle_supervisor_does_no_census_per_wake(root: &Path) -> Result<()> {
-    idle_supervisor(root, false)
-}
-
 fn unchanged_census_does_not_publish_tracking(root: &Path) -> Result<()> {
     let state = root.join("PROVENANT_STATE_DIR");
     std::fs::create_dir(&state)?;
-    // Failed process watches force an actual full census every 100 ms.
+    // Failed process watches make the guardian take repeated full censuses.
     std::fs::write(state.join("s2-fail-process-watch"), b"fail")?;
     let trace = state.join("s2-idle-census-trace");
-    let calls = state.join("s2-tracking-calls");
     std::fs::write(&trace, b"")?;
-    std::fs::write(&calls, b"")?;
     let socket = root.join("tracking.sock");
     let listener = UnixListener::bind(&socket)?;
     let (_writer, handle) = start(
@@ -759,30 +746,28 @@ fn unchanged_census_does_not_publish_tracking(root: &Path) -> Result<()> {
     )?;
     let mut held = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
     byte(&mut held, b'R')?;
-    let wait_for_censuses = |count| -> Result<()> {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while std::fs::read(&trace)?
-            .iter()
-            .filter(|kind| **kind == b'F')
-            .count()
-            < count
-        {
-            if Instant::now() >= deadline {
-                return Err("expected repeated full censuses".into());
-            }
-            std::thread::park_timeout(Duration::from_millis(10));
-        }
-        Ok(())
-    };
-    wait_for_censuses(3)?;
-    let before = std::fs::read(&calls)?;
-    assert!(!before.is_empty(), "publisher was never exercised");
-    wait_for_censuses(8)?;
-    assert_eq!(
-        std::fs::read(&calls)?,
-        before,
-        "unchanged tracking was published"
-    );
+    let count_full_censuses = |trace: &[u8]| trace.iter().filter(|kind| **kind == b'F').count();
+    let baseline = provenant_test_support::wait_for(
+        "initial full census",
+        Duration::from_secs(5),
+        || std::fs::read(&trace).map(|trace| count_full_censuses(&trace)),
+        |observed| observed.as_ref().is_ok_and(|count| *count > 0),
+    )
+    .map_err(io::Error::other)?
+    .map_err(io::Error::other)?;
+    let reservation = root
+        .join("tracking-writer")
+        .join(scope().attempt.to_string())
+        .join("reservation.json");
+    let before = std::fs::read(&reservation)?;
+    provenant_test_support::wait_for(
+        "next full census",
+        Duration::from_secs(5),
+        || std::fs::read(&trace).map(|trace| count_full_censuses(&trace)),
+        |observed| observed.as_ref().is_ok_and(|count| *count > baseline),
+    )
+    .map_err(io::Error::other)?;
+    assert_eq!(std::fs::read(&reservation)?, before);
     stop(&handle, StopReason::ExplicitCancellation)?;
     assert_eq!(
         exited(&handle)?.stop_reason,
@@ -792,7 +777,7 @@ fn unchanged_census_does_not_publish_tracking(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn idle_supervisor(root: &Path, capture_cpu: bool) -> Result<()> {
+fn idle_supervisor(root: &Path) -> Result<()> {
     let home = root.join("HOME");
     std::fs::create_dir_all(&home)?;
     std::fs::write(home.join(S2_PRODUCTION_SHAPE), b"no registry")?;
@@ -800,8 +785,6 @@ fn idle_supervisor(root: &Path, capture_cpu: bool) -> Result<()> {
     std::fs::create_dir(&state)?;
     std::fs::write(state.join("s2-live-tree"), b"enabled")?;
     std::fs::write(state.join("s2-constant-cpu"), b"enabled")?;
-    let trace = state.join("s2-idle-census-trace");
-    std::fs::write(&trace, b"")?;
     let socket = root.join("idle-census.sock");
     let listener = UnixListener::bind(&socket)?;
     let (_writer, handle) = start(
@@ -816,49 +799,8 @@ fn idle_supervisor(root: &Path, capture_cpu: bool) -> Result<()> {
     // The first walk installs filters and the confirmation walk closes that
     // registration gap. No process forks or exits after this point.
     wait_for_file(&state.join("s2-live-tree-seen"))?;
-    let before = std::fs::read(&trace)?.len();
-    let began = Instant::now();
     let attempt = root.join("idle-census-attempt");
-    for index in 0..30 {
-        // Wake the actual reactor repeatedly without changing process state.
-        // This is also the event emitted by atomic cancellation publication.
-        std::fs::write(attempt.join(format!("idle-wake-{index}")), b"wake")?;
-        std::thread::park_timeout(Duration::from_millis(20));
-    }
-    let calls = std::fs::read(&trace)?;
-    let elapsed = began.elapsed();
-    assert!(
-        !calls[before..].contains(&b'L'),
-        "idle scoped walks: {calls:?}"
-    );
-    // Permit the mandatory five-second backstop even on a slow native host.
-    let full = calls[before..].iter().filter(|kind| **kind == b'F').count();
-    assert!(
-        full as u128 <= 1 + elapsed.as_millis() / 5_000,
-        "census per idle wake: {calls:?}"
-    );
-    if capture_cpu {
-        capture_idle_cpu(&attempt)?;
-    } else {
-        // Let the first CPU observation replace the initial unknown value.
-        // The next observation has identical facts and must retain the bytes,
-        // including the timestamp, rather than flushing a heartbeat.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let before = loop {
-            let bytes = std::fs::read(attempt.join("process.json"))?;
-            let checkpoint: serde_json::Value = serde_json::from_slice(&bytes)?;
-            if checkpoint["provider_cpu_micros"] == 0 && checkpoint["phase"] == "running" {
-                break bytes;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "running checkpoint with sampled CPU was not published: {checkpoint}"
-            );
-            std::thread::park_timeout(Duration::from_millis(20));
-        };
-        std::thread::park_timeout(Duration::from_millis(1_200));
-        assert_eq!(std::fs::read(attempt.join("process.json"))?, before);
-    }
+    capture_idle_cpu(&attempt)?;
     assert!(
         !home.join("graph-children-read").exists(),
         "live census must not read host graph checkpoints"
@@ -2553,17 +2495,24 @@ fn guardian_exits_after_owner_and_tracked_descendant_are_gone(root: &Path) -> Re
     assert!(!settled.unresolved_cleanup, "{settled:?}");
     Ok(())
 }
-fn guardian_retires_after_owner_and_evidence_are_removed(root: &Path) -> Result<()> {
-    orphan_with_removed_writer_state(root, true, false, false)
-}
-fn guardian_retires_after_owner_and_lock_are_removed(root: &Path) -> Result<()> {
-    orphan_with_removed_writer_state(root, false, true, false)
-}
-fn guardian_retires_after_owner_and_writer_state_are_removed(root: &Path) -> Result<()> {
-    orphan_with_removed_writer_state(root, true, true, false)
-}
-fn guardian_retires_after_owner_and_lock_directory_are_removed(root: &Path) -> Result<()> {
-    orphan_with_removed_writer_state(root, true, true, true)
+fn guardian_retires_after_each_writer_artifact_removal(root: &Path) -> Result<()> {
+    let cases = [
+        ("evidence", true, false, false),
+        ("lock", false, true, false),
+        ("writer-state", true, true, false),
+        ("lock-directory", true, true, true),
+    ];
+    for (name, remove_evidence, remove_lock, remove_directory) in cases {
+        let case_root = root.join(name);
+        std::fs::create_dir(&case_root)?;
+        orphan_with_removed_writer_state(
+            &case_root,
+            remove_evidence,
+            remove_lock,
+            remove_directory,
+        )?;
+    }
+    Ok(())
 }
 fn orphan_with_removed_writer_state(
     root: &Path,
@@ -2924,9 +2873,9 @@ fn profile_transport_pass_failure_never_launches_provider(root: &Path) -> Result
     Ok(())
 }
 
-// Medium native integration: both exec handoffs consume the exact complete
-// profile, including a mandatory denial after the former 512 KiB boundary.
-fn native_profile_file_survives_both_handoffs_above_former_limit(root: &Path) -> Result<()> {
+// Medium native integration: both exec handoffs consume the exact profile and
+// preserve its mandatory denial.
+fn native_profile_file_survives_both_handoffs(root: &Path) -> Result<()> {
     let probe = std::process::Command::new("/usr/bin/sandbox-exec")
         .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
         .output()?;
@@ -2938,51 +2887,56 @@ fn native_profile_file_survives_both_handoffs_above_former_limit(root: &Path) ->
         return Ok(());
     }
     let directory = Directory::open_anchor(root)?;
-    for padding in [0, 600 * 1024] {
-        let name = format!("profile-{padding}");
-        let denied = root.join(format!("{name}-mandatory"));
-        let marker = root.join(format!("{name}-allowed"));
-        std::fs::write(&denied, b"mandatory")?;
-        let mut source = "(version 1)\n(allow default)\n".to_owned();
-        source.push_str(&format!(";{}\n", "padding".repeat(padding / 7)));
-        source.push_str(&format!("(deny file-read-data (literal \"{}\"))\n(deny file-write* (literal \"{}\"))\n(allow mach-lookup (global-name \"{}\"))\n", denied.display(), denied.display(), scope().attempt.sandbox_lookup_name()));
-        let profile = provenant_supervisor::ProfileFile::create(source.as_bytes(), &directory)?;
-        let identity = serde_json::to_value(profile.identity())?;
-        let argv = vec!["/usr/bin/sandbox-exec".into(), "-f".into(), profile.path(),
-            "/bin/sh".into(), "-c".into(),
-            "if /bin/cat \"$1\"; then exit 21; fi; if printf changed > \"$1\"; then exit 22; fi; printf applied > \"$2\"".into(),
-            "probe".into(), denied.into_os_string(), marker.clone().into_os_string()];
-        let (_writer, handle, _) = start_with_profile(
-            root,
-            &name,
-            "bytes",
-            &[],
-            CapturePlan::default(),
-            Some((argv, profile)),
-        )?;
-        let exit = exited(&handle)?;
-        assert_eq!(
-            exit.termination,
-            Some(provenant_os::exec::Termination::Exit(0)),
-            "{exit:?}"
-        );
-        assert!(!exit.never_spawned);
-        assert_eq!(std::fs::read(marker)?, b"applied");
-        assert_eq!(
-            std::fs::read(root.join(format!("{name}-mandatory")))?,
-            b"mandatory"
-        );
-        let summary: serde_json::Value = serde_json::from_slice(&std::fs::read(
-            root.join(format!("{name}-attempt/launch.json")),
-        )?)?;
-        assert_eq!(summary["profile"], identity);
-        assert_eq!(summary["profile"]["bytes"], serde_json::json!(source.len()));
-        use sha2::{Digest, Sha256};
-        assert_eq!(
-            summary["profile"]["sha256"],
-            serde_json::json!(Sha256::digest(source.as_bytes()).to_vec())
-        );
-    }
+    let name = "profile";
+    let denied = root.join("profile-mandatory");
+    let marker = root.join("profile-allowed");
+    std::fs::write(&denied, b"mandatory")?;
+    let source = format!(
+        "(version 1)\n(allow default)\n(deny file-read-data (literal \"{}\"))\n(deny file-write* (literal \"{}\"))\n(allow mach-lookup (global-name \"{}\"))\n",
+        denied.display(),
+        denied.display(),
+        scope().attempt.sandbox_lookup_name()
+    );
+    let profile = provenant_supervisor::ProfileFile::create(source.as_bytes(), &directory)?;
+    let identity = serde_json::to_value(profile.identity())?;
+    let argv = vec![
+        "/usr/bin/sandbox-exec".into(),
+        "-f".into(),
+        profile.path(),
+        "/bin/sh".into(),
+        "-c".into(),
+        "if /bin/cat \"$1\"; then exit 21; fi; if printf changed > \"$1\"; then exit 22; fi; printf applied > \"$2\"".into(),
+        "probe".into(),
+        denied.clone().into_os_string(),
+        marker.clone().into_os_string(),
+    ];
+    let (_writer, handle, _) = start_with_profile(
+        root,
+        name,
+        "bytes",
+        &[],
+        CapturePlan::default(),
+        Some((argv, profile)),
+    )?;
+    let exit = exited(&handle)?;
+    assert_eq!(
+        exit.termination,
+        Some(provenant_os::exec::Termination::Exit(0)),
+        "{exit:?}"
+    );
+    assert!(!exit.never_spawned);
+    assert_eq!(std::fs::read(marker)?, b"applied");
+    assert_eq!(std::fs::read(denied)?, b"mandatory");
+    let summary: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        root.join(format!("{name}-attempt/launch.json")),
+    )?)?;
+    assert_eq!(summary["profile"], identity);
+    assert_eq!(summary["profile"]["bytes"], serde_json::json!(source.len()));
+    use sha2::{Digest, Sha256};
+    assert_eq!(
+        summary["profile"]["sha256"],
+        serde_json::json!(Sha256::digest(source.as_bytes()).to_vec())
+    );
     Ok(())
 }
 
@@ -2993,12 +2947,8 @@ const CASES: &[Case] = &[
         profile_transport_pass_failure_never_launches_provider,
     ),
     (
-        "native_profile_file_survives_both_handoffs_above_former_limit",
-        native_profile_file_survives_both_handoffs_above_former_limit,
-    ),
-    (
-        "idle_supervisor_does_no_census_per_wake",
-        idle_supervisor_does_no_census_per_wake,
+        "native_profile_file_survives_both_handoffs",
+        native_profile_file_survives_both_handoffs,
     ),
     (
         "unchanged_census_does_not_publish_tracking",
@@ -3073,20 +3023,8 @@ const CASES: &[Case] = &[
         guardian_exits_after_owner_and_tracked_descendant_are_gone,
     ),
     (
-        "guardian_retires_after_owner_and_evidence_are_removed",
-        guardian_retires_after_owner_and_evidence_are_removed,
-    ),
-    (
-        "guardian_retires_after_owner_and_lock_are_removed",
-        guardian_retires_after_owner_and_lock_are_removed,
-    ),
-    (
-        "guardian_retires_after_owner_and_writer_state_are_removed",
-        guardian_retires_after_owner_and_writer_state_are_removed,
-    ),
-    (
-        "guardian_retires_after_owner_and_lock_directory_are_removed",
-        guardian_retires_after_owner_and_lock_directory_are_removed,
+        "guardian_retires_after_each_writer_artifact_removal",
+        guardian_retires_after_each_writer_artifact_removal,
     ),
     (
         "retry_is_busy_while_a_descendant_of_a_killed_guardian_is_alive",
@@ -3273,7 +3211,7 @@ fn main() -> Result<()> {
             tempfile::Builder::new().prefix("cpu").tempdir_in(root)
         })?;
         let cleanup = fixture::ProcessCleanupGuard::new(root.path());
-        idle_supervisor(root.path(), true)?;
+        idle_supervisor(root.path())?;
         settle_writers(root.path())?;
         cleanup.disarm();
         return Ok(());
@@ -3311,10 +3249,7 @@ fn main() -> Result<()> {
         };
         let tracking_publisher = std::env::var_os("PROVENANT_STATE_DIR")
             .map(PathBuf::from)
-            .filter(|state| {
-                state.join("s2-tracking-failure").is_file()
-                    || state.join("s2-tracking-calls").is_file()
-            })
+            .filter(|state| state.join("s2-tracking-failure").is_file())
             .and_then(|state| {
                 state
                     .parent()

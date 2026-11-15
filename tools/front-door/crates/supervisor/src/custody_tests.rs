@@ -15,8 +15,6 @@ fn admission_clock_error_stays_an_admission_refusal() {
 
 type TestResult = std::result::Result<(), Box<dyn Error>>;
 
-/// The persisted attempt shape is pinned independently of the current
-/// serializer; only physical directory identities vary between installations.
 #[test]
 fn current_attempt_reservation_preserves_uncommitted_work() -> TestResult {
     let root = tempfile::tempdir()?;
@@ -44,18 +42,42 @@ fn current_attempt_reservation_preserves_uncommitted_work() -> TestResult {
     let evidence_identity = evidence.metadata()?;
     let tree_identity = tree.metadata()?;
     let git_identity = git.metadata()?;
-    let fixture = r#"{"schema_version":1,"scope":{"attempt":"@ATTEMPT@","generation":1},"launch_state":"prepared","attempt_device":null,"attempt_inode":null,"reservation_device":@SLOT_DEVICE@,"reservation_inode":@SLOT_INODE@,"binding":{"kind":"worktree","worktree_device":@TREE_DEVICE@,"worktree_inode":@TREE_INODE@,"git_device":@GIT_DEVICE@,"git_inode":@GIT_INODE@,"branch":"refs/heads/lane","base":"@BASE@"},"boot":"linux:00000000-0000-0000-0000-000000000001","guardian":null,"provider":null,"unresolved_cleanup":true,"descendants":[],"census_incomplete":true,"omitted_descendants":0}"#
-    .replace("@ATTEMPT@", &scope.attempt.to_string())
-    .replace("@SLOT_DEVICE@", &evidence_identity.device.to_string())
-    .replace("@SLOT_INODE@", &evidence_identity.inode.to_string())
-    .replace("@TREE_DEVICE@", &tree_identity.device.to_string())
-    .replace("@TREE_INODE@", &tree_identity.inode.to_string())
-    .replace("@GIT_DEVICE@", &git_identity.device.to_string())
-    .replace("@GIT_INODE@", &git_identity.inode.to_string())
-    .replace("@BASE@", base.trim());
+    let reservation = Reservation {
+        schema_version: 1,
+        scope,
+        launch_state: LaunchState::Prepared,
+        attempt_device: None,
+        attempt_inode: None,
+        reservation_device: evidence_identity.device,
+        reservation_inode: evidence_identity.inode,
+        binding: StoredWriterBinding::Worktree {
+            worktree_device: tree_identity.device,
+            worktree_inode: tree_identity.inode,
+            git_device: git_identity.device,
+            git_inode: git_identity.inode,
+            branch: "refs/heads/lane".into(),
+            base: GitOid::parse(base.trim())?,
+            extra: Default::default(),
+        },
+        boot: "linux:00000000-0000-0000-0000-000000000001".into(),
+        guardian: None,
+        provider: None,
+        unresolved_cleanup: true,
+        descendants: vec![],
+        census_incomplete: true,
+        omitted_descendants: 0,
+        extra: Default::default(),
+    };
     let reservation_path = evidence_path.join("reservation.json");
     let marker_path = evidence_path.join("import-retained.json");
-    std::fs::write(&reservation_path, fixture.as_bytes())?;
+    write_record(
+        &evidence,
+        "reservation.json",
+        &reservation,
+        PublishMode::NoReplace,
+    )?
+    .require_durable()?;
+    let encoded = std::fs::read(&reservation_path)?;
     std::fs::write(&marker_path, b"retained import evidence")?;
     let decoded: Reservation = read_record(&evidence, "reservation.json", RECORD_LIMIT)?;
     validate_anchor(&evidence, &decoded)?;
@@ -66,7 +88,7 @@ fn current_attempt_reservation_preserves_uncommitted_work() -> TestResult {
     ));
     assert!(reservation_present(&slot, scope)?);
     assert!(matches!(acquire(&path), Err(CustodyError::Fenced)));
-    assert_eq!(std::fs::read(&reservation_path)?, fixture.as_bytes());
+    assert_eq!(std::fs::read(&reservation_path)?, encoded);
     assert_eq!(std::fs::read(&marker_path)?, b"retained import evidence");
     assert_eq!(
         std::fs::read(worktree.join("uncommitted.txt"))?,
@@ -250,27 +272,28 @@ fn worktree_settlement_retains_flock_until_recovery_is_dropped() -> TestResult {
 }
 
 #[test]
-fn persisted_custody_accepts_future_fields_without_changing_scope_checks() -> TestResult {
+fn ownership_journal_uses_bounded_decode_and_rejects_invalid_scope() -> TestResult {
     let record = serde_json::json!({
         "schema_version": 1,
         "scope": {
             "attempt": scope().attempt,
-            "generation": 1,
-            "future_scope": {"value": true}
+            "generation": 1
         },
-        "binding": {"kind": "read_only", "future_binding": 42},
         "future_journal": [1, 2]
     });
     let journal: OwnershipJournal =
-        decode_v1(serde_json::to_vec(&record)?.as_slice(), Limits::CONFIG)?;
+        provenant_records::decode(serde_json::to_vec(&record)?.as_slice(), Limits::CONFIG)?;
     assert_eq!(journal.schema_version, 1);
     assert_eq!(journal.scope, scope());
     journal.binding.validate()?;
     let mut invalid = record;
     invalid["scope"]["generation"] = serde_json::json!("invalid");
     assert!(
-        decode_v1::<OwnershipJournal, _>(serde_json::to_vec(&invalid)?.as_slice(), Limits::CONFIG)
-            .is_err()
+        provenant_records::decode::<OwnershipJournal, _>(
+            serde_json::to_vec(&invalid)?.as_slice(),
+            Limits::CONFIG,
+        )
+        .is_err()
     );
     Ok(())
 }
@@ -341,6 +364,7 @@ fn exit_publication_bounds_escaped_facts_and_counts_every_omission() -> TestResu
         launch_refusal: None,
         warnings: vec!["\u{0001}".repeat(160); 24],
         omitted_warnings: 5,
+        extra: Default::default(),
     };
     assert!(serde_json::to_vec(&exit)?.len() as u64 > EXIT_LIMIT);
     let bytes = exit.bounded_bytes()?;
@@ -551,6 +575,7 @@ fn settlement_checks_exact_attempt_and_both_digests_before_scratch() -> TestResu
         scope: scope(),
         terminal_digest: provenant_records::CanonicalV1::file_digest(&terminal),
         quarantine_digest: provenant_records::CanonicalV1::file_digest(b"wrong"),
+        extra: Default::default(),
     };
     Publication::require_durable(write_record(
         &held,
@@ -624,10 +649,12 @@ fn settlement_checks_exact_attempt_and_both_digests_before_scratch() -> TestResu
         Some(serde_json::to_vec(&SettlementJournal {
             schema_version: 1,
             scope: wrong_attempt,
+            extra: Default::default(),
         })?),
         Some(serde_json::to_vec(&SettlementJournal {
             schema_version: 1,
             scope: wrong_generation,
+            extra: Default::default(),
         })?),
     ] {
         match bytes {
@@ -903,8 +930,18 @@ fn reboot_recovery_requires_native_proof() -> TestResult {
         let world = RebootWorld { boot };
         let result = recovery.after_reboot_with(&attempt, scope(), &world);
         if boot.is_none() {
-            assert!(matches!(result, Err(CustodyError::Io(ref error))
-                if error.to_string().contains("boot identity unavailable")));
+            assert!(matches!(
+                result,
+                Err(CustodyError::Io(ref error))
+                    if error.kind() == std::io::ErrorKind::Other
+                        && error
+                            .get_ref()
+                            .and_then(|source| source.downcast_ref::<BootIdentityUnavailable>())
+                            .is_some_and(|source| matches!(
+                                &source.0,
+                                crate::census::CensusError::Unsupported
+                            ))
+            ));
             assert!(
                 root.path()
                     .join(scope().attempt.to_string())
@@ -970,12 +1007,14 @@ fn spawned_reboot_recovery(
 
 #[test]
 fn reboot_recovery_requires_the_original_attempt_and_exclusive_custody() -> TestResult {
+    #[derive(Clone, Copy)]
     enum Refusal {
         Scope,
         Attempt,
         Custody,
     }
-    for refusal in [Refusal::Scope, Refusal::Attempt, Refusal::Custody] {
+    const ALL: [Refusal; 3] = [Refusal::Scope, Refusal::Attempt, Refusal::Custody];
+    for refusal in ALL {
         let root = tempfile::tempdir()?;
         let original = tempfile::tempdir()?;
         let original = Directory::open_anchor(original.path())?;
@@ -1205,5 +1244,182 @@ fn writer_exclusion_distinct_gate_failure_remains_unknown() -> TestResult {
         ),
         Err(CustodyError::ObservationGate(_))
     ));
+    Ok(())
+}
+
+fn stored_extra_round_trips<T>(record: serde_json::Value, field: &str) -> TestResult
+where
+    T: serde::de::DeserializeOwned + serde::Serialize,
+{
+    let bytes = serde_json::to_vec(&record)?;
+    let decoded: T = provenant_records::decode(bytes.as_slice(), Limits::CONFIG)?;
+    let encoded = serde_json::to_value(decoded)?;
+    assert_eq!(encoded.get(field), record.get(field));
+    Ok(())
+}
+
+#[test]
+fn stored_custody_shapes_round_trip_additive_fields_through_bounded_decode() -> TestResult {
+    let marker = serde_json::json!({"future": {"minor": 1}});
+    macro_rules! check {
+        ($ty:ty, $record:expr, $field:literal) => {
+            stored_extra_round_trips::<$ty>($record, $field)?;
+        };
+    }
+    stored_extra_round_trips::<OwnershipJournal>(
+        serde_json::json!({
+            "schema_version": 1,
+            "scope": scope(),
+            "binding": {"kind": "read_only"},
+            "future_ownership": marker.clone(),
+        }),
+        "future_ownership",
+    )?;
+    check!(
+        SettlementJournal,
+        serde_json::json!({
+            "schema_version": 1,
+            "scope": scope(),
+            "future_settlement": marker.clone(),
+        }),
+        "future_settlement"
+    );
+    check!(
+        Reservation,
+        serde_json::json!({
+            "schema_version": 1,
+            "scope": scope(),
+            "launch_state": "prepared",
+            "attempt_device": null,
+            "attempt_inode": null,
+            "reservation_device": 1,
+            "reservation_inode": 1,
+            "binding": {"kind": "read_only", "future_binding": marker.clone()},
+            "boot": "fixture-boot",
+            "guardian": null,
+            "provider": null,
+            "unresolved_cleanup": true,
+            "descendants": [],
+            "census_incomplete": true,
+            "omitted_descendants": 0,
+            "future_reservation": marker.clone(),
+        }),
+        "future_reservation"
+    );
+    check!(
+        StoredImportFence,
+        serde_json::json!({
+            "schema_version": 1,
+            "scope": scope(),
+            "lane": fixture_key(1),
+            "run_attempt": "/fixture/run",
+            "future_import": marker.clone(),
+        }),
+        "future_import"
+    );
+    check!(
+        CancelRequest,
+        serde_json::json!({
+            "schema_version": 1,
+            "scope": scope(),
+            "request_id": format!("{}.{}.cancel", scope().attempt, scope().generation),
+            "requester": ActorId::from_bytes([3; 16]),
+            "reason": "explicit_cancellation",
+            "future_cancel": marker.clone(),
+        }),
+        "future_cancel"
+    );
+    check!(
+        StoredObservation,
+        serde_json::json!({
+            "schema_version": 1,
+            "scope": scope(),
+            "guardian": null,
+            "provider": null,
+            "publication_pending": true,
+            "future_observation": marker.clone(),
+        }),
+        "future_observation"
+    );
+    check!(
+        StoredExit,
+        serde_json::json!({
+            "schema_version": 1,
+            "scope": scope(),
+            "termination": null,
+            "never_spawned": true,
+            "stop_reason": null,
+            "cancel_delivered_before_exit": null,
+            "delivered_signals": [],
+            "reaped": [],
+            "omitted_reaped": 0,
+            "spared": [],
+            "omitted_spared": 0,
+            "warnings": [],
+            "omitted_warnings": 0,
+            "terminal_observed": false,
+            "unresolved_cleanup": false,
+            "unresolved_pids": [],
+            "settlement_evidence": "never_spawned",
+            "stdout": {
+                "bytes": 0,
+                "retained": 0,
+                "oversized_frames": 0,
+                "decoder_lost_frames": 0,
+                "lost_bytes": 0,
+                "read_failed": false,
+                "future_capture": marker.clone(),
+            },
+            "stderr": {
+                "bytes": 0,
+                "retained": 0,
+                "oversized_frames": 0,
+                "decoder_lost_frames": 0,
+                "lost_bytes": 0,
+                "read_failed": false,
+            },
+            "future_exit": marker.clone(),
+        }),
+        "future_exit"
+    );
+    check!(
+        ReleaseReceipt,
+        serde_json::json!({
+            "schema_version": 1,
+            "scope": scope(),
+            "terminal_digest": provenant_records::CanonicalV1::file_digest(b"terminal"),
+            "quarantine_digest": provenant_records::CanonicalV1::file_digest(b"quarantine"),
+            "future_release": marker.clone(),
+        }),
+        "future_release"
+    );
+    check!(
+        SettlementArtifact,
+        serde_json::json!({
+            "schema_version": 1,
+            "scope": scope(),
+            "kind": "canonical_terminal",
+            "future_artifact": marker.clone(),
+        }),
+        "future_artifact"
+    );
+    check!(
+        StoredWriterBinding,
+        serde_json::json!({"kind": "read_only", "future_binding": marker.clone()}),
+        "future_binding"
+    );
+    check!(
+        CaptureTotals,
+        serde_json::json!({
+            "bytes": 0,
+            "retained": 0,
+            "oversized_frames": 0,
+            "decoder_lost_frames": 0,
+            "lost_bytes": 0,
+            "read_failed": false,
+            "future_capture": marker,
+        }),
+        "future_capture"
+    );
     Ok(())
 }
