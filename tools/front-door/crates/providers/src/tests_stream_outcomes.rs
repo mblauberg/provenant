@@ -856,6 +856,50 @@ fn claude_answer_is_recorded_once() -> Result<(), ProviderError> {
 }
 
 #[test]
+fn cursor_answer_is_recorded_once() -> Result<(), ProviderError> {
+    let stream = concat!(
+        "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
+        "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"running tools\"}]},\"session_id\":\"s\"}\n",
+        "{\"type\":\"tool_call\",\"subtype\":\"started\",\"session_id\":\"s\"}\n",
+        "{\"type\":\"tool_call\",\"subtype\":\"completed\",\"session_id\":\"s\"}\n",
+        "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"final answer\"}]},\"session_id\":\"s\"}\n",
+        "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"final answer\"}\n",
+    );
+    let (events, outcome) = replay(&cursor::Cursor, stream, EXIT)?;
+    let texts: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, ["final answer"]);
+    assert_eq!(outcome.status(), OutcomeStatus::Success);
+
+    let (fresh_events, _) = replay(&cursor::Cursor, fixture!("cursor/fresh.jsonl"), EXIT)?;
+    let fresh_texts: Vec<_> = fresh_events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fresh_texts, ["FIXTURE_USER_OR_PROVIDER_TEXT_001"]);
+
+    let fallback_stream = concat!(
+        "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
+        "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"fallback answer\"}]},\"session_id\":\"s\"}\n",
+        "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"\"}\n",
+    );
+    let (mut fallback_events, fallback_outcome) = replay(&cursor::Cursor, fallback_stream, EXIT)?;
+    fallback_events.extend(fallback_outcome.final_events().iter().cloned());
+    assert!(fallback_events.contains(&ProviderEvent::Text("fallback answer".into())));
+    assert!(fallback_events.contains(&ProviderEvent::ResultFallback));
+
+    Ok(())
+}
+
+#[test]
 fn structured_error_outranks_claimed_success_but_quota_prose_is_text() -> Result<(), ProviderError>
 {
     let mut state = claude::Claude.stream(None)?;
