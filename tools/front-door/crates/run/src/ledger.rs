@@ -575,9 +575,7 @@ mod tests {
 
     #[test]
     fn lane_cap_identifies_writer_and_total_settings_with_sources() {
-        use provenant_records::diagnostic::{
-            DiagnosticFact, LaneLimit, ResourceFact, SettingSource,
-        };
+        use provenant_records::diagnostic::{LaneLimit, ResourceFact, SettingSource};
         let defaults = LaneCaps::of(&provenant_config::LaneBuildSettings::default());
         assert_eq!(defaults.host_source, SettingSource::ShippedDefault);
         assert_eq!(defaults.project_source, SettingSource::ShippedDefault);
@@ -605,22 +603,18 @@ mod tests {
         assert_eq!(hit.kind, LaneLimit::ProjectTotal);
         assert_eq!(hit.limit, PROJECT_ACTIVE);
         assert_eq!(hit.kind.setting(), "domains.fabric.lanes.max_project_lanes");
-        let fact = provenant_records::diagnostic::ResourceFact::LaneCap {
+        assert_eq!(hit.origin, SettingSource::Configuration);
+        // The projection names the governing setting and where it came from.
+        let projection = ResourceFact::LaneCap {
             active: hit.active,
             limit: hit.limit,
             lane_limit: hit.kind,
             origin: hit.origin,
-        };
-        let projection = fact.project(provenant_records::diagnostic::Diagnostic::new("LANE_CAP"));
-        assert!(matches!(
-            projection.fact,
-            Some(DiagnosticFact::Resource(ResourceFact::LaneCap {
-                active,
-                limit,
-                lane_limit: LaneLimit::ProjectTotal,
-                origin: SettingSource::Configuration,
-            })) if active == hit.active && limit == hit.limit
-        ));
+        }
+        .project(provenant_records::diagnostic::Diagnostic::new("LANE_CAP"));
+        let detail = projection.detail.as_deref().unwrap_or_default();
+        assert!(detail.contains(hit.kind.setting()), "{detail}");
+        assert!(detail.contains(hit.origin.description()), "{detail}");
         let settings = provenant_config::LaneBuildSettings {
             max_lanes: Some(HOST_ACTIVE),
             max_project_lanes: Some(10),
