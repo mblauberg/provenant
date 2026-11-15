@@ -5,6 +5,7 @@
 //! copies provider payloads, credentials or prompt text.
 use crate::{AccountScope, QuotaSnapshot, QuotaStatus, QuotaWindow};
 use serde::{Deserialize, Serialize};
+use provenant_records::ExtraFields;
 
 pub const HISTORY_SCHEMA_VERSION: u64 = 1;
 pub const DEFAULT_HISTORY_MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -23,8 +24,15 @@ pub enum MarkerKind {
     PlanChange,
 }
 
+impl MarkerKind {
+    /// Every persisted history marker kind, for exhaustive format tables.
+    pub const ALL: &[Self] = &[Self::Reset, Self::PlanChange];
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryMarker {
+    #[serde(flatten)]
+    pub extra: ExtraFields,
     pub kind: MarkerKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool: Option<String>,
@@ -36,6 +44,8 @@ pub struct HistoryMarker {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryRecord {
+    #[serde(flatten)]
+    pub extra: ExtraFields,
     pub schema_version: u64,
     pub observed_unix_seconds: i64,
     pub account_key: String,
@@ -56,6 +66,7 @@ impl HistoryRecord {
     pub fn from_snapshot(snapshot: &QuotaSnapshot) -> Option<Self> {
         let details = snapshot.details.as_ref();
         let record = Self {
+            extra: Default::default(),
             schema_version: HISTORY_SCHEMA_VERSION,
             observed_unix_seconds: snapshot.observed_unix_seconds,
             account_key: snapshot.account.account_key.clone(),
@@ -100,6 +111,7 @@ impl HistoryRecord {
             );
             if window.used_basis_points < before.used_basis_points || advanced {
                 next.markers.push(HistoryMarker {
+                    extra: Default::default(),
                     kind: MarkerKind::Reset,
                     pool: Some(window.pool.clone()),
                     from: None,
@@ -112,6 +124,7 @@ impl HistoryRecord {
             && a != b
         {
             next.markers.push(HistoryMarker {
+                extra: Default::default(),
                 kind: MarkerKind::PlanChange,
                 pool: None,
                 from: Some(a.clone()),
@@ -123,6 +136,7 @@ impl HistoryRecord {
 
     pub fn account(&self) -> AccountScope {
         AccountScope {
+            extra: Default::default(),
             adapter: self.provider.clone(),
             account_key: self.account_key.clone(),
             label: self.label.clone(),
@@ -135,7 +149,13 @@ pub fn decode_lines(bytes: &[u8]) -> Vec<HistoryRecord> {
     bytes
         .split(|b| *b == b'\n')
         .filter(|line| !line.is_empty())
-        .filter_map(|line| serde_json::from_slice::<HistoryRecord>(line).ok())
+        .filter_map(|line| {
+            provenant_records::decode::<HistoryRecord, _>(
+                line,
+                provenant_records::Limits::CONFIG,
+            )
+            .ok()
+        })
         .filter(|r| r.schema_version == HISTORY_SCHEMA_VERSION)
         .collect()
 }
@@ -229,35 +249,44 @@ mod tests {
     use crate::QuotaDetails;
 
     #[test]
-    fn history_keeps_newer_fields_readable_and_skips_unsupported_versions() {
+    fn history_rows_round_trip_additive_fields_and_skip_future_versions() {
         let reading =
             HistoryRecord::from_snapshot(&snapshot(1, None, vec![window("5h", 1, None)])).unwrap();
-        let mut value = serde_json::to_value(&reading).unwrap();
-        value["future_reading"] = serde_json::json!({"value": true});
-        value["markers"] = serde_json::json!([
-            {"kind": "reset", "pool": "5h", "future_marker": 1}
-        ]);
-        let decoded = decode_lines(&serde_json::to_vec(&value).unwrap());
-        assert_eq!(decoded.len(), 1);
-        assert_eq!(decoded[0].account_key, reading.account_key);
-        assert_eq!(decoded[0].markers.len(), 1);
-        value["schema_version"] = serde_json::json!(2);
-        assert!(decode_lines(&serde_json::to_vec(&value).unwrap()).is_empty());
-    }
-
-    #[test]
-    fn history_ignores_a_stored_tier() {
-        let reading =
-            HistoryRecord::from_snapshot(&snapshot(1, None, vec![window("5h", 1, None)])).unwrap();
-        let mut value = serde_json::to_value(&reading).unwrap();
-        assert!(value.get("tier").is_none());
-        value["tier"] = serde_json::json!("max");
-        let decoded = decode_lines(&serde_json::to_vec(&value).unwrap());
-        assert_eq!(decoded, vec![reading]);
+        let base = serde_json::to_value(&reading).unwrap();
+        for (field, extension) in [
+            ("future_reading", serde_json::json!({"value": true})),
+            ("tier", serde_json::json!("max")),
+        ] {
+            let mut value = base.clone();
+            value[field] = extension.clone();
+            value["windows"][0]["future_window"] = serde_json::json!([1, 2]);
+            value["markers"] = serde_json::json!([
+                {"kind": "reset", "pool": "5h", "future_marker": {"value": 3}}
+            ]);
+            let decoded = decode_lines(&serde_json::to_vec(&value).unwrap());
+            assert_eq!(decoded.len(), 1);
+            let encoded = encode_line(&decoded[0]).unwrap();
+            let round_trip: HistoryRecord = provenant_records::decode(
+                encoded.as_slice(),
+                provenant_records::Limits::CONFIG,
+            )
+            .unwrap();
+            assert_eq!(serde_json::to_value(round_trip).unwrap(), value);
+        }
+        let mut future_version = base;
+        future_version["schema_version"] = serde_json::json!(2);
+        assert!(decode_lines(&serde_json::to_vec(&future_version).unwrap()).is_empty());
+        for &kind in MarkerKind::ALL {
+            let encoded = provenant_records::encode(&kind).unwrap();
+            let decoded: MarkerKind =
+                provenant_records::decode(&encoded, provenant_records::Limits::CONFIG).unwrap();
+            assert_eq!(decoded, kind);
+        }
     }
 
     fn window(pool: &str, used: u64, reset: Option<i64>) -> QuotaWindow {
         QuotaWindow {
+            extra: Default::default(),
             pool: pool.into(),
             window_seconds: Some(18_000),
             used_basis_points: used,
@@ -266,8 +295,10 @@ mod tests {
     }
     fn snapshot(at: i64, plan: Option<&str>, windows: Vec<QuotaWindow>) -> QuotaSnapshot {
         QuotaSnapshot {
+            extra: Default::default(),
             schema_version: 1,
             account: AccountScope {
+                extra: Default::default(),
                 adapter: "claude".into(),
                 account_key: "k1".into(),
                 label: "work".into(),
@@ -279,6 +310,7 @@ mod tests {
             authority_ref: None,
             windows,
             details: Some(QuotaDetails {
+                extra: Default::default(),
                 plan: plan.map(str::to_owned),
                 ..QuotaDetails::default()
             }),
@@ -380,6 +412,7 @@ mod tests {
     #[test]
     fn markers_serialise_with_dotted_plan_change() {
         let marker = HistoryMarker {
+            extra: Default::default(),
             kind: MarkerKind::PlanChange,
             pool: None,
             from: None,
@@ -400,17 +433,6 @@ mod tests {
         bytes.push(b'\n');
         bytes.extend(encode_line(&record).unwrap());
         assert_eq!(decode_lines(&bytes).len(), 2);
-    }
-
-    #[test]
-    fn decode_keeps_records_with_newer_metadata() {
-        let record =
-            HistoryRecord::from_snapshot(&snapshot(1, None, vec![window("5h", 1, None)])).unwrap();
-        let mut value = serde_json::to_value(record).unwrap();
-        value["future_metadata"] = serde_json::json!({"source": "1.4.0"});
-        value["markers"] = serde_json::json!([{"kind": "reset", "future_marker": true}]);
-        let bytes = serde_json::to_vec(&value).unwrap();
-        assert_eq!(decode_lines(&bytes).len(), 1);
     }
 
     #[test]

@@ -90,6 +90,7 @@ pub struct Display {
     pub icon: String,
 }
 pub const MOST_CONSTRAINED: &str = "most_constrained";
+pub const MAX_DISPLAY_ICON_BYTES: usize = 128;
 impl Default for Display {
     fn default() -> Self {
         Self {
@@ -102,7 +103,7 @@ impl Default for Display {
 pub fn valid_icon(icon: &str) -> bool {
     icon == MOST_CONSTRAINED
         || (!icon.is_empty()
-            && icon.len() <= 128
+            && icon.len() <= MAX_DISPLAY_ICON_BYTES
             && icon
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)))
@@ -290,21 +291,23 @@ mod tests {
         let configured = parse(&format!("{BASE}[polling_intervals.claude]\ntimer_seconds = 17\npanel_seconds = 11\n[polling_intervals.agy]\ntimer_seconds = 2000\n")).unwrap();
         assert!(configured.validate().is_empty());
         configured.apply_polling_intervals(&mut policies);
+        let claude = policies.iter().find(|policy| policy.adapter == "claude").unwrap();
+        let agy = policies.iter().find(|policy| policy.adapter == "agy").unwrap();
+        let opencode = policies
+            .iter()
+            .find(|policy| policy.adapter == "opencode")
+            .unwrap();
         assert_eq!(
             interval(&policies, "claude", Trigger::Timer, Power::Ac),
             Some(17)
         );
         assert_eq!(
             interval(&policies, "claude", Trigger::Panel, Power::Battery),
-            Some(22)
+            Some(claude.panel_seconds * 2)
         );
         assert_eq!(
             interval(&policies, "claude", Trigger::Timer, Power::Low),
-            Some(68)
-        );
-        assert_eq!(
-            interval(&policies, "claude", Trigger::Manual, Power::Ac),
-            Some(30)
+            Some(claude.timer_seconds * 4)
         );
         assert_eq!(
             interval(&policies, "agy", Trigger::Timer, Power::Ac),
@@ -312,14 +315,15 @@ mod tests {
         );
         assert_eq!(
             interval(&policies, "agy", Trigger::Panel, Power::Ac),
-            Some(900)
+            Some(agy.panel_seconds)
         );
         assert_eq!(interval(&policies, "agy", Trigger::Timer, Power::Low), None);
         assert_eq!(
             interval(&policies, "opencode", Trigger::Timer, Power::Ac),
-            Some(300)
+            Some(opencode.timer_seconds)
         );
         let mut record = crate::AccountRecord::empty(crate::AccountScope {
+            extra: Default::default(),
             adapter: "claude".into(),
             account_key: "work".into(),
             label: "work".into(),
@@ -327,7 +331,11 @@ mod tests {
         record.last_attempt_unix_seconds = Some(100);
         assert_eq!(
             next_due(&policies, &record, Trigger::Timer, Power::Ac).unwrap(),
-            Some(117)
+            Some(100 + interval(&policies, "claude", Trigger::Timer, Power::Ac).unwrap() as i64)
+        );
+        assert_eq!(
+            interval(&policies, "claude", Trigger::Manual, Power::Ac),
+            interval(&original, "claude", Trigger::Manual, Power::Ac)
         );
         for (before, after) in original.iter().zip(&policies) {
             assert_eq!(before.probe_seconds, after.probe_seconds);
@@ -396,24 +404,21 @@ mod tests {
         assert_eq!(raised.wall_budget_seconds, 300);
         assert!(raised.validate().is_empty());
         for (text, field) in [
+            ("max_parallel = 0\nwall_budget_seconds = 55\n".to_owned(), "max_parallel"),
+            ("max_parallel = 3\nwall_budget_seconds = 0\n".to_owned(), "wall_budget_seconds"),
             (
-                "max_parallel = 0\nwall_budget_seconds = 55\n",
+                format!("max_parallel = {}\nwall_budget_seconds = 55\n", MAX_PARALLEL + 1),
                 "max_parallel",
             ),
             (
-                "max_parallel = 3\nwall_budget_seconds = 0\n",
-                "wall_budget_seconds",
-            ),
-            (
-                "max_parallel = 17\nwall_budget_seconds = 55\n",
-                "max_parallel",
-            ),
-            (
-                "max_parallel = 3\nwall_budget_seconds = 601\n",
+                format!(
+                    "max_parallel = 3\nwall_budget_seconds = {}\n",
+                    MAX_WALL_BUDGET_SECONDS + 1
+                ),
                 "wall_budget_seconds",
             ),
         ] {
-            let invalid = parse(text).unwrap();
+            let invalid = parse(&text).unwrap();
             assert!(
                 invalid.validate().iter().any(|error| error.field == field),
                 "{text}"
@@ -426,7 +431,7 @@ mod tests {
         assert_eq!(s.display, Display::default());
         assert!(s.validate().is_empty());
         let d = parse(&format!(
-            "{BASE}[display]\nheadline = \"5h\"\nicon = \"claude-michael\"\n"
+            "{BASE}[display]\nheadline = \"5h\"\nicon = \"account-one\"\n"
         ))
         .unwrap();
         assert_eq!(d.display.headline, Headline::FiveHour);
@@ -446,7 +451,7 @@ mod tests {
             let s = parse(&format!("{BASE}[display]\nicon = \"{icon}\"\n")).unwrap();
             assert_eq!(s.validate()[0].code, "icon", "{icon:?}");
         }
-        let long = "a".repeat(129);
+        let long = "a".repeat(MAX_DISPLAY_ICON_BYTES + 1);
         let s = parse(&format!("{BASE}[display]\nicon = \"{long}\"\n")).unwrap();
         assert!(!s.validate().is_empty());
     }

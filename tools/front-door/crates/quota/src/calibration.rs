@@ -96,6 +96,7 @@ impl crate::Settings {
                     window.used_basis_points = window.used_basis_points.max(percent * 100);
                 } else {
                     snapshot.windows.push(QuotaWindow {
+                        extra: Default::default(),
                         pool: pool.into(),
                         used_basis_points: percent * 100,
                         window_seconds: Some(seconds),
@@ -129,12 +130,14 @@ mod tests {
 
     fn ledger(account: &str, plan: Option<&str>) -> AccountRecord {
         let scope = crate::AccountScope {
+            extra: Default::default(),
             adapter: "opencode".into(),
             account_key: account.into(),
             label: account.into(),
         };
         let mut record = AccountRecord::empty(scope.clone());
         record.snapshot = Some(crate::QuotaSnapshot {
+            extra: Default::default(),
             schema_version: 1,
             account: scope,
             revision: 0,
@@ -145,6 +148,7 @@ mod tests {
             windows: [("five_hour", 401), ("seven_day", 160), ("thirty_day", 7000)]
                 .into_iter()
                 .map(|(pool, used_basis_points)| QuotaWindow {
+                    extra: Default::default(),
                     pool: pool.into(),
                     used_basis_points,
                     window_seconds: None,

@@ -1,5 +1,6 @@
 //! Provider-owned wire decoding and supervisor effect contracts.
 use serde::{Deserialize, Serialize};
+use provenant_records::ExtraFields;
 
 #[derive(Clone, Copy, Debug)]
 pub struct QuotaPolicy {
@@ -18,6 +19,14 @@ pub(crate) const TEST_POLICIES: &[QuotaPolicy] = &[
         timer_seconds: 300,
         panel_seconds: 120,
         probe_seconds: 14,
+        low_power: true,
+        solo: false,
+    },
+    QuotaPolicy {
+        adapter: "codex",
+        timer_seconds: 900,
+        panel_seconds: 300,
+        probe_seconds: 10,
         low_power: true,
         solo: false,
     },
@@ -41,11 +50,35 @@ pub(crate) const TEST_POLICIES: &[QuotaPolicy] = &[
 
 /// Opaque, non-secret provider identity; never an email, credential or auth path.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AccountScope {
+    #[serde(flatten)]
+    pub extra: ExtraFields,
     pub adapter: String,
     pub account_key: String,
     pub label: String,
+}
+
+impl AccountScope {
+    pub(crate) fn same_identity(&self, other: &Self) -> bool {
+        self.adapter == other.adapter && self.account_key == other.account_key
+    }
+
+    pub(crate) fn same_scope(&self, other: &Self) -> bool {
+        self.same_identity(other) && self.label == other.label
+    }
+
+    /// Adopt the current registered identity while retaining fields from an
+    /// older stored scope that this version cannot interpret.
+    pub(crate) fn updated_from(&self, current: &Self) -> Self {
+        let mut updated = current.clone();
+        for (key, value) in &self.extra {
+            updated
+                .extra
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
+        updated
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,8 +144,10 @@ pub trait QuotaEffects {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct QuotaDetails {
+    #[serde(flatten)]
+    pub extra: ExtraFields,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -165,9 +200,25 @@ pub enum QuotaStatus {
     Unsupported,
 }
 
+impl QuotaStatus {
+    /// Every persisted quota status, for exhaustive format tables.
+    pub const ALL: &[Self] = &[
+        Self::Available,
+        Self::CreditOnly,
+        Self::Exhausted,
+        Self::Stale,
+        Self::Unknown,
+        Self::AuthRequired,
+        Self::RefreshPending,
+        Self::KeychainUnavailable,
+        Self::Unsupported,
+    ];
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct QuotaWindow {
+    #[serde(flatten)]
+    pub extra: ExtraFields,
     pub pool: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_seconds: Option<u64>,
@@ -176,8 +227,9 @@ pub struct QuotaWindow {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct QuotaSnapshot {
+    #[serde(flatten)]
+    pub extra: ExtraFields,
     pub schema_version: u64,
     pub account: AccountScope,
     pub revision: u64,
@@ -188,4 +240,28 @@ pub struct QuotaSnapshot {
     pub windows: Vec<QuotaWindow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<QuotaDetails>,
+}
+
+impl QuotaSnapshot {
+    /// A minimal snapshot builder for this crate's deterministic tests.
+    #[cfg(test)]
+    pub(crate) fn test_snapshot(
+        account: AccountScope,
+        status: QuotaStatus,
+        observed_unix_seconds: i64,
+        windows: Vec<QuotaWindow>,
+    ) -> Self {
+        Self {
+            extra: Default::default(),
+            schema_version: 1,
+            account,
+            revision: 0,
+            status,
+            observed_unix_seconds,
+            source_ref: "quota.test".into(),
+            authority_ref: None,
+            windows,
+            details: None,
+        }
+    }
 }
