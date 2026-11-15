@@ -282,7 +282,7 @@ mod tests {
     fn base_commit_uses_bounded_repository_facts() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let state = temp.path().join("state");
-        std::fs::create_dir(&state)?;
+        provenant_os::fixture::private_state_dir(&state)?;
         let git = Git::new(&state)?;
         let project = temp.path().join("project");
         std::fs::create_dir_all(&project)?;

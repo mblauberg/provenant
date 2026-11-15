@@ -318,10 +318,11 @@ impl Fixture {
         let source = root.join("private-objects");
         let staging = root.join("host-staging");
         let state = root.join("state");
-        for path in [&home, &project, &source, &staging, &state] {
+        for path in [&home, &project, &source, &staging] {
             fs::create_dir(path)?;
         }
         fs::set_permissions(&home, fs::Permissions::from_mode(0o700))?;
+        provenant_os::fixture::private_state_dir(&state)?;
         let executable = provenant_os::git::git_executable().ok_or("Git unavailable")?;
         let host_git = |args: &[&str]| git(&executable, &home, &project, None, args);
         host_git(&[
