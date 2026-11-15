@@ -994,8 +994,8 @@ esac
     const COMMAND_FAKE: &str = r##"#!/bin/sh
 case "$PROVENANT_PORT_OPERATION" in
   issue) printf '{"body":"body","state":"OPEN","kind":"Bug"}' ;;
-  api) printf '{"status":200,"body":"{\"ok\":true}"}' ;;
-  pull) printf '{"status":200,"headers":{"etag":"fake-tag"},"body":"{\"ok\":true}"}' ;;
+  api|revert_adoption) printf '{"status":200,"body":"{\\"ok\\":true}"}' ;;
+  pull) printf '{"status":200,"headers":{"etag":"fake-tag"},"body":"{\\"ok\\":true}"}' ;;
   *) printf '{"ok":true}' ;;
 esac
 "##;

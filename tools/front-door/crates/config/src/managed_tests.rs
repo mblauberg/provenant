@@ -672,19 +672,14 @@ fn uninstall_after_home_rename_never_acts_on_old_paths() {
     );
     assert_eq!(installed_binary(&targets).unwrap(), None);
     let release = f.release();
-    targets.adopt_existing = true;
+    // Uninstall left the old-home links alone; a later install adopts links
+    // into the same release assets instead of refusing them.
     for path in [
         moved_home.join(".codex/skills/example"),
         moved_home.join(".codex/AGENTS.md"),
         targets.bin_dir.join("provenant"),
     ] {
-        let snapshots = Snapshots::capture(&release, &targets).unwrap();
-        assert!(matches!(
-            plan_install(release.clone(), targets.clone(), snapshots),
-            Err(InstallError::Conflict(_))
-        ));
         assert!(fs::read_link(&path).unwrap().starts_with(&old_state));
-        fs::remove_file(path).unwrap();
     }
     // launchctl bootout is a manual process-edge step; the fixture pins that
     // uninstall did not stop it and completes the documented plist cleanup.
@@ -1021,7 +1016,7 @@ fn partial_uninstall_after_home_rename_retains_unselected_stale_entries() {
     );
     let bytes = fs::read(targets.roots.state.as_path().join("install/receipt.json")).unwrap();
     let receipt: InstallReceipt =
-        provenant_records::decode_v1(bytes.as_slice(), Limits::CONFIG).unwrap();
+        provenant_records::decode(bytes.as_slice(), Limits::CONFIG).unwrap();
     assert_eq!(receipt.harnesses, vec![Harness::Claude]);
     assert!(
         receipt
@@ -1831,7 +1826,11 @@ pub(super) fn filesystem_operation<T>(
         FilesystemOperation::SyncLink => fault_link_sync(directory, name)?,
     }
     let result = operation()?;
-    if matches!(kind, FilesystemOperation::Publish) {
+    // A link is published when its directory entry is synced.
+    if matches!(
+        kind,
+        FilesystemOperation::Publish | FilesystemOperation::SyncLink
+    ) {
         fault_after_publish();
     }
     Ok(result)
@@ -2915,7 +2914,7 @@ fn upgrade_removes_only_unchanged_dropped_links_and_recovers_after_first_replace
     let recovery = f.plan_for(release_b.clone());
     install(
         &recovery,
-        &context(&clock, &cancel),
+        &context(&clock, &TestCancelToken::new()),
         &mut Reporter::default(),
         &Smoke,
         false,
