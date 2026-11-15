@@ -1622,9 +1622,16 @@ pub(super) fn checked_output_origin(
     mut output: OutputResult,
     expected: &provenant_records::WorkKey,
 ) -> Result<OutputResult, FacadeError> {
-    let (OutputResult::Chunk { peer, .. } | OutputResult::Artifact { peer, .. }) = &mut output;
+    let (OutputResult::Chunk { peer, extra, .. } | OutputResult::Artifact { peer, extra, .. }) =
+        &mut output;
     if !peer_origin_matches(&peer.graph, expected) {
         return Err(FacadeError::StateCorrupt);
+    }
+    // Serde's flatten does not consume the keys of a flattened struct that
+    // itself flattens a struct, so every peer key is also retained in `extra`.
+    // Drop those copies so only the typed fields below reach the projection.
+    if let Ok(serde_json::Value::Object(owned)) = serde_json::to_value(&*peer) {
+        extra.retain(|key, _| !owned.contains_key(key));
     }
     // These authenticate the peer read; the CLI output schema contains lane
     // fields only. Consume transport metadata before rendering the payload.
