@@ -597,7 +597,7 @@ impl Context {
             registered_project_roots(binding, &executor, &git, &CancelToken::new())?;
         // Git metadata has no checkout when inventory proves a bare repository.
         // Keep its context host-only instead of inventing one from the path.
-        let cwd = project_root.as_path();
+        let cwd = project_root.clone();
         let port_table = provenant_config::PortTable::read_for(
             project_config_root.as_deref(),
             roots.state.as_path(),
@@ -616,7 +616,7 @@ impl Context {
         let identity = Identity::bind(
             binding,
             host,
-            cwd,
+            &cwd,
             &config,
             std::env::var_os(provenant_core::consumer_env::AGENT_LABEL).as_deref(),
             None,
@@ -635,7 +635,7 @@ impl Context {
             in_lane: in_lane(),
             executor,
             home: home.to_path_buf(),
-            cwd: cwd.to_path_buf(),
+            cwd,
         })
     }
 
