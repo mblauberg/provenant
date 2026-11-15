@@ -1,9 +1,11 @@
 # State and config
 
 Owner: `crates/core` (IDs, roots, time), `crates/records` (codecs, digests),
-`crates/config` (config, release, managed install), `crates/sqlite` (SQLite formats)
+`crates/config` (config, release, managed install), `crates/sqlite` (SQLite formats),
+`crates/cli` (provider preparation) and `crates/fabric-runtime` (peer status projections)
 Anchor: `crates/core/src/roots.rs`, `crates/records/src/lib.rs`,
-`crates/config/src/managed.rs`
+`crates/config/src/managed.rs`, `crates/cli/src/run/provider/preparation.rs`,
+`crates/fabric-runtime/src/runs.rs`, `src/fabric/peer.rs`
 
 Keys and defaults: `provenant config schema`. Operator steps: the
 [install](../runbooks/install.md) and [GC](../runbooks/gc.md) runbooks.
@@ -146,8 +148,10 @@ private from group and other users. Permission or ownership failures have a
 local repair diagnostic; malformed bindings and filesystem errors retain their
 own causes, and lookup never repairs state.
 Callers that surface the typed unsafe-directory failure preserve its safe local
-location and repair action; destination-aware projections disclose remote paths
-only through an approved anchor.
+location and repair action. Local attempt status retains that detail, while peer
+status uses the typed guard to replace terminal text with a safe reason and
+remedy. Direct diagnostic projections disclose remote paths only through an
+approved anchor.
 Commands load their declared domains; invalid unused domains warn, and effective defaults retain their compiled source.
 One sourced port table declares forge operations, verify, land, CI observation, worktree layout, naming, post-create, tracker, release, attempt admission and build admission backends; repository values at `.provenant/ports.json` override host `state/ports.json`, then compiled builtin defaults. Each explicitly replaced port takes its source from the containing layer before decoding; a serialised source is optional and cannot override that provenance. Omitted ports retain their lower layer and source. This repository stores its source at `config/ports.json` and links the optional Provenant path there; CI reads the source directly. Verify tiers declare free-form names, an explicit default, selection and host-load policy, while the builtin layout declares its roots and branch path once.
 Forge operations share one typed port and one Builtin/Command/None adapter in `config::ports`; CI observation and tracker select their sourced category through that same adapter. The land owner resolves `PortTable.land` before publication effects, independently of candidate and ordering strategy. The resolved publication declaration is sealed in the landing plan. The land command reuses `records::landing::RepositoryCommand`: exit 0 means landed, other nonzero exits refuse except its declared unknown code. A command port inherits only the declared execution-context environment (paths, home, temporary directory, locale and toolchain selection), plus explicit owner-supplied values; ambient credential and agent variables are not forwarded. A command port runs configured argv directly, followed by owner-supplied arguments, with no shell; declared exit codes select succeeded, unknown or refused. Consumers of response bytes treat incomplete capture as unavailable; exit-only admission uses declared exit success and records capture completeness separately. `none` disables that port without selecting the builtin behavior.

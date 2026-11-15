@@ -696,6 +696,8 @@ pub(super) enum PrepareError {
     Receipt(#[from] serde_json::Error),
     #[error(transparent)]
     ReadOnly(#[from] ReadOnlyPlanError),
+    #[error(transparent)]
+    SourceView(super::source_tree::SourceViewError),
     #[error("write grants overlap a host index")]
     HostIndexOverlap,
     #[error("write grants overlap the host target seed store")]
@@ -814,6 +816,30 @@ impl PrepareError {
                 )
                 .then_some(provenant_records::run::PreparationFailure::AdapterUnavailable),
             }),
+            Self::SourceView(error) => {
+                let detail = error.to_string();
+                let binding_refusal = matches!(
+                    &error.cause,
+                    super::source_tree::SourceCause::ProjectBindingDirectory(_)
+                );
+                let mut refusal = run::PrepareRefusal::boxed(
+                    provenant_records::run::TerminalCause::SourceViewRefused,
+                    detail.clone(),
+                );
+                refusal.terminal_note = Some(detail);
+                if binding_refusal {
+                    let mut skipped = skip(
+                        "project binding state",
+                        SkipKind::Refused,
+                        "project binding state directory is unsafe",
+                    );
+                    skipped.confinement_guard = Some(
+                        provenant_records::diagnostic::ConfinementGuard::ProjectBindingDirectoryUnsafe,
+                    );
+                    refusal.skipped_routes.push(skipped);
+                }
+                Box::new(refusal)
+            }
             Self::Candidates {
                 message,
                 skipped_routes,
@@ -1208,12 +1234,7 @@ fn route_resolution_refusal(error: crate::route::DispatchError) -> PrepareError 
 
 impl From<super::source_tree::SourceViewError> for PrepareError {
     fn from(error: super::source_tree::SourceViewError) -> Self {
-        // The step and cause are fixed-form text, never Git output or contents.
-        Self::Refusal {
-            message: error.to_string(),
-            cause: provenant_records::run::TerminalCause::SourceViewRefused,
-            note: Some(error.to_string()),
-        }
+        Self::SourceView(error)
     }
 }
 impl From<String> for PrepareError {
@@ -1490,9 +1511,8 @@ impl PlanCheckError {
                 ReadOnlyPlanError::BindingMismatch => G::ProjectBindingMismatch,
                 ReadOnlyPlanError::MissingBinding => G::ProjectBindingMissing,
                 ReadOnlyPlanError::PinnedSourceRequiresGit => G::PinnedSourceRequiresGit,
-                ReadOnlyPlanError::Other(_) | ReadOnlyPlanError::ProjectBindingDirectory(_) => {
-                    G::ReadOnlyPreparationFailed
-                }
+                ReadOnlyPlanError::Other(_) => G::ReadOnlyPreparationFailed,
+                ReadOnlyPlanError::ProjectBindingDirectory(_) => G::ProjectBindingDirectoryUnsafe,
             },
         }
     }
@@ -5680,6 +5700,6 @@ fn binding_refusal_preserves_local_repair_and_closed_route_guard() {
     );
     assert_eq!(
         refusal.skipped_routes[0].confinement_guard,
-        Some(provenant_records::diagnostic::ConfinementGuard::ReadOnlyPreparationFailed)
+        Some(provenant_records::diagnostic::ConfinementGuard::ProjectBindingDirectoryUnsafe)
     );
 }
