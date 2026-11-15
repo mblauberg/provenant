@@ -1104,6 +1104,13 @@ fn push_denial(
     if exceptions.is_empty() {
         return push_rule(source, "deny", operation, &root.path, root.scope);
     }
+    // An exception that covers the whole root leaves nothing to deny.
+    if exceptions.iter().any(|grant| {
+        grant.path == root.path
+            && (grant.scope == PathScope::Subtree || root.scope == PathScope::Exact)
+    }) {
+        return Ok(());
+    }
     let filter = |scope| match scope {
         PathScope::Exact => "literal",
         PathScope::Subtree => "subpath",

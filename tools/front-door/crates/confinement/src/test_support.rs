@@ -257,7 +257,12 @@ pub(crate) fn run_fixture_git(
     );
     let outcome = executor.execute(options)?;
     if outcome.termination != Termination::Exit(0) || outcome.timed_out || outcome.cancelled {
-        return Err(io::Error::other("bounded Git fixture setup failed").into());
+        return Err(io::Error::other(format!(
+            "bounded Git fixture setup failed: git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&outcome.stderr.bytes).trim()
+        ))
+        .into());
     }
     Ok(outcome)
 }

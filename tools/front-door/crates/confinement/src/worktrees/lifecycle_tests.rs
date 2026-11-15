@@ -649,8 +649,6 @@ fn recreating_a_worktree_path_starts_a_fresh_custody_incarnation() -> Result<(),
         },
         &cancel(),
     )?;
-    fixture.run(&["branch", "-D", "custody-incarnation"])?;
-
     let second = create(
         &context,
         WorktreeCreate {

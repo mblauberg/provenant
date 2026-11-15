@@ -3144,9 +3144,16 @@ fn census_refusal_reports_the_declared_process_evidence_kind() -> Result<(), Box
             (pid == 200).then(|| self.executable.clone())
         }
         fn occupancy(&self, pid: i64) -> provenant_os::pid::OccupancyObservation {
-            if pid == 200 && self.kind == ProcessEvidenceKind::OtherHeldPath {
+            // The system observer reports the running image among the
+            // occupancy paths, as it does any other held file.
+            let held = match self.kind {
+                ProcessEvidenceKind::OtherHeldPath => Some(self.held.clone()),
+                ProcessEvidenceKind::ExecutableImage => Some(self.executable.clone()),
+                _ => None,
+            };
+            if let (200, Some(held)) = (pid, held) {
                 provenant_os::pid::OccupancyObservation {
-                    paths: vec![self.held.clone()],
+                    paths: vec![held],
                     complete: true,
                     gap: None,
                 }
@@ -3249,11 +3256,15 @@ fn census_refusal_reports_the_declared_process_evidence_kind() -> Result<(), Box
                 kind,
             },
         };
-        assert!(matches!(
-            live_refusal(&observer, &root),
-            WorktreeError::LiveProcess(ObservedProcess { pid: 200, kind: actual, .. })
-                if actual == kind
-        ));
+        let refusal = live_refusal(&observer, &root);
+        assert!(
+            matches!(
+                &refusal,
+                WorktreeError::LiveProcess(ObservedProcess { pid: 200, kind: actual, .. })
+                    if *actual == kind
+            ),
+            "{kind:?}: {refusal:?}"
+        );
     }
     Ok(())
 }

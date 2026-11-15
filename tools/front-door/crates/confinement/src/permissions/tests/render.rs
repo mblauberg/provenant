@@ -43,7 +43,10 @@ pub(super) fn rule_facts(source: &str) -> Vec<RuleFact> {
                 "deny" => RuleAction::Deny,
                 _ => return None,
             };
-            let operations = atoms.map(str::to_owned).collect();
+            let operations = atoms
+                .map(|atom| atom.trim_end_matches(')').to_owned())
+                .filter(|atom| !atom.is_empty())
+                .collect();
             let mut strings = Vec::new();
             let mut remaining = line;
             while let Some((_, quoted)) = remaining.split_once('"') {

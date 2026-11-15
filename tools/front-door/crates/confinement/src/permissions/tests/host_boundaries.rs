@@ -108,11 +108,13 @@ fn native_host_inventory_protects_aliases_and_later_worktrees()
             !selected
         );
         if selected {
-            assert!(source.contains(&format!(
-                "(deny file-read* (require-all (literal \"{}\") (require-not (literal \"{}\"))))",
-                login.display(),
-                login.display()
-            )));
+            // The selected login store is readable: no denial names it.
+            assert!(
+                !source
+                    .lines()
+                    .any(|line| line.starts_with("(deny file-read*")
+                        && line.contains(&format!("\"{}\"", login.display())))
+            );
         }
         sources.push((selected, source));
     }
