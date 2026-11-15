@@ -2365,7 +2365,7 @@ impl SteeringCause {
     }
 
     /// Parse the bounded RunStore outcome value.
-    pub const fn from_str(value: &str) -> Option<Self> {
+    pub fn from_str(value: &str) -> Option<Self> {
         match value {
             "session_unavailable" => Some(Self::SessionUnavailable),
             "session_mismatch" => Some(Self::SessionMismatch),
