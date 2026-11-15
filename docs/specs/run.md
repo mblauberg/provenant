@@ -54,7 +54,9 @@ immutable, and collection cannot race an active clone. `max_generations` keeps
 history per project; `max_bytes` remains a host-wide allocated-byte limit and
 can evict a project's only generation under byte pressure. Failed refreshes
 retry at the next scheduled collection, while busy projects retry on the next
-tick without rebuilding other failed projects.
+tick without rebuilding other failed projects. Full requests supersede queued
+busy retries and reevaluate prior failures. Detached pending and active scopes
+survive process interruption and are retried after a minute.
 - Why: reuse must not introduce incompatible or partially collected build output.
 
 ## Publication order
