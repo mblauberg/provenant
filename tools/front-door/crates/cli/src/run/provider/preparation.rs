@@ -3721,7 +3721,7 @@ pub(super) fn prepare_candidates(
         } else {
             None
         };
-        let provider_route = adapter_route(&route);
+        let mut provider_route = adapter_route(&route);
         let model_id =
             provenant_routing::ModelId::parse(&label).map_err(|error| error.to_string())?;
         let launch_model = catalogue.launch_model(&model_id, route.effort.as_deref());
@@ -4196,13 +4196,11 @@ pub(super) fn prepare_candidates(
             push_launch_warning(&mut route, warning);
         }
         if route.eligibility == provenant_records::RouteEligibility::UnverifiedModel {
-            push_launch_warning(
-                &mut route,
-                format!(
-                    "model {}/{} is not in the catalogue; the provider will check it",
-                    route.adapter, route.model
-                ),
+            let warning = format!(
+                "model {}/{} is not in the catalogue; the provider will check it",
+                route.adapter, route.model
             );
+            push_launch_warning(&mut route, warning);
         }
         for warning in config.domains.routing.pool_effort_warnings(&catalogue) {
             push_launch_warning(&mut route, warning);
