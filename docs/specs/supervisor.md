@@ -173,13 +173,14 @@ compare-and-swap.
 
 ### Native environment and sandbox tool stores
 
-Unsandboxed lanes inherit the host environment, PATH, tool caches and
-credentials in place. Provider account selectors still choose the registered
-account and its required credentials. Credential
-values stay in the live launch, never in prompts or receipts. Native launches
-skip skill copies, tool dependency discovery, credential symlink inventory and
-the build-slot shim. Every lane still binds the host Cargo home and private
-target/build directories before seed validation.
+Unsandboxed lanes inherit the host environment and PATH. Provider preparation
+may select an account-specific home or redirect provider state and cache paths
+in either confinement mode; account selectors choose the registered account
+and its required credentials. Credential values stay in the live launch,
+never in prompts or receipts. Native launches skip skill copies, tool
+dependency discovery, credential symlink inventory and the build-slot shim.
+Every lane still binds the host Cargo home and private target/build
+directories before seed validation.
 
 Sandboxed lanes use the minimal environment and staged skills, discover tool
 dependencies and credential aliases, and report inventory omissions in one
