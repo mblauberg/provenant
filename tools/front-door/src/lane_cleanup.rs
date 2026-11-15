@@ -1638,10 +1638,9 @@ mod tests {
             };
             let base = head()?;
             run_git(&project, &["checkout", "-qb", "lane/old"])?;
-            run_git(
-                &project,
-                &["commit", "--allow-empty", "-qm", "unlanded work"],
-            )?;
+            std::fs::write(project.join("unlanded-work.txt"), "unique unlanded work\n")?;
+            run_git(&project, &["add", "unlanded-work.txt"])?;
+            run_git(&project, &["commit", "-qm", "unlanded work"])?;
             let unlanded = head()?;
             run_git(&project, &["checkout", "-q", "main"])?;
             run_git(
