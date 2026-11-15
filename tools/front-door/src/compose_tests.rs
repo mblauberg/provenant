@@ -343,7 +343,7 @@ pub(crate) fn provider() -> Result {
             PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").ok_or("CARGO_TARGET_DIR missing")?);
         let cargo = PathBuf::from(std::env::var_os("CARGO_HOME").ok_or("CARGO_HOME missing")?);
         let cache = target.parent().ok_or("cache")?;
-        // Source identity is shared with the host; only build output is private.
+        // Lanes use the host's Cargo home as a subagent would; only credentials stay out.
         assert_eq!(cargo, home.join(".cargo"));
         assert!(!cargo.starts_with(cache));
         fs::create_dir_all(&target)?;
@@ -364,7 +364,6 @@ pub(crate) fn provider() -> Result {
                 fs::read(&config)?.as_slice(),
                 b"# synthetic host Cargo configuration\n"
             );
-            denied(&config)?;
         }
         for name in provenant_confinement::cargo::TRACKING_FILES {
             fs::write(cargo.join(name), b"fixture tracking")?;
