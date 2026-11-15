@@ -58,6 +58,7 @@ pub fn filtered_requester_lane_path(
     git: &Path,
     executor: &dyn provenant_os::exec::Executor,
     cancel: &CancelToken,
+    binding: Option<&provenant_config::ProjectBinding>,
 ) -> Result<run::FilteredLanePath, String> {
     provider::confinement::filtered_requester_lane_path(
         host,
@@ -66,6 +67,7 @@ pub fn filtered_requester_lane_path(
         git,
         executor,
         cancel,
+        binding,
     )
 }
 

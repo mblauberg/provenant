@@ -356,9 +356,8 @@ pub(super) fn confinement_request(
                 .chain(writer.is_none().then(|| grant(roots.cwd)))
                 .chain(
                     writer
-                        .and_then(|writer| writer.worktree.repo().common_git_dir().parent())
                         .into_iter()
-                        .flat_map(project_scratch_reads),
+                        .flat_map(|writer| project_scratch_reads(writer.project_root())),
                 )
                 .chain(access.read_roots.iter().map(|path| grant(path)))
                 .chain(access.attachments.iter().map(|path| PathGrant {
@@ -656,11 +655,11 @@ pub(super) fn protected_worktrees(
         if !is_git {
             continue;
         }
-        let layout = provenant_confinement::worktrees::project_layout_for_common(
+        let layout = provenant_confinement::worktrees::project_layout_for_binding(
             &executor,
-            common,
+            &binding,
             git,
-            &requester_git_environment(),
+            &provenant_confinement::worktrees::project_layout_git_environment(),
             std::time::Duration::from_secs(5),
             &cancel,
         )
@@ -892,25 +891,37 @@ pub(in crate::run) fn filtered_requester_lane_path(
     git: &Path,
     executor: &dyn provenant_os::exec::Executor,
     cancel: &provenant_core::CancelToken,
+    binding: Option<&provenant_config::ProjectBinding>,
 ) -> Result<run::FilteredLanePath, String> {
-    let (project, selected) = requester_path_roots(project_path, git, executor, cancel)?;
+    let (project, selected) = requester_path_roots(project_path, git, executor, cancel, binding)?;
     let selected_worktree = if canonical(project_path)? == canonical(worktree_path)? {
         selected
     } else {
-        requester_path_roots(worktree_path, git, executor, cancel)?.1
+        requester_path_roots(worktree_path, git, executor, cancel, binding)?.1
     };
     run::FilteredLanePath::for_requester(host, &project, &selected_worktree)
         .map_err(|error| error.to_string())
 }
 
+pub(super) fn registered_project_binding(
+    roots: &provenant_core::Roots,
+    project: provenant_core::ProjectId,
+) -> Result<Option<provenant_config::ProjectBinding>, String> {
+    Ok(provenant_config::registered_projects(roots)
+        .map_err(|error| format!("cannot read registered project inventory: {error}"))?
+        .into_iter()
+        .find(|binding| binding.project_id() == project))
+}
+
 /// Return the verified primary project root and selected checkout root. A
-/// non-checkout directory remains its own root; linked and separate Git
-/// directories use the canonical common directory and verified inventory.
+/// non-checkout directory remains its own root; linked checkouts use their
+/// registered binding or the common directory's verified inventory.
 fn requester_path_roots(
     path: &Path,
     git: &Path,
     executor: &dyn provenant_os::exec::Executor,
     cancel: &provenant_core::CancelToken,
+    binding: Option<&provenant_config::ProjectBinding>,
 ) -> Result<(PathBuf, PathBuf), String> {
     let path = canonical(path)?;
     if !path
@@ -935,45 +946,45 @@ fn requester_path_roots(
         Some(cancel),
     )
     .map_err(|error| format!("cannot resolve requester PATH worktree: {error}"))?;
-    Ok((
-        verified_project_root(&common, git, executor, cancel)?,
-        selected,
-    ))
-}
-
-pub(super) fn verified_project_root(
-    common: &Path,
-    git: &Path,
-    executor: &dyn provenant_os::exec::Executor,
-    cancel: &provenant_core::CancelToken,
-) -> Result<PathBuf, String> {
-    let environment = requester_git_environment();
-    let layout = provenant_confinement::worktrees::project_layout_for_common(
+    let private = provenant_os::git::repository_path_with_cancel(
         executor,
-        common,
         git,
-        &environment,
-        std::time::Duration::from_secs(5),
-        cancel,
+        &path,
+        provenant_os::git::RepositoryPath::GitDir,
+        Some(cancel),
     )
-    .map_err(|error| format!("cannot verify requester PATH project layout: {error}"))?;
-    Ok(layout.root().to_path_buf())
-}
-
-fn requester_git_environment() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
-    [
-        ("HOME", "/nonexistent"),
-        ("XDG_CONFIG_HOME", "/nonexistent"),
-        ("GIT_CONFIG_NOSYSTEM", "1"),
-        ("GIT_CONFIG_GLOBAL", "/dev/null"),
-        ("GIT_CONFIG_SYSTEM", "/dev/null"),
-        ("GIT_NO_REPLACE_OBJECTS", "1"),
-        ("GIT_NO_LAZY_FETCH", "1"),
-        ("GIT_TERMINAL_PROMPT", "0"),
-        ("LC_ALL", "C"),
-    ]
-    .map(|(key, value)| (key.into(), value.into()))
-    .into()
+    .map_err(|error| format!("cannot resolve requester PATH private Git directory: {error}"))?;
+    let common = canonical(&common)?;
+    let private = canonical(&private)?;
+    let project = if private == common {
+        // Git proves this selected top-level owns the shared metadata directly.
+        selected.clone()
+    } else if let Some(binding) =
+        binding.filter(|binding| canonical(binding.common_dir()).is_ok_and(|bound| bound == common))
+    {
+        let layout = provenant_confinement::worktrees::project_layout_for_binding(
+            executor,
+            binding,
+            git,
+            &provenant_confinement::worktrees::project_layout_git_environment(),
+            std::time::Duration::from_secs(5),
+            cancel,
+        )
+        .map_err(|error| format!("cannot verify requester PATH project layout: {error}"))?;
+        layout.project().unwrap_or(layout.root()).to_path_buf()
+    } else {
+        let layout = provenant_confinement::worktrees::project_layout_for_common(
+            executor,
+            &common,
+            git,
+            &provenant_confinement::worktrees::project_layout_git_environment(),
+            std::time::Duration::from_secs(5),
+            cancel,
+        )
+        .map_err(|error| format!("cannot verify requester PATH project layout: {error}"))?;
+        layout.project().unwrap_or(layout.root()).to_path_buf()
+    };
+    Ok((project, selected))
 }
 
 /// Reopen the graph-bound checkout at launch, refusing a moved or replaced
@@ -1255,11 +1266,16 @@ pub(super) fn read_only_plan(
                 Err(error) => return Err(error.to_string().into()),
             }
         }
-        let location = provenant_config::ProjectLocation::new(
-            repository
-                .as_ref()
-                .map_or(cwd, |repo| repo.common_git_dir()),
-        )
+        let location = match repository.as_ref() {
+            Some(repo) if repo.private_git_dir() == repo.common_git_dir() => {
+                provenant_config::ProjectLocation::from_verified_primary_checkout(
+                    repo.common_git_dir(),
+                    repo.root_path(),
+                )
+            }
+            Some(repo) => provenant_config::ProjectLocation::new(repo.common_git_dir()),
+            None => provenant_config::ProjectLocation::new(cwd),
+        }
         .map_err(|error| error.to_string())?;
         let binding = if live {
             // Graph attribution stays with the parent; the read plan belongs to

@@ -146,6 +146,7 @@ impl Error {
                 | WorktreeError::IncompleteCensus { .. }
                 | WorktreeError::Primary
                 | WorktreeError::IdentityChanged
+                | WorktreeError::ProjectLayoutUnresolved
                 | WorktreeError::PrimaryMoved,
             ) => Outcome::Refused,
             Self::Worktree(WorktreeError::Cancelled) => Outcome::Cancelled,
@@ -2360,7 +2361,14 @@ fn with_context_mode<T>(
     let cancel = CancelToken::new();
     let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
     let repo = runtime.open_repo(&executor, project, budget, &cancel)?;
-    let location = provenant_config::ProjectLocation::new(repo.common_git_dir())?;
+    let location = if repo.private_git_dir() == repo.common_git_dir() {
+        provenant_config::ProjectLocation::from_verified_primary_checkout(
+            repo.common_git_dir(),
+            repo.root_path(),
+        )?
+    } else {
+        provenant_config::ProjectLocation::new(repo.common_git_dir())?
+    };
     let binding = if read_only {
         provenant_config::lookup_project(roots, &location)?.ok_or(Error::GcObservation(
             "GC preview requires an existing project binding",
