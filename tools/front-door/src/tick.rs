@@ -4,11 +4,17 @@ use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::{Clock, DurationMicros, WaitBudget, WallTime};
 use provenant_os::{
     clock::SystemClock,
+    exec::{Executor, SystemExecutor},
     fs::{Directory, LockMode, PublishMode},
 };
 use provenant_records::{CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::{
+    collections::BTreeSet,
+    ffi::OsString,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 mod steward;
 
@@ -247,8 +253,6 @@ struct SeedPass {
     busy: usize,
     /// Projects with no selected Cargo manifest, which have nothing to seed.
     skipped: usize,
-    /// Commits whose last build failed, waiting for `origin/main` to move.
-    backed_off: Vec<String>,
     errors: Vec<String>,
 }
 
@@ -279,24 +283,11 @@ fn refresh_projects(
             Ok(Refresh::Built(_)) => pass.built += 1,
             Ok(Refresh::NotCargo) => pass.skipped += 1,
             Ok(Refresh::Current) => pass.current += 1,
-            Ok(Refresh::BackedOff(commit)) => pass.backed_off.push(commit),
             Ok(Refresh::Busy) => pass.busy += 1,
             Err(error) => pass.errors.push(format!("{}: {error}", project.display())),
         }
     }
     pass
-}
-
-fn backed_off_note(commits: &[String]) -> Option<String> {
-    let mut commits = commits.to_vec();
-    commits.sort();
-    commits.dedup();
-    (!commits.is_empty()).then(|| {
-        format!(
-            "commit {} failed; waiting for origin/main to move",
-            commits.join(", ")
-        )
-    })
 }
 
 /// Run one single-flight pass under `seed-worker.lock`. A second worker, or a
@@ -327,20 +318,64 @@ fn seed_pass(
         Ok(pass) if pass.busy > 0 => (
             "busy",
             Some(format!(
-                "{} project(s) had a build running; retrying next tick{}",
-                pass.busy,
-                backed_off_note(&pass.backed_off)
-                    .map(|note| format!("; {note}"))
-                    .unwrap_or_default()
+                "{} project(s) had a build running; retrying next tick",
+                pass.busy
             )),
         ),
-        Ok(pass) if !pass.backed_off.is_empty() => {
-            ("backed_off", backed_off_note(&pass.backed_off))
-        }
         Ok(_) => ("complete", None),
         Err(error) => ("failed", Some(error)),
     };
     write_result(directory, SEED_RESULT, "tick-seed", at()?, state, error)
+}
+
+fn seed_git_environment() -> Vec<(OsString, OsString)> {
+    [
+        ("HOME", "/nonexistent"),
+        ("XDG_CONFIG_HOME", "/nonexistent"),
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("GIT_CONFIG_SYSTEM", "/dev/null"),
+        ("GIT_NO_REPLACE_OBJECTS", "1"),
+        ("GIT_NO_LAZY_FETCH", "1"),
+        ("GIT_TERMINAL_PROMPT", "0"),
+        ("LC_ALL", "C"),
+    ]
+    .map(|(key, value)| (key.into(), value.into()))
+    .into()
+}
+
+fn registered_seed_projects(
+    common_dirs: &[PathBuf],
+    executor: &dyn Executor,
+    git: &Path,
+    environment: &[(OsString, OsString)],
+    cancel: &provenant_core::CancelToken,
+) -> Result<Vec<PathBuf>, String> {
+    let mut projects = Vec::new();
+    let mut seen = BTreeSet::new();
+    for common in common_dirs {
+        let layout = provenant_confinement::worktrees::project_layout_for_common(
+            executor,
+            common,
+            git,
+            environment,
+            Duration::from_secs(5),
+            cancel,
+        )
+        .map_err(|error| {
+            format!(
+                "cannot resolve registered seed project for {}: {error}",
+                common.display()
+            )
+        })?;
+        // A bare common directory owns host Git state, not a Cargo project.
+        if let Some(project) = layout.project()
+            && seen.insert(project.to_path_buf())
+        {
+            projects.push(project.to_path_buf());
+        }
+    }
+    Ok(projects)
 }
 
 /// Detached cargo-seed refresh queued by the daily collector. The build can
@@ -370,18 +405,21 @@ pub(crate) fn seed_worker(globals: &Globals) -> u8 {
             || {
                 let selection = provenant_config::registered_gc_project_selection(&resolved.roots)
                     .map_err(|error| error.to_string())?;
-                Ok(selection
+                let common_dirs = selection
                     .projects
                     .iter()
-                    .map(|binding| {
-                        let common = binding.common_dir();
-                        if common.file_name() == Some(std::ffi::OsStr::new(".git")) {
-                            common.parent().unwrap_or(common).to_owned()
-                        } else {
-                            common.to_owned()
-                        }
-                    })
-                    .collect())
+                    .map(|binding| binding.common_dir().to_path_buf())
+                    .collect::<Vec<_>>();
+                let git = provenant_os::git::git_executable()
+                    .ok_or_else(|| "Git executable unavailable".to_owned())?;
+                let executor = SystemExecutor::new(1).map_err(|error| error.to_string())?;
+                registered_seed_projects(
+                    &common_dirs,
+                    &executor,
+                    &git,
+                    &seed_git_environment(),
+                    &provenant_core::CancelToken::new(),
+                )
             },
             |project| crate::target_seed_build::refresh(state, project),
         )?;
@@ -409,7 +447,6 @@ fn seed_state(directory: &Directory) -> &'static str {
                 "running" => "running",
                 "complete" => "complete",
                 "busy" => "busy",
-                "backed_off" => "backed_off",
                 "disabled" => "disabled",
                 _ => "last_failed",
             },
@@ -624,6 +661,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn registered_seed_projects_resolve_separate_gitdirs_and_skip_bare_repositories() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let primary = root.join("primary");
+        std::fs::create_dir(&primary).unwrap();
+        provenant_os::fixture::run_git(&primary, &["init", "-q"]).unwrap();
+        provenant_os::fixture::run_git(&primary, &["commit", "--allow-empty", "-qm", "base"])
+            .unwrap();
+
+        let separate = root.join("separate");
+        let separate_git = root.join("separate.git");
+        std::fs::create_dir(&separate).unwrap();
+        provenant_os::fixture::run_git(
+            &separate,
+            &[
+                "init",
+                "-q",
+                "--separate-git-dir",
+                separate_git.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        provenant_os::fixture::run_git(&separate, &["commit", "--allow-empty", "-qm", "base"])
+            .unwrap();
+
+        let bare = root.join("host-only.git");
+        provenant_os::fixture::run_git(&root, &["init", "--bare", "-q", bare.to_str().unwrap()])
+            .unwrap();
+
+        let git = provenant_os::git::git_executable().unwrap();
+        let executor = SystemExecutor::new(4).unwrap();
+        let projects = registered_seed_projects(
+            &[primary.join(".git"), separate_git, bare],
+            &executor,
+            &git,
+            &seed_git_environment(),
+            &provenant_core::CancelToken::new(),
+        )
+        .unwrap();
+        assert_eq!(projects, vec![primary, separate]);
+    }
+
+    #[test]
     fn daily_cadence_survives_restart_and_fires_at_the_deadline() {
         let temp = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
         let directory = provenant_config::private_directory(temp.path(), true).unwrap();
@@ -783,8 +863,9 @@ mod tests {
         assert!(!seed_retry_due(&directory, far), "only busy is retried");
     }
 
+    /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
-    fn seed_pass_skips_projects_without_a_manifest_and_reports_a_back_off() {
+    fn seed_pass_skips_non_cargo_projects_and_allows_later_retry_after_failure() {
         use crate::target_seed_build::Refresh;
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
@@ -801,17 +882,14 @@ mod tests {
             || Ok(listed),
             |project| {
                 called.borrow_mut().push(project.to_owned());
-                Ok(Refresh::BackedOff("abc123".into()))
+                Err(std::io::Error::other("temporary Git spawn failure").into())
             },
         )
         .unwrap();
         assert_eq!(*called.borrow(), vec![broken.clone()], "bare is skipped");
         let (state, note) = seed_state_of(&directory);
-        assert_eq!(state, "backed_off", "a back-off is not `complete`");
-        assert_eq!(
-            note.unwrap(),
-            "commit abc123 failed; waiting for origin/main to move"
-        );
+        assert_eq!(state, "last_failed");
+        assert!(note.unwrap().contains("temporary Git spawn failure"));
         let pass = refresh_projects(&[bare], &root, |_| panic!("no manifest, no refresh"));
         assert_eq!(
             pass,
@@ -820,6 +898,16 @@ mod tests {
                 ..Default::default()
             }
         );
+        seed_pass(
+            &directory,
+            &root,
+            &seed_clock(),
+            true,
+            || Ok(vec![broken]),
+            |_| Ok(Refresh::Built("generation".into())),
+        )
+        .unwrap();
+        assert_eq!(seed_state_of(&directory), ("complete", None));
     }
 
     #[allow(dead_code)] // The worktree driver includes this module without libtest.

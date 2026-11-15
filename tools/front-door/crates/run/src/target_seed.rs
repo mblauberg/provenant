@@ -10,6 +10,10 @@ use std::{
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Manifest {
+    /// Hash of the canonical shared Git directory whose verify-base was built.
+    /// Empty on generations written before repository identity was recorded.
+    #[serde(default)]
+    pub project_key: String,
     pub rustc_vv: String,
     pub host_triple: String,
     pub commit: String,
