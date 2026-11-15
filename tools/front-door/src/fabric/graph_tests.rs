@@ -4000,7 +4000,7 @@ mod provisioned_writer_submission_tests {
             let successor = node.attempts.last().ok_or("successor")?;
             assert_eq!(
                 successor.key.previous_attempt_ref.as_deref(),
-                Some(reference.as_str()),
+                Some(reference),
                 "{node:?}"
             );
             let successor_ref = successor

@@ -3430,11 +3430,11 @@ impl BoundGraphOwner<'_> {
                 self.launch_warnings.push(warning);
             }
             if peer_root && let Some(network) = route.peer_network {
-                grants.network = network;
+                grants.network = Some(network);
             }
             let peer_retry = peer_root.then_some(route.peer_retry_limit).flatten();
             let retry_limit =
-                accepted_retry_limit.unwrap_or(peer_retry.unwrap_or(node.settlement_retries));
+                accepted_retry_limit.unwrap_or(peer_retry.or(node.settlement_retries));
             let mut attempt = accepted_attempt.unwrap_or_else(|| {
                 let mut attempt = node.attempt.cloned().unwrap_or_default();
                 attempt.account = route.account.clone().or(attempt.account);

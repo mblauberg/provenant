@@ -4463,8 +4463,8 @@ mod tests {
         )?;
         let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
         assert_eq!(
-            document.template_library["review.local"].brief,
-            "Review local invariants"
+            document.template_library["review.local"].brief.as_deref(),
+            Some("Review local invariants")
         );
         assert!(document.template_resolvers.contains_key("review-panel"));
         let expanded = document.expanded(&factory.context.config.graph.limits)?;
@@ -5763,11 +5763,8 @@ mod tests {
         });
         let response = factory.graph_document(input.clone(), budget, &cancel)?;
         let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
-        let record: provenant_routing::PanelResolution = serde_json::from_str(
-            document.template_resolvers["review-family-resolution"][0]
-                .as_str()
-                .ok_or("family resolution")?,
-        )?;
+        let record: provenant_routing::PanelResolution =
+            serde_json::from_str(&document.template_resolvers["review-family-resolution"][0])?;
         assert_eq!(
             record
                 .slots
@@ -5811,11 +5808,8 @@ mod tests {
         advisory["document"]["exclude"] = json!(["codex"]);
         let response = factory.graph_document(advisory, budget, &cancel)?;
         let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
-        let record: provenant_routing::PanelResolution = serde_json::from_str(
-            document.template_resolvers["review-family-resolution"][0]
-                .as_str()
-                .ok_or("family resolution")?,
-        )?;
+        let record: provenant_routing::PanelResolution =
+            serde_json::from_str(&document.template_resolvers["review-family-resolution"][0])?;
         assert!(
             record
                 .slots
