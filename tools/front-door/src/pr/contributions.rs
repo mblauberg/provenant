@@ -1,5 +1,5 @@
 //! Host-only capture and retained contribution reader. Never consult peer stores.
-use super::{Result, execute, successful};
+use super::{Result, successful};
 use crate::{emit, fail, roots};
 use provenant_cli::Globals;
 use provenant_core::{CancelToken, GitOid, ProjectId, WallTime};
@@ -9,15 +9,20 @@ use provenant_run::{Contributions, PullRequest, Request};
 use serde_json::json;
 use std::{path::Path, time::Duration};
 
-fn repository(project: &Path) -> Result<String> {
+fn repository(state: &Path, project: &Path) -> Result<String> {
     #[derive(serde::Deserialize)]
     struct Repository {
         #[serde(rename = "nameWithOwner")]
         name: String,
     }
-    let bytes = successful(execute(
+    let bytes = successful(super::forge_execute(
+        state,
         project,
         &["gh", "repo", "view", "--json", "nameWithOwner"],
+        Duration::from_secs(60),
+        false,
+        None,
+        None,
     )?)?;
     Ok(serde_json::from_slice::<Repository>(&bytes)?
         .name
@@ -61,7 +66,7 @@ impl Tracker {
     pub(super) fn new(resolved: roots::Resolved) -> Result<Self> {
         Ok(Self {
             project: project_id(&resolved)?,
-            repository: repository(&resolved.project)?,
+            repository: repository(resolved.roots.state.as_path(), &resolved.project)?,
             resolved,
         })
     }
@@ -117,7 +122,8 @@ impl Tracker {
 
     /// GitHub state and end time of a PR from one gh call.
     fn observed_end(&self, pr: &PullRequest) -> Result<(String, Option<WallTime>)> {
-        let bytes = successful(execute(
+        let bytes = successful(super::forge_execute(
+            self.resolved.roots.state.as_path(),
             &self.resolved.project,
             &[
                 "gh",
@@ -129,6 +135,10 @@ impl Tracker {
                 "--json",
                 "state,mergedAt,closedAt",
             ],
+            Duration::from_secs(60),
+            false,
+            None,
+            None,
         )?)?;
         parse_end(&bytes)
     }
@@ -273,14 +283,22 @@ pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
             if !project_bound {
                 return Err(unbound().into());
             }
-            let view = super::land::pull(&resolved.project, &number.to_string())?;
+            let view = super::land::pull(
+                resolved.roots.state.as_path(),
+                &resolved.project,
+                &number.to_string(),
+            )?;
             if view.cross_repository {
                 return Err("cannot bind a fork PR to a local namesake branch".into());
             }
             let bound = tracker.bind(
                 &view.branch,
                 number,
-                super::head(&resolved.project, &number.to_string())?,
+                super::head(
+                    resolved.roots.state.as_path(),
+                    &resolved.project,
+                    &number.to_string(),
+                )?,
             );
             let closed = if matches!(view.state.as_str(), "CLOSED" | "MERGED") {
                 tracker.close(number)

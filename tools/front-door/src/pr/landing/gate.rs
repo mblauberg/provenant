@@ -260,6 +260,7 @@ fn run_command(
 )]
 pub fn execute_commands(
     project: &std::path::Path,
+    state: &std::path::Path,
     candidate: &Candidate,
     definition: &GateDefinition,
 ) -> Result<GateEvidence, LandingError> {
@@ -277,13 +278,21 @@ pub fn execute_commands(
     }
     let started = std::time::Instant::now();
     let deadline = started + Duration::from_secs(definition.timeout_seconds);
-    let root = project.join(".worktrees");
+    let ports = provenant_config::PortTable::read_for(Some(project), state)
+        .map_err(|error| failed(format!("cannot resolve worktree layout port: {error}")))?;
     let short: String = candidate.commit.chars().take(12).collect();
-    let checkout = root.join(format!("land-gate-{short}-{}", std::process::id()));
+    let branch = format!("land-gate-{short}-{}", std::process::id());
+    let relative = ports
+        .managed_writer_path(&branch)
+        .map_err(|error| failed(format!("cannot resolve gate checkout path: {error}")))?;
+    let checkout = project.join(relative);
+    let root = checkout
+        .parent()
+        .ok_or_else(|| failed("configured gate checkout has no parent"))?;
     if checkout.exists() {
         return Err(failed("gate checkout already exists"));
     }
-    std::fs::create_dir_all(&root)
+    std::fs::create_dir_all(root)
         .map_err(|error| failed(format!("cannot prepare gate checkout directory: {error}")))?;
     let added = std::process::Command::new("git")
         .arg("-C")
@@ -890,19 +899,24 @@ mod tests {
         def.kind = GateKind::Commands;
         def.commands = vec!["test -f f".into()];
         def.executor = Some("local".into());
-        let got = execute_commands(&dir, &cand, &def).unwrap();
+        let got = execute_commands(&dir, &dir, &cand, &def).unwrap();
         assert_eq!(got.result, GateResult::Passed);
         assert_eq!(got.issuer.as_deref(), Some("local"));
         assert!(got.duration_seconds.is_some());
         def.commands = vec!["test -f missing".into()];
         assert_eq!(
-            execute_commands(&dir, &cand, &def).unwrap().result,
+            execute_commands(&dir, &dir, &cand, &def).unwrap().result,
             GateResult::Failed
         );
         def.commands = vec!["sleep 30".into()];
         def.timeout_seconds = 1;
-        assert!(execute_commands(&dir, &cand, &def).is_err());
-        let leftover = std::fs::read_dir(dir.join(".worktrees")).unwrap().count();
+        assert!(execute_commands(&dir, &dir, &cand, &def).is_err());
+        let ports = provenant_config::PortTable::read_for(Some(&dir), &dir).unwrap();
+        let branch = format!("land-gate-{}-{}", &cand.commit[..12], std::process::id());
+        let checkout = dir.join(ports.managed_writer_path(&branch).unwrap());
+        let leftover = std::fs::read_dir(checkout.parent().unwrap())
+            .unwrap()
+            .count();
         assert_eq!(leftover, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }

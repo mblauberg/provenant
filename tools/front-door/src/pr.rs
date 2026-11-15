@@ -55,9 +55,6 @@ pub(crate) fn code_of(
 #[error("external command timed out")]
 pub(crate) struct TimedOut;
 
-fn execute(project: &Path, argv: &[&str]) -> Result<ExecOutcome> {
-    execute_for(project, argv, Duration::from_secs(60), false)
-}
 /// Run an external command to completion within `timeout`. A `watch` run
 /// discards repeated progress so a long CI wait cannot fill capture.
 pub(crate) fn execute_for(
@@ -78,6 +75,20 @@ fn execute_with(
     execute_cancellable(project, argv, timeout, watch, stdin, None)
 }
 fn execute_cancellable(
+    project: &Path,
+    argv: &[&str],
+    timeout: Duration,
+    watch: bool,
+    stdin: Option<&[u8]>,
+    cancel: Option<&provenant_core::CancelToken>,
+) -> Result<ExecOutcome> {
+    if argv.first() == Some(&"gh") {
+        return Err("forge commands require the resolved forge port".into());
+    }
+    raw_execute_cancellable(project, argv, timeout, watch, stdin, cancel)
+}
+
+fn raw_execute_cancellable(
     project: &Path,
     argv: &[&str],
     timeout: Duration,
@@ -118,6 +129,88 @@ fn execute_cancellable(
     }
     Ok(output)
 }
+/// Route forge operations through the sourced adapter while retaining the
+/// bounded command result required by the PR policy readers.
+pub(crate) fn forge_execute(
+    state: &Path,
+    project: &Path,
+    argv: &[&str],
+    timeout: Duration,
+    watch: bool,
+    stdin: Option<&[u8]>,
+    cancel: Option<&provenant_core::CancelToken>,
+) -> Result<ExecOutcome> {
+    if argv.first() != Some(&"gh") {
+        return Err("forge operation must name the builtin forge executable".into());
+    }
+    let ports = provenant_config::PortTable::read_for(Some(project), state)?;
+    let mut forge = provenant_config::ForgePort::new(ports.forge, "forge", project, state)?;
+    if let Some(cancel) = cancel {
+        forge.set_cancel(cancel.clone());
+    }
+    let arguments: Vec<_> = argv[1..].iter().map(OsString::from).collect();
+    let execution = forge
+        .execute_with(
+            provenant_config::ForgeOperation::Cli {
+                arguments,
+                input: stdin.map(<[u8]>::to_vec),
+            },
+            timeout,
+            |_, _, _, _| {
+                raw_execute_cancellable(project, argv, timeout, watch, stdin, cancel).map_err(
+                    |error| {
+                        let kind = if error.is::<TimedOut>() {
+                            std::io::ErrorKind::TimedOut
+                        } else {
+                            std::io::ErrorKind::Other
+                        };
+                        std::io::Error::new(kind, error.to_string())
+                    },
+                )
+            },
+        )
+        .map_err(|error| -> Box<dyn std::error::Error> {
+            match error {
+                provenant_config::PortError::Executor(error)
+                    if error.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    Box::new(TimedOut)
+                }
+                error => Box::new(error),
+            }
+        })?;
+    use provenant_config::PortCommandDisposition as D;
+    if !execution.capture_complete() && matches!(execution.disposition, D::Succeeded | D::Refused) {
+        return Err(Box::new(provenant_config::PortError::Disposition(
+            D::Unknown,
+        )));
+    }
+    match execution.disposition {
+        D::TimedOut => Err(Box::new(TimedOut)),
+        D::Succeeded => {
+            let mut outcome = execution
+                .outcome
+                .ok_or("forge port returned no process outcome")?;
+            // The port's declared success codes define operation success. Exact
+            // command termination is retained by the shared command receipt.
+            outcome.termination = Termination::Exit(0);
+            Ok(outcome)
+        }
+        D::Refused => {
+            let mut outcome = execution
+                .outcome
+                .ok_or("forge port refused without a process outcome")?;
+            if outcome.termination == Termination::Exit(0) {
+                outcome.termination = Termination::Exit(1);
+            }
+            Ok(outcome)
+        }
+        disposition => Err(Box::new(provenant_config::PortError::Disposition(
+            disposition,
+        ))),
+    }
+}
+
 pub(crate) fn successful(output: ExecOutcome) -> Result<Vec<u8>> {
     if output.termination != Termination::Exit(0) {
         return Err(format!(
@@ -186,8 +279,23 @@ fn rest_pull(read: &impl Fn(&[&str]) -> Result<ExecOutcome>, number: &str) -> Re
     ])?)?;
     Ok(serde_json::from_slice(&bytes)?)
 }
-fn head(project: &Path, number: &str) -> Result<GitOid> {
-    Ok(rest_pull(&|argv| execute(project, argv), number)?.head.sha)
+fn head(state: &Path, project: &Path, number: &str) -> Result<GitOid> {
+    Ok(rest_pull(
+        &|argv| {
+            forge_execute(
+                state,
+                project,
+                argv,
+                Duration::from_secs(60),
+                false,
+                None,
+                None,
+            )
+        },
+        number,
+    )?
+    .head
+    .sha)
 }
 /// The pull request a graph lands: found by head branch, never by `gh pr
 /// view BRANCH`, which reads a numeric branch as a pull request number.
@@ -199,8 +307,18 @@ struct BranchPull {
     /// The branch the pull request merges into.
     base_branch: String,
 }
-fn pull_for_branch(project: &Path, branch: &str, head: GitOid) -> Result<BranchPull> {
-    pull_for_branch_with(branch, head, &|argv| successful(execute(project, argv)?))
+fn pull_for_branch(state: &Path, project: &Path, branch: &str, head: GitOid) -> Result<BranchPull> {
+    pull_for_branch_with(branch, head, &|argv| {
+        successful(forge_execute(
+            state,
+            project,
+            argv,
+            Duration::from_secs(60),
+            false,
+            None,
+            None,
+        )?)
+    })
 }
 /// The one same-repository pull request whose head branch is `branch` and
 /// that is open or already at `head`. A fork's namesake, or an earlier pull

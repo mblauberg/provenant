@@ -161,6 +161,20 @@ pub fn main() -> std::process::ExitCode {
         Some("--writer-provider") => exit("writer provider", provider(&args)),
         // Bind a Unix-domain socket at the given path and connect to it.
         Some("--bind-socket") => exit("bind socket", bind_socket(&args)),
+        // The fake forge command port re-enters this harness and its existing fake `gh`.
+        Some("--forge-port") => {
+            let text = args
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            match support::fake_forge_port(&text) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    let _ = writeln!(std::io::stderr().lock(), "fake forge port: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         // The fake `gh` of the `land` fixtures.
         Some("pr" | "repo" | "api") => {
             let args: Vec<String> = std::env::args().skip(1).collect();
@@ -518,6 +532,7 @@ pub(super) fn git(rig: &TestRig, args: &[&str]) -> Result<String> {
 
 pub(super) fn repository() -> Result<TestRig> {
     let rig = TestRig::new()?;
+    support::configure_fake_forge_ports(&rig.state, &rig.project, &std::env::current_exe()?)?;
     git(&rig, &["config", "user.name", "Fixture"])?;
     git(&rig, &["config", "user.email", "fixture@example.invalid"])?;
     // Detached auto-maintenance would write locks while tests snapshot the tree.

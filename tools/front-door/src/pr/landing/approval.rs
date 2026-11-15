@@ -325,7 +325,7 @@ pub(crate) fn graph_coverage(
     let oid = head
         .parse::<provenant_core::GitOid>()
         .map_err(|error| LandingError::Failed(error.to_string()))?;
-    let base_branch = crate::pr::pull_for_branch(project, branch, oid)
+    let base_branch = crate::pr::pull_for_branch(host_state, project, branch, oid)
         .map_err(|error| LandingError::Failed(error.to_string()))?
         .base_branch;
     let mut repo = super::adapters::GitRepo::new(project, host_state)?;

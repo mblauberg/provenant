@@ -307,11 +307,10 @@ pub struct CapabilityDecision {
     pub selected: CapabilityPath,
 }
 
-/// The execution port selected by the strategy declaration.
+/// Whether the strategy composition is implemented; backend selection belongs to PortTable.land.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Execution {
     Builtin,
-    Command,
     Unavailable,
 }
 
@@ -391,7 +390,6 @@ declare_strategies! {
     Stack => ("stack", Plan { dependencies: Dependencies::Stack, candidate: CandidateKind::Batch, schedule: Schedule::Ordered, publication: Publication::ExactCandidate, completion: Completion::Event }, &[ForgeCapability::Restack], resolve_preset, Unavailable);
     Queue => ("queue", Plan { dependencies: Dependencies::Independent, candidate: CandidateKind::Single, schedule: Schedule::Ordered, publication: Publication::ExactCandidate, completion: Completion::Event }, &[ForgeCapability::MergeQueue], resolve_queue, Unavailable);
     Async => ("async", Plan { dependencies: Dependencies::Independent, candidate: CandidateKind::Single, schedule: Schedule::Immediate, publication: Publication::ExactCandidate, completion: Completion::Event }, &[ForgeCapability::AutoMerge, ForgeCapability::AsyncMerge], resolve_preset, Unavailable);
-    Command => ("command", Plan { dependencies: Dependencies::Independent, candidate: CandidateKind::Batch, schedule: Schedule::Immediate, publication: Publication::ExactCandidate, completion: Completion::Event }, &[], resolve_preset, Command);
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -781,25 +779,6 @@ pub struct RestackMapping {
     pub new_base: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LandingChanged {
-    pub id: LandingId,
-    pub generation: u64,
-    pub revision: u64,
-    pub operation: Option<OperationRef>,
-    #[serde(with = "member_map")]
-    pub outcomes: BTreeMap<u64, MemberOutcome>,
-    pub evidence: Option<MergeEvidence>,
-    pub deduplication_key: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OutboxEntry {
-    pub event: LandingChanged,
-    pub delivered_to: BTreeSet<Subscriber>,
-    pub attempts: u32,
-}
-
 /// Run/graph snapshots retain this reference and cursor without owning a second queue.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LandingSubscription {
@@ -816,6 +795,7 @@ pub struct ConsumerCursor {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LandingRecord {
     pub schema_version: u32,
     pub id: LandingId,
@@ -838,7 +818,6 @@ pub struct LandingRecord {
     pub cleanup_debt: CleanupDebt,
     pub restack_mappings: Vec<RestackMapping>,
     pub subscribers: Vec<Subscriber>,
-    pub outbox: Vec<OutboxEntry>,
     /// Highest revision applied by each subscribed consumer.
     pub consumer_cursors: Vec<ConsumerCursor>,
     pub applied_observations: BTreeSet<ObservationKey>,

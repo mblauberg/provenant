@@ -98,5 +98,17 @@
     "backend": {
       "kind": "builtin"
     }
+  },
+  "build_admission": {
+    "source": "builtin",
+    "backend": {
+      "kind": "builtin"
+    }
+  },
+  "forge": {
+    "source": "builtin",
+    "backend": {
+      "kind": "builtin"
+    }
   }
 }

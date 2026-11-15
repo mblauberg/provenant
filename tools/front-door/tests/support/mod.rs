@@ -132,6 +132,139 @@ pub fn clear_accounts(rig: &TestRig) -> Result {
     Ok(())
 }
 
+/// Configure the forge and CI-observation ports to use this harness's fake adapter.
+pub fn configure_fake_forge_ports(state: &Path, project: &Path, executable: &Path) -> Result {
+    let command = serde_json::json!({
+        "argv": [executable.to_string_lossy(), "--forge-port", project.to_string_lossy()],
+        "exit_codes": {"success": [0], "unknown": [75], "other": "refused"}
+    });
+    let port = serde_json::json!({
+        "source": "host",
+        "backend": {"kind": "command", "command": command}
+    });
+    let document = serde_json::json!({
+        "schema_version": provenant_config::PORTS_SCHEMA_VERSION,
+        "forge": port,
+        "ci_observation": port
+    });
+    fs::create_dir_all(state)?;
+    fs::write(state.join("ports.json"), serde_json::to_vec(&document)?)?;
+    Ok(())
+}
+
+pub fn fake_forge_port(args: &[String]) -> Result<u8> {
+    use std::{
+        io::{self, Write},
+        process::Command,
+    };
+
+    let cwd = std::env::current_dir()?;
+    let fixture_dir = args
+        .get(1)
+        .ok_or("fake forge fixture directory is missing")?;
+    let mut gh = args.iter().skip(2).cloned().collect::<Vec<_>>();
+    let request_path = std::env::var("PROVENANT_PORT_REQUEST_PATH").ok();
+    if let Some(path) = &request_path {
+        if gh.first().is_some_and(|value| value == "api") {
+            gh.remove(0);
+        }
+        if gh.first().is_none_or(|value| value != "--include") {
+            gh.insert(0, "--include".into());
+        }
+        gh.insert(0, "api".into());
+        if !gh.iter().any(|value| value == path) {
+            gh.push(path.clone());
+        }
+    }
+    let output = Command::new(std::env::current_exe()?)
+        .args(&gh)
+        .current_dir(&cwd)
+        .env("FIXTURE_GH_DIR", fixture_dir)
+        .stdin(std::process::Stdio::inherit())
+        .output()?;
+
+    if request_path.is_none() {
+        io::stdout().write_all(&output.stdout)?;
+        io::stderr().write_all(&output.stderr)?;
+        return Ok(output
+            .status
+            .code()
+            .and_then(|code| u8::try_from(code).ok())
+            .unwrap_or(1));
+    }
+
+    let (status, headers, body) = split_fake_http_response(&output.stdout)?;
+    // A status line is a typed HTTP observation even when fake gh exits nonzero
+    // for a rate limit. Carry that response through the successful command port.
+    if status.is_none() && !output.status.success() {
+        io::stderr().write_all(&output.stderr)?;
+        return Ok(output
+            .status
+            .code()
+            .and_then(|code| u8::try_from(code).ok())
+            .unwrap_or(1));
+    }
+    let mut response = serde_json::Map::new();
+    response.insert(
+        "status".into(),
+        serde_json::Value::from(status.unwrap_or(200)),
+    );
+    if let Some(headers) = headers {
+        response.insert("headers".into(), serde_json::to_value(headers)?);
+    }
+    response.insert(
+        "body".into(),
+        serde_json::Value::String(String::from_utf8(body)?),
+    );
+    serde_json::to_writer(io::stdout().lock(), &response)?;
+    Ok(0)
+}
+
+fn split_fake_http_response(
+    bytes: &[u8],
+) -> Result<(
+    Option<u16>,
+    Option<std::collections::BTreeMap<String, String>>,
+    Vec<u8>,
+)> {
+    let separator = bytes
+        .windows(4)
+        .position(|part| part == b"\r\n\r\n")
+        .map(|at| (at, 4))
+        .or_else(|| {
+            bytes
+                .windows(2)
+                .position(|part| part == b"\n\n")
+                .map(|at| (at, 2))
+        });
+    let Some((offset, width)) = separator else {
+        return Ok((None, None, bytes.to_vec()));
+    };
+    let header = std::str::from_utf8(&bytes[..offset])?;
+    let mut lines = header.lines();
+    let Some(status) = lines
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse::<u16>().ok())
+    else {
+        return Ok((None, None, bytes.to_vec()));
+    };
+    if !header.starts_with("HTTP/") {
+        return Ok((None, None, bytes.to_vec()));
+    }
+    let headers = lines
+        .filter_map(|line| {
+            line.split_once(':')
+                .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_owned()))
+        })
+        .collect();
+    Ok((
+        Some(status),
+        Some(headers),
+        bytes[offset + width..].to_vec(),
+    ))
+}
+
 pub struct TestRig {
     _temp: tempfile::TempDir,
     pub root: PathBuf,

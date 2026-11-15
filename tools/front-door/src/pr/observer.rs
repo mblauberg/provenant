@@ -13,7 +13,7 @@
 //!
 //! A commit is any head: a pull request head, a `land/**` candidate or a
 //! landed commit.
-use super::gh::{Forge, Gh, Response, rate_limit_reset};
+use super::gh::{Forge, Response, rate_limit_reset};
 mod port;
 use provenant_os::fs::{Directory, LockMode, PublishMode};
 use serde::{Deserialize, Serialize};
@@ -79,24 +79,6 @@ impl Clock for WallClock {
     #[allow(clippy::disallowed_methods, reason = "CI observer clock boundary")]
     fn sleep(&self, duration: Duration) {
         std::thread::sleep(duration);
-    }
-}
-
-/// `gh api` in the project checkout, each request bounded by the read budget.
-pub(crate) struct GhTransport {
-    project: PathBuf,
-    left: Duration,
-}
-impl Forge for GhTransport {
-    fn bound(&mut self, left: Duration) {
-        self.left = left;
-    }
-    #[allow(clippy::disallowed_methods, reason = "forge transport timing boundary")]
-    fn get(&mut self, path: &str, etag: Option<&str>) -> std::io::Result<Response> {
-        let left = self
-            .left
-            .clamp(Duration::from_secs(1), Duration::from_secs(60));
-        Gh::in_checkout(self.project.clone(), left).get(path, etag)
     }
 }
 

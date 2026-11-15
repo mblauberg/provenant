@@ -83,38 +83,28 @@ impl<'a> Owner<'a> {
         }
         if self.pulls.borrow().is_none() {
             let result = (|| {
-                let result = crate::pr::execute_for(
-                    self.project,
-                    &[
-                        "gh",
-                        "api",
-                        "--method",
-                        "GET",
-                        "--paginate",
-                        "--slurp",
-                        "repos/{owner}/{repo}/pulls",
-                        "-f",
-                        "state=all",
-                        "-f",
-                        "per_page=100",
-                    ],
-                    Duration::from_secs(15),
-                    false,
+                let ports = provenant_config::PortTable::read_for(
+                    Some(self.project),
+                    self.roots.state.as_path(),
                 )
-                .map_err(|e| e.to_string())?;
-                if result.termination != Termination::Exit(0)
-                    || result.timed_out
-                    || result.stdout.truncated
-                    || result.drain_truncated
-                    || result.stdout.read_failed
-                    || result.stdout.sink_failed
-                {
-                    return Err(
-                        "forge snapshot unavailable or incomplete; last fetched refs only".into(),
-                    );
-                }
-                let pages: Vec<Vec<Pull>> = serde_json::from_slice(&result.stdout.bytes)
-                    .map_err(|e| format!("unreadable forge snapshot: {e}"))?;
+                .map_err(|error| error.to_string())?;
+                let mut forge = provenant_config::ForgePort::new(
+                    ports.forge,
+                    "forge",
+                    self.project,
+                    self.roots.state.as_path(),
+                )
+                .map_err(|error| error.to_string())?;
+                let response = forge
+                    .request(
+                        provenant_config::ForgeOperation::PullSnapshot {
+                            repository: "{owner}/{repo}".into(),
+                        },
+                        Duration::from_secs(15),
+                    )
+                    .map_err(|error| error.to_string())?;
+                let pages: Vec<Vec<Pull>> = serde_json::from_slice(&response.body)
+                    .map_err(|error| format!("unreadable forge snapshot: {error}"))?;
                 let pulls: Vec<_> = pages.into_iter().flatten().collect();
                 if pulls.iter().any(|p| {
                     !matches!(p.state.as_str(), "open" | "closed")

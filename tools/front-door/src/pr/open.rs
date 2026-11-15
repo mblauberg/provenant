@@ -1,6 +1,6 @@
 //! `pr open`: the repository's template filled from the attempts' receipts.
 use super::git::{Git, plain_ref};
-use super::{Refused, Result, code_of, execute_with, successful};
+use super::{Refused, Result, code_of, successful};
 use crate::{emit, fail, roots};
 use provenant_cli::{
     Globals, PrOpen,
@@ -45,7 +45,7 @@ struct Plan {
     remote: String,
 }
 
-fn default_branch(project: &Path) -> Result<String> {
+fn default_branch(state: &Path, project: &Path) -> Result<String> {
     #[derive(Deserialize)]
     struct Repository {
         #[serde(rename = "defaultBranchRef")]
@@ -55,9 +55,14 @@ fn default_branch(project: &Path) -> Result<String> {
     struct Named {
         name: String,
     }
-    let bytes = successful(super::execute(
+    let bytes = successful(super::forge_execute(
+        state,
         project,
         &["gh", "repo", "view", "--json", "defaultBranchRef"],
+        Duration::from_secs(60),
+        false,
+        None,
+        None,
     )?)?;
     Ok(serde_json::from_slice::<Repository>(&bytes)?.branch.name)
 }
@@ -122,7 +127,7 @@ fn plan(
         .ok_or("the attempt recorded no head, so there is nothing to open")?;
     let base = match &command.base {
         Some(base) => base.clone(),
-        None => default_branch(project)?,
+        None => default_branch(resolved.roots.state.as_path(), project)?,
     };
     if !plain_ref(&branch) || !plain_ref(&base) {
         return Err("branch names must be plain Git names".into());
@@ -210,30 +215,28 @@ pub(super) fn run(command: PrOpen, globals: &Globals) -> u8 {
             true,
         );
     }
-    let mut argv = vec![
-        "gh",
-        "pr",
-        "create",
-        "--base",
-        &plan.base,
-        "--head",
-        &plan.branch,
-        "--title",
-        &plan.title,
-        "--body-file",
-        "-",
-    ];
-    if command.draft {
-        argv.push("--draft");
-    }
-    let created = execute_with(
-        &project,
-        &argv,
-        CREATE_TIMEOUT,
-        false,
-        Some(plan.body.as_bytes()),
-    )
-    .and_then(successful);
+    let created = (|| -> Result<Vec<u8>> {
+        let ports =
+            provenant_config::PortTable::read_for(Some(&project), resolved.roots.state.as_path())?;
+        let mut forge = provenant_config::ForgePort::new(
+            ports.forge,
+            "forge",
+            &project,
+            resolved.roots.state.as_path(),
+        )?;
+        Ok(forge
+            .request(
+                provenant_config::ForgeOperation::Open {
+                    base: plan.base.clone(),
+                    head: plan.branch.clone(),
+                    title: plan.title.clone(),
+                    body: plan.body.as_bytes().to_vec(),
+                    draft: command.draft,
+                },
+                CREATE_TIMEOUT,
+            )?
+            .body)
+    })();
     match created {
         Ok(bytes) => {
             let text = String::from_utf8_lossy(&bytes);

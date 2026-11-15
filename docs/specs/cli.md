@@ -171,8 +171,11 @@ at any supported configuration layer or using `land --poll` selects that fixed i
 all three waits. Source provenance decides this, so an explicit value is fixed even when it
 matches the bundled default.
 
-The `command` strategy invokes `land.command.argv` in the repository checkout,
-with the full pending intent as JSON on stdin. Its required declaration includes
+The effective `PortTable.land` declaration alone selects the publication backend.
+`none` returns typed unavailability before publication effects; `command` invokes
+its declared argv in the repository checkout. Candidate and ordering strategies
+remain independent of that backend. The command receives
+the full pending intent as JSON on stdin. Its required declaration includes
 `unknown_exit_code` (1..255) and `timeout_seconds` (>0). Exit 0 attests that the
 supplied candidate landed; other exits refuse, except the declared unknown code.
 Timeouts and signals are also unknown. The same pending markers, gate, approvals,

@@ -34,14 +34,16 @@ pub mod policy;
 mod presets;
 mod providers;
 pub use providers::{ProviderSettings, ProviderUpdate};
-mod ports;
+pub mod ports;
 mod project_binding;
 pub use ports::{
-    CommandExitCodes, ExitDisposition, Integration, LandBackend, LandPort, PORTS_CONFIG,
-    PORTS_SCHEMA_VERSION, PackagePath, Port, PortBackend, PortBackendKind, PortCommand,
-    PortCommandDisposition, PortCommandExecution, PortCommandReceiptProof, PortEvidenceError,
+    Adapter, CommandExitCodes, ExitDisposition, Forge, ForgeOperation, ForgePort, ForgeResponse,
+    HeadersObservation, Integration, LandBackend, LandPort, PORTS_CONFIG, PORTS_SCHEMA_VERSION,
+    PackagePath, Port, PortBackend, PortBackendKind, PortCommand, PortCommandDisposition,
+    PortCommandExecution, PortCommandReceiptProof, PortError, PortEvidenceError, PortExecution,
     PortSource, PortTable, VerifyPort, VerifySelection, VerifyTier, WorktreeLayoutPort,
-    execute_port_command, port_command_receipt_proof, record_port_command,
+    dispatch_port_backend, execute_port_command, execute_port_command_with_input, land_backend,
+    port_command_environment, port_command_receipt_proof, record_port_command,
 };
 mod release;
 mod repository_policy;

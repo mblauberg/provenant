@@ -1,5 +1,5 @@
 //! Bounded CI polling for a pinned PR head. No progress goes to JSON stdout.
-use super::{Result, execute_for, observer::ObserveError};
+use super::{Result, observer::ObserveError};
 use provenant_core::retry::{Backoff, RetryCause, is_transient};
 use provenant_os::exec::Termination;
 use std::{
@@ -29,6 +29,7 @@ const RETRY_LAST: Duration = Duration::from_secs(15);
 /// Reads GitHub within one deadline, retrying transient failures with backoff.
 /// Persistent or non-transient failures return at once for the caller to refuse.
 pub(super) struct Reader<'a> {
+    pub state: &'a Path,
     pub project: &'a Path,
     pub deadline: Instant,
     pub retry_command: String,
@@ -56,11 +57,14 @@ impl Reader<'_> {
             if args.starts_with(&["gh", "api"]) {
                 args.insert(2, "--include");
             }
-            let mut output = match execute_for(
+            let mut output = match super::forge_execute(
+                self.state,
                 self.project,
                 &args,
                 left.min(Duration::from_secs(60)),
                 false,
+                None,
+                None,
             ) {
                 Ok(output) => output,
                 Err(error) if !mutation && error.is::<super::TimedOut>() => {

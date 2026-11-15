@@ -25,11 +25,10 @@ pub(super) fn branch_name(
         Ok(ports) => ports,
         Err(error) => return fallback(format!("could not read port declaration: {error}")),
     };
-    let command = match &ports.naming.backend {
-        provenant_config::PortBackend::Builtin | provenant_config::PortBackend::None => {
-            return (requested.to_owned(), None);
-        }
-        provenant_config::PortBackend::Command { command } => command,
+    let command =
+        provenant_config::dispatch_port_backend(&ports.naming.backend, || None, Some, || None);
+    let Some(command) = command else {
+        return (requested.to_owned(), None);
     };
     let settings = match provenant_config::WorktreeSettings::read(&state) {
         Ok(settings) => settings,
@@ -105,11 +104,14 @@ pub(super) fn run(
             .for_project(context.binding.project_id());
         let ports = provenant_config::PortTable::read_for(Some(context.repo.root_path()), &state)
             .map_err(|error| format!("could not read ports: {error}"))?;
-        let command = match &ports.post_create.backend {
-            provenant_config::PortBackend::Builtin | provenant_config::PortBackend::None => {
-                return Ok(());
-            }
-            provenant_config::PortBackend::Command { command } => command,
+        let command = provenant_config::dispatch_port_backend(
+            &ports.post_create.backend,
+            || None,
+            Some,
+            || None,
+        );
+        let Some(command) = command else {
+            return Ok(());
         };
         let budget = WaitBudget::cli(context.clock.mono_now(), settings.timeout_seconds)
             .map_err(|error| error.to_string())?;
