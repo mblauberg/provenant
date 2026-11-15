@@ -422,7 +422,11 @@ mod tests {
             value["future_observation"] = serde_json::json!({"source": "newer minor"});
             let decoded: RunResult = serde_json::from_value(value.clone()).unwrap();
             assert_eq!(serde_json::to_value(decoded).unwrap(), value);
-            for malformed in [serde_json::json!(false), serde_json::json!(7), serde_json::json!({})] {
+            for malformed in [
+                serde_json::json!(false),
+                serde_json::json!(7),
+                serde_json::json!({}),
+            ] {
                 value["observation"] = malformed;
                 assert!(serde_json::from_value::<RunResult>(value.clone()).is_err());
             }

@@ -1246,7 +1246,7 @@ impl Factory {
         &self,
         attempt: &provenant_fabric_runtime::graph::GraphAttempt,
     ) -> bool {
-        attempt.extra.contains_key("placement_host")
+        attempt.placement_host.is_some()
             && attempt
                 .attempt_ref
                 .as_deref()
@@ -1271,17 +1271,9 @@ impl Factory {
                     .parse()
                     .map_err(|_| FacadeError::StateCorrupt)?,
             )
-        } else if let Some(host) = attempt
-            .extra
-            .get("placement_host_id")
-            .and_then(serde_json::Value::as_str)
-        {
-            Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?)
-        } else if let Some(name) = attempt
-            .extra
-            .get("placement_host")
-            .and_then(serde_json::Value::as_str)
-        {
+        } else if let Some(host) = attempt.placement_host_id {
+            Some(host)
+        } else if let Some(name) = attempt.placement_host.as_deref() {
             let local = self.context.identity.host;
             Some(
                 if matches!(name, "local" | "localhost")

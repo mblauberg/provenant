@@ -1022,7 +1022,7 @@ fn claude_lane_auth_failure_with_registered_token_settles_without_continuation()
         account_key: Some("key".into()),
         ..Default::default()
     };
-    route.extra.insert("lane_token".into(), true.into());
+    route.lane_token = Some(true);
     let mut exit = clean_exit();
     exit.termination = Some(provenant_os::exec::Termination::Exit(1));
     let decoded = Registry {

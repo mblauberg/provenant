@@ -15,15 +15,13 @@ pub(crate) fn record(attempt: &Directory, limits: Option<&LaneLimits>, usage: &m
         return;
     };
     let budget = limits.and_then(|limits| limits.gh_invocations.as_ref());
-    usage.extra.insert(
-        "gh_invocations".into(),
-        serde_json::json!({
-            "count": count,
-            "budget": budget.map(|limit| limit.value),
-            "source": budget.map(|limit| limit.source.as_str()),
-            "over_budget": budget.is_some_and(|limit| count >= limit.value),
-        }),
-    );
+    usage.gh_invocations = Some(provenant_records::run::GhInvocationReceipt {
+        count,
+        budget: budget.map(|limit| limit.value),
+        source: budget.map(|limit| limit.source),
+        over_budget: budget.is_some_and(|limit| count >= limit.value),
+        extra: Default::default(),
+    });
 }
 
 fn count(attempt: &Directory) -> Option<u64> {

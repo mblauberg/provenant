@@ -1001,6 +1001,11 @@ fn prepare_nested(
         }
         if child.route.is_none() && child.routes.is_none() {
             child.route = Some(GraphRoute {
+                required_family: None,
+                peer_source_head: None,
+                peer_requested_route: None,
+                peer_network: None,
+                peer_retry_limit: None,
                 extra: Default::default(),
                 alias: Some("senior".into()),
                 adapter: None,
@@ -1040,6 +1045,11 @@ fn prepare_nested(
         ));
         if child.route.is_none() && child.routes.is_none() {
             child.route = Some(GraphRoute {
+                required_family: None,
+                peer_source_head: None,
+                peer_requested_route: None,
+                peer_network: None,
+                peer_retry_limit: None,
                 extra: Default::default(),
                 alias: Some("senior".into()),
                 adapter: None,
@@ -1350,6 +1360,8 @@ pub(super) fn flatten_fragment(
         local_nodes.push(stub);
     }
     let local = GraphDocument {
+        review: None,
+        review_subject_missing: false,
         exclude: Vec::new(),
         network: None,
         capability: Vec::new(),
@@ -1388,6 +1400,11 @@ pub(super) fn flatten_fragment(
             && child.routes.is_none()
         {
             child.route = Some(GraphRoute {
+                required_family: None,
+                peer_source_head: None,
+                peer_requested_route: None,
+                peer_network: None,
+                peer_retry_limit: None,
                 extra: Default::default(),
                 alias: Some("senior".into()),
                 adapter: None,

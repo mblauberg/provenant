@@ -94,7 +94,7 @@ impl CommitSourcePreparation {
             base_ref: None,
             profile: Default::default(),
             prompt_digest: provenant_records::CanonicalV1::file_digest(b"review fixture"),
-            route: run::RequestedRoute::Model {
+            route: run::RequestedRoute::Model { required_family: None,
                 extra: Default::default(),
                 provider: "cursor".into(),
                 model: "cursor/gpt-5.3-codex-low".into(),
@@ -167,7 +167,7 @@ fn commit_source_preparation_grants_an_immutable_materialised_view()
         fixture.state.join("config.toml"),
         "schema_version=1\n[[domains.routing.pools.senior]]\nmodel='cursor/gpt-5.3-codex-low'\nweight=1\nefforts=[]\n",
     )?;
-    fixture.task.route = run::RequestedRoute::Review {
+    fixture.task.route = run::RequestedRoute::Review { required_family: None,
         extra: Default::default(),
         name: "senior".into(),
         effort: None,
@@ -258,7 +258,7 @@ fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics
                 fixture.state.join("config.toml"),
                 "schema_version=1\n[[domains.routing.pools.preparation-fixture]]\nmodel='cursor/gpt-5.3-codex-low'\nweight=1\nefforts=[]\n",
             )?;
-            fixture.task.route = run::RequestedRoute::Review {
+            fixture.task.route = run::RequestedRoute::Review { required_family: None,
                 extra: Default::default(),
                 name: "preparation-fixture".into(),
                 effort: None,
@@ -295,8 +295,8 @@ fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics
             .find(|route| route.route.starts_with("cursor"))
             .ok_or("preselection refusal discarded the adapter plan error")?;
         assert_eq!(
-            skipped.extra.get("guard_boundary"),
-            Some(&serde_json::json!(boundary)),
+            skipped.guard_boundary,
+            Some(boundary),
         );
         assert!(!skipped.detail.is_empty());
         assert!(
@@ -309,27 +309,23 @@ fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics
                 .detail
                 .contains(fixture.paths.scratch.to_str().ok_or("scratch encoding")?)
         );
-        assert_eq!(
-            skipped.extra.get("plan_error"),
-            Some(&serde_json::json!(if plan_error == "resolver" {
-                "credential_root"
-            } else {
-                plan_error
-            })),
-        );
+        let failure = if plan_error == "invalid_roots" {
+            provenant_records::diagnostic::PlanFailure::InvalidRoots
+        } else {
+            provenant_records::diagnostic::PlanFailure::CredentialRoot
+        };
+        assert_eq!(skipped.plan_error, Some(failure));
         assert_eq!(
             skipped.cause,
             Some(provenant_records::RouteExclusionReason::ConfinementUnavailable),
         );
-        let failure: provenant_records::diagnostic::PlanFailure =
-            serde_json::from_value(skipped.extra["plan_error"].clone())?;
         assert_eq!(skipped.diagnostic().detail.as_deref(), Some(failure.detail()));
         assert_eq!(
-            skipped.extra["confinement_guard"],
-            serde_json::json!(if plan_error == "invalid_roots" {
-                "invalid_plan_roots"
+            skipped.confinement_guard,
+            Some(if plan_error == "invalid_roots" {
+                provenant_records::diagnostic::ConfinementGuard::InvalidPlanRoots
             } else {
-                "credential_root_refused"
+                provenant_records::diagnostic::ConfinementGuard::CredentialRootRefused
             }),
         );
     }

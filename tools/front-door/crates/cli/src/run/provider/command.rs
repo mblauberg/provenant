@@ -170,9 +170,7 @@ pub(super) fn prepare_command(
         selection_context: Default::default(),
         diagnostics: Default::default(),
         user_skills: true,
-        extra: [("name".into(), serde_json::Value::String(name.into()))]
-            .into_iter()
-            .collect(),
+        extra: Default::default(),
         adapter: provider.into(),
         model: String::new(),
         effort: None,
@@ -345,16 +343,22 @@ pub(super) fn prepare_command(
     let mut route = RouteRecord {
         provider: Some(provider.into()),
         source: Some(format!("domains.fabric.commands.{name}")),
-        extra: [
-            ("name".into(), serde_json::Value::String(name.into())),
-            ("cargo_home".into(), spec.cargo_home_receipt()),
-            ("applied_access".into(), applied_access),
-            ("tool_closure".into(), tool_closure),
-            ("discovery_warnings".into(), serde_json::json!(warnings)),
-            ("project_paths".into(), project_paths),
-        ]
-        .into_iter()
-        .collect(),
+        extra: Default::default(),
+        cargo_home: serde_json::from_value(spec.cargo_home_receipt())
+            .map_err(|_| unavailable("invalid Cargo home receipt".into()))?,
+        applied_access: Some(
+            serde_json::from_value(applied_access)
+                .map_err(|_| unavailable("invalid applied access receipt".into()))?,
+        ),
+        tool_closure: Some(
+            serde_json::from_value(tool_closure)
+                .map_err(|_| unavailable("invalid tool closure receipt".into()))?,
+        ),
+        discovery_warnings: Some(warnings),
+        project_paths: Some(
+            serde_json::from_value(project_paths)
+                .map_err(|_| unavailable("invalid project path receipt".into()))?,
+        ),
         ..Default::default()
     };
     apply_sandbox_mode(task, sandbox.clone(), &mut spec.env, &mut route);
@@ -711,6 +715,7 @@ pub(super) fn skip(route: &str, kind: SkipKind, _detail: impl Into<String>) -> S
         kind,
         cause: None,
         detail,
+        ..Default::default()
     }
 }
 

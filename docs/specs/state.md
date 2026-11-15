@@ -286,11 +286,24 @@ Known fields with the wrong JSON type fail record decoding. Missing optional
 observations remain unknown. Unknown forward fields alone remain in extension
 maps; there are no old-shape readers or key aliases.
 - Why: the 2.0 stored shape gives each host fact one shared writer/reader type.
-- Test: `crates/records/src/trace.rs::tests::typed_context_round_trips_and_rejects_malformed_values`
-- Owner: `crates/records/src/trace.rs`; `crates/records/src/run.rs`
+- Test: `crates/records/src/trace.rs::tests::typed_context_round_trips_and_rejects_malformed_values`;
+  `crates/fabric-runtime/src/runs.rs::tests::wait_observation_round_trips_and_rejects_wrong_types`;
+  `crates/cli/src/run/remote.rs::tests::output_identity_comes_from_the_declared_target`
+- Owner: `crates/records/src/trace.rs`; `crates/records/src/run.rs`;
+  `crates/fabric-runtime/src/graph/model.rs`; `crates/fabric-runtime/src/coordination/facade.rs`;
+  `crates/fabric-runtime/src/runs.rs`
 
-The sandbox mode and sandbox-admission receipt remain coupled to
-`cli/src/run/provider/confinement.rs::apply_sandbox_mode`. Until that owner
-moves its writes, their extension-map representation and the shared sandbox
-field constant remain unfinished cut-over work; they must move together with
-the run launch writer and attempt reader before format 2 freezes.
+Sandbox mode and sandbox-admission receipts are declared route metadata. The
+confinement writer, launch writer and attempt readers share those typed fields;
+no shared string key or extension-map decode determines sandbox authority.
+Preparation failures, guard evidence, launch preparation observations and usage
+aggregation likewise belong to their declared run record owners. Optional facts
+may be absent; a present value with the wrong type fails decoding.
+
+Graph specifications, attempts and routes own provisioning, placement, review,
+peer and template metadata. Relay and interface callers pass the declared values
+directly. Peer output carries a typed planner-fallback reason, while its typed
+attempt target owns identity. Wait replies carry a typed observation report.
+Telemetry reads declared work-context PR, lens, task and risk fields. Every new
+persisted field is optional or defaulted; flattened extension maps retain
+unknown fields from newer minor writers without interpreting them as host facts.

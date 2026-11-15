@@ -91,7 +91,7 @@ extend: Vec::new(),
         let task = &request.task;
         Ok((task.route.clone(), task.profile.overrides.clone()))
     };
-    let review = |excluded: &[&str]| RequestedRoute::Review {
+    let review = |excluded: &[&str]| RequestedRoute::Review { required_family: None,
         extra: Default::default(),
         name: "junior".into(),
         effort: None,
@@ -102,7 +102,7 @@ extend: Vec::new(),
     };
     // The first sibling has no peers yet and takes the plain alias.
     let (route, _) = submit("one", 0, &[], &[], false, &[])?;
-    assert_eq!(route, RequestedRoute::Named { extra: Default::default(), name: "junior".into(), effort: None });
+    assert_eq!(route, RequestedRoute::Named { required_family: None, extra: Default::default(), name: "junior".into(), effort: None });
     // Later siblings prefer other families. A preference never refuses, so
     // with one family available every lens still runs.
     let peers = ["openai".to_owned(), "anthropic".to_owned()];
@@ -112,7 +112,7 @@ extend: Vec::new(),
     // leaves sibling families as a preference.
     assert_eq!(submit("four", 0, &peers[..1], &[], true, &[])?.0, review(&["openai"]));
     let accepted = submit("five", 0, &peers[1..], &[], true, std::slice::from_ref(&writer))?.0;
-    assert_eq!(accepted, RequestedRoute::Review {
+    assert_eq!(accepted, RequestedRoute::Review { required_family: None,
         extra: Default::default(), name: "junior".into(), effort: None,
         excluded_families: vec!["openai".into()], distinct_families: true,
         preferred_families: vec!["anthropic".into()], require_distinct: true,

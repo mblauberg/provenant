@@ -146,6 +146,7 @@ pub(super) fn trace_run(
                 base_ref: None,
                 prompt_digest: CanonicalV1::file_digest(b"p"),
                 route: run::RequestedRoute::Model {
+                    required_family: None,
                     extra: Default::default(),
                     provider: "fixture".into(),
                     model: "fixture/model".into(),
@@ -559,6 +560,7 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
             head: None,
             source_head: None,
             route: run::RequestedRoute::Model {
+                required_family: None,
                 extra: Default::default(),
                 provider: "fixture".into(),
                 model: "fixture/model".into(),

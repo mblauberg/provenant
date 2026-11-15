@@ -54,6 +54,7 @@ pub fn requested(
                 )
             })?;
             Ok(run::RequestedRoute::Model {
+                required_family: None,
                 extra: Default::default(),
                 provider: id.as_str().split('/').next().unwrap_or_default().into(),
                 model: model.into(),
@@ -70,12 +71,14 @@ pub fn requested(
                 ));
             }
             Ok(run::RequestedRoute::Adapter {
+                required_family: None,
                 extra: Default::default(),
                 provider: provider.into(),
                 name: entry.into(),
             })
         }
         (None, Some(name)) => Ok(run::RequestedRoute::Named {
+            required_family: None,
             extra: Default::default(),
             name: name.into(),
             effort,

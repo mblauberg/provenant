@@ -571,7 +571,11 @@ pub fn peer(
                     extra: Default::default(),
                 },
             ),
-            PeerAction::Run { input, extra } => {
+            PeerAction::Run {
+                input,
+                peer_subtree_after,
+                ..
+            } => {
                 let observed = owner
                     .run(input.clone(), budget, &cancel)
                     .and_then(|mut value| {
@@ -601,16 +605,7 @@ pub fn peer(
                             attempt, ..
                         } = &mut value
                         {
-                            let after = extra
-                                .get("peer_subtree_after")
-                                .map(|value| {
-                                    value
-                                        .as_u64()
-                                        .and_then(|value| usize::try_from(value).ok())
-                                        .ok_or(FacadeError::InvalidInput { detail: None })
-                                })
-                                .transpose()?
-                                .unwrap_or(0);
+                            let after = peer_subtree_after.unwrap_or(0);
                             attempt.peer.merge(peer_graph_fields_page(
                                 &peer_factory,
                                 attempt.attempt_id,
@@ -1068,7 +1063,7 @@ pub(crate) fn peer_submit_graph(
     let origin_work_key = origin_work_key.ok_or(FacadeError::StateCorrupt)?;
     let task = &task;
     let graph = peer_graph_name(actor, &operation_id)?;
-    let mut route = match &task.route {
+    let route = match &task.route {
         RequestedRoute::Adapter { provider, name, .. } => {
             serde_json::json!({"adapter":provider,"name":name})
         }
@@ -1083,11 +1078,13 @@ pub(crate) fn peer_submit_graph(
             serde_json::json!({"alias":name,"effort":effort})
         }
     };
-    route["peer_requested_route"] =
-        serde_json::to_value(&task.route).map_err(|_| FacadeError::StateCorrupt)?;
-    route["peer_network"] = serde_json::to_value(network).map_err(|_| FacadeError::StateCorrupt)?;
-    route["peer_retry_limit"] = serde_json::json!(retry);
-    route["peer_source_head"] = serde_json::json!(task.source_head);
+    let mut route: provenant_fabric_runtime::graph::GraphRoute =
+        serde_json::from_value(route).map_err(|_| FacadeError::StateCorrupt)?;
+    route.required_family = task.route.required_family().map(str::to_owned);
+    route.peer_requested_route = Some(task.route.clone());
+    route.peer_network = network;
+    route.peer_retry_limit = retry;
+    route.peer_source_head = task.source_head.clone();
     let origin = task
         .context
         .clone()
@@ -1554,12 +1551,14 @@ pub(crate) fn peer_graph_fields_page(
                     launched: attempt.launched,
                     key: attempt.key.clone(),
                     route: PeerGraphRoute {
+                        extra: Default::default(),
                         adapter: attempt.route.adapter.clone(),
                         model: attempt.route.model.clone(),
                         alias: attempt.route.alias.clone(),
                         name: attempt.route.name.clone(),
                         effort: attempt.route.effort.clone(),
                         account: attempt.route.account.clone(),
+                        required_family: attempt.route.required_family.clone(),
                     },
                     state: attempt.state,
                     attempt_ref: attempt.attempt_ref.clone(),
@@ -1630,8 +1629,10 @@ pub(super) fn checked_output_origin(
     // These authenticate the peer read; the CLI output schema contains lane
     // fields only. Consume transport metadata before rendering the payload.
     let length = peer.length;
+    let planner_fallback = peer.planner_fallback.clone();
     *peer = provenant_records::run::PeerOutputFields {
         length,
+        planner_fallback,
         ..Default::default()
     };
     Ok(output)

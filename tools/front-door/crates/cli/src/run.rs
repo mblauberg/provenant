@@ -870,6 +870,7 @@ impl Registry<'_> {
                     .into(),
                 ),
                 pool_selection: None,
+                ..Default::default()
             }),
             usage: run::UsageRecord::default(),
             session: outcome.session().map(str::to_owned),
@@ -985,10 +986,8 @@ impl Registry<'_> {
                 // Preparation marks a route that launched on a registered lane
                 // token; a rotating login copy carries no mark.
                 let registered_token = route
-                    .extra
-                    .get("registered_lane_token")
-                    .or_else(|| route.extra.get("lane_token"))
-                    .and_then(serde_json::Value::as_bool)
+                    .registered_lane_token
+                    .or(route.lane_token)
                     .unwrap_or(false);
                 let entries = config
                     .iter()

@@ -238,6 +238,7 @@ fn overview_needs_you() -> Result {
                 source_head: None,
                 head: None,
                 route: RequestedRoute::Named {
+                    required_family: None,
                     extra: Default::default(),
                     name: "senior".into(),
                     effort: None,

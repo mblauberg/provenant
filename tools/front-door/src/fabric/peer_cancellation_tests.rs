@@ -179,7 +179,7 @@ fn lost_peer_reply_cancellation_survives_reconnect_and_stops_receiver_subtree() 
     )?;
     struct LostReplyOwner {
         actor: String,
-        host: String,
+        host: provenant_core::HostId,
     }
     impl graph::AttemptOwner for LostReplyOwner {
         type Error = FacadeError;
@@ -189,8 +189,11 @@ fn lost_peer_reply_cancellation_survives_reconnect_and_stops_receiver_subtree() 
         fn actor(&self) -> String {
             self.actor.clone()
         }
-        fn placement_host_id(&self, _name: &str) -> Result<Option<String>, Self::Error> {
-            Ok(Some(self.host.clone()))
+        fn placement_host_id(
+            &self,
+            _name: &str,
+        ) -> Result<Option<provenant_core::HostId>, Self::Error> {
+            Ok(Some(self.host))
         }
         fn observe_or_start(
             &mut self,
@@ -217,7 +220,7 @@ fn lost_peer_reply_cancellation_survives_reconnect_and_stops_receiver_subtree() 
         journal.bind(execution.clone())?;
         let mut owner = LostReplyOwner {
             actor: receiver_factory.context.identity.inbox.actor.to_string(),
-            host: remote_host.to_string(),
+            host: remote_host,
         };
         let run = graph::advance_with_budget(
             &execution.document,
@@ -228,8 +231,8 @@ fn lost_peer_reply_cancellation_survives_reconnect_and_stops_receiver_subtree() 
         )?;
         assert!(run.checkpoint.nodes[0].attempts[0].attempt_ref.is_none());
         assert_eq!(
-            run.checkpoint.nodes[0].attempts[0].extra["placement_host_id"],
-            json!(remote_host)
+            run.checkpoint.nodes[0].attempts[0].placement_host_id,
+            Some(remote_host)
         );
     }
     // Offline cancellation must persist the fence, never mistake the empty

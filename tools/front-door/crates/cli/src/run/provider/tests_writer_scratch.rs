@@ -173,7 +173,7 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
             ..Default::default()
         },
         prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
-        route: run::RequestedRoute::Model {
+        route: run::RequestedRoute::Model { required_family: None,
             extra: Default::default(),
             provider: "cursor".into(),
             model: "cursor/gpt-5.3-codex-low".into(),
@@ -212,7 +212,7 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
             provenant_os::fs::LockMode::Exclusive,
         )?;
         let mut blocked = task.clone();
-        blocked.route = run::RequestedRoute::Model {
+        blocked.route = run::RequestedRoute::Model { required_family: None,
             extra: Default::default(),
             provider: "codex".into(),
             model: "codex/gpt-6.1-sol".into(),
@@ -262,7 +262,7 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
             "schema_version=1\n[domains.routing]\nsettlement_retries=1\n[[domains.routing.pools.fence-fixture]]\nmodel='codex/gpt-6.1-sol'\nweight=1\nefforts=[]\n[[domains.routing.pools.fence-fixture]]\nmodel='cursor/gpt-5.3-codex-low'\nweight=1\nefforts=[]\n",
         )?;
         let mut pool = task.clone();
-        pool.route = run::RequestedRoute::Named {
+        pool.route = run::RequestedRoute::Named { required_family: None,
             extra: Default::default(),
             name: "fence-fixture".into(),
             effort: None,
@@ -352,7 +352,7 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         )?;
         let mut protected = task.clone();
         protected.profile.confidential = true;
-        protected.route = run::RequestedRoute::Named {
+        protected.route = run::RequestedRoute::Named { required_family: None,
             extra: Default::default(),
             name: "protected-fixture".into(),
             effort: None,
@@ -493,7 +493,7 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
             format!("schema_version=1\n{protected_policy}"),
         )?;
         let mut senior = protected.clone();
-        senior.route = run::RequestedRoute::Named {
+        senior.route = run::RequestedRoute::Named { required_family: None,
             extra: Default::default(),
             name: "senior".into(),
             effort: None,
@@ -556,12 +556,18 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
             skipped_routes[0].cause,
             Some(provenant_records::RouteExclusionReason::ConfinementUnavailable)
         );
-        assert_eq!(skipped_routes[0].extra["guard_boundary"], "authority");
         assert_eq!(
-            skipped_routes[0].extra["confinement_guard"],
-            "protected_path_overlap"
+            skipped_routes[0].guard_boundary,
+            Some(provenant_records::diagnostic::BoundaryClass::Authority)
         );
-        assert_eq!(skipped_routes[0].extra["plan_error"], "protected_overlap");
+        assert_eq!(
+            skipped_routes[0].confinement_guard,
+            Some(provenant_records::diagnostic::ConfinementGuard::ProtectedPathOverlap)
+        );
+        assert_eq!(
+            skipped_routes[0].plan_error,
+            Some(provenant_records::diagnostic::PlanFailure::ProtectedOverlap)
+        );
         assert_eq!(
             skipped_routes[0].diagnostic().detail.as_deref(),
             Some(provenant_records::diagnostic::PlanFailure::ProtectedOverlap.detail()),
@@ -738,7 +744,7 @@ printf 'agy 1.0.0\n'
         }
         for (n, write, linked) in [(7u8, true, false), (8u8, false, false), (9u8, false, true)] {
             let mut request = task.clone();
-            request.route = run::RequestedRoute::Model {
+            request.route = run::RequestedRoute::Model { required_family: None,
                 extra: Default::default(),
                 provider: "agy".into(),
                 model: "agy/gemini-3.8-flash".into(),
@@ -969,25 +975,32 @@ printf 'agy 1.0.0\n'
                 "write grant for {path:?}: {settings}"
             );
         }
-        let receipt = &prepared.route.extra["user_skills"];
+        let receipt = prepared.route.user_skills.as_ref().ok_or("user skills receipt")?;
         // Policy selection is independent of whether the platform stages skills.
         // Unsandboxed launches use the user's own skill tree without staging it.
-        assert_eq!(receipt["mode"], if expected { "discover" } else { "off" });
         assert_eq!(
-            receipt["exposed"],
+            receipt.mode,
+            if expected {
+                provenant_records::UserSkillsMode::Discover
+            } else {
+                provenant_records::UserSkillsMode::Off
+            }
+        );
+        assert_eq!(
+            receipt.exposed,
             expected && confinement.sandbox.effective,
             "{settings}"
         );
-        assert!(receipt["warnings"].as_array().unwrap().is_empty());
+        assert!(receipt.warnings.is_empty());
         if source == "route" {
-            assert!(receipt["source"]["route_policy"].is_array());
+            assert!(receipt.source.route_policy.is_some());
         } else {
             let key = if source == "project" {
                 format!("domains.lanes.projects.{project_id}.user_skills")
             } else {
                 "domains.lanes.user_skills".into()
             };
-            assert_eq!(receipt["source"]["key"], key);
+            assert_eq!(receipt.source.key.as_deref(), Some(key.as_str()));
         }
     }
     // The primary checkout is another protected worktree for this writer; the
@@ -1039,15 +1052,16 @@ printf 'agy 1.0.0\n'
             confinement.writer.as_ref().ok_or("writer")?,
         )?;
     }
-    assert_eq!(launch.route.extra["argv_prompt_limit"]["value"], 60_000);
+    let argv_limit = launch.route.argv_prompt_limit.as_ref().ok_or("argv prompt limit")?;
+    assert_eq!(argv_limit.value, 60_000);
     assert_eq!(
-        launch.route.extra["argv_prompt_limit"]["key"],
+        argv_limit.key,
         "domains.run.argv_prompt_limit_bytes"
     );
-    assert_eq!(
-        launch.route.extra["argv_prompt_limit"]["origin"]["kind"],
-        "user"
-    );
+    assert!(matches!(
+        &argv_limit.origin,
+        provenant_records::run::OriginReceipt::User { .. }
+    ));
     assert!(
         launch
             .environment
@@ -1297,12 +1311,16 @@ printf 'agy 1.0.0\n'
     );
     assert!(!launch.environment.iter().any(|(key, _)| key == "GH_TOKEN"));
     // One credential decision per lane, recorded with its source.
-    let credential = &publishing.route.extra["github_credential"];
-    assert_eq!(credential["identity"], "user");
-    assert_eq!(credential["source"], "default");
-    assert_eq!(credential["delivery"], "injected");
-    assert_eq!(credential["mediation"], "gh wrapper (advisory)");
-    assert!(!credential.to_string().contains("fixture-host-token"));
+    let credential = publishing
+        .route
+        .github_credential
+        .as_ref()
+        .ok_or("GitHub credential receipt")?;
+    assert_eq!(credential.identity.as_deref(), Some("user"));
+    assert_eq!(credential.source, "default");
+    assert_eq!(credential.delivery, "injected");
+    assert_eq!(credential.mediation, "gh wrapper (advisory)");
+    assert!(!serde_json::to_string(credential)?.contains("fixture-host-token"));
     let gh_config = publishing_paths.temporary.join("candidate-0/gh-config");
     assert!(gh_config.is_dir());
     assert!(
@@ -1590,7 +1608,7 @@ printf 'agy 1.0.0\n'
         "schema_version=1\n[domains.routing]\nsettlement_retries=1\n[[domains.routing.pools.redraw-fixture]]\nmodel='cursor/gpt-5.3-codex-low'\nweight=1\nefforts=[]\n[[domains.routing.pools.redraw-fixture]]\nmodel='cursor/grok-4.7'\nweight=1\nefforts=[]\n",
     )?;
     let mut redraw_task = task.clone();
-    redraw_task.route = run::RequestedRoute::Named {
+    redraw_task.route = run::RequestedRoute::Named { required_family: None,
         extra: Default::default(),
         name: "redraw-fixture".into(),
         effort: None,
@@ -1796,7 +1814,7 @@ printf 'agy 1.0.0\n'
     // A continuation must use the exact applied provider, model and
     // account without consulting that pool or the original account alias.
     let mut prior = store.record(attempt_id, &call)?;
-    prior.requested_route = run::RequestedRoute::Named {
+    prior.requested_route = run::RequestedRoute::Named { required_family: None,
         extra: Default::default(),
         name: "retired-pool".into(),
         effort: None,

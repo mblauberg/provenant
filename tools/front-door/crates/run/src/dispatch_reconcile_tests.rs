@@ -101,6 +101,7 @@ fn resolved_named_route_survives_launch_admission() -> TestResult {
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let mut prepared = input();
     prepared.request.task.route = RequestedRoute::Named {
+        required_family: None,
         extra: Default::default(),
         name: "fixture".into(),
         effort: None,
@@ -155,6 +156,7 @@ fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
                     kind: SkipKind::Unavailable,
                     cause,
                     detail: "opaque candidate detail".into(),
+                    ..Default::default()
                 })
                 .collect(),
             }))
@@ -250,6 +252,7 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
                         },
                         cause: None,
                         detail: "sign-in required".into(),
+                        ..Default::default()
                     })
                     .to_vec(),
             }))

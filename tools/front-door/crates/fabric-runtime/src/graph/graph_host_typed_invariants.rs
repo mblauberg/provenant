@@ -26,7 +26,20 @@ fn roundtrip_and_reject<T: DeserializeOwned + Serialize>(base: &T, fields: &[Fie
             .insert(field.key.to_owned(), field.valid.clone());
         let decoded: T = serde_json::from_value(value).unwrap();
         let encoded = serde_json::to_value(decoded).unwrap();
-        assert_eq!(encoded.get(field.key), Some(&field.valid), "{}", field.key);
+        // Empty/default fields may be omitted by their declared wire policy.
+        // The typed value must still survive its canonical representation.
+        let decoded_again: T = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(decoded_again).unwrap(),
+            encoded,
+            "{}",
+            field.key
+        );
+        for (key, value) in baseline.as_object().unwrap() {
+            if key.starts_with("future_") {
+                assert_eq!(encoded.get(key), Some(value), "{key}");
+            }
+        }
 
         let mut malformed = baseline.clone();
         malformed
@@ -39,6 +52,122 @@ fn roundtrip_and_reject<T: DeserializeOwned + Serialize>(base: &T, fields: &[Fie
             field.key
         );
     }
+}
+
+#[test]
+fn graph_document_host_fields_round_trip_reject_wrong_types_and_keep_unknowns() {
+    let base: GraphDocument = serde_json::from_value(json!({
+        "schema_version": 2,
+        "graph_id": "typed-document",
+        "nodes": [],
+        "future_graph_fact": {"retained": true}
+    }))
+    .unwrap();
+    let fields = [
+        field(
+            "review",
+            json!({"shape":"standard", "minimum_family_counts":{"openai":2}}),
+            json!(false),
+        ),
+        field("review_subject_missing", json!(true), json!("true")),
+        field("exclude", json!(["codex"]), json!("codex")),
+        field("template_library", json!({}), json!([])),
+        field("template_layers", json!({}), json!([])),
+        field(
+            "template_resolvers",
+            json!({"review-panel":["correctness"]}),
+            json!([]),
+        ),
+    ];
+    roundtrip_and_reject(&base, &fields);
+    let mut encoded = serde_json::to_value(base).unwrap();
+    encoded["review"] = json!({"shape":"standard"});
+    let decoded: GraphDocument = serde_json::from_value(encoded).unwrap();
+    assert_eq!(
+        serde_json::to_value(decoded).unwrap()["future_graph_fact"]["retained"],
+        true
+    );
+}
+
+#[test]
+fn graph_route_host_fields_round_trip_and_reject_malformed_values() {
+    let base: GraphRoute = serde_json::from_value(json!({"future_route":true})).unwrap();
+    let fields = [
+        field("required_family", json!("openai"), json!(3)),
+        field("peer_source_head", json!("a".repeat(40)), json!(false)),
+        field(
+            "peer_requested_route",
+            json!({"kind":"named","name":"senior","effort":null,"required_family":"openai"}),
+            json!(false),
+        ),
+        field("peer_network", json!("provider"), json!([])),
+        field("peer_retry_limit", json!(2), json!("two")),
+    ];
+    roundtrip_and_reject(&base, &fields);
+}
+
+#[test]
+fn graph_attempt_placement_round_trips_and_rejects_malformed_values() {
+    let base: GraphAttempt = serde_json::from_value(json!({
+        "future_attempt_fact": true,
+        "launched": true,
+        "key": {"graph_id":"g", "node_id":"n", "route_index":0, "attempt":1},
+        "route": {},
+        "state":"starting",
+        "attempt_ref":null,
+        "outcome":null,
+        "launch_actor":"chair"
+    }))
+    .unwrap();
+    let fields = [
+        field("placement_host", json!("peer-label"), json!(false)),
+        field(
+            "placement_host_id",
+            json!("a".repeat(32)),
+            json!("invalid-host-id"),
+        ),
+    ];
+    roundtrip_and_reject(&base, &fields);
+}
+
+#[test]
+fn attempt_usage_route_round_trips_and_rejects_wrong_types() {
+    let base: AttemptUsage = serde_json::from_value(json!({
+        "future_usage_fact": {"retained": true}
+    }))
+    .unwrap();
+    let fields = [field(
+        "resolved_route",
+        json!({
+            "provider":"openai", "model":"reasoning", "effort":"high",
+            "future_route_fact":{"retained":true}
+        }),
+        json!({"provider":7}),
+    )];
+    roundtrip_and_reject(&base, &fields);
+    let mut value = serde_json::to_value(base).unwrap();
+    value["resolved_route"] = fields[0].valid.clone();
+    let decoded: AttemptUsage = serde_json::from_value(value).unwrap();
+    let encoded = serde_json::to_value(decoded).unwrap();
+    assert_eq!(encoded["future_usage_fact"]["retained"], true);
+    assert_eq!(
+        encoded["resolved_route"]["future_route_fact"]["retained"],
+        true
+    );
+}
+
+#[test]
+fn attempt_resolved_route_fields_round_trip_and_reject_wrong_types() {
+    let base: AttemptResolvedRoute = serde_json::from_value(json!({
+        "future_route_fact": {"retained": true}
+    }))
+    .unwrap();
+    let fields = [
+        field("provider", json!("openai"), json!(false)),
+        field("model", json!("reasoning"), json!(3)),
+        field("effort", json!("high"), json!([])),
+    ];
+    roundtrip_and_reject(&base, &fields);
 }
 
 #[test]

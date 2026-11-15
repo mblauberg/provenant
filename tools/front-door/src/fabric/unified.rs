@@ -635,6 +635,7 @@ pub(crate) fn enrich_status_rows_within(
                             attempt,
                         },
                     },
+                    peer_subtree_after: None,
                 },
                 peer_budget,
                 cancel,

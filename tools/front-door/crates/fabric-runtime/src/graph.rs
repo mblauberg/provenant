@@ -663,7 +663,10 @@ pub trait AttemptOwner {
     }
 
     /// Resolve a placement before persisting an uncertain launch.
-    fn placement_host_id(&self, _name: &str) -> Result<Option<String>, Self::Error> {
+    fn placement_host_id(
+        &self,
+        _name: &str,
+    ) -> Result<Option<provenant_core::HostId>, Self::Error> {
         Ok(None)
     }
 
@@ -972,6 +975,8 @@ fn node_context(plan: &PlannedGraph, node: &PlannedNode) -> provenant_records::r
             .task_kind
             .clone()
             .or_else(|| graph.task_kind.clone()),
+        pr: context.pr.or(graph.pr),
+        lens: context.lens.clone().or_else(|| graph.lens.clone()),
         graph_id: Some(plan.graph_id.clone()),
         node_id: Some(node.id.clone()),
         attempt: None,
@@ -2497,10 +2502,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     .resolve_creation_base(
                                         &spec.branch,
                                         &spec.base,
-                                        spec.extra
-                                            .get("default_base")
-                                            .and_then(serde_json::Value::as_bool)
-                                            .unwrap_or(false),
+                                        spec.default_base,
                                     )
                                     .map_err(GraphError::Run)?
                                     .filter(|base| base.parse::<provenant_core::GitOid>().is_ok())
@@ -2986,9 +2988,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 }
                 let mut launch_attempt = node.attempt.clone().unwrap_or_default();
                 if !node.write_scope.is_empty() {
-                    launch_attempt
-                        .extra
-                        .insert("write_scope".into(), serde_json::json!(node.write_scope));
+                    launch_attempt.write_scope = node.write_scope.clone();
                 }
                 let observation = match owner.observe_or_start(
                     &key,

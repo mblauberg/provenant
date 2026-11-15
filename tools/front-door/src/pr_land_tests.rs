@@ -95,6 +95,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
                     head: None,
                     source_head: None,
                     route: provenant_run::RequestedRoute::Named {
+                        required_family: None,
                         extra: Default::default(),
                         name: "senior".into(),
                         effort: None,
@@ -453,6 +454,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
                     head: None,
                     source_head: None,
                     route: provenant_run::RequestedRoute::Named {
+                        required_family: None,
                         extra: Default::default(),
                         name: "senior".into(),
                         effort: None,

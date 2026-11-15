@@ -148,11 +148,7 @@ pub fn writer_budget_limits(
     let mut policy = BudgetPolicy::resolve(actions, graces);
     if let Some(remaining) = profile.budget_wrap_up.as_ref().map(|wrap| wrap.remaining) {
         let mut allowance = Limit::new(remaining, LimitSource::Launch, LimitStrength::Default);
-        if let Some(target) = budget {
-            allowance
-                .extra
-                .insert("wrap_up_target".into(), serde_json::json!(target));
-        }
+        allowance.wrap_up_target = budget.map(Box::new);
         budget = Some(allowance);
         policy.action = BudgetAction::Stop;
         policy.action_source = LimitSource::Launch;

@@ -827,6 +827,7 @@ pub(super) fn writer_run(
                 profile: provenant_run::HarnessProfile::default(),
                 prompt_digest,
                 route: provenant_run::RequestedRoute::Model {
+                    required_family: None,
                     extra: Default::default(),
                     provider: "claude".into(),
                     model: "claude/test-model".into(),

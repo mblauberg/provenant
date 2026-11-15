@@ -28,10 +28,7 @@ fn codex_attempt_usage(
         (false, Some((previous_session, previous_usage)))
             if session.is_some() && previous_session == session =>
         {
-            previous_usage
-                .extra
-                .get("session_total")
-                .and_then(|v| serde_json::from_value::<UsageRecord>(v.clone()).ok())
+            previous_usage.session_total.as_deref().cloned()
         }
         (false, Some(_)) => None,
     };
@@ -68,12 +65,8 @@ fn codex_attempt_usage(
         baseline.as_ref().and_then(|b| b.output_excluding_reasoning),
     );
     usage.reasoning = delta(total.reasoning, baseline.as_ref().and_then(|b| b.reasoning));
-    usage
-        .extra
-        .insert("per_attempt".into(), serde_json::Value::Bool(true));
-    if let Ok(value) = serde_json::to_value(total) {
-        usage.extra.insert("session_total".into(), value);
-    }
+    usage.per_attempt = Some(true);
+    usage.session_total = Some(Box::new(total));
 }
 
 #[cfg(test)]
@@ -90,7 +83,13 @@ mod codex_usage_tests {
         };
         codex_attempt_usage(&mut first, Some("t"), None, false);
         assert_eq!(first.uncached_input, Some(20));
-        assert_eq!(first.extra["session_total"]["cache_read"], 80);
+        assert_eq!(
+            first
+                .session_total
+                .as_deref()
+                .and_then(|total| total.cache_read),
+            Some(80)
+        );
         let mut second = UsageRecord {
             uncached_input: Some(50),
             cache_read: Some(100),
@@ -101,7 +100,13 @@ mod codex_usage_tests {
         assert_eq!(second.uncached_input, Some(30));
         assert_eq!(second.cache_read, Some(20));
         assert_eq!(second.output_excluding_reasoning, Some(5));
-        assert_eq!(second.extra["session_total"]["uncached_input"], 50);
+        assert_eq!(
+            second
+                .session_total
+                .as_deref()
+                .and_then(|total| total.uncached_input),
+            Some(50)
+        );
         let mut unknown = second.clone();
         codex_attempt_usage(
             &mut unknown,
@@ -5013,7 +5018,7 @@ mod writer_recovery_tests {
                 | BudgetStopCase::Clean
         ) {
             fake.codex_usage = Some(UsageRecord {
-                extra: [("per_attempt".into(), true.into())].into(),
+                per_attempt: Some(true),
                 uncached_input: Some(1_000_001),
                 ..Default::default()
             });

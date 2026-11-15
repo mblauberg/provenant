@@ -553,6 +553,7 @@ fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result
                 source_head: None,
                 head: None,
                 route: RequestedRoute::Named {
+                    required_family: None,
                     extra: Default::default(),
                     name: "senior".into(),
                     effort: None,

@@ -90,7 +90,7 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
                 pinned_base: None,
                 head: None,
                 profile: Default::default(),
-                route: provenant_run::RequestedRoute::Model {
+                route: provenant_run::RequestedRoute::Model { required_family: None,
                     extra: Default::default(),
                     provider: "fixture".into(),
                     model: "fixture/model".into(),

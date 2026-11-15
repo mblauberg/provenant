@@ -469,6 +469,7 @@ fn raw_input() -> PreparedRun {
                 profile: HarnessProfile::default(),
                 prompt_digest: CanonicalV1::file_digest(b"exact prompt"),
                 route: RequestedRoute::Model {
+                    required_family: None,
                     extra: Default::default(),
                     provider: "fixture".into(),
                     model: "fixture/model".into(),

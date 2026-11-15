@@ -513,9 +513,24 @@ fn admission_policy_is_independent_of_primary_or_fallback_adapter()
             let mut receipt = run::RouteRecord::default();
             let mut environment = Vec::new();
             apply_sandbox_mode(&task, mode, &mut environment, &mut receipt);
-            assert_eq!(receipt.extra["sandbox_admission"]["strength"], strength);
-            assert_eq!(receipt.extra["sandbox_admission"]["boundary"], "none");
-            assert_eq!(receipt.extra["sandbox_admission"]["source"], "default");
+            let admission = receipt
+                .sandbox_admission
+                .as_ref()
+                .expect("admission receipt");
+            assert_eq!(
+                admission.strength,
+                match strength {
+                    "off" => run::SandboxFloorStrength::Off,
+                    "warn" => run::SandboxFloorStrength::Warn,
+                    "strict" => run::SandboxFloorStrength::Strict,
+                    _ => unreachable!(),
+                }
+            );
+            assert_eq!(
+                admission.boundary,
+                provenant_records::diagnostic::BoundaryClass::None
+            );
+            assert_eq!(admission.source, provenant_records::LimitSource::Default);
         }
     }
     Ok(())
@@ -531,25 +546,48 @@ pub(super) fn apply_sandbox_mode(
 ) {
     use provenant_core::consumer_env::SANDBOX;
     let parent = task.profile.parent_sandboxed;
-    route.extra.insert("sandbox_admission".into(), serde_json::json!({
-        "parent_sandboxed": parent,
-        "boundary": "none",
-        "strength": task.profile.knobs.get("lanes.sandbox_floor").and_then(serde_json::Value::as_str).unwrap_or("warn"),
-        "knob": "lanes.sandbox_floor",
-        "source": task
+    let strength = match task
+        .profile
+        .knobs
+        .get("lanes.sandbox_floor")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("warn")
+    {
+        "off" => run::SandboxFloorStrength::Off,
+        "strict" => run::SandboxFloorStrength::Strict,
+        _ => run::SandboxFloorStrength::Warn,
+    };
+    route.sandbox_admission = Some(run::SandboxAdmissionReceipt {
+        parent_sandboxed: parent,
+        boundary: provenant_records::diagnostic::BoundaryClass::None,
+        strength,
+        knob: "lanes.sandbox_floor".into(),
+        source: task
             .profile
             .knob_sources
             .get("lanes.sandbox_floor")
             .copied()
-            .map(provenant_records::LimitSource::as_str)
-            .unwrap_or("default"),
-    }));
+            .unwrap_or(provenant_records::LimitSource::Default),
+        extra: Default::default(),
+    });
     environment.retain(|(name, _)| name != SANDBOX);
     environment.push((SANDBOX.into(), mode.env_value().into()));
-    route.extra.insert(
-        provenant_records::run::SANDBOX_ROUTE_FIELD.into(),
-        serde_json::json!(mode),
-    );
+    use provenant_confinement::run_config::SandboxSource;
+    use run::SandboxSourceReceipt as ReceiptSource;
+    route.sandbox = Some(run::SandboxModeReceipt {
+        requested: mode.requested,
+        effective: mode.effective,
+        source: match mode.source {
+            SandboxSource::Parent => ReceiptSource::Parent,
+            SandboxSource::Route => ReceiptSource::Route,
+            SandboxSource::Restriction => ReceiptSource::Restriction,
+            SandboxSource::Platform => ReceiptSource::Platform,
+            SandboxSource::Knob => ReceiptSource::Knob,
+            SandboxSource::Default => ReceiptSource::Default,
+        },
+        warning: mode.warning,
+        extra: Default::default(),
+    });
 }
 
 /// The configured host caches a sandboxed lane reads but never writes. They

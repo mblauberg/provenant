@@ -3530,6 +3530,7 @@ mod tests {
             account_key: Some("first".into()),
             source: None,
             pool_selection: None,
+            ..Default::default()
         };
         persist_provider_success(temp.path(), &route, 120)?;
         let mut mismatch_route = route.clone();

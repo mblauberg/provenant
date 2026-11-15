@@ -976,6 +976,7 @@ fn submission_preserves_explicit_named_route_tier() -> Result {
     assert_eq!(
         request.task.route,
         provenant_records::run::RequestedRoute::Named {
+            required_family: None,
             extra: Default::default(),
             name: "senior".into(),
             effort: None,
@@ -2513,6 +2514,7 @@ fn seed_attempt_in_state(
                     profile: provenant_records::run::HarnessProfile::default(),
                     prompt_digest: CanonicalV1::file_digest(prompt.as_bytes()),
                     route: RequestedRoute::Model {
+                        required_family: None,
                         extra: Default::default(),
                         provider: "fixture".into(),
                         model: "fixture".into(),

@@ -923,6 +923,7 @@ mod tests {
                     base_ref: None,
                     prompt_digest: CanonicalV1::file_digest(b"child"),
                     route: run::RequestedRoute::Model {
+                        required_family: None,
                         extra: Default::default(),
                         provider: "fixture".into(),
                         model: "fixture/model".into(),

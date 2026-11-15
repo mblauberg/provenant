@@ -198,6 +198,24 @@ pub enum Origin {
     },
 }
 
+impl Origin {
+    /// Retain the source in a forward-extensible record without making the
+    /// configuration resolver's own origin an input codec.
+    pub fn receipt(&self) -> provenant_records::run::OriginReceipt {
+        use provenant_records::run::OriginReceipt;
+        match self {
+            Self::Compiled { profile } => OriginReceipt::Compiled {
+                profile: Some(profile.as_str().into()),
+                extra: Default::default(),
+            },
+            Self::User { path } => OriginReceipt::User {
+                path: path.clone(),
+                extra: Default::default(),
+            },
+        }
+    }
+}
+
 /// One-based character line/column and the dotted key path in the source.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Location {

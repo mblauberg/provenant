@@ -60,6 +60,12 @@ pub(super) fn canonical_len<T: Serialize>(value: &T) -> usize {
 pub struct GraphDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_base: Option<String>,
+    /// Review resolution inputs retained with the submitted graph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<provenant_routing::ReviewRequest>,
+    /// The graph requested a review without a resolvable review subject.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub review_subject_missing: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<provenant_records::run::WorkContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -130,6 +136,18 @@ pub struct GraphRoute {
     /// Tier retained across a concrete ladder handoff.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
+    /// Required provider family selected by a review panel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_family: Option<String>,
+    /// Peer submission provenance, retained on its route until launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_source_head: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_requested_route: Option<provenant_records::run::RequestedRoute>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_network: Option<provenant_records::run::NetworkAccess>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_retry_limit: Option<u8>,
 }
 
 /// The selector used when launching a graph route.
@@ -1748,6 +1766,11 @@ pub struct WriterWorktreeBinding {
 pub struct GraphAttempt {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
+    /// Peer placement sealed before launch so recovery can route a lost reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_host_id: Option<provenant_core::HostId>,
     pub launched: bool,
     #[serde(default, skip_serializing_if = "not_delivered")]
     pub host_refused_before_acceptance: bool,
@@ -1849,6 +1872,8 @@ pub enum InputDelivery {
 pub struct AttemptUsage {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_route: Option<AttemptResolvedRoute>,
     pub tokens: Option<u64>,
     pub cost_micro_usd: Option<u64>,
     pub wall_time_seconds: Option<u64>,
@@ -1858,6 +1883,19 @@ pub struct AttemptUsage {
     pub cost_partial: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_unknown_reason: Option<String>,
+}
+
+/// The non-sensitive route facts exposed in graph usage summaries.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptResolvedRoute {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

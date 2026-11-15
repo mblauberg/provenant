@@ -13,9 +13,9 @@
 //!
 //! A commit is any head: a pull request head, a `land/**` candidate or a
 //! landed commit.
-use super::gh::rate_limit_reset;
 #[cfg(test)]
 use super::gh::Response;
+use super::gh::rate_limit_reset;
 use provenant_config::ports::Request;
 use provenant_config::{Forge, ForgePort};
 mod port;

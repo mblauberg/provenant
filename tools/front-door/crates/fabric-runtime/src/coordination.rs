@@ -86,6 +86,34 @@ impl From<provenant_fabric_store::Error> for CoordinationError {
 
 pub const LOCAL_OBSERVATION_INTERVAL_KEY: &str = "domains.wait.local_interval_ms";
 
+/// The event source selected for a blocking event read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationBackend {
+    Inotify,
+    Kqueue,
+    Unsupported,
+}
+
+/// How an event read observed the local store while waiting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum EventObservation {
+    EventSource {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        backend: ObservationBackend,
+    },
+    PacedReread {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        source_key: String,
+        source_origin: provenant_records::run::OriginReceipt,
+        interval_ms: u64,
+        reason: String,
+    },
+}
+
 /// Source cadence for local event observation when no native event source is available.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservationSettings {
@@ -153,6 +181,8 @@ pub enum EventsResult {
     Read {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observation: Option<EventObservation>,
         page: Page<Event>,
         cursor: i64,
         timed_out: bool,
@@ -172,6 +202,7 @@ impl EventsResult {
     pub fn empty_timeout(after: Option<i64>) -> Self {
         Self::Read {
             extra: Default::default(),
+            observation: None,
             page: Page {
                 extra: Default::default(),
                 items: vec![],
@@ -410,32 +441,31 @@ impl<'a> LocalCoordination<'a> {
         Ok(())
     }
 
-    fn observation_extra(
+    fn observation(
         &self,
         backend: Option<provenant_os::changes::watch::Backend>,
         fallback_reason: Option<&str>,
-    ) -> provenant_records::ExtraFields {
-        let mut extra = provenant_records::ExtraFields::new();
-        let value = match (backend, fallback_reason) {
-            (Some(backend), _) => serde_json::json!({
-                "mode": "event_source",
-                "backend": match backend {
-                    provenant_os::changes::watch::Backend::Inotify => "inotify",
-                    provenant_os::changes::watch::Backend::Kqueue => "kqueue",
-                    provenant_os::changes::watch::Backend::Unsupported => "unsupported",
+    ) -> Option<EventObservation> {
+        match (backend, fallback_reason) {
+            (Some(backend), _) => Some(EventObservation::EventSource {
+                extra: Default::default(),
+                backend: match backend {
+                    provenant_os::changes::watch::Backend::Inotify => ObservationBackend::Inotify,
+                    provenant_os::changes::watch::Backend::Kqueue => ObservationBackend::Kqueue,
+                    provenant_os::changes::watch::Backend::Unsupported => {
+                        ObservationBackend::Unsupported
+                    }
                 },
             }),
-            (None, Some(reason)) => serde_json::json!({
-                "mode": "paced_reread",
-                "source_key": LOCAL_OBSERVATION_INTERVAL_KEY,
-                "source_origin": &self.observation.source,
-                "interval_ms": self.observation.local_interval.as_micros() / 1000,
-                "reason": reason,
+            (None, Some(reason)) => Some(EventObservation::PacedReread {
+                extra: Default::default(),
+                source_key: LOCAL_OBSERVATION_INTERVAL_KEY.into(),
+                source_origin: self.observation.source.receipt(),
+                interval_ms: self.observation.local_interval.as_micros() / 1000,
+                reason: reason.into(),
             }),
-            (None, None) => return extra,
-        };
-        extra.insert("observation".into(), value);
-        extra
+            (None, None) => None,
+        }
     }
 
     fn new_id_bytes() -> Result<[u8; 16], CoordinationError> {
@@ -567,6 +597,7 @@ impl CoordinationApi for LocalCoordination<'_> {
                         },
                     ) => Ok(EventsResult::Read {
                         extra: Default::default(),
+                        observation: None,
                         page: Page {
                             extra: Default::default(),
                             items: Vec::new(),
@@ -694,15 +725,16 @@ impl CoordinationApi for LocalCoordination<'_> {
                             .events(self.project, start, limit, &read_request)?;
                     }
                 }
-                let extra = if waiting {
-                    self.observation_extra(backend, fallback_reason.as_deref())
+                let observation = if waiting {
+                    self.observation(backend, fallback_reason.as_deref())
                 } else {
-                    Default::default()
+                    None
                 };
                 let page = bounded_page(page.items, page.truncated)?;
                 let cursor = page.items.last().map(|event| event.seq).unwrap_or(start);
                 Ok(EventsResult::Read {
-                    extra,
+                    extra: Default::default(),
+                    observation,
                     page,
                     cursor,
                     timed_out,
@@ -1002,17 +1034,64 @@ mod tests {
                 source: source.clone(),
             };
             let reason = "fixture event source unavailable";
-            let extra = service.observation_extra(None, Some(reason));
-            let observation = &extra["observation"];
-            assert_eq!(observation["mode"], "paced_reread");
-            assert_eq!(observation["source_key"], LOCAL_OBSERVATION_INTERVAL_KEY);
-            assert_eq!(
-                observation["source_origin"],
-                serde_json::to_value(source).expect("origin")
-            );
-            assert_eq!(observation["interval_ms"], interval_ms);
-            assert_eq!(observation["reason"], reason);
+            let Some(EventObservation::PacedReread {
+                source_key,
+                source_origin,
+                interval_ms: observed_interval,
+                reason: observed_reason,
+                ..
+            }) = service.observation(None, Some(reason))
+            else {
+                panic!("missing paced reread observation");
+            };
+            assert_eq!(source_key, LOCAL_OBSERVATION_INTERVAL_KEY);
+            assert_eq!(source_origin, source.receipt());
+            assert_eq!(observed_interval, interval_ms);
+            assert_eq!(observed_reason, reason);
         }
+    }
+
+    #[test]
+    fn event_observation_fields_round_trip_reject_wrong_types_and_preserve_unknowns() {
+        let fixture = Fixture::new();
+        let source_origin = fixture.observation_settings().source.receipt();
+        let observation = EventObservation::PacedReread {
+            extra: [("future_detail".into(), serde_json::json!(true))].into(),
+            source_key: LOCAL_OBSERVATION_INTERVAL_KEY.into(),
+            source_origin,
+            interval_ms: 73,
+            reason: "native watcher unavailable".into(),
+        };
+        let mut encoded = serde_json::to_value(&observation).unwrap();
+        let decoded: EventObservation = serde_json::from_value(encoded.clone()).unwrap();
+        let round_trip = serde_json::to_value(decoded).unwrap();
+        assert_eq!(round_trip["source_key"], LOCAL_OBSERVATION_INTERVAL_KEY);
+        assert_eq!(round_trip["interval_ms"], 73);
+        assert_eq!(round_trip["future_detail"], true);
+        for (field, malformed) in [
+            ("source_key", serde_json::json!(false)),
+            ("source_origin", serde_json::json!([])),
+            ("interval_ms", serde_json::json!("73")),
+            ("reason", serde_json::json!(0)),
+        ] {
+            encoded[field] = malformed;
+            assert!(
+                serde_json::from_value::<EventObservation>(encoded.clone()).is_err(),
+                "{field} must reject the wrong type"
+            );
+            encoded[field] = round_trip[field].clone();
+        }
+        let result = EventsResult::empty_timeout(None);
+        let mut encoded_result = serde_json::to_value(result).unwrap();
+        encoded_result["future_event"] = serde_json::json!("retained");
+        let decoded_result: EventsResult = serde_json::from_value(encoded_result).unwrap();
+        assert_eq!(
+            serde_json::to_value(decoded_result).unwrap()["future_event"],
+            "retained"
+        );
+        let mut malformed_result = serde_json::to_value(EventsResult::empty_timeout(None)).unwrap();
+        malformed_result["observation"] = serde_json::json!(false);
+        assert!(serde_json::from_value::<EventsResult>(malformed_result).is_err());
     }
 
     #[test]

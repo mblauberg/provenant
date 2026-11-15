@@ -718,6 +718,7 @@ impl BinaryRunOwner<'_> {
             return match self.peer(
                 host,
                 PeerAction::Run {
+                    peer_subtree_after: None,
                     extra: Default::default(),
                     input: RunInput::Status {
                         extra: Default::default(),
@@ -1229,16 +1230,10 @@ impl BinaryRunOwner<'_> {
         row.provider_seconds = provenant_records::wire::provider_seconds(record.provider_ms);
         let state = row.state.clone();
         let reason = row.reason.clone();
-        let mut fields: provenant_records::ExtraFields = serde_json::from_value(
+        let fields: provenant_records::ExtraFields = serde_json::from_value(
             serde_json::to_value(row).map_err(|_| FacadeError::StateCorrupt)?,
         )
         .map_err(|_| FacadeError::StateCorrupt)?;
-        fields.insert(
-            "provider_seconds".into(),
-            serde_json::json!(provenant_records::wire::provider_seconds(
-                record.provider_ms
-            )),
-        );
         let mut chunk_fields = fields.clone();
         chunk_fields.remove("state");
         chunk_fields.remove("reason");
@@ -1305,26 +1300,23 @@ impl BinaryRunOwner<'_> {
                 provenant_cli::run::align_utf8_tail(&mut chunk);
                 // The serving side reads its own graph, so `output --host` can
                 // name the planner fallback it recorded.
-                let mut extra = chunk_fields;
                 let output_length = chunk.len;
-                if matches!(part, OutputPart::Result)
-                    && let Some(reason) = provenant_cli::run::planner_fallback_reason(
+                let planner_fallback = if matches!(part, OutputPart::Result) {
+                    provenant_cli::run::planner_fallback_reason(
                         &self.factory.context.roots.state,
                         session.context.project_id,
                         &record,
                     )
-                {
-                    extra.insert(
-                        provenant_cli::run::PLANNER_FALLBACK_KEY.into(),
-                        serde_json::Value::String(reason),
-                    );
-                }
+                } else {
+                    None
+                };
                 Ok(OutputResult::Chunk {
                     peer: provenant_records::run::PeerOutputFields {
                         length: Some(output_length),
+                        planner_fallback,
                         ..Default::default()
                     },
-                    extra,
+                    extra: chunk_fields,
                     target,
                     part,
                     state,
@@ -1395,6 +1387,7 @@ impl BinaryRunOwner<'_> {
                 if let Some(response) = self.remote(
                     &target,
                     PeerAction::Run {
+                        peer_subtree_after: None,
                         extra: Default::default(),
                         input: RunInput::Status {
                             extra: Default::default(),
@@ -1681,6 +1674,7 @@ impl BinaryRunOwner<'_> {
                 if let Some(answer) = self.remote(
                     target,
                     PeerAction::Run {
+                        peer_subtree_after: None,
                         extra: Default::default(),
                         input: input.clone(),
                     },

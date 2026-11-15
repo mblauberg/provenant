@@ -614,7 +614,11 @@ fn usage_limit_failure_reports_cause_instead_of_missing_findings() {
 
 #[test]
 fn exhausted_pool_names_the_cause_and_the_pool() {
-    let alias = GraphRoute {
+    let alias = GraphRoute {        required_family: None,
+        peer_source_head: None,
+        peer_requested_route: None,
+        peer_network: None,
+        peer_retry_limit: None,
         extra: Default::default(),
         adapter: None,
         name: None,

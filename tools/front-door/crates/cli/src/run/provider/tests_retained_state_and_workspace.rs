@@ -1528,7 +1528,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
     task.base = Some(head.clone());
     task.access.source_root = Some(source.clone());
     task.access.source_identity = Some(source_identity(&source)?);
-    task.route = run::RequestedRoute::Adapter {
+    task.route = run::RequestedRoute::Adapter { required_family: None,
         extra: Default::default(),
         provider: "command".into(),
         name: "fake".into(),

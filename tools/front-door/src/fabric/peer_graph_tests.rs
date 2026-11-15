@@ -761,6 +761,10 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
                 extra: Default::default(),
                 route: "fixture/model".into(),
                 kind: provenant_records::run::SkipKind::Unavailable,
+                plan_error: None,
+                guard_boundary: None,
+                guard_resource: None,
+                confinement_guard: None,
                 cause: Some(provenant_records::RouteExclusionReason::PacingReserve),
                 detail: "PRIVATE_PACING_SENTINEL".into(),
             };
@@ -905,6 +909,10 @@ fn retry_output_names_the_recorded_refusal_route_and_reason() -> TestResult {
                     extra: Default::default(),
                     route: "codex/gpt".into(),
                     kind: provenant_records::run::SkipKind::Unavailable,
+                    plan_error: None,
+                    guard_boundary: None,
+                    guard_resource: None,
+                    confinement_guard: None,
                     cause: None,
                     detail: "allowance spent".into(),
                 });
@@ -968,6 +976,10 @@ fn retry_output_names_the_recorded_refusal_route_and_reason() -> TestResult {
         extra: Default::default(),
         route: "codex/gpt".into(),
         kind: provenant_records::run::SkipKind::Unavailable,
+        plan_error: None,
+        guard_boundary: None,
+        guard_resource: None,
+        confinement_guard: None,
         cause: None,
         detail: "allowance spent".into(),
     };

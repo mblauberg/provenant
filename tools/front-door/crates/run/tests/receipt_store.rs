@@ -50,6 +50,7 @@ fn input() -> std::result::Result<PreparedRun, Box<dyn std::error::Error>> {
                 profile: HarnessProfile::default(),
                 prompt_digest: CanonicalV1::file_digest(b"prompt"),
                 route: RequestedRoute::Model {
+                    required_family: None,
                     extra: Default::default(),
                     provider: "fixture".into(),
                     model: "fixture/model".into(),

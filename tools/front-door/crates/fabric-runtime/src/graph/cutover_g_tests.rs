@@ -36,6 +36,8 @@ fn chair_bound_depletion_reads_facts_once_across_passes() {
         transitions::initial_checkpoint(&document, &plan, "digest".into(), None, None, None);
     checkpoint.nodes[0].state = NodeState::Failed;
     checkpoint.nodes[0].attempts.push(GraphAttempt {
+        placement_host: None,
+        placement_host_id: None,
         extra: Default::default(),
         host_refused_before_acceptance: false,
         launched: true,
