@@ -121,6 +121,7 @@ impl LaneRoots {
         root: &Path,
         private: &Path,
         common: &Path,
+        project: Option<&Path>,
         extra: &Self,
         host_state: &Path,
     ) -> Result<Self, TransportError> {
@@ -128,13 +129,9 @@ impl LaneRoots {
         if private != common {
             roots.push(root.to_path_buf());
         }
-        let project = common
-            .file_name()
-            .is_some_and(|name| name == ".git")
-            .then(|| common.parent())
-            .flatten()
-            .unwrap_or(root);
-        roots.extend(Self::project(project, host_state)?.0);
+        if let Some(project) = project {
+            roots.extend(Self::project(project, host_state)?.0);
+        }
         Ok(Self::new(roots))
     }
 

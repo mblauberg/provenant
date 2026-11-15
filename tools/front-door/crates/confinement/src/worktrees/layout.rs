@@ -112,6 +112,45 @@ pub fn project_layout_for_common(
     }
 }
 
+/// Resolve a common Git directory using its registered checkout hint when one
+/// exists, otherwise using the verified Git inventory. Host transport safety
+/// checks use this before reading effective repository configuration, so the
+/// inventory command has its own sanitized environment and does not recurse
+/// through `UtilityRuntime`.
+pub fn project_layout_for_common_at_state(
+    executor: &dyn Executor,
+    common: &Path,
+    host_state: &Path,
+    git: &Path,
+    environment: &[(std::ffi::OsString, std::ffi::OsString)],
+    inventory_timeout: Duration,
+    cancel: &CancelToken,
+) -> Result<ProjectLayout, WorktreeError> {
+    let common = canonicalize(common).map_err(|_| WorktreeError::ProjectLayoutUnresolved)?;
+    let location = provenant_config::ProjectLocation::new(common.clone())
+        .map_err(|_| WorktreeError::ProjectLayoutUnresolved)?;
+    let binding = provenant_config::lookup_project_at_state(host_state, &location)
+        .map_err(|_| WorktreeError::ProjectLayoutUnresolved)?;
+    match binding {
+        Some(binding) => project_layout_for_binding(
+            executor,
+            &binding,
+            git,
+            environment,
+            inventory_timeout,
+            cancel,
+        ),
+        None => project_layout_for_common(
+            executor,
+            &common,
+            git,
+            environment,
+            inventory_timeout,
+            cancel,
+        ),
+    }
+}
+
 /// Resolve a registered project using Git inventory first and its saved
 /// checkout hint only when Git cannot identify a conventional primary.
 /// The hint is re-proved from the checkout with Git and its common-directory
@@ -200,9 +239,10 @@ pub fn project_layout_for_checkout(
         Err(WorktreeError::InvalidRequest) if repo.private_git_dir() == repo.common_git_dir() => {
             ProjectLayout::from_repo(&repo.0, true)
         }
-        Err(WorktreeError::InvalidRequest) => {
-            ProjectLayout::from_common_identity(repo.common_git_dir(), repo.0.common_identity())
-        }
+        // Only a valid inventory that explicitly registers the common
+        // directory as bare proves there is no checkout owner. An unknown
+        // non-bare layout must not be treated as host-only.
+        Err(WorktreeError::InvalidRequest) => Err(WorktreeError::ProjectLayoutUnresolved),
         Err(error) => Err(error),
     }
 }
