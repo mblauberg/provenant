@@ -1534,7 +1534,7 @@ impl Factory {
         let input = &input;
         // Review ranges are launch controls: resolve them on the host before
         // admitting a graph, and bind immutable object IDs into its identity.
-        let review_launch = template_name == "review" || template_name.starts_with("review.");
+        let review_launch = declared.accepts_review_range();
         let setting = |name: &str| -> Result<Option<&str>, FacadeError> {
             match input.get("set").and_then(|set| set.get(name)) {
                 None => Ok(None),
@@ -3704,12 +3704,13 @@ mod tests {
 
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
+        let caller_brief = "REVIEW_PANEL_CALLER_BRIEF_SENTINEL";
         let explain = |subject: &str, review_base: &str| -> Result<GraphDocument> {
             let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
             let result = factory.graph_document(
                 json!({
-                    "op":"run", "template":"review", "brief":"Review pinned paths",
-                    "over":"@review-panel", "explain":true,
+                    "op":"run", "template":"review-panel", "brief":caller_brief,
+                    "explain":true,
                     "set":{"subject":subject,"review_base":review_base}
                 }),
                 budget,
@@ -3719,6 +3720,7 @@ mod tests {
         };
 
         let protected = explain(&protected_head, &base)?;
+        assert_eq!(protected.review_base.as_deref(), Some(base.as_str()));
         let protected_lenses = &protected.template_resolvers["review-panel"];
         assert!(protected_lenses.len() >= 8, "{protected_lenses:?}");
         for lens in ["correctness-spec", "reliability", "security-privacy"] {
@@ -3738,6 +3740,41 @@ mod tests {
         assert_eq!(
             protected.template_resolvers["review-synthesis"],
             vec!["true".to_owned()]
+        );
+        let protected_expanded = protected.expanded(&factory.context.config.graph.limits)?;
+        let review_leaves: Vec<_> = protected_expanded
+            .nodes
+            .iter()
+            .filter(|node| node.review_lens.is_some())
+            .collect();
+        assert!(
+            review_leaves.len() >= 8,
+            "{} review leaves",
+            review_leaves.len()
+        );
+        assert!(
+            review_leaves
+                .iter()
+                .all(|node| node.prompt.contains(caller_brief))
+        );
+        for stage in ["frame", "verify", "synthesis"] {
+            let node = protected_expanded
+                .nodes
+                .iter()
+                .find(|node| node.id.contains(&format!("--{stage}")))
+                .ok_or_else(|| format!("full review panel has no {stage} stage"))?;
+            assert!(node.prompt.contains(caller_brief), "{stage} prompt");
+        }
+        assert!(
+            protected_expanded
+                .nodes
+                .iter()
+                .filter(|node| node.review_behaviour.is_some())
+                .all(|node| matches!(
+                    node.source.as_ref(),
+                    Some(provenant_fabric_runtime::graph::SourceBinding::Commit { commit })
+                        if commit == &protected_head
+                ))
         );
 
         let docs = explain(&docs_head, &base)?;

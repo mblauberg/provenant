@@ -28,7 +28,13 @@ senior and root constraints to principal; consult recorded cost per template.
 `implement` runs as junior only for a bounded brief, one from a plan node or a
 `batch` slice; an unplanned brief gets a plan node first. A long writer is for
 coupled work that cannot split. Review each slice lightly and the integrated
-head with the full panel.
+head with the full panel. For a complete configured review, use:
+
+```sh
+provenant run review-panel --brief-file brief.md --set subject=origin/branch --set review_base=origin/main
+```
+
+A leaf such as `review.security` runs one lens.
 
 `run implement --branch NAME --base REF` creates a single writer's worktree. Register one
 by hand (`provenant worktree create BRANCH`) only to share it: `batch` gives every

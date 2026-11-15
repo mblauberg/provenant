@@ -7,11 +7,17 @@ description: "Use for independent read-only review of a pinned diff or pull requ
 
 Review independently at a pinned head and prove coverage alongside CI.
 
-Run the `review` template with the subject and base on the command line (the
-command is in `orchestrate`; the host computes the merge base and supplies
-pinned Git context) and the spec in the brief. A dotted flavour such as
-`review.security` selects one lens; the composite resolves a panel at launch,
-then `review.verify` and `review.synthesis` where needed. Review each slice
+Run the `review-panel` template for a complete configured review, with the
+subject and base pinned on the command line and the spec in `--brief-file`:
+
+```sh
+provenant run review-panel --brief-file brief.md --set subject=origin/branch --set review_base=origin/main
+```
+
+The host computes the merge base, supplies pinned Git context and passes the
+brief through framing, every selected lens, verification and synthesis. A dotted
+leaf such as `review.security` selects only one lens; it is useful for a focused
+slice, not a substitute for the complete configured panel. Review each slice
 lightly and the integrated head with the full required panel. A changed subject
 gets a delta review against the prior findings and the invariant under repair.
 
