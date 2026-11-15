@@ -691,9 +691,9 @@ pub(super) fn credential_roots(
     let mut roots = CredentialRoots::for_home(home);
     for entry in settings.entries.values() {
         let source = format!("account registry: {}/{}", entry.adapter, entry.label);
-        for path in std::iter::once(&entry.directory).chain(&entry.directories) {
+        for path in crate::accounts::credential_directories(entry) {
             roots.add(
-                path.clone(),
+                path.to_path_buf(),
                 CredentialScope::Subtree,
                 source.clone(),
                 kind(entry.adapter.as_str(), path),
@@ -709,13 +709,7 @@ pub(super) fn credential_roots(
                 "account registry: {}/{} credential file",
                 entry.adapter, entry.label
             );
-            roots.add(
-                entry.directory.with_extension("json"),
-                CredentialScope::Exact,
-                source.clone(),
-                CredentialKind::Store,
-            );
-            for directory in &entry.directories {
+            for directory in crate::accounts::credential_directories(entry) {
                 roots.add(
                     directory.with_extension("json"),
                     CredentialScope::Exact,

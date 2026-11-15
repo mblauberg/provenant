@@ -4,6 +4,118 @@ use provenant_core::Roots;
 use provenant_os::{exec::SystemExecutor, fs::Directory};
 use provenant_providers::accounts::{Registration, Settings};
 use std::path::{Path, PathBuf};
+
+/// The credential-bearing directories owned by a registration. Account
+/// aliases are additional roots for the same identity, not separate accounts.
+pub(crate) fn credential_directories(
+    entry: &provenant_providers::accounts::Registration,
+) -> impl Iterator<Item = &Path> {
+    std::iter::once(entry.directory.as_path()).chain(entry.directories.iter().map(PathBuf::as_path))
+}
+
+#[derive(Clone)]
+struct AccountDirectories {
+    id: String,
+    paths: Vec<PathBuf>,
+}
+
+struct DirectoryFinding {
+    accounts: Vec<String>,
+    message: String,
+}
+
+fn directory_inventory(settings: &Settings) -> Vec<AccountDirectories> {
+    settings
+        .entries
+        .iter()
+        .map(|(id, entry)| AccountDirectories {
+            id: id.clone(),
+            paths: credential_directories(entry)
+                .map(Path::to_path_buf)
+                .collect(),
+        })
+        .collect()
+}
+
+fn resolve_directory(path: &Path) -> PathBuf {
+    provenant_core::PathResolver::resolve_existing_ancestor(
+        &provenant_os::fs::SystemPathResolver,
+        path,
+    )
+    .unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn directory_inventory_findings(
+    accounts: &[AccountDirectories],
+    home: &Path,
+) -> Vec<DirectoryFinding> {
+    let home = resolve_directory(home);
+    let resolved: Vec<_> = accounts
+        .iter()
+        .map(|account| {
+            (
+                &account.id,
+                account
+                    .paths
+                    .iter()
+                    .map(|path| resolve_directory(path))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    let mut findings = Vec::new();
+    for (index, (id, paths)) in resolved.iter().enumerate() {
+        if paths.iter().any(|path| home.starts_with(path)) {
+            findings.push(DirectoryFinding {
+                accounts: vec![(*id).clone()],
+                message: format!("account {id}: directory is HOME or its ancestor; a login at HOME is the adapter's local account and needs no registration"),
+            });
+        }
+        for (other_id, other_paths) in resolved.iter().skip(index + 1) {
+            if paths.iter().any(|path| {
+                other_paths.iter().any(|other| {
+                    provenant_providers::identity::account_directories_overlap(path, other)
+                })
+            }) {
+                findings.push(DirectoryFinding {
+                    accounts: vec![(*id).clone(), (*other_id).clone()],
+                    message: format!("accounts {id} and {other_id}: registered directories overlap; a login at HOME is the adapter's local account and needs no registration"),
+                });
+            }
+        }
+    }
+    findings
+}
+
+fn candidate_directory_findings(
+    settings: &Settings,
+    home: &Path,
+    id: &str,
+    adapter: &str,
+    label: &str,
+    directory: &Path,
+    additional: &[PathBuf],
+) -> Vec<DirectoryFinding> {
+    let mut accounts = directory_inventory(settings);
+    let replaced: std::collections::BTreeSet<_> = settings
+        .entries
+        .iter()
+        .filter(|(_, entry)| entry.adapter == adapter && entry.label == label)
+        .map(|(entry_id, _)| entry_id.as_str())
+        .collect();
+    accounts.retain(|account| !replaced.contains(account.id.as_str()));
+    accounts.push(AccountDirectories {
+        id: id.to_owned(),
+        paths: std::iter::once(directory.to_path_buf())
+            .chain(additional.iter().cloned())
+            .collect(),
+    });
+    directory_inventory_findings(&accounts, home)
+        .into_iter()
+        .filter(|finding| finding.accounts.iter().any(|account| account == id))
+        .collect()
+}
+
 /// Headline window choice; `default` clears a per-account override.
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 pub enum HeadlineArg {
@@ -169,31 +281,10 @@ pub fn execute(
 
 /// Diagnose registrations that would make credential roots overlap.
 pub fn directory_findings(settings: &Settings, home: &Path) -> Vec<String> {
-    let resolve = |path: &Path| {
-        provenant_core::PathResolver::resolve_existing_ancestor(
-            &provenant_os::fs::SystemPathResolver,
-            path,
-        )
-        .unwrap_or_else(|_| path.to_path_buf())
-    };
-    let home = resolve(home);
-    let entries: Vec<_> = settings.entries.iter().collect();
-    let mut findings = Vec::new();
-    for (index, (id, entry)) in entries.iter().enumerate() {
-        let directory = resolve(&entry.directory);
-        if home.starts_with(&directory) {
-            findings.push(format!("account {id}: directory is HOME or its ancestor; a login at HOME is the adapter's local account and needs no registration"));
-        }
-        for (other_id, other) in entries.iter().skip(index + 1) {
-            if provenant_providers::identity::account_directories_overlap(
-                &directory,
-                &resolve(&other.directory),
-            ) {
-                findings.push(format!("accounts {id} and {other_id}: registered directories overlap; a login at HOME is the adapter's local account and needs no registration"));
-            }
-        }
-    }
-    findings
+    directory_inventory_findings(&directory_inventory(settings), home)
+        .into_iter()
+        .map(|finding| finding.message)
+        .collect()
 }
 
 fn execute_inner(
@@ -268,8 +359,26 @@ fn execute_inner(
             home,
         )
         .map_err(|error| error.to_string())?;
-        if resolved_home.starts_with(&directory) {
-            return Err("a directory at or above HOME cannot be registered; a login at HOME is the adapter's local account and needs no registration".into());
+        let account_id = format!("{adapter}-{label}");
+        let additional = settings
+            .entries
+            .values()
+            .find(|entry| entry.adapter == *adapter && entry.label == *label)
+            .map(|entry| entry.directories.as_slice())
+            .unwrap_or_default();
+        if let Some(finding) = candidate_directory_findings(
+            &settings,
+            &resolved_home,
+            &account_id,
+            adapter,
+            label,
+            &directory,
+            additional,
+        )
+        .into_iter()
+        .next()
+        {
+            return Err(finding.message);
         }
         if provenant_records::AdapterSpec::get(adapter)
             .and_then(|spec| spec.account_directory_prefix)
@@ -361,20 +470,19 @@ fn execute_inner(
             settings
                 .entries
                 .retain(|_, a| a.adapter != *adapter || a.label != *label);
-            if settings.entries.values().any(|other| {
-                let other_directory = provenant_core::PathResolver::resolve_existing_ancestor(
-                    &provenant_os::fs::SystemPathResolver,
-                    &other.directory,
-                )
-                .unwrap_or_else(|_| other.directory.clone());
-                provenant_providers::identity::account_directories_overlap(
-                    &entry.directory,
-                    &other_directory,
-                )
-            }) {
-                return Err("registered account directories overlap; a login at HOME is the adapter's local account and needs no registration".into());
+            settings.entries.insert(account_id.clone(), entry);
+            if let Some(finding) =
+                directory_inventory_findings(&directory_inventory(&settings), &resolved_home)
+                    .into_iter()
+                    .find(|finding| {
+                        finding
+                            .accounts
+                            .iter()
+                            .any(|account| account == &account_id)
+                    })
+            {
+                return Err(finding.message);
             }
-            settings.entries.insert(format!("{adapter}-{label}"), entry);
             if !provenant_config::DomainConfig::validate(&settings).is_empty() {
                 return Err("conflicting account registration".into());
             }
