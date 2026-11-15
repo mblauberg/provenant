@@ -578,6 +578,40 @@ mod tests {
                 .or_else(|| env_path(&env, "npm_config_store_dir"))
                 .unwrap_or_else(|| pnpm_default_store(&home, &host_var));
             assert_eq!([npm, pnpm_cache, pnpm_store], expected, "{adapter}");
+            match adapter {
+                "agy" => assert_eq!(
+                    env_path(&env, "npm_config_cache").as_ref(),
+                    Some(&expected[0]),
+                    "Agy must bind npm cache while its account HOME differs"
+                ),
+                "opencode" => {
+                    assert_eq!(
+                        env_path(&env, "npm_config_cache"),
+                        None,
+                        "OpenCode keeps npm's host HOME default"
+                    );
+                    assert_eq!(
+                        env_path(&env, "pnpm_config_cache_dir").as_ref(),
+                        Some(&expected[1]),
+                        "OpenCode must bind pnpm cache while XDG cache changes"
+                    );
+                    assert_eq!(
+                        env_path(&env, "pnpm_config_store_dir").as_ref(),
+                        Some(&expected[2]),
+                        "OpenCode must bind pnpm store while XDG data changes"
+                    );
+                }
+                "codex" | "cursor" => {
+                    for key in [
+                        "npm_config_cache",
+                        "pnpm_config_cache_dir",
+                        "pnpm_config_store_dir",
+                    ] {
+                        assert!(env_path(&env, key).is_none(), "{adapter} injected {key}");
+                    }
+                }
+                _ => unreachable!("fixture adapter is covered above"),
+            }
             if adapter == "opencode" {
                 assert_eq!(
                     var(&env, "XDG_CONFIG_HOME"),
