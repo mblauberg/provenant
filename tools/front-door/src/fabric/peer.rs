@@ -39,33 +39,19 @@ pub fn hosts(globals: &provenant_cli::Globals, workers: &'static dyn WorkerObser
         ),
     }
 }
-fn peer_read_only(action: &PeerAction) -> bool {
-    use provenant_fabric_runtime::inbox::InboxInput;
-    match action {
-        PeerAction::ConsoleBoard { .. }
-        | PeerAction::ConsoleTree { .. }
-        | PeerAction::ConsoleDetail { .. }
-        | PeerAction::ConsoleInbox { .. }
-        | PeerAction::Doctor { .. }
-        | PeerAction::Receipt { .. } => true,
-        PeerAction::CancelSubmission { stop, .. } => !stop,
-        PeerAction::Inbox {
-            input:
-                provenant_fabric_runtime::inbox::InboxInput::Steer {
-                    graph_context: Some(_),
-                    ..
-                },
-            ..
-        } => false,
-        PeerAction::Inbox { input, .. } => !matches!(
-            input,
-            InboxInput::Answer {
-                operation_id: Some(_),
-                ..
-            }
-        ),
-        _ => false,
+fn registered_peer_context(
+    roots: &provenant_core::Roots,
+    home: &Path,
+    common: &Path,
+) -> Result<Context, Box<dyn std::error::Error>> {
+    let is_git_common = common.file_name() == Some(std::ffi::OsStr::new(".git"))
+        || (common.join("HEAD").is_file() && common.join("objects").is_dir());
+    if !is_git_common {
+        return Err(PeerError::Project.into());
     }
+    let location = provenant_config::ProjectLocation::new(common)?;
+    let binding = provenant_config::lookup_project(roots, &location)?.ok_or(PeerError::Project)?;
+    Ok(Context::open_for_project(roots.clone(), home, &binding)?)
 }
 
 fn validate_graph_steer(
@@ -287,13 +273,12 @@ pub fn peer(
         )?;
         let home = host.home;
         if !in_process {
-            let state = host.roots.state;
+            let state = host.roots.state.as_path();
             // Only an unreachable agent falls back; a sent request is never repeated.
-            let reply =
-                match provenant_fabric_runtime::peer_agent::forward(state.as_path(), &bytes)? {
-                    provenant_fabric_runtime::peer_agent::Forward::Replied(reply) => Some(reply),
-                    provenant_fabric_runtime::peer_agent::Forward::Unreachable => None,
-                };
+            let reply = match provenant_fabric_runtime::peer_agent::forward(state, &bytes)? {
+                provenant_fabric_runtime::peer_agent::Forward::Replied(reply) => Some(reply),
+                provenant_fabric_runtime::peer_agent::Forward::Unreachable => None,
+            };
             if let Some(reply) = reply {
                 provenant_os::sys::hook_io::write_stdout(
                     &reply,
@@ -307,24 +292,20 @@ pub fn peer(
         if provenant_os::fs::canonicalize(&common)? != common {
             return Err(PeerError::Project.into());
         }
-        let cwd = if common.file_name() == Some(std::ffi::OsStr::new(".git")) {
-            common.parent().ok_or(PeerError::Project)?.to_path_buf()
-        } else {
-            common
-        };
+        let mut context = registered_peer_context(&host.roots, &home, &common)?;
+        // The common directory anchors Git identity and inventory; the verified
+        // layout root owns project config and the workspace boundary. A bare
+        // common directory remains its own host-only layout root.
+        let cwd = context.project_root.clone();
         let resolved = crate::roots::resolve(
             globals,
             crate::roots::Workspace::At(&cwd),
             crate::roots::Product::Required,
         )?;
         let assets = resolved.assets;
-        // An answer without an operation ID is refused below, after peer validation,
-        // and must not initialise writable project state on its way there.
-        let mut context = if peer_read_only(&request.action) {
-            Context::open_read_only(resolved.roots, &home, &cwd)?
-        } else {
-            Context::open(resolved.roots, &home, &cwd)?
-        };
+        // This opens an existing registered binding and creates no project state.
+        // Rebind its roots at the verified project root before dispatch.
+        context.roots = resolved.roots;
         request.validate(context.identity.host, &context.config, &home)?;
         if context.identity.federation.as_ref().map(|p| &p.key) != Some(&request.project.key) {
             return Err(PeerError::Project.into());
@@ -1804,4 +1785,155 @@ pub(super) fn peer_retained_receipt(
     .map_err(graph_journal_error)?
     .map(|checkpoint| peer_graph_receipt(factory, operation_id.clone(), &graph, &checkpoint))
     .transpose()
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn ports_with_root(root: &str) -> provenant_config::PortTable {
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.worktree_layout.roots = vec![PathBuf::from(root)];
+        ports.worktree_layout.default = PathBuf::from(root).join("<branch>");
+        ports
+    }
+
+    fn bind_project(
+        roots: &provenant_core::Roots,
+        common: &Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        provenant_config::bind_project(roots, provenant_config::ProjectLocation::new(common)?)?;
+        Ok(())
+    }
+
+    fn roots(
+        home: &Path,
+        assets: &Path,
+        state: &Path,
+    ) -> Result<provenant_core::Roots, Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        for path in [home, assets, state] {
+            std::fs::create_dir_all(path)?;
+        }
+        std::fs::set_permissions(state, std::fs::Permissions::from_mode(0o700))?;
+        let mut inputs = provenant_core::RootInputs::new(home.to_owned(), assets.to_owned());
+        inputs.state_dir = Some(state.to_owned());
+        Ok(inputs.resolve(&provenant_os::fs::SystemPathResolver)?)
+    }
+
+    // Spec: docs/specs/fabric.md#peer-hosts
+    #[test]
+    fn peer_context_uses_verified_project_owner_for_external_gitdir()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let home = root.join("home");
+        let assets = root.join("assets");
+        let state = root.join("state");
+        let metadata = home.join("metadata");
+        let common = metadata.join("external.git");
+        let project = root.join("checkout");
+        std::fs::create_dir_all(&metadata)?;
+        std::fs::create_dir_all(&project)?;
+        let init = provenant_os::fixture::git_command()
+            .args(["init", "--quiet", "--separate-git-dir"])
+            .arg(&common)
+            .arg(&project)
+            .output()?;
+        assert!(
+            init.status.success(),
+            "separate Git directory init failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        provenant_os::fixture::run_git(&project, &["commit", "--allow-empty", "-qm", "fixture"])?;
+        let project_ports = ports_with_root("project-writers");
+        std::fs::create_dir(project.join(".provenant"))?;
+        std::fs::write(
+            project.join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&project_ports)?,
+        )?;
+        let decoy_ports = ports_with_root("metadata-writers");
+        std::fs::create_dir(metadata.join(".provenant"))?;
+        std::fs::write(
+            metadata.join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&decoy_ports)?,
+        )?;
+
+        let roots = roots(&home, &assets, &state)?;
+        provenant_config::bind_host(&roots)?;
+        bind_project(&roots, &common)?;
+        let context = registered_peer_context(&roots, &home, &common)?;
+        assert_eq!(context.project_root, project);
+        assert_eq!(
+            context.port_table.worktree_layout.roots,
+            [PathBuf::from("project-writers")]
+        );
+        let locator = ProjectLocator::new(&context.identity, &home)?;
+        assert_eq!(locator.resolve(&home)?, common);
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#peer-hosts
+    #[test]
+    fn peer_context_keeps_bare_common_projects_host_only() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let home = root.join("home");
+        let assets = root.join("assets");
+        let state = root.join("state");
+        let common = home.join("metadata/bare.git");
+        let seed = root.join("seed");
+        let linked = root.join("bare-linked");
+        std::fs::create_dir_all(&common)?;
+        std::fs::create_dir_all(&state)?;
+        std::fs::create_dir_all(&seed)?;
+        provenant_os::fixture::run_git(&common, &["init", "--bare", "--quiet"])?;
+        provenant_os::fixture::run_git(&seed, &["init", "--quiet", "--initial-branch=main"])?;
+        provenant_os::fixture::run_git(&seed, &["commit", "--allow-empty", "-qm", "fixture"])?;
+        let common_arg = common.to_string_lossy();
+        provenant_os::fixture::run_git(
+            &seed,
+            &["push", common_arg.as_ref(), "HEAD:refs/heads/main"],
+        )?;
+        let linked_arg = linked.to_string_lossy();
+        provenant_os::fixture::run_git(
+            &common,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "--detach",
+                linked_arg.as_ref(),
+                "main",
+            ],
+        )?;
+        let host_ports = ports_with_root("host-writers");
+        std::fs::write(state.join("ports.json"), serde_json::to_vec(&host_ports)?)?;
+        let bare_ports = ports_with_root("bare-project-writers");
+        std::fs::create_dir(common.join(".provenant"))?;
+        std::fs::write(
+            common.join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&bare_ports)?,
+        )?;
+
+        let roots = roots(&home, &assets, &state)?;
+        provenant_config::bind_host(&roots)?;
+        bind_project(&roots, &common)?;
+        let context = registered_peer_context(&roots, &home, &common)?;
+        assert_eq!(context.project_root, common);
+        assert_eq!(
+            context.port_table.worktree_layout.roots,
+            [PathBuf::from("host-writers")]
+        );
+        assert!(
+            !context
+                .port_table
+                .worktree_layout
+                .roots
+                .contains(&PathBuf::from("bare-project-writers"))
+        );
+        Ok(())
+    }
 }
