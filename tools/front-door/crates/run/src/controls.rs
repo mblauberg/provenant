@@ -19,7 +19,7 @@ pub(crate) const STEER_TEXT_SEPARATOR: &str = "\n\n";
 pub(crate) struct SteerSessionReady {
     pub generation: u64,
     pub route_digest: String,
-    pub session: String,
+    pub session: Option<String>,
     pub provider_boot: String,
     pub provider_pid: i64,
     pub provider_start: u64,
@@ -2001,7 +2001,7 @@ impl RunStore {
                 return Ok((false, false));
             }
             let scope = Self::scope(&record);
-            let saved: Option<(i64, String, String, String, i64, i64, i64, i64)> = tx
+            let saved: Option<(i64, String, Option<String>, String, i64, i64, i64, i64)> = tx
                 .query_row(
                     "SELECT generation,route_digest,session,provider_boot,provider_pid,provider_start,identity_conflict,terminal_confirmed FROM provider_session_ready WHERE attempt=?1",
                     [id.to_string()],
@@ -2011,7 +2011,7 @@ impl RunStore {
             if let Some((generation, saved_route, saved_session, boot, pid, start, conflicted, _)) = saved {
                 let conflict = generation != i64::try_from(scope.generation).unwrap_or(i64::MAX)
                     || saved_route != route_digest
-                    || saved_session != session
+                    || saved_session.as_deref() != Some(session)
                     || boot != source.boot
                     || pid != source.pid
                     || start != i64::try_from(source.native_start).unwrap_or(i64::MAX);
@@ -2048,13 +2048,91 @@ impl RunStore {
         Ok(ready)
     }
 
+    /// Permanently fence continuation when the validated adapter stream
+    /// contradicts the model or session bound to this live provider process.
+    /// The route and process identity must still match the admitted candidate.
+    pub fn record_provider_identity_conflict(
+        &self,
+        id: AttemptId,
+        route: &RouteRecord,
+        source: &provenant_os::capture::CaptureSourceIdentity,
+        call: &Request<'_>,
+    ) -> Result<bool> {
+        if source.boot.is_empty()
+            || source.boot.len() > 256
+            || source.pid <= 0
+            || source.native_start == 0
+        {
+            return Err(RunError::Validation("provider identity conflict source"));
+        }
+        let route_digest = steer_route_digest(route)?;
+        if route.provider.is_none() {
+            return Err(RunError::Validation("provider identity conflict route"));
+        }
+        let admitted = self.record(id, call)?;
+        if !matches!(admitted.state, AttemptState::Running { .. })
+            || source.attempt != id.to_string()
+            || source.generation != Self::scope(&admitted).generation
+            || admitted.applied_route.as_ref().is_none_or(|applied| {
+                steer_route_digest(applied).ok().as_deref() != Some(route_digest.as_str())
+            })
+        {
+            return Ok(false);
+        }
+        self.write(call, |tx| {
+            let raw: Vec<u8> = tx
+                .query_row(
+                    "SELECT record FROM attempts WHERE id=?1 AND project=?2 AND refused=0",
+                    params![id.to_string(), self.context.project_id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or(RunError::NotFound)?;
+            let record = crate::db::decode_attempt(&raw)?;
+            if !matches!(record.state, AttemptState::Running { .. })
+                || Self::scope(&record).generation != source.generation
+                || record
+                    .applied_route
+                    .as_ref()
+                    .is_none_or(|applied| {
+                        steer_route_digest(applied).ok().as_deref()
+                            != Some(route_digest.as_str())
+                    })
+            {
+                return Ok(false);
+            }
+            let changed = tx.execute(
+                "UPDATE provider_session_ready SET identity_conflict=1 WHERE attempt=?1",
+                [id.to_string()],
+            )?;
+            if changed == 1 {
+                return Ok(true);
+            }
+            // The adapter can reject the first frame before it returns the
+            // session event in that same frame. Retain a conflict-only row
+            // anyway so natural settlement cannot adopt a contradictory stream.
+            tx.execute(
+                "INSERT INTO provider_session_ready(attempt,generation,route_digest,session,provider_boot,provider_pid,provider_start,identity_conflict,terminal_confirmed) VALUES (?1,?2,?3,NULL,?4,?5,?6,1,0)",
+                params![
+                    id.to_string(),
+                    i64::try_from(source.generation).map_err(|_| RunError::Conflict)?,
+                    route_digest,
+                    source.boot,
+                    source.pid,
+                    i64::try_from(source.native_start).map_err(|_| RunError::Conflict)?,
+                ],
+            )?;
+            Ok(true)
+        })
+    }
+
     pub(crate) fn steer_session_ready(
         &self,
         id: AttemptId,
         call: &Request<'_>,
     ) -> Result<Option<SteerSessionReady>> {
         call.check()?;
-        let saved: Option<(i64, String, String, String, i64, i64, i64, i64)> = self
+        let saved: Option<(i64, String, Option<String>, String, i64, i64, i64, i64)> = self
             .db
             .query_row(
                 "SELECT generation,route_digest,session,provider_boot,provider_pid,provider_start,identity_conflict,terminal_confirmed FROM provider_session_ready WHERE attempt=?1",
@@ -4701,6 +4779,74 @@ mod tests {
 
     // Spec: docs/specs/fabric.md#session-ready-steering
     #[test]
+    fn sealed_live_identity_conflict_fences_a_queued_successor() -> TestResult {
+        for (conflict, incomplete, outcome, cause) in [
+            (
+                true,
+                false,
+                Outcome::Failed,
+                Some(TerminalCause::IdentityMismatch),
+            ),
+            (false, true, Outcome::Unsettled, None),
+        ] {
+            let temp = tempfile::tempdir()?;
+            let clock = crate::tests::clock();
+            let cancel = provenant_core::CancelToken::new();
+            let call = crate::tests::call(&clock, &cancel);
+            let context = crate::tests::context(temp.path())?;
+            let store = RunStore::open(&context, &call)?;
+            let run = crate::tests::input();
+            let id = run.attempt_id;
+            store.create(&run, &call)?;
+            store.mark_starting(
+                &store.record(id, &call)?,
+                &crate::tests::route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            let running = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+            let operation = OperationId::parse("steer-identity-conflict")?;
+            store.steer(id, operation, "Keep the existing session.", &call)?;
+
+            let attempt = store.attempt_dir(id, false)?;
+            crate::artifacts::seal(
+                &attempt,
+                "stdout.log",
+                b"apparently successful",
+                CAPTURE_LIMIT,
+            )?;
+            let mut exit = crate::tests::exit();
+            exit.scope = RunStore::scope(&running);
+            exit.provider_identity_conflict = conflict;
+            exit.provider_identity_evidence_incomplete = incomplete;
+            crate::dispatch_tests::seal_exit(&store, &exit)?;
+            let fake = crate::dispatch_tests::Fake::with_observed(
+                Some(crate::tests::route()),
+                Some(Outcome::Succeeded),
+            );
+            let finished = store.finish(id, &attempt, &exit, &fake, &call)?;
+            assert!(matches!(
+                finished.state,
+                AttemptState::Terminal {
+                    outcome: actual_outcome,
+                    terminal_cause: actual_cause,
+                    ..
+                } if actual_outcome == outcome && actual_cause == cause
+            ));
+            assert_eq!(store.prepare_steer_continuation(id, &call)?, None);
+            assert_eq!(store.record(id, &call)?.superseded_by, None);
+            assert_eq!(
+                store.steer_intent(id, &call)?[0].text,
+                "Keep the existing session."
+            );
+        }
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
     fn steer_session_readiness_binds_scope_process_and_immutable_route_identity() -> TestResult {
         use provenant_supervisor::census::ProcessObservation;
 
@@ -4760,7 +4906,7 @@ mod tests {
         let ready = store
             .steer_session_ready(id, &call)?
             .ok_or("ready session missing")?;
-        assert_eq!(ready.session, "fixture-live-session");
+        assert_eq!(ready.session.as_deref(), Some("fixture-live-session"));
         assert_eq!(ready.generation, source.generation);
         assert!(!ready.conflict);
         assert!(!ready.terminal_confirmed);
@@ -4844,9 +4990,10 @@ mod tests {
             .ok_or("applied route")?
             .clone();
         assert!(store.record_provider_session_ready(id, &route, "live-session", &source, &call,)?);
+        assert!(store.record_provider_identity_conflict(id, &route, &source, &call)?);
         let terminal_provider = provenant_supervisor::census::ProcessIdentity {
             boot: source.boot.clone(),
-            pid: source.pid.saturating_add(1),
+            pid: source.pid,
             native_start: source.native_start,
             group_id: source.pid,
             session_id: source.pid,
@@ -4874,6 +5021,84 @@ mod tests {
             Err(RunError::SteerSessionMismatch)
         ));
         assert_eq!(store.steer_intent(id, &call)?[0].text, "Keep this input.");
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn first_frame_identity_mismatch_without_session_event_fences_natural_steer() -> TestResult {
+        use provenant_supervisor::census::ProcessObservation;
+
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        let id = run.attempt_id;
+        store.create(&run, &call)?;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let mut running = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let accepted = store.steer(
+            id,
+            OperationId::parse("steer-first-frame-mismatch")?,
+            "Keep the accepted work, then verify its provider identity.",
+            &call,
+        )?;
+        assert!(matches!(accepted, SteerReceipt::Queued { .. }));
+        let source = match SystemProcessObserver.observe(i64::from(std::process::id())) {
+            ProcessObservation::Present(fact) if !fact.zombie => {
+                provenant_os::capture::CaptureSourceIdentity {
+                    attempt: id.to_string(),
+                    generation: RunStore::scope(&running).generation,
+                    boot: fact.identity.boot,
+                    pid: fact.identity.pid,
+                    native_start: fact.identity.native_start,
+                }
+            }
+            observation => {
+                return Err(format!("test process identity unavailable: {observation:?}").into());
+            }
+        };
+        let route = running
+            .applied_route
+            .as_ref()
+            .ok_or("applied route")?
+            .clone();
+        // Agy may reject its first init frame on Model after decoding Session;
+        // the adapter then returns neither event. The host still records a
+        // route/process-bound fence for that exact admitted candidate.
+        assert!(store.record_provider_identity_conflict(id, &route, &source, &call)?);
+        let ready = store
+            .steer_session_ready(id, &call)?
+            .ok_or("identity conflict row missing")?;
+        assert!(ready.conflict);
+        assert!(ready.session.is_none());
+        assert!(!ready.terminal_confirmed);
+
+        let mut exit = crate::tests::exit();
+        exit.scope = RunStore::scope(&running);
+        crate::dispatch_tests::seal_exit(&store, &exit)?;
+        let mut publication = crate::tests::publication();
+        publication.session = Some("session-from-final-decoder".into());
+        running = store.publish_terminal(id, running.revision, &publication, &exit, &call)?;
+        assert!(matches!(running.state, AttemptState::Terminal { .. }));
+        assert!(matches!(
+            store.prepare_steer_continuation(id, &call),
+            Err(RunError::SteerSessionMismatch)
+        ));
+        assert_eq!(
+            store.steer_intent(id, &call)?[0].text,
+            "Keep the accepted work, then verify its provider identity."
+        );
         Ok(())
     }
 

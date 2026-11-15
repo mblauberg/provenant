@@ -167,6 +167,15 @@ stays queued while the provider continues. After settlement, the graph resumes
 the same provider, model, account and session with the saved instructions as
 the next user turn. It must preserve writer custody and must not fall back to a
 fresh session when retained provider state is missing or expired.
+The guardian preserves the typed `steered` stop through exit publication, and
+Run admits that continuation only when the intentional interrupt was delivered
+before exit. A stream identity error also leaves a route- and process-bound
+conflict fence when the rejected first frame yields no usable session event;
+that fence is not session-readiness evidence. The guardian seals this live
+conflict separately from the bounded stdout tail, so a failed ledger write or a
+discarded head frame cannot erase it. Oversized, undecodable, unreadable, or
+drain-truncated live output also seals incomplete identity evidence; settlement
+leaves that result unsettled instead of admitting a same-session continuation.
 
 The receipt says `queued` only after the text is durable. It does not claim a
 provider interrupt or resumed continuation; graph/run status owns those later
@@ -184,7 +193,7 @@ first validated identity, the input remains recorded and the graph reports the
 mismatch instead of starting a fresh session.
 
 This is continuation transport for #3318, not live input injection. Adapters
-advertise `continuation` only when their run path can retain and resume the
+advertise `continuation_only` only when their run path can retain and resume the
 provider session; other routes remain `unsupported`. The shared live decoder
 uses each adapter's existing stream parser, so readiness does not need a second
 provider parser or a new control protocol. Live injection may later optimise

@@ -358,7 +358,10 @@ fn peer_output_binding_is_consumed_before_the_cli_projection() {
     };
     assert!(extra.is_empty());
     assert_eq!(peer.length, Some(2));
-    assert_eq!(peer.planner_fallback.as_deref(), Some("bounded planner failure"));
+    assert_eq!(
+        peer.planner_fallback.as_deref(),
+        Some("bounded planner failure")
+    );
     assert_eq!(peer.graph, Default::default());
     assert!(
         extra
@@ -640,7 +643,12 @@ pub(crate) mod peer_tests {
             inbox: &'a provenant_fabric_runtime::inbox::InboxService<'a>,
             cancel: &'a provenant_core::CancelToken,
         ) -> Self {
-            Self { actor, at, inbox, cancel }
+            Self {
+                actor,
+                at,
+                inbox,
+                cancel,
+            }
         }
     }
 
@@ -753,6 +761,8 @@ pub(crate) mod peer_tests {
             omitted_reaped: 0,
             spared: vec![],
             cancel_delivered_before_exit: None,
+            provider_identity_conflict: false,
+            provider_identity_evidence_incomplete: false,
             omitted_spared: 0,
             warnings: vec![],
             omitted_warnings: 0,
@@ -902,7 +912,8 @@ pub(crate) mod peer_tests {
                         pinned_base: None,
                         head: None,
                         profile: Default::default(),
-                        route: provenant_run::RequestedRoute::Model { required_family: None,
+                        route: provenant_run::RequestedRoute::Model {
+                            required_family: None,
                             extra: Default::default(),
                             provider: "fixture".into(),
                             model: "fixture/model".into(),
@@ -1011,7 +1022,8 @@ pub(crate) mod peer_tests {
                         pinned_base: None,
                         head: None,
                         profile: Default::default(),
-                        route: provenant_run::RequestedRoute::Model { required_family: None,
+                        route: provenant_run::RequestedRoute::Model {
+                            required_family: None,
                             extra: Default::default(),
                             provider: "fixture".into(),
                             model: "fixture/model".into(),
@@ -1283,7 +1295,8 @@ pub(crate) mod peer_tests {
                     pinned_base: None,
                     head: Some(node_source.to_string()),
                     profile: Default::default(),
-                    route: provenant_run::RequestedRoute::Model { required_family: None,
+                    route: provenant_run::RequestedRoute::Model {
+                        required_family: None,
                         extra: Default::default(),
                         provider: "claude".into(),
                         model: "claude/test-model".into(),
@@ -1608,14 +1621,9 @@ fn managed_writer_path_mismatch_names_the_layout_and_repair() {
     ));
     let diagnostic = error.diagnostic();
     assert_eq!(diagnostic.code, "dispatch_refused");
-    assert!(
-        diagnostic
-            .detail
-            .as_deref()
-            .is_some_and(|detail| {
-                detail.contains("does not match") && detail.contains("configured project")
-            })
-    );
+    assert!(diagnostic.detail.as_deref().is_some_and(|detail| {
+        detail.contains("does not match") && detail.contains("configured project")
+    }));
     let detail = diagnostic.detail.as_deref().unwrap();
     assert!(detail.contains("--branch"));
     assert!(detail.contains("--worktree"));

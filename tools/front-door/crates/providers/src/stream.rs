@@ -225,6 +225,11 @@ impl StreamState {
         self.session = Some(session.into());
         self.expected_model = Some(model.into());
     }
+    /// Bind streamed model reports to the admitted route before a live turn
+    /// begins. A mismatch is an identity conflict, not a replacement model.
+    pub fn expect_model(&mut self, model: &str) {
+        self.expected_model = Some(model.into());
+    }
     pub(crate) fn check_adapter(&self, adapter: &str) -> Result<(), ProviderError> {
         if self.adapter == adapter {
             Ok(())

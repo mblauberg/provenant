@@ -58,6 +58,17 @@ pub use submit::*;
 pub use telemetry::*;
 pub use worktree::*;
 
+/// Run route records qualify model IDs with the adapter, while provider stream
+/// events carry the bare wire ID. Strip only that exact leading adapter token.
+pub(super) fn stream_model(route: &run::RouteRecord) -> Option<String> {
+    let provider = route.provider.as_deref()?;
+    let model = route.model.as_deref()?;
+    model
+        .strip_prefix(&format!("{provider}/"))
+        .filter(|model| !model.is_empty())
+        .map(str::to_owned)
+}
+
 /// The first typed refusal is sealed beside the attempt before quota publication.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct QuotaEvidence {
@@ -724,9 +735,17 @@ impl Registry<'_> {
         let Ok(mut state) = adapter.stream(None) else {
             return Ok(failed("provider stream is unavailable"));
         };
-        let (mut events, parse_error) = match adapter.observe(&mut state, stdout) {
-            Ok(events) => (events, None),
-            Err(error) => (Vec::new(), Some(error.to_string())),
+        if let Some(model) = stream_model(route) {
+            state.expect_model(&model);
+        }
+        let (mut events, parse_error, identity_mismatch) = match adapter.observe(&mut state, stdout)
+        {
+            Ok(events) => (events, None, false),
+            Err(error) => (
+                Vec::new(),
+                Some(error.to_string()),
+                matches!(error, provenant_providers::ProviderError::IdentityMismatch),
+            ),
         };
         // The prepared route key was checked against the provider identity port.
         // Keep it as observed usage identity only while the adapter still sees an authenticated stream.
@@ -754,11 +773,25 @@ impl Registry<'_> {
                     | provenant_supervisor::machine::StopReason::ContextHandoff
             )
         );
-        let Ok(outcome) = adapter.finish(
+        let outcome = adapter.finish(
             state,
             provenant_providers::ExitObservation { code, timed_out },
-        ) else {
-            return Ok(failed("provider outcome is malformed"));
+        );
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let mismatch = identity_mismatch
+                    || matches!(error, provenant_providers::ProviderError::IdentityMismatch);
+                let mut decoded = failed(if mismatch {
+                    "provider identity mismatch"
+                } else {
+                    "provider outcome is malformed"
+                });
+                if mismatch {
+                    decoded.terminal_cause = Some(run::TerminalCause::IdentityMismatch);
+                }
+                return Ok(decoded);
+            }
         };
         events.extend(outcome.final_events().iter().cloned());
         let state_root = self
@@ -1035,6 +1068,9 @@ impl Registry<'_> {
         };
         if decoded.reason.is_none() {
             decoded.reason = rollout_error;
+        }
+        if identity_mismatch {
+            decoded.terminal_cause = Some(run::TerminalCause::IdentityMismatch);
         }
         if result_fallback && decoded.outcome == run::Outcome::Succeeded {
             decoded.reason.get_or_insert_with(|| {

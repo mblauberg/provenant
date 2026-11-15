@@ -10,6 +10,8 @@ struct QuotaFrames {
     decoder: Mutex<Option<&'static dyn provenant_os::capture::FrameDecoder>>,
     evidence: Arc<Mutex<Option<QuotaCapture>>>,
     source: Mutex<Option<provenant_os::capture::CaptureSourceIdentity>>,
+    identity_conflict_observed: std::sync::atomic::AtomicBool,
+    identity_evidence_incomplete: std::sync::atomic::AtomicBool,
     stderr: bool,
 }
 struct QuotaCapture {
@@ -26,8 +28,10 @@ struct QuotaCapture {
     pending_conflict_session: Option<String>,
     ready_source: Option<provenant_os::capture::CaptureSourceIdentity>,
     pending_source_conflict: bool,
+    pending_identity_conflict: bool,
     identity_conflict: bool,
 }
+
 impl provenant_os::capture::FrameDecoder for QuotaFrames {
     fn bind_source(&self, identity: &provenant_os::capture::CaptureSourceIdentity) {
         let changed = if let Ok(mut source) = self.source.lock() {
@@ -43,6 +47,8 @@ impl provenant_os::capture::FrameDecoder for QuotaFrames {
             && capture.session_ready.is_some()
         {
             capture.pending_source_conflict = true;
+            self.identity_conflict_observed
+                .store(true, std::sync::atomic::Ordering::Release);
         }
     }
 
@@ -58,6 +64,7 @@ impl provenant_os::capture::FrameDecoder for QuotaFrames {
         let source = self.source.lock().ok().and_then(|source| source.clone());
         let mut guard = self.evidence.lock().map_err(|_| DecodeFailure)?;
         if let Some(capture) = guard.as_mut() {
+            let mut stream_identity_conflict = false;
             let events: Vec<ProviderEvent> = if self.stderr && result == FrameEvent::Terminal {
                 provenant_providers::opencode::stderr_quota(frame)
                     .into_iter()
@@ -67,12 +74,21 @@ impl provenant_os::capture::FrameDecoder for QuotaFrames {
             } else {
                 let mut line = frame.to_vec();
                 line.push(b'\n');
-                capture
-                    .adapter
-                    .observe(&mut capture.stream, &line)
-                    .unwrap_or_default()
+                match capture.adapter.observe(&mut capture.stream, &line) {
+                    Ok(events) => events,
+                    Err(provenant_providers::ProviderError::IdentityMismatch) => {
+                        stream_identity_conflict = true;
+                        Vec::new()
+                    }
+                    Err(_) => {
+                        self.identity_evidence_incomplete
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        Vec::new()
+                    }
+                }
             };
             if !self.stderr {
+                capture.pending_identity_conflict |= stream_identity_conflict;
                 for session in events.iter().filter_map(|event| match event {
                     ProviderEvent::Session(session) => Some(session),
                     _ => None,
@@ -98,9 +114,19 @@ impl provenant_os::capture::FrameDecoder for QuotaFrames {
                         },
                     }
                 }
+                let source_conflict = capture.pending_source_conflict
+                    && capture.ready_source.as_ref() != source.as_ref();
+                if capture.pending_identity_conflict
+                    || capture.pending_conflict_session.is_some()
+                    || source_conflict
+                {
+                    self.identity_conflict_observed
+                        .store(true, std::sync::atomic::Ordering::Release);
+                }
                 if (capture.pending_session.is_some()
                     || capture.pending_conflict_session.is_some()
-                    || capture.pending_source_conflict)
+                    || capture.pending_source_conflict
+                    || capture.pending_identity_conflict)
                     && let Some(source) = source.as_ref()
                     && let Ok((context, store)) = run::HolderContext::open(&capture.holder_context)
                 {
@@ -133,23 +159,36 @@ impl provenant_os::capture::FrameDecoder for QuotaFrames {
                         .flatten()
                     });
                     if !capture.identity_conflict
-                        && capture.session_ready.is_some()
-                        && let Some(session) = conflict_session.as_deref()
-                        && store
-                            .record_provider_session_ready(
+                        && (capture.pending_identity_conflict
+                            || (capture.session_ready.is_some() && conflict_session.is_some()))
+                    {
+                        let recorded = if capture.pending_identity_conflict {
+                            store.record_provider_identity_conflict(
+                                context.attempt_id,
+                                &capture.route,
+                                source,
+                                &call,
+                            )
+                        } else if let Some(session) = conflict_session.as_deref() {
+                            store.record_provider_session_ready(
                                 context.attempt_id,
                                 &capture.route,
                                 session,
                                 source,
                                 &call,
                             )
-                            .unwrap_or(false)
-                    {
-                        // The RunStore has durably marked this identity
-                        // disagreement; no later frame can make it safe again.
-                        capture.identity_conflict = true;
-                        capture.pending_conflict_session = None;
-                        capture.pending_source_conflict = false;
+                        } else {
+                            Ok(false)
+                        }
+                        .unwrap_or(false);
+                        if recorded {
+                            // The RunStore has durably marked this identity
+                            // disagreement; no later frame can make it safe again.
+                            capture.identity_conflict = true;
+                            capture.pending_conflict_session = None;
+                            capture.pending_source_conflict = false;
+                            capture.pending_identity_conflict = false;
+                        }
                     }
                 }
             }
@@ -181,6 +220,14 @@ impl provenant_os::capture::FrameDecoder for QuotaFrames {
             }
         }
         Ok(result)
+    }
+    fn identity_conflict_observed(&self) -> bool {
+        self.identity_conflict_observed
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+    fn identity_evidence_incomplete(&self) -> bool {
+        self.identity_evidence_incomplete
+            .load(std::sync::atomic::Ordering::Acquire)
     }
     fn partial_terminal(&self, frame: &[u8]) -> bool {
         self.decoder
@@ -441,6 +488,10 @@ impl Holder for HostHolder<'_> {
                 .adapter
                 .stream(None)
                 .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error)))?;
+            let mut stream = stream;
+            if let Some(model) = super::stream_model(&route) {
+                stream.expect_model(&model);
+            }
             let (configuration_root, _) = context.disk_roots();
             *self
                 .stdout_frames
@@ -460,6 +511,7 @@ impl Holder for HostHolder<'_> {
                 pending_conflict_session: None,
                 ready_source: None,
                 pending_source_conflict: false,
+                pending_identity_conflict: false,
                 identity_conflict: false,
             });
         }
@@ -560,6 +612,152 @@ mod tests {
     use provenant_records::CanonicalV1;
 
     #[test]
+    fn provider_identity_mismatches_are_retained_for_host_conflict_recording()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::capture::FrameDecoder;
+
+        let temp = tempfile::tempdir()?;
+        let attempt_path = temp.path().join("attempt");
+        std::fs::create_dir(&attempt_path)?;
+        let registration = &provenant_providers::agy::REGISTRATION;
+        let source = provenant_os::capture::CaptureSourceIdentity {
+            attempt: "fixture-attempt".into(),
+            generation: 1,
+            boot: "fixture-boot".into(),
+            pid: 123,
+            native_start: 456,
+        };
+        let route = run::RouteRecord {
+            provider: Some("agy".into()),
+            model: Some("agy/expected-model".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::run::stream_model(&route).as_deref(),
+            Some("expected-model")
+        );
+        let initial =
+            br#"{"event":"init","conversation_id":"s1","init":{"model":"expected-model"}}"#;
+
+        let mut stream = registration.adapter.stream(None)?;
+        stream.expect_model("expected-model");
+        let first_frame = QuotaFrames {
+            decoder: Mutex::new(None),
+            evidence: Arc::new(Mutex::new(Some(QuotaCapture {
+                adapter: registration.adapter,
+                stream,
+                attempt: Directory::open_anchor(&attempt_path)?,
+                state_root: temp.path().into(),
+                route: route.clone(),
+                holder_context: Vec::new(),
+                shared: true,
+                recorded: false,
+                pending_session: None,
+                session_ready: None,
+                pending_conflict_session: None,
+                ready_source: None,
+                pending_source_conflict: false,
+                pending_identity_conflict: false,
+                identity_conflict: false,
+            }))),
+            source: Mutex::new(Some(source.clone())),
+            identity_conflict_observed: std::sync::atomic::AtomicBool::new(false),
+            identity_evidence_incomplete: std::sync::atomic::AtomicBool::new(false),
+            stderr: false,
+        };
+        let wrong_first_model =
+            br#"{"event":"init","conversation_id":"s1","init":{"model":"other-model"}}"#;
+        assert_eq!(
+            first_frame.decode(wrong_first_model),
+            Ok(provenant_os::capture::FrameEvent::Progress)
+        );
+        assert!(first_frame.identity_conflict_observed());
+        assert!(
+            first_frame
+                .evidence
+                .lock()
+                .map_err(|_| "capture lock")?
+                .as_ref()
+                .ok_or("capture")?
+                .pending_identity_conflict
+        );
+
+        for mismatch in [
+            br#"{"event":"init","conversation_id":"s2","init":{"model":"expected-model"}}"#
+                .as_slice(),
+            br#"{"event":"init","conversation_id":"s1","init":{"model":"other-model"}}"#.as_slice(),
+        ] {
+            let mut stream = registration.adapter.stream(None)?;
+            stream.expect_model("expected-model");
+            registration.adapter.observe(&mut stream, initial)?;
+            let frames = QuotaFrames {
+                decoder: Mutex::new(None),
+                evidence: Arc::new(Mutex::new(Some(QuotaCapture {
+                    adapter: registration.adapter,
+                    stream,
+                    attempt: Directory::open_anchor(&attempt_path)?,
+                    state_root: temp.path().into(),
+                    route: route.clone(),
+                    holder_context: Vec::new(),
+                    shared: true,
+                    recorded: false,
+                    pending_session: None,
+                    session_ready: Some("s1".into()),
+                    pending_conflict_session: None,
+                    ready_source: Some(source.clone()),
+                    pending_source_conflict: false,
+                    pending_identity_conflict: false,
+                    identity_conflict: false,
+                }))),
+                source: Mutex::new(Some(source.clone())),
+                identity_conflict_observed: std::sync::atomic::AtomicBool::new(false),
+                identity_evidence_incomplete: std::sync::atomic::AtomicBool::new(false),
+                stderr: false,
+            };
+            assert_eq!(
+                frames.decode(mismatch),
+                Ok(provenant_os::capture::FrameEvent::Progress)
+            );
+            assert!(frames.identity_conflict_observed());
+            let guard = frames.evidence.lock().map_err(|_| "capture lock")?;
+            let capture = guard.as_ref().ok_or("capture")?;
+            assert!(capture.pending_identity_conflict);
+            assert!(!capture.identity_conflict);
+        }
+        let malformed = QuotaFrames {
+            decoder: Mutex::new(None),
+            evidence: Arc::new(Mutex::new(Some(QuotaCapture {
+                adapter: registration.adapter,
+                stream: registration.adapter.stream(None)?,
+                attempt: Directory::open_anchor(&attempt_path)?,
+                state_root: temp.path().into(),
+                route,
+                holder_context: Vec::new(),
+                shared: true,
+                recorded: false,
+                pending_session: None,
+                session_ready: None,
+                pending_conflict_session: None,
+                ready_source: None,
+                pending_source_conflict: false,
+                pending_identity_conflict: false,
+                identity_conflict: false,
+            }))),
+            source: Mutex::new(Some(source)),
+            identity_conflict_observed: std::sync::atomic::AtomicBool::new(false),
+            identity_evidence_incomplete: std::sync::atomic::AtomicBool::new(false),
+            stderr: false,
+        };
+        assert_eq!(
+            malformed.decode(b"not-json"),
+            Ok(provenant_os::capture::FrameEvent::Progress)
+        );
+        assert!(!malformed.identity_conflict_observed());
+        assert!(malformed.identity_evidence_incomplete());
+        Ok(())
+    }
+
+    #[test]
     fn quota_event_survives_guardian_death_and_recovery_writes_once()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_os::capture::FrameDecoder;
@@ -632,9 +830,12 @@ mod tests {
                 pending_conflict_session: None,
                 ready_source: None,
                 pending_source_conflict: false,
+                pending_identity_conflict: false,
                 identity_conflict: false,
             }))),
             source: Mutex::new(None),
+            identity_conflict_observed: std::sync::atomic::AtomicBool::new(false),
+            identity_evidence_incomplete: std::sync::atomic::AtomicBool::new(false),
             stderr: false,
         };
         frames.decode(br#"{"type":"provider.quota","response":{"body":{"error":{"type":"FreeUsageLimitError","message":"fixture"}}}}"#)?;
@@ -787,9 +988,12 @@ mod tests {
                 pending_conflict_session: None,
                 ready_source: None,
                 pending_source_conflict: false,
+                pending_identity_conflict: false,
                 identity_conflict: false,
             }))),
             source: Mutex::new(None),
+            identity_conflict_observed: std::sync::atomic::AtomicBool::new(false),
+            identity_evidence_incomplete: std::sync::atomic::AtomicBool::new(false),
             stderr: false,
         };
         let frame = br#"{"type":"provider.quota","response":{"body":{"error":{"type":"FreeUsageLimitError","message":"fixture"}}}}"#;

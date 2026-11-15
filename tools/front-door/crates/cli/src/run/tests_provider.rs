@@ -2,6 +2,50 @@ use super::*;
 use provenant_records::CanonicalV1;
 
 #[test]
+fn terminal_replay_keeps_typed_stream_identity_mismatch() -> Result<(), Box<dyn std::error::Error>>
+{
+    use run::Providers;
+
+    let temp = tempfile::tempdir()?;
+    let fixtures = [
+        (
+            "agy",
+            "agy/expected-model",
+            concat!(r#"{"event":"init","conversation_id":"s1","init":{"model":"other-model"}}"#, "\n").as_bytes(),
+        ),
+        (
+            "claude",
+            "claude/expected-model",
+            concat!(
+                r#"{"type":"assistant","message":{"role":"assistant","model":"other-model","content":[{"type":"text","text":"answer"}]},"session_id":"s1","parent_tool_use_id":null}"#,
+                "\n",
+                r#"{"type":"result","session_id":"s1","subtype":"success","is_error":false,"result":"answer"}"#,
+                "\n"
+            )
+            .as_bytes(),
+        ),
+    ];
+    for (provider, model, stdout) in fixtures {
+        let route = run::RouteRecord {
+            provider: Some(provider.into()),
+            model: Some(model.into()),
+            ..Default::default()
+        };
+        let mut exit = clean_exit();
+        exit.termination = Some(provenant_os::exec::Termination::Exit(0));
+        let decoded =
+            Registry::default().decode_captures(&route, stdout, &[], &exit, temp.path(), None)?;
+        assert_eq!(decoded.outcome, run::Outcome::Failed, "{provider}");
+        assert_eq!(
+            decoded.terminal_cause,
+            Some(run::TerminalCause::IdentityMismatch),
+            "{provider}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn capacity_guardian_context_records_and_reports_config_failure()
 -> Result<(), Box<dyn std::error::Error>> {
     use std::os::unix::fs::DirBuilderExt;

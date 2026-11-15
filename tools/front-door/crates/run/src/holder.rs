@@ -1175,7 +1175,7 @@ impl RunStore {
                 || !ready.terminal_confirmed
                 || ready.generation != Self::scope(&record).generation
                 || ready.route_digest != route_digest
-                || ready.session != session
+                || ready.session.as_deref() != Some(session)
             {
                 return Err(RunError::SteerSessionMismatch);
             }
@@ -2744,16 +2744,43 @@ impl RunStore {
             decoded.reason = Some("cancellation delivery before provider exit is unknown".into());
         } else if cancelled {
             decoded.outcome = Outcome::Cancelled;
-            if steered {
+            if steered && decoded.terminal_cause != Some(TerminalCause::IdentityMismatch) {
                 decoded.terminal_cause = Some(TerminalCause::Steered);
                 decoded.reason = Some(TerminalCause::Steered.detail().into());
             }
         }
+        if exit.provider_identity_conflict {
+            decoded.outcome = Outcome::Failed;
+            decoded.complete = false;
+            decoded.terminal_cause = Some(TerminalCause::IdentityMismatch);
+            decoded.reason = Some(TerminalCause::IdentityMismatch.detail().into());
+        } else if exit.provider_identity_evidence_incomplete
+            && matches!(
+                decoded.outcome,
+                Outcome::Succeeded
+                    | Outcome::ReviewRequired
+                    | Outcome::Uncommitted
+                    | Outcome::Cancelled
+            )
+        {
+            // Live identity checks run before retained-tail truncation. If a
+            // frame was oversized, undecodable, or unreadable, the terminal
+            // owner cannot prove that the provider stayed in the admitted
+            // session. Do not turn a successful or steered result into a
+            // same-session continuation on incomplete evidence.
+            decoded.outcome = Outcome::Unsettled;
+            decoded.complete = false;
+            decoded.terminal_cause = None;
+            decoded.reason =
+                Some("provider identity evidence was incomplete; continuation refused".into());
+        }
         if matches!(
             decoded.outcome,
             Outcome::Cancelled | Outcome::Lost | Outcome::Unsettled
-        ) && decoded.terminal_cause != Some(TerminalCause::Steered)
-        {
+        ) && !matches!(
+            decoded.terminal_cause,
+            Some(TerminalCause::Steered | TerminalCause::IdentityMismatch)
+        ) {
             decoded.terminal_cause = None;
         }
         if trailing_verdict_tolerated {

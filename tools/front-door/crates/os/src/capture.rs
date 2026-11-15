@@ -16,6 +16,10 @@ pub enum FrameEvent {
     Progress,
     Terminal,
     ProtocolRejected,
+    /// The live provider stream contradicted its admitted identity. This is
+    /// separate from the frame's ordinary event so it can be sealed by
+    /// process custody even when the provider's state-store write fails.
+    IdentityConflict,
     /// Tokens one provider call reported while the attempt runs. `key`
     /// identifies the call, so a call that is reported again replaces its
     /// earlier figure instead of adding to it.
@@ -49,6 +53,19 @@ pub struct DecodeFailure;
 /// or signalling capability. Frames and partial frames are capped at FRAME_LIMIT.
 pub trait FrameDecoder: Send + Sync {
     fn decode(&self, frame: &[u8]) -> Result<FrameEvent, DecodeFailure>;
+
+    /// Whether any live frame contradicted this decoder's bound identity.
+    /// This monotonic summary also covers source changes that arrive between
+    /// frames and therefore cannot emit an event from `decode` itself.
+    fn identity_conflict_observed(&self) -> bool {
+        false
+    }
+
+    /// Whether live stream parsing lost enough information that identity
+    /// continuity cannot be established from every decoded frame.
+    fn identity_evidence_incomplete(&self) -> bool {
+        false
+    }
 
     /// Bind subsequent frames to the spawned provider process. Called before
     /// capture starts; decoders that do not need process identity may ignore it.
@@ -274,7 +291,15 @@ impl Frames {
         match sink {
             FrameDelivery::Raw(sink) => sink.try_frame(&self.bytes),
             FrameDelivery::Provider { decoder, events } => match decoder.decode(&self.bytes) {
-                Ok(event) => events.try_send(event),
+                Ok(event) => {
+                    let event_result = events.try_send(event);
+                    let conflict_result = if decoder.identity_conflict_observed() {
+                        events.try_send(FrameEvent::IdentityConflict)
+                    } else {
+                        Ok(())
+                    };
+                    event_result.and(conflict_result)
+                }
                 Err(_) => Err(QueueLoss::Full),
             },
         }
@@ -441,6 +466,16 @@ mod tests {
         }
         fn partial_terminal(&self, frame: &[u8]) -> bool {
             frame == b"terminal"
+        }
+    }
+
+    struct ConflictDecoder;
+    impl FrameDecoder for ConflictDecoder {
+        fn decode(&self, _frame: &[u8]) -> Result<FrameEvent, DecodeFailure> {
+            Ok(FrameEvent::Terminal)
+        }
+        fn identity_conflict_observed(&self) -> bool {
+            true
         }
     }
 
@@ -611,6 +646,25 @@ mod tests {
         assert!(capture.outcome().bytes.is_empty());
         assert!(capture.outcome().truncated);
         assert_eq!(events.collected(), vec![FrameEvent::Terminal]);
+    }
+
+    #[test]
+    fn live_identity_conflict_is_separate_from_the_frame_event_and_tail() {
+        let decoder = ConflictDecoder;
+        let events = EventSink::default();
+        let mut capture = StreamCapture::new(
+            StreamPolicy::Capture { limit: 0 },
+            Some(provider(&decoder, &events)),
+            None,
+        )
+        .unwrap();
+        assert!(capture.push(b"identity-conflict\n").is_ok());
+        capture.finish();
+        assert!(capture.outcome().bytes.is_empty());
+        assert_eq!(
+            events.collected(),
+            vec![FrameEvent::Terminal, FrameEvent::IdentityConflict]
+        );
     }
 
     #[test]

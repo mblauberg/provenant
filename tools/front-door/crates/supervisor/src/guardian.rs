@@ -724,6 +724,7 @@ const USAGE_KEYS: usize = 65_536;
 struct Events {
     terminal: std::sync::atomic::AtomicBool,
     rejected: std::sync::atomic::AtomicBool,
+    identity_conflict: std::sync::atomic::AtomicBool,
     usage: std::sync::Mutex<Usage>,
 }
 /// Live token usage: one figure per provider call, summed, and the context
@@ -769,6 +770,9 @@ impl provenant_os::capture::DecodedEventSink for Events {
             }
             provenant_os::capture::FrameEvent::ProtocolRejected => {
                 self.rejected.store(true, Ordering::Relaxed)
+            }
+            provenant_os::capture::FrameEvent::IdentityConflict => {
+                self.identity_conflict.store(true, Ordering::Release)
             }
             provenant_os::capture::FrameEvent::Usage {
                 key,
@@ -1091,6 +1095,7 @@ impl Driver<'_> {
         let mut stop_at = None;
         let mut killed = false;
         let mut terminal = false;
+        let mut capture_drain_truncated = false;
         let mut last_checkpoint = None;
         let mut last_observation_ms: Option<u64> = None;
         let mut last_cpu_observation_ms = 0;
@@ -1351,7 +1356,7 @@ impl Driver<'_> {
             } else if let Some(reason) = request {
                 match reason {
                     machine::StopReason::ExplicitCancellation => Event::Cancel,
-                    machine::StopReason::Steered => Event::Cancel,
+                    machine::StopReason::Steered => Event::Steer,
                     machine::StopReason::ProtocolRejected => Event::ProtocolRejected,
                     machine::StopReason::SupervisorSignal => Event::SupervisorSignal,
                     machine::StopReason::TokenBudget => Event::TokenBudget,
@@ -1404,8 +1409,11 @@ impl Driver<'_> {
                         stop_reason.get_or_insert(reason);
                         stop_at.get_or_insert(now);
                         let outcome = stop_delivery_outcome(child.stop(false));
-                        if reason == machine::StopReason::ExplicitCancellation
-                            && outcome == DeliveryOutcome::Delivered
+                        if matches!(
+                            reason,
+                            machine::StopReason::ExplicitCancellation
+                                | machine::StopReason::Steered
+                        ) && outcome == DeliveryOutcome::Delivered
                         {
                             cancel_delivered_before_exit = true;
                         }
@@ -1441,7 +1449,10 @@ impl Driver<'_> {
                 let reason = stop_reason.unwrap_or(machine::StopReason::PostTerminalCleanup);
                 let outcome = stop_delivery_outcome(child.stop(true));
                 if exit.is_none()
-                    && reason == machine::StopReason::ExplicitCancellation
+                    && matches!(
+                        reason,
+                        machine::StopReason::ExplicitCancellation | machine::StopReason::Steered
+                    )
                     && outcome == DeliveryOutcome::Delivered
                 {
                     cancel_delivered_before_exit = true;
@@ -1472,6 +1483,7 @@ impl Driver<'_> {
                 let pipes_done = child.stdout.is_none() && child.stderr.is_none();
                 if pipes_done || drain_deadline.is_some_and(|deadline| now >= deadline) {
                     if !pipes_done {
+                        capture_drain_truncated = true;
                         warn(
                             &mut warnings,
                             &mut omitted_warnings,
@@ -1871,6 +1883,22 @@ impl Driver<'_> {
             }
         }
         let mut totals = totals.into_iter();
+        let stdout = totals.next().unwrap_or_default();
+        let stderr = totals.next().unwrap_or_default();
+        let provider_identity_conflict = out_events
+            .identity_conflict
+            .load(std::sync::atomic::Ordering::Acquire)
+            || hooks
+                .stdout_decoder
+                .is_some_and(|decoder| decoder.identity_conflict_observed());
+        let provider_identity_evidence_incomplete = hooks.stdout_decoder.is_some()
+            && (capture_drain_truncated
+                || stdout.oversized_frames > 0
+                || stdout.decoder_lost_frames > 0
+                || stdout.read_failed
+                || hooks
+                    .stdout_decoder
+                    .is_some_and(|decoder| decoder.identity_evidence_incomplete()));
         let record = ProcessExit {
             schema_version: 1,
             scope: self.reservation.scope,
@@ -1880,6 +1908,8 @@ impl Driver<'_> {
             priority: child.priority,
             stop_reason,
             cancel_delivered_before_exit: Some(cancel_delivered_before_exit),
+            provider_identity_conflict,
+            provider_identity_evidence_incomplete,
             delivered_signals: self.delivered_signals.clone(),
             reaped: self.reaped.clone(),
             omitted_reaped: self.omitted_reaped,
@@ -1904,8 +1934,8 @@ impl Driver<'_> {
                 Vec::new()
             },
             settlement_evidence: self.settlement_evidence,
-            stdout: totals.next().unwrap_or_default(),
-            stderr: totals.next().unwrap_or_default(),
+            stdout,
+            stderr,
             warnings: warnings.clone(),
             omitted_warnings,
             extra: Default::default(),
