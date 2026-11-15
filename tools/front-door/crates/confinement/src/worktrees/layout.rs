@@ -112,6 +112,68 @@ pub fn project_layout_for_common(
     }
 }
 
+/// Resolve an unbound common directory during a linked checkout's utility
+/// bootstrap. A forced non-bare inventory can find a structurally verified
+/// primary without trusting `core.bare`; common-only is accepted only when a
+/// separately classified trusted local origin says `core.bare=true` and the
+/// forced-bare inventory registers this common directory as bare.
+pub(crate) fn project_layout_for_common_with_bare_setting(
+    executor: &dyn Executor,
+    common: &Path,
+    trusted_bare: Option<bool>,
+    git: &Path,
+    environment: &[(std::ffi::OsString, std::ffi::OsString)],
+    inventory_timeout: Duration,
+    cancel: &CancelToken,
+) -> Result<ProjectLayout, WorktreeError> {
+    let common = canonicalize(common).map_err(|_| WorktreeError::ProjectLayoutUnresolved)?;
+    let directory = Directory::open_anchor(&common)?;
+    let identity = directory.metadata()?;
+    let facts = RepoFacts::default();
+    let checkout_inventory = facts.discover_worktree_inventory_with_bare_setting(
+        &common,
+        git,
+        environment,
+        executor,
+        inventory_timeout,
+        cancel,
+        false,
+    )?;
+    let checkout_entries = parse_worktree_list(&checkout_inventory)?;
+    match verified_primary_from_inventory(&common, identity, &checkout_entries) {
+        Ok(Some(repo)) => return ProjectLayout::from_repo(&repo, true),
+        Ok(None) | Err(WorktreeError::InvalidRequest) => {}
+        Err(error) => return Err(error),
+    }
+
+    if trusted_bare != Some(true) {
+        return Err(WorktreeError::ProjectLayoutUnresolved);
+    }
+    let bare_inventory = facts.discover_worktree_inventory_with_bare_setting(
+        &common,
+        git,
+        environment,
+        executor,
+        inventory_timeout,
+        cancel,
+        true,
+    )?;
+    let bare_entries = parse_worktree_list(&bare_inventory)?;
+    let bare_common_registered = bare_entries.iter().any(|entry| {
+        entry.bare && canonical_inventory_path(&entry.path).as_deref() == Some(&common)
+    });
+    match verified_primary_from_inventory(&common, identity, &bare_entries) {
+        Ok(Some(repo)) => ProjectLayout::from_repo(&repo, true),
+        Ok(None) if bare_common_registered => {
+            ProjectLayout::from_common_identity(&common, identity)
+        }
+        Ok(None) | Err(WorktreeError::InvalidRequest) => {
+            Err(WorktreeError::ProjectLayoutUnresolved)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Resolve a common Git directory using its registered checkout hint when one
 /// exists, otherwise using the verified Git inventory. Without a validated
 /// host-state root, callers should use `project_layout_for_common` directly.
