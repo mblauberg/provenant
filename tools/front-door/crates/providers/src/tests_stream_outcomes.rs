@@ -671,8 +671,19 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
             OutcomeStatus::Malformed
         );
     }
+    let incomplete = replay(&codex::Codex, "{\"type\":", EXIT)?;
+    assert_eq!(incomplete.1.status(), OutcomeStatus::Malformed);
     assert_eq!(
-        replay(&codex::Codex, "{\"type\":", EXIT)?.1.status(),
+        incomplete.1.protocol_error(),
+        Some("provider protocol frame ended before the record was complete")
+    );
+    let mut complete_partial = codex::Codex.stream(None)?;
+    assert!(matches!(
+        codex::Codex.observe(&mut complete_partial, b"{\n"),
+        Err(ProviderError::Malformed)
+    ));
+    assert_eq!(
+        codex::Codex.finish(complete_partial, EXIT)?.status(),
         OutcomeStatus::Malformed
     );
     let mut state = codex::Codex.stream(None)?;
@@ -699,15 +710,12 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
 
     let mut state = claude::Claude.stream(None)?;
     state.expect_model("expected-model");
-    claude::Claude.observe(
-        &mut state,
-        br#"{"type":"assistant","message":{"role":"assistant","model":"other-model","content":[{"type":"text","text":"answer"}]},"session_id":"s","parent_tool_use_id":null}"#,
-    )?;
+    let assistant: &[u8] = br#"{"type":"assistant","message":{"role":"assistant","model":"other-model","content":[{"type":"text","text":"answer"}]},"session_id":"s","parent_tool_use_id":null}"#;
+    claude::Claude.observe(&mut state, &[assistant, b"\n"].concat())?;
+    let result: &[u8] =
+        br#"{"type":"result","session_id":"s","subtype":"success","is_error":false,"result":"answer"}"#;
     assert!(matches!(
-        claude::Claude.observe(
-            &mut state,
-            br#"{"type":"result","session_id":"s","subtype":"success","is_error":false,"result":"answer"}"#,
-        ),
+        claude::Claude.observe(&mut state, &[result, b"\n"].concat()),
         Err(ProviderError::IdentityMismatch)
     ));
     Ok(())

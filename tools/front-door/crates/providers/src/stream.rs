@@ -286,7 +286,11 @@ impl StreamState {
                     Err(error) => {
                         self.malformed = true;
                         self.retained_events = events;
-                        return Err(error);
+                        return Err(if matches!(&error, ProviderError::IncompleteFrame) {
+                            ProviderError::Malformed
+                        } else {
+                            error
+                        });
                     }
                 }
             } else if self.discarding {
