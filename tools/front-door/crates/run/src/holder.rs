@@ -6744,7 +6744,8 @@ mod steer_terminal_identity_tests {
 
     // Spec: docs/specs/fabric.md#session-ready-steering
     #[test]
-    fn completion_uses_provider_identity_from_verified_custody() -> Result<(), Box<dyn Error>> {
+    fn completion_uses_provider_identity_from_verified_custody()
+    -> std::result::Result<(), Box<dyn Error>> {
         let temporary = tempfile::tempdir()?;
         let slot_path = temporary.path().join("custody");
         let attempt_path = temporary.path().join("attempt");
