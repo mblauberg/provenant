@@ -957,7 +957,7 @@ pub(crate) fn seed_worker(globals: &Globals) -> u8 {
                     let executor = SystemExecutor::new(1).map_err(|error| error.to_string())?;
                     Ok(registered_seed_projects(
                         &common_dirs,
-                        &retry_project_keys,
+                        request.project_keys(),
                         &executor,
                         &git,
                         &seed_git_environment(),
