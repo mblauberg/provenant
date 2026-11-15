@@ -177,7 +177,7 @@ jobs:
         run: python3 -m unittest discover -s skills/improve/scripts/tests -v
 
       - name: Require documentation inventory and resolvable evidence
-        run: scripts/check-doc-truth --inventory-only --strict-inventory --strict-citations
+        run: scripts/check-doc-truth --inventory-only --strict-inventory
       - name: Install spelling checker
         uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
         timeout-minutes: 3

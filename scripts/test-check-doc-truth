@@ -44,52 +44,95 @@ class DocTruthTests(unittest.TestCase):
         path.write_text(text)
         return path
 
-    def test_test_citations_resolve_and_fail_strictly(self):
-        source = self.root / "tools/front-door/crates/example/src/lib.rs"
-        source.parent.mkdir(parents=True)
-        source.write_text("mod tests { fn present() {} }\n")
-        spec = self.root / "docs/specs/example.md"
-        spec.write_text("# Example\n\nOwner: example\nAnchor: example\n\n"
-                        "- Test: `crates/example/src/lib.rs::present`;\n"
-                        "  `crates/example/src/lib.rs::missing`\n")
-        result = self.check("--inventory-only", "--strict-citations", source=False)
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("lib.rs::missing", result.stdout)
-        self.assertNotIn("lib.rs::present", result.stdout)
-        source.write_text("mod tests { fn present() {} fn missing() {} }\n")
-        self.assertEqual(self.check("--inventory-only", "--strict-citations", source=False).returncode, 0)
+    def spec(self, text="## Admission\n"):
+        path = self.root / "docs/specs/example.md"
+        path.write_text("# Example\nOwner: maintainers\n"
+                        "Anchor: `tools/front-door/src/main.rs`\n\n" + text)
+        return path
 
-    def test_grouped_and_shorthand_citations_share_only_the_current_test_block(self):
-        source = self.root / "tools/front-door/tests/example.rs"
-        source.parent.mkdir(parents=True)
-        source.write_text("fn first() {} fn second() {} fn third() {}\n")
-        spec = self.root / "docs/specs/example.md"
-        spec.write_text("# Example\nOwner: example\nAnchor: tests/example.rs\n\n"
-                        "- Test: `tests/example.rs::tests::{first, second}`;\n"
-                        "  `::third`; `::missing`\n"
-                        "- Why: grouped lists have one source.\n\n"
-                        "- Test: `::first`\n")
-        result = self.check("--inventory-only", "--strict-citations", source=False)
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertEqual(result.stdout.count("unresolved test citation"), 2, result.stdout)
-        self.assertIn("example.md:6:", result.stdout)
-        self.assertIn("(no preceding path)::first", result.stdout)
+    def test_spec_comments_resolve_and_always_fail_on_missing_file_or_heading(self):
+        self.spec()
+        source = self.root / "tools/front-door/src/main.rs"
+        source.write_text("// Spec: docs/specs/example.md#admission\n"
+                          "// Spec: docs/specs/example.md#missing\n"
+                          "// Spec: docs/specs/absent.md#admission\n")
+        for args in ((), ("--inventory-only",)):
+            with self.subTest(args=args):
+                result = self.check(*args)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertEqual(result.stdout.count("unresolved spec citation"), 2, result.stdout)
+                self.assertIn("src/main.rs:2: error:", result.stdout)
+                self.assertIn("src/main.rs:3: error:", result.stdout)
+        source.write_text("// Spec: docs/specs/example.md#admission\n")
+        self.assertEqual(self.check("--inventory-only", source=False).returncode, 0)
 
-    def test_plural_hash_and_file_citations_are_checked(self):
-        source = self.root / "tools/front-door/tests/example.rs"
-        source.parent.mkdir(parents=True)
-        source.write_text("fn present() {}\n")
-        spec = self.root / "docs/specs/example.md"
-        spec.write_text("# Example\nOwner: example\nAnchor: tools/front-door\n\n"
-                        "Tests: `tests/example.rs#present`; `tests/example.rs#missing`;\n"
-                        "  `tests/absent.rs`\n")
-        result = self.check("--inventory-only", "--strict-citations", source=False)
+    def test_spec_citations_require_a_file_and_section(self):
+        self.spec()
+        source = self.root / "tools/front-door/src/main.rs"
+        for reference in ("docs/specs/example.md", "docs/specs/example.md#",
+                          "docs/specs/../example.md#admission", "", "other.md#admission"):
+            with self.subTest(reference=reference):
+                source.write_text(f"// Spec: {reference}\n")
+                result = self.check("--inventory-only", source=False)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn("unresolved spec citation", result.stdout)
+
+    def test_rust_comments_include_doc_and_nested_blocks_but_skip_literals(self):
+        self.spec()
+        source = self.root / "tools/front-door/src/main.rs"
+        source.write_text(
+            '// Spec: `docs/specs/example.md#admission`.\n'
+            '/// Spec: docs/specs/example.md#admission\n'
+            '//! Spec: docs/specs/example.md#admission\n'
+            '/* outer /* Spec: docs/specs/example.md#admission */\n'
+            ' * Spec: docs/specs/example.md#admission */\n'
+            'let text = "// Spec: docs/specs/absent.md#missing";\n'
+            'let raw = r##"/* Spec: docs/specs/absent.md#missing */"##;\n'
+            'let byte = b"// Spec: docs/specs/absent.md#missing";\n'
+            'let slash = \'/\'; let quote = \'"\';\n'
+            'let adapter = AdapterSpec::get(name); // no citation\n'
+            '/* /* nested */ Spec: docs/specs/example.md#missing */\n')
+        result = self.check("--inventory-only", source=False)
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertEqual(result.stdout.count("unresolved test citation"), 2, result.stdout)
-        self.assertNotIn("#present", result.stdout)
-        source.write_text("fn present() {} fn missing() {}\n")
-        (source.parent / "absent.rs").write_text("fn file_level_coverage() {}\n")
-        self.assertEqual(self.check("--inventory-only", "--strict-citations", source=False).returncode, 0)
+        self.assertEqual(result.stdout.count("unresolved spec citation"), 1, result.stdout)
+        self.assertIn("src/main.rs:11: error:", result.stdout)
+        source.write_text(source.read_text().replace('#missing */\n', '#admission */\n'))
+        self.assertEqual(self.check("--inventory-only", source=False).returncode, 0)
+
+    def test_spec_citations_scan_all_rust_sources_only_under_front_door(self):
+        self.spec()
+        for relative in ("tools/front-door/tests/example.rs", "tools/front-door/crates/example/src/lib.rs"):
+            source = self.root / relative
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text("// Spec: docs/specs/absent.md#missing\n")
+        (self.root / "outside.rs").write_text("// Spec: docs/specs/absent.md#missing\n")
+        (self.root / "tools/front-door/guide.md").write_text("Spec: docs/specs/absent.md#missing\n")
+        result = self.check("--inventory-only", source=False)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(result.stdout.count("unresolved spec citation"), 2, result.stdout)
+
+    def test_github_heading_slugs_render_text_and_disambiguate_collisions(self):
+        self.spec("## Signals: `StopCause` & **custody**!\n"
+                  "## Signals: `StopCause` & **custody**!\n"
+                  "## Signals StopCause  custody-1\n"
+                  "## Café Δ é <em>ready</em> &amp; [safe](target.md)\n"
+                  "## _Read_ `Stop_Cause<T>` and [retry][owner] ###\n"
+                  "Setext heading\n--------------\n"
+                  "```md\n## Not a heading\n```\n"
+                  "~~~md\n## Also hidden\n~~~\n"
+                  "<!--\n## Hidden comment\n-->\n")
+        source = self.root / "tools/front-door/src/main.rs"
+        anchors = ("signals-stopcause--custody", "signals-stopcause--custody-1",
+                   "signals-stopcause--custody-1-1", "café-δ-é-ready--safe",
+                   "caf%C3%A9-%CE%B4-e%CC%81-ready--safe",
+                   "read-stop_causet-and-retry", "setext-heading")
+        source.write_text("".join(f"// Spec: docs/specs/example.md#{anchor}\n" for anchor in anchors))
+        result = self.check("--inventory-only", source=False)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        for anchor in ("not-a-heading", "also-hidden", "hidden-comment"):
+            with self.subTest(anchor=anchor):
+                source.write_text(f"// Spec: docs/specs/example.md#{anchor}\n")
+                self.assertEqual(self.check("--inventory-only", source=False).returncode, 1)
 
     def test_strict_inventory_checks_anchor_paths_index_and_diagram_metadata(self):
         self.document("# Example\nOwner: maintainers\nAnchor: `tools/front-door/missing.rs#check`\n")
@@ -111,27 +154,14 @@ class DocTruthTests(unittest.TestCase):
                                 "accTitle: Example\naccDescr {\nA points to B.\n}\nA --> B\n```\n")
         self.assertEqual(self.check("--inventory-only", "--strict-inventory", source=False).returncode, 0)
 
-    def test_strict_citations_check_every_spec(self):
-        for name in ("disk", "supervisor", "routing"):
-            (self.root / f"docs/specs/{name}.md").write_text(
-                "# Spec\nOwner: maintainers\nAnchor: tools/front-door\n\n"
-                "Test: `tests/missing.rs::missing`\n")
-        result = self.check("--inventory-only", "--strict-citations", source=False)
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertEqual(result.stdout.count("unresolved test citation"), 3, result.stdout)
-        for name in ("disk", "supervisor", "routing"):
-            self.assertIn(f"docs/specs/{name}.md", result.stdout)
-            (self.root / f"docs/specs/{name}.md").unlink()
-        self.assertEqual(self.check("--inventory-only", "--strict-citations", source=False).returncode, 0)
-
     def test_a_spec_over_the_word_cap_warns_without_failing(self):
         spec = self.root / "docs/specs/long.md"
         header = "# Long\nOwner: maintainers\nAnchor: `tools/front-door/src/main.rs`\n\n"
         spec.write_text(header + "word " * 1990)
-        result = self.check("--inventory-only", "--strict-inventory", "--strict-citations", source=False)
+        result = self.check("--inventory-only", "--strict-inventory", source=False)
         self.assertNotIn("word cap", result.stdout)
         spec.write_text(header + "word " * 2001)
-        result = self.check("--inventory-only", "--strict-inventory", "--strict-citations", source=False)
+        result = self.check("--inventory-only", "--strict-inventory", source=False)
         self.assertIn("docs/specs/long.md:1: warning: spec has", result.stdout)
         self.assertIn("2000-word cap", result.stdout)
         self.assertEqual(result.returncode, 0, result.stdout)
@@ -360,12 +390,12 @@ class DocTruthTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertEqual(result.stdout, "")
 
-    def test_test_name_suffix_is_not_part_of_the_path(self):
+    def test_symbol_suffix_is_not_part_of_the_path(self):
         code = self.root / "tools/front-door/crates/example/src/lib.rs"
         code.parent.mkdir(parents=True)
         code.write_text("// example\n")
         self.document("# Paths\nOwner: maintainers\nAnchor: tools/front-door/src/main.rs\n"
-                      "Test: `crates/example/src/lib.rs::keeps_order`.\n")
+                      "Declaration: `crates/example/src/lib.rs::Contract`.\n")
         result = self.check()
         self.assertEqual(result.stdout, "")
 
@@ -452,7 +482,7 @@ class DocTruthTests(unittest.TestCase):
     def test_anchor_must_resolve_to_a_source_file(self):
         for anchor, message in (
             ("`tools/front-door/src/gone.rs`", "Anchor path `tools/front-door/src/gone.rs` does not resolve"),
-            ("`tools/front-door/src`", "Anchor names no source file or test"),
+            ("`tools/front-door/src`", "Anchor names no source file or declaration"),
         ):
             with self.subTest(anchor=anchor):
                 self.document(f"# Anchored\nOwner: maintainers\nAnchor: {anchor}\n")

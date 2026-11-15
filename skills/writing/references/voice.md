@@ -7,11 +7,10 @@ lighter dose; commits, error text and release notes stay terse. Formal
 register (see [academic.md](academic.md)) is the exception, and a supplied
 sample outranks everything here.
 
-> Line coverage was 8/8 in both runs, yet all seven survivors were on the
-> checks in lines 6, 9 and 12 of classify(). The baseline only uses scores 60,
-> 75, 90 and -1, so none of its tests lands on a threshold.
+> The mutation run found all survivors in `classify()`'s threshold checks.
+> The baseline exercises scores between thresholds, so it misses the boundaries.
 
-Every claim sits on a number or a line, and `so` carries an observation to its
+Every claim names the relevant behaviour, and `so` carries an observation to its
 consequence.
 
 - Mostly declarative sentences. Confident where the evidence is direct; one

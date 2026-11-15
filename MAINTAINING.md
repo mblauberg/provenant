@@ -44,7 +44,10 @@ write `_intro.md` last. Run `scripts/collate-release-notes vX.Y.Z`, then reset
 
 - Owns: `non-derivable-intent`
 - Drift gate: `scripts/check-doc-truth` checks spec indexes, headers, anchors,
-  citations and diagram metadata; other prose is review-checked.
+  and diagram metadata. Specs name owning symbols, never individual tests,
+  line numbers or inventory counts. Tests cite the section they pin with
+  `Spec: docs/specs/NAME.md#anchor`; the gate strictly resolves these Rust
+  comments to spec files and heading anchors. Other prose is review-checked.
 
 ### Merge policy
 

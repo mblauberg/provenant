@@ -5,19 +5,23 @@ Unknown commands and flags in runbooks, skills and ambient instructions fail,
 inline or in fenced `provenant` lines; in other documents, and for paths and
 ADRs, they are advisory warnings.
 Deleted commands, research index omissions and projection mismatches fail;
-strict options enforce inventory, Anchor paths, diagram metadata and explicit
-test citations. Runtime absolute paths and templates are excluded. Commands
+strict inventory enforces headers, Anchor paths and diagram metadata. Rust
+comments citing Spec: sections always resolve strictly. Runtime absolute paths
+and templates are excluded. Commands
 scope flags to their own help; flags are checked only after a provenant command.
 Lines that say removed, replaced or retired are skipped. Documentation snippets
 are never executed.
 """
 
 import argparse
+import html
 import json
 from pathlib import Path
 import re
 import shlex
 import subprocess
+import unicodedata
+from urllib.parse import unquote
 
 
 def warn(path, line, kind, reference, level="warning"):
@@ -232,47 +236,100 @@ def check_references(root, document, commands, adrs, gone):
 
 
 
-def check_test_citations(root, document):
-    """Resolve explicit, grouped and same-file shorthand Rust Test citations."""
-    count = 0
-    text = document.read_text()
-    blocks = re.finditer(
-        r"^\s*(?:[-*]\s*)?(?:\*\*)?Tests?:(?:\*\*)?([^\n]*(?:\n(?!\s*$|\s*(?:[-*]\s*)?(?:\*\*)?(?:Why(?: \(default\))?|Owner):)[^\n]*)*)",
-        text, re.M,
-    )
-    for block in blocks:
-        current_path = None
-        for citation in re.finditer(r"`([^`]+)`", block[1]):
-            reference = " ".join(citation[1].split())
-            match = re.fullmatch(r"([^ ]+\.rs)(?:::|#)(.+)", reference)
-            if match:
-                current_path, symbols = match.groups()
-            elif reference.startswith("::"):
-                symbols = reference[2:]
-            elif reference.endswith(".rs"):
-                if not any((base / reference).is_file() for base in
-                           (root, document.parent, root / "tools/front-door")):
-                    line = text.count("\n", 0, block.start(1) + citation.start()) + 1
-                    warn(document.relative_to(root), line, "test citation", reference)
-                    count += 1
-                current_path = reference
-                continue
-            else:
-                continue
-            # tests::{one, two} is a same-file list, never a wildcard family.
-            names = symbols.split("{", 1)[-1].rstrip("}").split(",")
-            source = next((base / current_path for base in
-                           (root, document.parent, root / "tools/front-door")
-                           if current_path and (base / current_path).is_file()), None)
-            for symbol in names:
-                name = symbol.strip().split("::")[-1]
-                if (source is None or not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", name)
-                        or not re.search(r"\b(?:fn|mod)\s+" + re.escape(name) + r"\b", source.read_text())):
-                    line = text.count("\n", 0, block.start(1) + citation.start()) + 1
-                    warn(document.relative_to(root), line, "test citation",
-                         f"{current_path or '(no preceding path)'}::{symbol.strip()}")
-                    count += 1
-    return count
+def heading_anchors(text):
+    """GitHub heading slugs: inline text, punctuation removal and unique suffixes."""
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+    used, fence, previous = set(), None, ""
+    for line in text.splitlines():
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if fence:
+            if marker and marker[1][0] == fence[0] and len(marker[1]) >= len(fence):
+                fence = None
+            continue
+        if marker:
+            fence, previous = marker[1], ""
+            continue
+        atx = re.match(r"^ {0,3}#{1,6}(?:[ \t]+(.*?)|$)$", line)
+        setext = re.fullmatch(r" {0,3}(?:=+|-+)[ \t]*", line)
+        if atx:
+            title = re.sub(r"[ \t]+#+[ \t]*$", "", atx[1] or "")
+        elif setext and previous.strip():
+            title = previous.strip()
+        else:
+            previous = line if not line.startswith(("    ", "\t")) else ""
+            continue
+        # Protect code spans: underscores and angle brackets there are literal.
+        code = []
+        def protect(match):
+            code.append(match[2])
+            return f"\x00{len(code) - 1}\x00"
+        title = re.sub(r"(`+)(.*?)\1", protect, title)
+        # Render links as labels and HTML as its visible text before slugging.
+        title = re.sub(r"!?\[([^]]*)\]\((?:[^()]|\([^()]*\))*\)", r"\1", title)
+        title = re.sub(r"!?\[([^]]*)\]\[[^]]*\]", r"\1", title)
+        title = re.sub(r"<((?:https?://|mailto:)[^>]+)>", r"\1", title)
+        title = re.sub(r"<[^>]*>", "", title)
+        title = re.sub(r"(?<!\w)(_+)(.*?)\1(?!\w)", r"\2", title)
+        title = html.unescape(title)
+        title = re.sub(r"\x00(\d+)\x00", lambda match: code[int(match[1])], title).lower()
+        slug = "".join(char for char in title if char in "-_ " or
+                       unicodedata.category(char)[0] in "LMN").replace(" ", "-")
+        anchor, suffix = slug, 0
+        while anchor in used:
+            suffix += 1
+            anchor = f"{slug}-{suffix}"
+        used.add(anchor)
+        previous = ""
+    return used
+
+
+# Skip Rust strings and character literals so examples cannot become evidence.
+RUST_TOKENS = re.compile(
+    r'\b(?:br|cr|r)(?P<hashes>\#{0,255})".*?"(?P=hashes)'
+    r'|"(?:\\.|[^"\\])*"'
+    r"|'(?:\\(?:u\{[^}]*\}|x[0-9a-fA-F]{2}|.)|[^'\\\n])'"
+    r'|(?P<line>//[^\n]*)|(?P<block>/\*)', re.S,
+)
+
+
+def rust_comments(text):
+    """Yield comment offsets and text, including nested Rust block comments."""
+    offset = 0
+    while token := RUST_TOKENS.search(text, offset):
+        offset = token.end()
+        if token.lastgroup == "line":
+            yield token.start(), token[0]
+        elif token.lastgroup == "block":
+            depth = 1
+            while depth and (marker := re.search(r"/\*|\*/", text[offset:])):
+                depth += 1 if marker[0] == "/*" else -1
+                offset += marker.end()
+            if depth:
+                offset = len(text)
+            yield token.start(), text[token.start():offset]
+
+
+def check_spec_citations(root):
+    """Rust comments point to a living spec section; dangling links always fail."""
+    cache, errors = {}, 0
+    for source in sorted((root / "tools/front-door").rglob("*.rs")):
+        text = source.read_text()
+        for offset, comment in rust_comments(text):
+            for match in re.finditer(r"(?<![\w:])Spec:(?!:)\s*([^\s*]+)?", comment):
+                reference = (match[1] or "").strip("`.,;()[]{}")
+                target = re.fullmatch(r"(docs/specs/[\w.-]+\.md)#([^#]+)", reference)
+                valid = False
+                if target:
+                    path = root / target[1]
+                    if path.is_file():
+                        if path not in cache:
+                            cache[path] = heading_anchors(path.read_text())
+                        valid = unquote(target[2]) in cache[path]
+                if not valid:
+                    line = text.count("\n", 0, offset + match.start()) + 1
+                    warn(source.relative_to(root), line, "spec citation", reference or "Spec: (missing target)", "error")
+                    errors += 1
+    return errors
 
 
 def check_anchors(root, document):
@@ -325,7 +382,7 @@ def check_spec_length(root):
         words = len(spec.read_text().split())
         if words > SPEC_WORD_CAP:
             print(f"{spec.relative_to(root)}:1: warning: spec has {words} words, "
-                  f"over the {SPEC_WORD_CAP}-word cap; cite tests instead of narrating")
+                  f"over the {SPEC_WORD_CAP}-word cap; name owning symbols instead of narrating")
 
 
 def check_diagrams(root, document):
@@ -411,7 +468,7 @@ def anchors(root, document):
             return 1
         found.append(target)
     if not any(path.is_file() for path in found):
-        print(f"{display}:{index + 1}: error: Anchor names no source file or test")
+        print(f"{display}:{index + 1}: error: Anchor names no source file or declaration")
         return 1
     return 0
 
@@ -584,7 +641,6 @@ def main():
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--binary", help="worktree-built CLI (reuses the CI build)")
     source.add_argument("--help-json", help="CLI help catalogue fixture, with or without result envelope")
-    parser.add_argument("--strict-citations", action="store_true", help="fail on unresolved Rust Test citations")
     parser.add_argument("--inventory-only", action="store_true", help="check documentation evidence without loading the CLI catalogue")
     parser.add_argument("--strict-inventory", action="store_true", help="fail on missing headers, Anchor paths, spec index entries or diagram metadata")
     args = parser.parse_args()
@@ -618,8 +674,7 @@ def main():
     check_spec_length(root)
     adr_documents = sorted((root / "docs/adr").glob("*.md"))
     missing += sum(check_diagrams(root, document) for document in evidence + adr_documents)
-    citations = sum(check_test_citations(root, document) for document in evidence
-                    if document.parent == root / "docs/specs")
+    citations = check_spec_citations(root)
     missing += sum(anchors(root, document) for document in evidence
                    if document in documents)
     reference_errors = 0
@@ -628,7 +683,7 @@ def main():
         skills = sorted((root / "skills").rglob("*.md"))
         for document in [path for path in ambient if path.exists()] + skills + documents + maintained + adr_documents:
             reference_errors += check_references(root, document, commands, adrs, gone)
-    return int(bool(command_errors) or bool(reference_errors) or (args.strict_inventory and bool(missing)) or (args.strict_citations and bool(citations)))
+    return int(bool(command_errors) or bool(reference_errors) or (args.strict_inventory and bool(missing)) or bool(citations))
 
 
 if __name__ == "__main__":

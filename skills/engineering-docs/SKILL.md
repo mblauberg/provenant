@@ -24,7 +24,7 @@ invariants with no second status projection.
 | What changed and when | `git log`; release fragments per repository policy |
 
 A spec that code can regenerate, or a task spec that has shipped, should die.
-Keep only what code cannot say, and link code, schemas and tests.
+Keep only what code cannot say, and link owning symbols, declarations and schemas.
 
 ## Rules
 
@@ -32,8 +32,10 @@ Keep only what code cannot say, and link code, schemas and tests.
   superseded text in the same change; never append dated `Update:` or "as of"
   entries. Changelogs and release notes are the exception.
 - **Owner and anchor.** Each spec and runbook opens with `Owner:` and `Anchor:`
-  (links to the source symbols or tests that let a reader check it). Name the
-  symbol, not a line number. A rule's `Why:` cites its event, or reads
+  naming owning modules, types or declarations. Specs never name individual
+  tests, line numbers or inventory counts. Tests cite the section they pin with
+  `Spec: docs/specs/NAME.md#anchor`; the drift gate resolves these links.
+  A rule's `Why:` cites its event, or reads
   `Why (default):` for a default open to change.
 - **Three hops** from claim to owner to evidence. Merge duplicate truths and
   tiny files that change together. Before cutting apparent restatement, check

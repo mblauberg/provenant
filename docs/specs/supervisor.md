@@ -2,8 +2,8 @@
 
 Owner: `crates/supervisor` (custody), `crates/confinement` (permissions,
 evidence, worktrees), `crates/os` (bounded I/O and execution)
-Anchor: `crates/supervisor/tests/custody.rs`, `crates/supervisor/src/custody_tests.rs`,
-`crates/confinement/src/permissions.rs`, `src/worktree_tests.rs`
+Anchor: `crates/supervisor/src/custody.rs`, `crates/supervisor/src/machine.rs`,
+`crates/confinement/src/permissions.rs`, `crates/confinement/src/worktrees.rs`
 
 Supervisor holds a provider's process, output and custody through durable exit
 publication; confinement turns an authorised plan into filesystem, Git, network
@@ -23,9 +23,6 @@ exit wins over a late cancel or deadline, and a host sleep cannot extend the
 deadline.
 - Why: a bookkeeping fault or slow start must never kill a healthy provider,
   and a stuck one must not hold a worktree for hours.
-- Test: `crates/supervisor/src/machine.rs::silence_capture_and_observation_failures_are_not_stop_reasons`;
-  `::a_wnowait_exit_wins_over_late_cancel_and_deadline`;
-  `::a_host_sleep_cannot_extend_the_wall_deadline`
 - Owner: `crates/supervisor/src/machine.rs`
 
 ### Signals need proven identity and scope
@@ -48,11 +45,6 @@ records the key, and a stop request is identified by attempt and generation.
 A supervisor restart finds a live writer by the key through the attempt row,
 then reads that attempt's custody records.
 - Why: signalling a recycled PID or a sibling's group kills unrelated work.
-- Test: `crates/supervisor/tests/process.rs::inherited_wait_policy_preserves_pid_reservation`;
-  `crates/supervisor/tests/custody.rs::stale_complete_census_does_not_signal_a_late_shared_group_owner`;
-  `::nested_owner_stays_protected_when_native_custody_proof_is_uncertain`;
-  `crates/supervisor/src/process_os/provider.rs::tests::native_cleanup_targets_require_owned_identity_and_preserve_exclusions`;
-  `crates/supervisor/src/custody/orphans.rs::an_unprovable_pid_is_never_signalled_and_is_named`
 - Owner: `crates/supervisor/src/process_os/`, `crates/supervisor/src/custody.rs`
 
 ### Guardian holds custody past its owner
@@ -62,9 +54,6 @@ dies. Secrets travel in memory and pipes, never argv or disk.
 A missing launch acknowledgement is an unknown launch, never permission to
 launch again.
 - Why: losing the caller must not lose custody or double-launch a writer.
-- Test: `crates/supervisor/tests/custody.rs::owner_death_keeps_guardian_and_writer_live`;
-  `crates/os/src/exec/tests.rs::secret_input_arrives_by_descriptor_with_eof_and_no_token_environment`.
-
 - Owner: `crates/supervisor/src/guardian/`
 
 ### Quiescence before release
@@ -74,9 +63,6 @@ no surviving member or escapee, and a fresh lock on the original lease inode
 succeeds. Failed, racing or incomplete reads keep the fence; only a recorded
 decision with matching authority clears one, and that decision permits no signal.
 - Why: a leftover descendant could still write the worktree.
-- Test: `crates/supervisor/src/guardian/tests.rs::darwin_settlement_requires_complete_absence_of_members_and_recorded_escapes`;
-  `crates/supervisor/src/custody_tests.rs::an_unrecorded_escape_cannot_be_cleared_by_an_empty_census`;
-  `::reconcile_requires_matching_authority_and_records_before_release`
 
 ### Provider descriptors and detached services
 
@@ -94,10 +80,6 @@ flock ownership and grants no signal authority. Unknown or unreadable holders
 remain explicit uncertainty. The guardian continues retaining unresolved
 custody; a timeout alone never authorises settlement or an unrelated signal.
 - Why: detached services must not hold a lease or cause unsafe release.
-- Test: `crates/supervisor/src/process_os/provider.rs::lane_descriptors_are_cloexec`;
-  `::orphaned_provider_descendant_does_not_retain_writer_flock`;
-  `crates/supervisor/tests/custody.rs::unsandboxed_detached_service_does_not_block_settlement`;
-  `::guardian_loss_never_invents_exit_or_releases_the_reservation`
 
 ### Durable exit publication
 
@@ -105,8 +87,6 @@ The exit record is published without replacing an existing one, after what it
 references is durable. A failed publication keeps custody and retries; an
 unconfirmed sync is `durability_unconfirmed`, never absent.
 - Why: a lost or overwritten exit record loses the only proof of outcome.
-- Test: `crates/supervisor/tests/publication.rs::exit_publication_enospc_and_visible_sync_retry_keeps_one_snapshot`;
-  `crates/supervisor/tests/custody.rs::publication_failure_retains_the_lease_and_retries_without_overwrite`
 
 ### Writer reservation and settlement
 
@@ -116,9 +96,6 @@ flock stays held through import and [publication](run.md#publication-order). A
 missing or malformed reservation refuses recovery of that attempt, and scratch
 deletion needs a verified settlement commit.
 - Why: a writer must never be freed on a partial or forged settlement.
-- Test: `crates/supervisor/src/custody_tests.rs::missing_or_malformed_reservation_does_not_reopen_a_writer`;
-  `::settlement_checks_exact_attempt_and_both_digests_before_scratch`;
-  `::worktree_settlement_retains_flock_until_recovery_is_dropped`
 
 ### Stable locks and atomic writes
 
@@ -128,9 +105,6 @@ atomically and followed by a parent sync. Owner records carry no PID-derived or
 replayable authority.
 - Why: a recreated lock inode lets two owners hold one lock, and a crash must
   leave the old or new file whole.
-- Test: `crates/os/src/fs/tests.rs::stable_lock_namespace_refuses_every_mutation_without_splitting_exclusion`;
-  `::process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes`;
-  `crates/supervisor/src/custody_tests.rs::contradictory_never_spawned_records_never_prove_absence`
 - Owner: `crates/os/src/fs.rs`
 
 ### Build admission is a sourced port
@@ -143,7 +117,6 @@ the backend/source in `PROVENANT_BUILD_ADMISSION_BACKEND` and
 no shim is installed for them. Local-Cargo policy still applies to every shim
 backend. Wrapper execution streams Cargo output without a host-state receipt.
 - Why: build coordination varies by repository without changing attempt custody.
-- Test: `crates/providers/src/lane.rs::the_cargo_shim_hands_the_command_to_the_build_slot_gate`
 - Owner: `crates/providers/src/lane.rs`; `src/build_slot.rs`
 
 ### Bounded execution
@@ -151,7 +124,6 @@ backend. Wrapper execution streams Cargo output without a host-state receipt.
 Captures and frames are bounded; an oversized frame is decoder loss, never a
 fabricated terminal event.
 - Why: unbounded output must not stall custody or invent an outcome.
-- Test: `crates/os/src/capture.rs::oversized_frames_are_counted_and_never_decoded_as_terminal`
 
 ## Permission policy
 
@@ -187,11 +159,6 @@ Unsupported confinement fails `ConfinementUnavailable` and never widens
 access. An optional root that resolves into a declared credential root is
 omitted with a warning.
 - Why: one broad grant silently voids the boundary.
-- Test: `crates/confinement/src/permissions/tests/validation.rs::every_declared_credential_root_protects_grants_and_enclosing_paths`;
-  `crates/core/src/roots.rs::codex_package_exception_applies_only_where_no_other_declaration_protects`;
-  `crates/cli/src/run/provider/tests_retained_state_and_workspace.rs::source_cwd_matches_declared_admission_for_registered_worktree_locations`;
-  `src/fabric/interface.rs::explanation_and_preparation_share_worktree_admission`;
-  `crates/confinement/src/permissions/tests/validation.rs::directory_discovery_keeps_literal_scope_and_refuses_symlinks`
 - Owner: `crates/core/src/roots.rs`, `crates/confinement/src/permissions.rs`,
   `crates/cli/src/run/provider/confinement.rs`
 
@@ -203,8 +170,6 @@ read-only, and the host imports the result and moves the branch by
 compare-and-swap.
 - Why: ordinary Git works in the lane while one host boundary guards shared
   metadata.
-- Test: `crates/confinement/src/permissions/tests/grants.rs::linked_worktree_grants_derive_from_verified_git_paths_and_ref`;
-  `crates/confinement/tests/lane_git_conformance.rs::lane_git_supports_stash_rebase_and_merge_with_shared_metadata_read_only`
 
 ### Native environment and sandbox tool stores
 
@@ -225,10 +190,6 @@ The pnpm, npm and Node caches the host later runs unconfined stay read-only;
 build output and tool configuration use private lane caches.
 - Why: native lanes use ordinary tools and login state; sandboxed lanes keep
   source sharing explicit while keeping credentials and build output isolated.
-- Test: `crates/providers/src/tests_launch_access.rs::native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation`;
-  `crates/confinement/src/permissions/policy/host.rs::credential_alias_inventory_runs_only_for_sandboxed_lanes`;
-  `crates/providers/src/tests_lane_toolchains.rs::node_tool_stores_are_read_only`;
-  `crates/confinement/src/permissions/tests/grants.rs::writer_cache_is_private_and_bound_to_repository_and_worktree_identity`
 
 ### Network, IPC and process information
 
@@ -238,9 +199,6 @@ sandbox. SysV IPC is host-global on macOS, so same-user IPC isolation needs a
 separate OS user or VM.
 - Why: the peer agent relays to unconfined children, and Seatbelt can enforce
   no more.
-- Test: `crates/confinement/src/permissions.rs::native_sandbox_blocks_path_escape_probes`;
-  `crates/confinement/src/permissions/tests/signals.rs::same_sandbox_signals_reach_parents_but_cannot_reach_host_processes`;
-  `crates/confinement/src/permissions/tests/process_info.rs::process_info_includes_host_and_reports_own_rss`
 
 ### Lane process-tree memory interface
 
@@ -255,9 +213,6 @@ the CLI output and public sample schema do not change. The setting source is
 available from `provenant config show`.
 - Why: a memory guard that reads lost observation as zero would approve a
   runaway build.
-- Test: `crates/confinement/src/permissions/tests/process_tree.rs::lane_process_tree_sample_is_private_under_production_profiles`;
-  `tests/command_adapter.rs::command_lane_reads_its_supervisors_process_tree_through_the_cli`;
-  `::process_tree_cli_is_unavailable_without_a_supervisor_sample`
 - Owner: `crates/supervisor/src/process_tree.rs`, `src/process_tree.rs`
 
 ### Disclosure and safe Git evidence
@@ -268,10 +223,6 @@ hooks, filters, fsmonitor and external programs off, and refuses configuration
 from a lane-writable include. Host delivery pushes once, from the host, and
 refuses credential-bearing URLs.
 - Why: repository content and lane output are attacker-controlled input to the host.
-- Test: `crates/confinement/src/redact.rs::shell_output_secrets_split_across_chunks_are_never_emitted`;
-  `crates/confinement/src/disclosure.rs::snapshot_refuses_known_secrets_without_returning_content`;
-  `crates/confinement/src/transport.rs::include_targets_in_lane_areas_are_refused_even_when_unread`;
-  `crates/run/src/delivery_tests/settlement.rs::prepare_refuses_remote_urls_with_embedded_credentials`
 - Owner: `crates/confinement/src/redact.rs`, `crates/confinement/src/utility.rs`
 
 ## Worktrees
@@ -284,8 +235,6 @@ the primary, a live writer or observed process, and has no force. Dirty work
 requires explicit discard, with its recoverable archive captured before removal;
 it deletes a branch only with current landing evidence or explicit discard.
 - Why: removing a tree under a live writer destroys its work.
-- Test: `src/worktree_tests/writer_cases.rs::second_writer_is_refused_while_first_holds_the_worktree`;
-  `crates/confinement/src/worktrees/lifecycle_tests/gc_safety.rs::detached_removal_keeps_dirty_unmerged_and_live_work`
 - Owner: `crates/confinement/src/worktrees.rs`
 
 ### Unreadable processes need positive non-occupancy evidence
@@ -299,9 +248,6 @@ the writer cohort; host exceptions are in
 Landing and collection require `Free`; the census grants no signal authority.
 - Why: a retained cwd or descriptor survives permission changes, so current
   permissions cannot prove absence.
-- Test: `crates/confinement/src/worktrees/census_tests.rs::writer_cohort::unreadable_foreign_system_process_allows_merged_worktree_and_branch_cleanup`;
-  `::writer_cohort::possible_user_writers_and_positive_system_occupants_remain_protected`;
-  `::native_full_census_places_clean_merged_worktree_and_same_user_sleep`
 - Owner: `crates/confinement/src/worktrees.rs`, `crates/os/src/sys/pid.rs`
 
 ### Pruning and GC need proof
@@ -315,6 +261,4 @@ retention policy and complete current custody, run and process evidence.
 Shallow history, conflicted comparisons, moved tips and unavailable evidence
 keep the candidate.
 - Why: GC runs unattended; pruning on a guess deletes the user's work.
-- Test: `crates/confinement/src/worktrees/lifecycle_tests/worktree_operations.rs::merged_pruning_is_branch_scoped_and_keeps_unselected_refs`;
-  `crates/confinement/src/cache.rs::gc_idle_refuses_writers_that_became_held_or_unobservable`
 - Owner: `crates/confinement/src/worktrees.rs`, `crates/confinement/src/cache.rs`

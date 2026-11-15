@@ -9,13 +9,13 @@ GitHub issues own delivery state, and the [runbooks](../runbooks/) own
 procedure.
 
 Each spec is an invariants page. An entry states one invariant in a few
-sentences, then gives a one-sentence `Why`, a `Test` citation and an `Owner`.
+sentences, then gives a one-sentence `Why` and an `Owner`.
 Narration, enumerations, history, flags, schemas, defaults and limits stay out:
-cite the test that pins them or link the generated reference. Test citations
-use `path.rs::symbol` relative to `tools/front-door/`; `none (gap)` marks
-missing enforcement and `none (review gate)` a review obligation. A claim with
-no test and no review gate is not an invariant. `scripts/check-doc-truth`
-resolves every citation and warns when a page passes 2,000 words.
+name the owning module, type or declaration in `Anchor:` or link the generated
+reference. Specs never name individual tests, line numbers or inventory counts.
+Tests cite the section they pin with `Spec: docs/specs/NAME.md#anchor`.
+`scripts/check-doc-truth` strictly resolves those Rust comments to spec files
+and heading anchors, and warns when a page exceeds its word cap.
 [Engineering docs](../../skills/engineering-docs/SKILL.md) owns placement.
 
 The binary is the reference: `provenant help --all` for commands and
