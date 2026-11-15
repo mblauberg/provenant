@@ -217,7 +217,7 @@ fn terminal_steer_refusal_settles_without_losing_private_text_or_graph_progress(
         }
     }
 
-    let mut fixture = SettlementFixture::for_node("steer-refusal-fixture", "seed")?;
+    let fixture = SettlementFixture::for_node("steer-refusal-fixture", "seed")?;
     let clock = SystemClock;
     let cancel = CancelToken::new();
     let call = provenant_run::Request {

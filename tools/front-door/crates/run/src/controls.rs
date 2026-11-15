@@ -2900,7 +2900,7 @@ impl RunStore {
                 let cause = outcome
                     .cause
                     .as_deref()
-                    .and_then(provenant_records::run::SteeringCause::from_str)
+                    .and_then(provenant_records::run::SteeringCause::from_code)
                     .ok_or(RunError::Validation("steer refusal cause"))?;
                 (
                     provenant_records::run::SteeringState::NotContinued,
