@@ -30,10 +30,10 @@ pub(super) struct RetainedIdentity<'a> {
     pub(super) account_key: Option<&'a str>,
 }
 
-fn retained_identity(
-    applied: &run::RouteRecord,
+fn retained_identity<'a>(
+    applied: &'a run::RouteRecord,
     enforcement: &provenant_records::policy::Policy,
-) -> Result<RetainedIdentity<'_>, ContinuationRequestError> {
+) -> Result<RetainedIdentity<'a>, ContinuationRequestError> {
     let provider = applied.provider.as_deref().ok_or_else(|| {
         enforcement.boundary_error(
             "CONTINUATION_CONTINUATION_REQUEST_AUTHORITY",
@@ -49,10 +49,10 @@ fn retained_identity(
 
 /// Recheck current readiness for the exact route the provider session used.
 /// Resolving an exact model bypasses named-pool selection and quota redraws.
-pub(super) fn continuation_request(
-    prior: &run::AttemptRecord,
+pub(super) fn continuation_request<'a>(
+    prior: &'a run::AttemptRecord,
     enforcement: &provenant_records::policy::Policy,
-) -> Result<(provenant_routing::RouteRequest, RetainedIdentity<'_>), ContinuationRequestError> {
+) -> Result<(provenant_routing::RouteRequest, RetainedIdentity<'a>), ContinuationRequestError> {
     use provenant_routing::{Fallback, ModelId, RouteChoice};
 
     let applied = prior.applied_route.as_ref().ok_or_else(|| {
