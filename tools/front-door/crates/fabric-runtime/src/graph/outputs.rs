@@ -627,10 +627,18 @@ fn parse_findings(
             {
                 return Err(fail("line", "expected non-negative integer or null"));
             }
-            findings.push(
-                serde_json::from_value::<Finding>(entry.into())
-                    .map_err(|_| fail("findings", "invalid entry"))?,
-            );
+            let finding =
+                serde_path_to_error::deserialize::<_, Finding>(serde_json::Value::Object(entry))
+                    .map_err(|error| {
+                        let path = error.path().to_string();
+                        let field = if path.is_empty() {
+                            "findings".to_owned()
+                        } else {
+                            format!("findings.{path}")
+                        };
+                        fail(&field, &error.inner().to_string())
+                    })?;
+            findings.push(finding);
         }
     }
     let mut size = canonical_len(&findings);
@@ -1928,6 +1936,21 @@ mod alias_tests {
             observed: true,
         });
         assert_eq!(restored.effective_severity(), "high");
+    }
+
+    #[test]
+    fn malformed_trigger_reports_the_field_and_expected_type() {
+        let block = serde_json::json!({"schema_version":1,"findings":[{
+            "id":"F1","severity":"blocking","file":"a.rs","summary":"trigger shape","status":"open",
+            "trigger":{"sequence":["call the command", "observe the refusal"],"reach":"default_path","observed":true}
+        }]})
+        .to_string();
+        let error = parse_findings(&block, &[]).unwrap_err();
+        assert!(
+            error.contains("entry 1 (F1) field findings.trigger.sequence"),
+            "{error}"
+        );
+        assert!(error.contains("expected a string"), "{error}");
     }
 
     #[test]

@@ -1677,7 +1677,9 @@ impl RunStore {
         // Scrub before publication so a retry never starts from new plaintext.
         let session_redaction_failed =
             provenant_confinement::redact::scrub_session_history(&provider_state).is_err();
-        let (mut handoff, handoff_error) = match self.capture_handoff(attempt, &record, &decoded)? {
+        let captured_handoff = self.capture_handoff(attempt, &record, &decoded)?;
+        let trailing_verdict_tolerated = captured_handoff.trailing_verdict_tolerated;
+        let (mut handoff, handoff_error) = match captured_handoff.handoff {
             Ok(handoff) => (handoff, None),
             Err(error) => (None, Some(error)),
         };
@@ -2479,7 +2481,7 @@ impl RunStore {
             Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
         ) && task.writer.is_some()
             && !matches!(&task.route, RequestedRoute::Adapter { .. })
-            && decoded.handoff().is_ok_and(|handoff| handoff.is_none())
+            && handoff.is_none()
             && handoff_error.is_none()
         {
             partial.push(PartialSignal::HandoffMissing);
@@ -2644,6 +2646,13 @@ impl RunStore {
             Outcome::Cancelled | Outcome::Lost | Outcome::Unsettled
         ) {
             decoded.terminal_cause = None;
+        }
+        if trailing_verdict_tolerated {
+            const ORDER_NOTE: &str = "accepted one standalone verdict after the closed handoff";
+            decoded.reason = Some(match decoded.reason.take() {
+                Some(reason) => format!("{ORDER_NOTE}; {reason}"),
+                None => ORDER_NOTE.into(),
+            });
         }
         let decoded_reason = decoded.reason.take().map(bounded_reason);
         let publication = TerminalPublication {

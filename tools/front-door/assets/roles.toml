@@ -165,13 +165,11 @@ with at most 32 entries and an empty array when there are no findings. Keep each
 summary to one line and include the evidence and proposed fix as structured
 fields. Use this canonical array form:
 ```findings
-{"schema_version":1,"findings":[{"id":"F1","severity":"high","file":"src/lib.rs","line":12,"summary":"Describe the finding","status":"open","evidence":"Observed behaviour","proposed_fix":"Suggested repair"}]}
+{"schema_version":1,"findings":[{"id":"F1","severity":"blocking","file":"src/lib.rs","line":12,"summary":"Describe the finding","status":"open","evidence":"Observed behaviour","proposed_fix":"Suggested repair","trigger":{"sequence":"Run the command, then observe the refusal","reach":"default_path","observed":true}}]}
 ```
 For no findings, use `{"schema_version":1,"findings":[]}`.
-Put the findings block before the verdict line.
-After all findings and prose, end with exactly one final non-empty line:
-VERDICT: PASS, VERDICT: FAIL, or VERDICT: INCONCLUSIVE. A closed handoff
-fence may follow. Do not include another verdict line elsewhere in the result.
+Finish with the shared result contract in reviewer context. Do not repeat a
+findings block or verdict line.
 """
 
 [roles."lens.correctness-spec"]
@@ -226,18 +224,10 @@ Base (diff reference): ${base}
 Spec (acceptance criteria): ${spec}
 Check correctness against the spec as well as this lens.
 ${local_check_policy}
-End with a findings block (schema_version 1) whose findings are a JSON array,
-with at most 32 entries and an empty array when there are no findings. Keep each
-summary to one line and include the evidence and proposed fix as structured
-fields. Use this canonical array form:
-```findings
-{"schema_version":1,"findings":[{"id":"F1","severity":"high","file":"src/lib.rs","line":12,"summary":"Describe the finding","status":"open","evidence":"Observed behaviour","proposed_fix":"Suggested repair"}]}
-```
-For no findings, use `{"schema_version":1,"findings":[]}`.
-Put the findings block before the verdict line.
-After all findings and prose, end with exactly one final non-empty line:
-VERDICT: PASS, VERDICT: FAIL, or VERDICT: INCONCLUSIVE. A closed handoff
-fence may follow. Do not include another verdict line elsewhere in the result.
+Return at most 32 findings in one schema_version 1 JSON findings block, with an
+empty array when there are none. Keep summaries to one line and include
+evidence and the proposed fix as structured fields. Finish with the shared
+result contract in reviewer context.
 """
 
 [roles."lens.reliability"]
@@ -332,6 +322,7 @@ kind = "synthesise"
 access = "read_only"
 worktree = "${worktree}"
 card = "You evaluate a writer's commit from its lens findings and decide whether it is accepted."
+references = [{ ref = "skill:code-review/references/reviewer-context.md", when = "always", inline = true }]
 prompt = """
 Evaluate the implementation of: ${prompt}
 Spec (acceptance criteria): ${spec}
@@ -341,10 +332,11 @@ fenced findings block (schema_version 1) with one entry per finding id; each
 entry carries "id", "disposition" and "reason". Copy the upstream qualified id
 exactly; a bare id works only when unambiguous. These three fields suffice for
 upstream findings; descriptive fields are inherited. New findings require
-severity, file, summary, status, evidence and proposed_fix as structured fields as well. After all findings and prose, end
-with exactly one final non-empty verdict line: VERDICT: PASS only when no
+severity, file, summary, status, evidence and proposed_fix as structured fields as well. After all findings and prose, write
+exactly one standalone verdict line: VERDICT: PASS only when no
 accepted finding remains, otherwise VERDICT: FAIL. Use VERDICT: INCONCLUSIVE
-when the evidence cannot support a decision. A closed handoff fence may follow.
+when the evidence cannot support a decision. Finish with the shared result
+contract in reviewer context.
 """
 
 [roles."write.implement"]

@@ -95,10 +95,11 @@ pub(super) fn contract_error(
     // blocks. `verdict_error` also carries source truncation, which is
     // diagnosed by findings availability below; a captured verdict is not
     // reported as malformed for that reason.
-    if !matches!(
-        outputs.verdict.as_deref(),
-        Some("VERDICT: PASS" | "VERDICT: FAIL" | "VERDICT: INCONCLUSIVE")
-    ) {
+    if !outputs
+        .verdict
+        .as_deref()
+        .is_some_and(provenant_records::result_capture::is_review_verdict)
+    {
         let cause = match outputs.verdict.as_deref() {
             Some(other) => format!("`{other}` is not VERDICT: PASS, FAIL or INCONCLUSIVE"),
             None => result
