@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use support::{Result, TestRig, call, code};
 #[test]
 fn identity_mail_tasks_and_events_use_durable_scoped_receipts() -> Result {
-    let rig = TestRig::new()?;
+    let rig = support::rig()?;
     let identity = call(&rig, &["fabric", "identity"], 0)?;
     assert_eq!(identity["data"]["inbox"]["agent"], "fixture");
     assert_eq!(

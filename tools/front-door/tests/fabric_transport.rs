@@ -657,12 +657,14 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
                     .as_secs(),
             )?;
             let scope = provenant_quota::AccountScope {
+                extra: Default::default(),
                 adapter: "claude".into(),
                 account_key: key.clone(),
                 label: "pro".into(),
             };
             let mut record = provenant_quota::AccountRecord::empty(scope.clone());
             record.snapshot = Some(provenant_quota::QuotaSnapshot {
+                extra: Default::default(),
                 schema_version: 1,
                 account: scope,
                 revision: 0,
@@ -671,6 +673,7 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
                 source_ref: "fixture".into(),
                 authority_ref: None,
                 windows: vec![provenant_quota::QuotaWindow {
+                    extra: Default::default(),
                     pool: "five_hour".into(),
                     window_seconds: Some(18_000),
                     used_basis_points: 10_000,

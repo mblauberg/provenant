@@ -163,8 +163,10 @@ fn resolve_reports_effort_controls_and_nearby_models() -> Result {
     let observed = provenant_os::clock::SystemClock::new().unix_seconds();
     let file = provenant_quota::ReadinessFile {
         records: vec![provenant_quota::RouteReadiness {
+            extra: Default::default(),
             schema_version: 1,
             scope: provenant_quota::ReadinessScope {
+                extra: Default::default(),
                 host: provenant_quota::LOCAL_HOST.into(),
                 adapter: "codex".into(),
                 account_key: "key-one".into(),
@@ -657,6 +659,7 @@ fn cached_account_pacing_is_visible_without_probing() -> Result {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     }
     let account = AccountScope {
+        extra: Default::default(),
         adapter: "claude".into(),
         account_key: "opaque-one".into(),
         label: "michael".into(),
@@ -664,6 +667,7 @@ fn cached_account_pacing_is_visible_without_probing() -> Result {
     let mut record = AccountRecord::empty(account.clone());
     record.revision = 1;
     record.snapshot = Some(QuotaSnapshot {
+        extra: Default::default(),
         schema_version: 1,
         account,
         revision: 1,
@@ -673,6 +677,7 @@ fn cached_account_pacing_is_visible_without_probing() -> Result {
         authority_ref: None,
         details: None,
         windows: vec![QuotaWindow {
+            extra: Default::default(),
             pool: "seven_day".into(),
             window_seconds: Some(604_800),
             used_basis_points: 9000,
