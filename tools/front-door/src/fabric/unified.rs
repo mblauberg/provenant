@@ -1986,18 +1986,9 @@ fn composite_graph_output(
             ),
         ));
     };
-    let Some(result) = outputs.result.as_ref() else {
-        return Ok(output_fail(
-            provenant_records::Outcome::Invalid,
-            "NOT_FOUND",
-            &format!(
-                "NOT_FOUND: {graph}/{} does not declare a result output",
-                progress.id
-            ),
-        ));
-    };
-
-    let text = &result.excerpt;
+    // A valid composite may export typed fields without declaring result text.
+    let result = outputs.result.as_ref();
+    let text = result.map_or("", |result| result.excerpt.as_str());
     let length = text.len();
     let tail = command
         .tail
@@ -2014,13 +2005,20 @@ fn composite_graph_output(
         let bounded_start = composite_tail_start(&text.as_bytes()[start..end], lines);
         start += bounded_start;
     }
-    while start < end && !text.is_char_boundary(start) {
-        start += 1;
-    }
-    while end > start && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    let excerpt = &text[start..end];
+    let selected_bytes = &text.as_bytes()[start..end];
+    let (bytes, excerpt) =
+        match provenant_fabric_runtime::coordination::facade::OutputBytes::from_bytes(
+            selected_bytes.to_vec(),
+        ) {
+            provenant_fabric_runtime::coordination::facade::OutputBytes::Utf8(text) => (
+                provenant_records::wire::ChunkBytes::Utf8(text.clone()),
+                text,
+            ),
+            provenant_fabric_runtime::coordination::facade::OutputBytes::Base64(text) => (
+                provenant_records::wire::ChunkBytes::Base64(text),
+                String::from_utf8_lossy(selected_bytes).into_owned(),
+            ),
+        };
     let state = serde_json::to_value(&progress.state)?
         .as_str()
         .unwrap_or("unknown")
@@ -2043,11 +2041,13 @@ fn composite_graph_output(
             part: "result".into(),
             offset: start as u64,
             next_offset: end as u64,
-            length: (!result.truncated).then_some(length as u64),
-            eof: end == length,
-            complete: !result.truncated,
-            digest: Some(result.digest.clone()),
-            bytes: provenant_records::wire::ChunkBytes::Utf8(excerpt.to_owned()),
+            length: result
+                .filter(|result| !result.truncated)
+                .map(|_| length as u64),
+            eof: result.is_none_or(|_| end == length),
+            complete: result.is_none_or(|result| !result.truncated),
+            digest: result.map(|result| result.digest.clone()),
+            bytes,
             selected,
             tail,
             tail_clamped: command
@@ -2724,6 +2724,143 @@ mod tests {
         );
         let schema = provenant_records::wire::data_schema("output").unwrap();
         provenant_records::wire::schema::validate(&schema, &reply.result.data).unwrap();
+    }
+
+    fn composite_progress(outputs: Value) -> provenant_fabric_runtime::graph::NodeProgress {
+        serde_json::from_value(json!({
+            "id": "panel",
+            "state": "succeeded",
+            "worktree": null,
+            "children": ["writer"],
+            "outputs": outputs
+        }))
+        .unwrap()
+    }
+
+    fn composite_output_command(offset: u64, max_bytes: u64) -> provenant_cli::Output {
+        provenant_cli::Output {
+            target: "typed-output/panel".parse().unwrap(),
+            part: provenant_cli::Part::Result,
+            to: None,
+            path: false,
+            offset,
+            tail: None,
+            max_bytes,
+        }
+    }
+
+    fn output_chunk_bytes(data: &Value) -> Vec<u8> {
+        match data["bytes"]["encoding"].as_str() {
+            Some("utf8") => data["bytes"]["data"]
+                .as_str()
+                .expect("UTF-8 chunk data")
+                .as_bytes()
+                .to_vec(),
+            Some("base64") => provenant_fabric_runtime::handoff::decode_base64(
+                data["bytes"]["data"].as_str().expect("base64 chunk data"),
+            )
+            .expect("valid base64 chunk"),
+            encoding => panic!("unexpected composite chunk encoding: {encoding:?}"),
+        }
+    }
+
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    #[test]
+    fn composite_output_paginates_multibyte_text_as_bounded_bytes() {
+        let excerpt = "🧪éx";
+        let progress = composite_progress(json!({
+            "schema_version": 2,
+            "result": {
+                "digest": "sha256:fixture",
+                "excerpt": excerpt,
+                "truncated": false,
+                "path": null
+            },
+            "findings": [],
+            "warnings": []
+        }));
+        let schema = provenant_records::wire::data_schema("output").unwrap();
+
+        // Starting inside the four-byte character returns its next raw byte,
+        // losslessly, instead of slicing the Rust string at that offset.
+        let middle =
+            composite_graph_output(&composite_output_command(1, 1), "typed-output", &progress)
+                .unwrap();
+        assert_eq!(middle.result.status, provenant_records::Outcome::Ok);
+        assert_eq!(middle.result.data["offset"], 1);
+        assert_eq!(middle.result.data["next_offset"], 2);
+        assert_eq!(output_chunk_bytes(&middle.result.data).len(), 1);
+        provenant_records::wire::schema::validate(&schema, &middle.result.data).unwrap();
+
+        let mut offset = 0;
+        let mut bytes = Vec::new();
+        while offset < excerpt.len() as u64 {
+            let reply = composite_graph_output(
+                &composite_output_command(offset, 1),
+                "typed-output",
+                &progress,
+            )
+            .unwrap();
+            let data = &reply.result.data;
+            assert_eq!(data["offset"], offset);
+            let next_offset = data["next_offset"].as_u64().expect("next byte offset");
+            assert!(next_offset > offset);
+            let chunk = output_chunk_bytes(data);
+            assert_eq!(chunk.len() as u64, next_offset - offset);
+            assert!(chunk.len() <= 1);
+            assert_eq!(data["eof"], next_offset == excerpt.len() as u64);
+            provenant_records::wire::schema::validate(&schema, data).unwrap();
+            bytes.extend(chunk);
+            offset = next_offset;
+        }
+        assert_eq!(bytes, excerpt.as_bytes());
+    }
+
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    #[test]
+    fn composite_output_returns_typed_exports_without_result_text() {
+        let commit = "1".repeat(40);
+        let progress = composite_progress(json!({
+            "schema_version": 2,
+            "result": null,
+            "verdict": "VERDICT: PASS",
+            "findings": [],
+            "findings_available": true,
+            "review_partial": true,
+            "warnings": ["typed-only source"],
+            "branch": "feature/output",
+            "commit": commit,
+            "remaining": ["finish the export test"]
+        }));
+        let reply =
+            composite_graph_output(&composite_output_command(0, 16), "typed-output", &progress)
+                .unwrap();
+
+        assert_eq!(reply.result.status, provenant_records::Outcome::Ok);
+        let data = &reply.result.data;
+        assert_eq!(data["graph"], "typed-output");
+        assert_eq!(data["node"], "panel");
+        assert_eq!(data["selected"]["verdict"], "VERDICT: PASS");
+        assert_eq!(data["selected"]["findings"], json!([]));
+        assert_eq!(data["selected"]["findings_available"], true);
+        assert_eq!(data["selected"]["partial"], true);
+        assert_eq!(data["selected"]["warnings"], json!(["typed-only source"]));
+        assert_eq!(data["selected"]["branch"], "feature/output");
+        assert_eq!(data["selected"]["commit"], commit);
+        assert_eq!(
+            data["selected"]["remaining"],
+            json!(["finish the export test"])
+        );
+        assert_eq!(data["bytes"], json!({"encoding":"utf8","data":""}));
+        assert_eq!(data["offset"], 0);
+        assert_eq!(data["next_offset"], 0);
+        assert_eq!(data["length"], Value::Null);
+        assert_eq!(data["digest"], Value::Null);
+        assert_eq!(data["eof"], true);
+        assert_eq!(data["complete"], true);
+        assert!(data.get("attempt_id").is_none());
+        let schema = provenant_records::wire::data_schema("output").unwrap();
+        provenant_records::wire::schema::validate(&schema, data).unwrap();
     }
 
     #[test]
