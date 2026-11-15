@@ -1170,7 +1170,6 @@ impl LaunchConfinement {
             return Outcome::fallback_detail("toolchain_unverified", detail);
         }
         crate::cargo_seed::seed_target(
-            true,
             &self.state_root,
             cache,
             worktree.path(),

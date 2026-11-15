@@ -205,7 +205,6 @@ impl Outcome {
 }
 
 pub(crate) fn seed_target(
-    enabled: bool,
     state: &Path,
     cache: &Path,
     worktree: &Path,
@@ -214,9 +213,6 @@ pub(crate) fn seed_target(
     environment: &[(std::ffi::OsString, std::ffi::OsString)],
     cancel: &provenant_core::CancelToken,
 ) -> Outcome {
-    if !enabled {
-        return Outcome::skipped("disabled");
-    }
     #[cfg(unix)]
     {
         let (version, triple) = match crate::target_seed::lane_rustc_metadata_cancellable(
@@ -976,7 +972,6 @@ mod tests {
             .unwrap()
             .lane_cargo_environment(&home, &cache, &mut env);
         let outcome = seed_target(
-            true,
             &state,
             &cache,
             &worktree,
@@ -993,7 +988,6 @@ mod tests {
         // A refusal records its code and nothing from the environment.
         let refused = [("RUSTC".into(), "/secret/rustc".into())];
         let outcome = seed_target(
-            true,
             &state,
             &cache,
             &worktree,

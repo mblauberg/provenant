@@ -647,13 +647,13 @@ mod tests {
         assert!(!has_generation(state.path(), "repo", "aaa"));
         // The next scheduled refresh retries the same commit after an
         // infrastructure failure has been repaired.
-        assert_eq!(
+        assert!(matches!(
             refresh_with(state.path(), "repo", "aaa", |stage| built(
                 stage, "repo", "aaa"
             ))
             .unwrap(),
             Refresh::Built(_)
-        );
+        ));
         freeze(state.path());
     }
 

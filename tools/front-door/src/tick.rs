@@ -527,6 +527,7 @@ struct SeedDiscovery {
 
 impl SeedDiscovery {
     #[cfg(test)]
+    #[allow(dead_code)] // The worktree driver includes this module without libtest.
     fn from_paths(paths: Vec<PathBuf>) -> Self {
         Self {
             projects: paths
@@ -612,13 +613,14 @@ fn refresh_projects(
 
 /// Run one single-flight pass under `seed-worker.lock`. A second worker, or a
 /// disabled seed, returns without touching the result file.
+#[cfg(test)]
+#[allow(dead_code)] // The worktree driver includes this module without libtest.
 fn seed_pass(
     directory: &Directory,
     host_state: &Path,
     clock: &dyn Clock,
     enabled: bool,
-    retry_project_keys: &[String],
-    prior_error: Option<String>,
+    request: &SeedRequest,
     projects: impl FnOnce() -> Result<SeedDiscovery, String>,
     refresh: impl Fn(
         &std::path::Path,
@@ -630,14 +632,7 @@ fn seed_pass(
         Err(error) => return Err(error.to_string()),
     };
     seed_pass_locked(
-        directory,
-        host_state,
-        clock,
-        enabled,
-        retry_project_keys,
-        prior_error,
-        projects,
-        refresh,
+        directory, host_state, clock, enabled, request, projects, refresh,
     )
     .map(|_| ())
 }
@@ -647,14 +642,15 @@ fn seed_pass_locked(
     host_state: &Path,
     clock: &dyn Clock,
     enabled: bool,
-    retry_project_keys: &[String],
-    prior_error: Option<String>,
+    request: &SeedRequest,
     projects: impl FnOnce() -> Result<SeedDiscovery, String>,
     refresh: impl Fn(
         &std::path::Path,
     ) -> Result<crate::target_seed_build::Refresh, Box<dyn std::error::Error>>,
 ) -> Result<SeedOutcome, String> {
     let at = || clock.wall_now().map_err(|error| error.to_string());
+    let retry_project_keys = request.project_keys();
+    let prior_error = request.prior_error.clone();
     if !enabled {
         write_result(directory, SEED_RESULT, "tick-seed", at()?, "disabled", None)?;
         return Ok(SeedOutcome {
@@ -941,15 +937,12 @@ pub(crate) fn seed_worker(globals: &Globals) -> u8 {
         };
         let mut worker_lock = Some(worker);
         loop {
-            let retry_project_keys = request.project_keys().to_vec();
-            let prior_error = request.prior_error.clone();
             let outcome = seed_pass_locked(
                 &directory,
                 state,
                 &SystemClock,
                 config.domains.fabric.lanes.cargo_seed.enabled,
-                &retry_project_keys,
-                prior_error,
+                &request,
                 || {
                     let selection =
                         provenant_config::registered_gc_project_selection(&resolved.roots)
@@ -964,7 +957,7 @@ pub(crate) fn seed_worker(globals: &Globals) -> u8 {
                     let executor = SystemExecutor::new(1).map_err(|error| error.to_string())?;
                     Ok(registered_seed_projects(
                         &common_dirs,
-                        &retry_project_keys,
+                        request.project_keys(),
                         &executor,
                         &git,
                         &seed_git_environment(),
@@ -1286,7 +1279,7 @@ mod tests {
         let primary_key = provenant_run::target_seed::project_key(&primary_common);
         let retry = registered_seed_projects(
             &[primary_common, invalid.clone(), separate_git],
-            &[primary_key.clone()],
+            std::slice::from_ref(&primary_key),
             &executor,
             &git,
             &seed_git_environment(),
@@ -1404,13 +1397,16 @@ mod tests {
         let root = temp.path().canonicalize().unwrap();
         let directory = provenant_config::private_directory(&root, true).unwrap();
         let now = WallTime::from_micros(1_000_000).unwrap();
-        let mut queue = SeedQueue::default();
-        queue.retry = Some(SeedRequest::busy(
-            vec!["project-a".into()],
-            Some("project-b failed previously".into()),
-        ));
-        queue.retry_at =
-            Some(WallTime::from_micros(now.as_micros() - SEED_WORK_RETRY_MICROS).unwrap());
+        let queue = SeedQueue {
+            retry: Some(SeedRequest::busy(
+                vec!["project-a".into()],
+                Some("project-b failed previously".into()),
+            )),
+            retry_at: Some(
+                WallTime::from_micros(now.as_micros() - SEED_WORK_RETRY_MICROS).unwrap(),
+            ),
+            ..Default::default()
+        };
         write_seed_queue(&directory, &queue).unwrap();
 
         // The daily full request arrives after a tick has observed the old
@@ -1443,12 +1439,14 @@ mod tests {
         let root = temp.path().canonicalize().unwrap();
         let directory = provenant_config::private_directory(&root, true).unwrap();
         let now = WallTime::from_micros(1_500_000).unwrap();
-        let mut queue = SeedQueue::default();
-        queue.active = Some(SeedRequest::busy(
-            vec!["project-a".into()],
-            Some("project-b failed".into()),
-        ));
-        queue.active_at = Some(now);
+        let queue = SeedQueue {
+            active: Some(SeedRequest::busy(
+                vec!["project-a".into()],
+                Some("project-b failed".into()),
+            )),
+            active_at: Some(now),
+            ..Default::default()
+        };
         write_seed_queue(&directory, &queue).unwrap();
         let mut worker = Some(
             directory
@@ -1562,9 +1560,11 @@ mod tests {
         let root = temp.path().canonicalize().unwrap();
         let directory = provenant_config::private_directory(&root, true).unwrap();
         let now = WallTime::from_micros(3_000_000).unwrap();
-        let mut queue = SeedQueue::default();
-        queue.active = Some(SeedRequest::full());
-        queue.active_at = Some(now);
+        let queue = SeedQueue {
+            active: Some(SeedRequest::full()),
+            active_at: Some(now),
+            ..Default::default()
+        };
         write_seed_queue(&directory, &queue).unwrap();
         write_result(&directory, SEED_RESULT, "tick-seed", now, "running", None).unwrap();
         let worker = directory
@@ -1573,8 +1573,8 @@ mod tests {
         let queue_lock = seed_queue_lock(&directory).unwrap();
         let spawned = AtomicBool::new(false);
 
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {
-            let (started_tx, started_rx) = std::sync::mpsc::channel();
             let producer = scope.spawn(|| {
                 started_tx.send(()).unwrap();
                 queue_seed(&directory, now, Some(SeedRequest::full()), || {
@@ -1629,8 +1629,7 @@ mod tests {
             &root,
             &seed_clock(),
             true,
-            request.project_keys(),
-            request.prior_error.clone(),
+            &request,
             || Ok(SeedDiscovery::from_paths(projects.clone())),
             |project| match project.file_name().unwrap().to_str().unwrap() {
                 "a" => Ok(Refresh::Busy),
@@ -1694,8 +1693,7 @@ mod tests {
             &root,
             &seed_clock(),
             true,
-            request.project_keys(),
-            request.prior_error.clone(),
+            &request,
             || Ok(SeedDiscovery::from_paths(projects.clone())),
             |project| {
                 retried.borrow_mut().push(project.to_owned());
@@ -1723,8 +1721,7 @@ mod tests {
             &root,
             &seed_clock(),
             true,
-            &[],
-            None,
+            &SeedRequest::full(),
             || Ok(SeedDiscovery::from_paths(projects)),
             |_| Ok(Refresh::Current),
         )
@@ -1748,8 +1745,7 @@ mod tests {
             &root,
             &seed_clock(),
             true,
-            &[],
-            None,
+            &SeedRequest::full(),
             || Ok(SeedDiscovery::from_paths(listed)),
             |project| {
                 called.borrow_mut().push(project.to_owned());
@@ -1778,8 +1774,7 @@ mod tests {
             &root,
             &seed_clock(),
             true,
-            &[],
-            None,
+            &SeedRequest::full(),
             || Ok(SeedDiscovery::from_paths(vec![broken])),
             |_| Ok(Refresh::Built("generation".into())),
         )
@@ -1821,8 +1816,7 @@ mod tests {
             &root,
             &seed_clock(),
             true,
-            &[],
-            None,
+            &SeedRequest::full(),
             || panic!("a second worker must not enumerate projects"),
             |_| -> Result<Refresh, Box<dyn std::error::Error>> { panic!("must not refresh") },
         )
@@ -1840,8 +1834,7 @@ mod tests {
                     &root,
                     &seed_clock(),
                     false,
-                    &[],
-                    None,
+                    &SeedRequest::full(),
                     || panic!("a disabled seed must not enumerate projects"),
                     |_| -> Result<Refresh, Box<dyn std::error::Error>> {
                         panic!("must not refresh")
@@ -1859,8 +1852,7 @@ mod tests {
             &root,
             &seed_clock(),
             true,
-            &[],
-            None,
+            &SeedRequest::full(),
             || Err("registry unreadable".into()),
             |_| Ok(Refresh::Current),
         )

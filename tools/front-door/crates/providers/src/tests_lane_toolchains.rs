@@ -203,8 +203,8 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
                     "{id}"
                 );
             }
-            if let Some(expected) = &expected_pnpm_store {
-                if crate::package_cache::explicit_host_value(&host_var, &["PNPM_HOME"]).is_none() {
+            if let Some(expected) = &expected_pnpm_store
+                && crate::package_cache::explicit_host_value(&host_var, &["PNPM_HOME"]).is_none() {
                     assert_eq!(
                         configured("pnpm_config_store_dir")
                             .or_else(|| configured("npm_config_store_dir"))
@@ -213,7 +213,6 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
                         "{id}"
                     );
                 }
-            }
         }
         if id == "opencode" {
             if let Some(expected) = &expected_pnpm_cache {
@@ -225,8 +224,8 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
                     "{id}"
                 );
             }
-            if let Some(expected) = &expected_pnpm_store {
-                if crate::package_cache::explicit_host_value(&host_var, &["PNPM_HOME"]).is_none() {
+            if let Some(expected) = &expected_pnpm_store
+                && crate::package_cache::explicit_host_value(&host_var, &["PNPM_HOME"]).is_none() {
                     assert_eq!(
                         configured("pnpm_config_store_dir")
                             .or_else(|| configured("npm_config_store_dir"))
@@ -235,7 +234,6 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
                         "{id}"
                     );
                 }
-            }
             assert!(prepared.env.iter().any(|(key, value)| {
                 key == "XDG_CACHE_HOME" && value == "/fixture/state/cache"
             }));
