@@ -1181,7 +1181,7 @@ pub(crate) fn peer_submit_graph(
             directory: factory.cwd.clone(),
             peer_origin_context: Some(origin.clone()),
             peer_submission_digest: Some(submission_digest),
-            requester_path: Some(factory.requester_lane_path()),
+            requester_path: Some(factory.requester_lane_path()?),
             extra: Default::default(),
             document: document.clone(),
         })

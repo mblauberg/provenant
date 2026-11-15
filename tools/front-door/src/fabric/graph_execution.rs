@@ -1,6 +1,6 @@
 // Capture only PATH, never the credential-bearing delivery environment.
 impl super::Factory {
-    pub(crate) fn requester_lane_path(&self) -> Vec<u8> {
+    pub(crate) fn requester_lane_path(&self) -> Result<Vec<u8>, FacadeError> {
         use std::os::unix::ffi::OsStringExt;
         let Some(git) = self
             .host_launch
@@ -8,20 +8,19 @@ impl super::Factory {
             .map(|host| host.git.clone())
             .or_else(provenant_os::git::git_executable)
         else {
-            return Vec::new();
+            return Err(FacadeError::io("capture requester PATH"));
         };
         let cancel = CancelToken::new();
-        let Ok(path) = provenant_cli::run::filtered_requester_lane_path(
+        let path = provenant_cli::run::filtered_requester_lane_path(
             self.host_launch.as_ref(),
             &self.cwd,
             &self.cwd,
             &git,
             &self.executor,
             &cancel,
-        ) else {
-            return Vec::new();
-        };
-        path.path().to_os_string().into_vec()
+        )
+        .map_err(|_| FacadeError::io("capture requester PATH"))?;
+        Ok(path.path().to_os_string().into_vec())
     }
 }
 
@@ -1007,7 +1006,7 @@ impl Factory {
                 .bind(provenant_fabric_runtime::graph::GraphExecution {
                     peer_origin_context: None,
                     peer_submission_digest: None,
-                    requester_path: Some(self.requester_lane_path()),
+                    requester_path: Some(self.requester_lane_path()?),
                     extra: Default::default(),
                     bases: GraphBaseBinding::new(review_base, integration_base),
                     directory: self.cwd.clone(),
