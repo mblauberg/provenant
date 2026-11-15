@@ -138,6 +138,7 @@ fn prepare(
         git_wrapper: Default::default(),
         policy: input.policy.clone(),
         credential_roots: input.credential_roots.clone(),
+        session_state: crate::SessionStateLocation::AttemptPrivate,
         profile: ProviderProfile {
             spec: profile,
             observations: Default::default(),

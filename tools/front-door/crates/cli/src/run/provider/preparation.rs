@@ -3544,12 +3544,6 @@ pub(super) fn prepare_candidates(
                     state_root,
                     config_root: roots.state.as_path(),
                     private_state: &private_state,
-                    selected_native_home: account.as_ref().map(|account| account.directory()),
-                    native_home_required: prior
-                        .applied_route
-                        .as_ref()
-                        .and_then(|applied| applied.sandbox.as_ref())
-                        .is_some_and(|sandbox| !sandbox.effective),
                 },
                 &launch_policy,
             ) {
@@ -3931,6 +3925,54 @@ pub(super) fn prepare_candidates(
             };
             spec.user_skills = skills;
         }
+        let native_root = match &spec.session_state {
+            provenant_providers::SessionStateLocation::AttemptPrivate => None,
+            provenant_providers::SessionStateLocation::Native { root }
+                if !sandbox.effective && root.is_absolute() =>
+            {
+                Some(root.as_path())
+            }
+            _ => {
+                reasons.push(skip(
+                    &label,
+                    SkipKind::Refused,
+                    "provider session-state location does not match the prepared sandbox or is not an absolute native root",
+                ));
+                reason_boundaries.insert(
+                    reasons.len() - 1,
+                    provenant_records::diagnostic::BoundaryClass::Authority,
+                );
+                continue;
+            }
+        };
+        if let Some(prior) = resume {
+            let prior_native = prior
+                .applied_route
+                .as_ref()
+                .is_some_and(|applied| prior_uses_native_session_state(applied, &route.adapter));
+            if prior_native != native_root.is_some() {
+                reasons.push(skip(
+                    &label,
+                    SkipKind::Refused,
+                    "the prior and prepared continuation use different native or private session-state locations",
+                ));
+                reason_boundaries.insert(
+                    reasons.len() - 1,
+                    provenant_records::diagnostic::BoundaryClass::Authority,
+                );
+                continue;
+            }
+            if let Some(root) = native_root
+                && let Err(error) = verify_native_continuation(prior, &route, root, state_root)
+            {
+                let class = error.boundary_class();
+                reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
+                if class != provenant_records::diagnostic::BoundaryClass::None {
+                    reason_boundaries.insert(reasons.len() - 1, class);
+                }
+                continue;
+            }
+        }
         if let Some(alias) = &paths.temporary_alias {
             alias_temporary_env(&mut spec.env, scratch, &alias.join(&scratch_name));
         }
@@ -4203,32 +4245,21 @@ pub(super) fn prepare_candidates(
             reasons.push(setup_skip(&label, format!("setup failed: {error}")));
             continue;
         }
-        if !sandbox.effective
-            && let Some((environment, fallback)) = adapter_spec
-                .filter(|spec| {
+        if let Some(root) = native_root {
+            if route.adapter == "codex"
+                && adapter_spec.is_some_and(|spec| {
                     spec.model_observation == provenant_records::ModelObservation::Rollout
                 })
-                .and_then(|spec| spec.default_account_directory)
-        {
-            // Native Codex writes its rollout beside the selected login rather
-            // than in this candidate's private state. Retain the launch-time
-            // selector outside the lane-writable candidate subtree so settlement
-            // observes the same trusted home after recovery.
-            let codex_home = spec
-                .env
-                .iter()
-                .find(|(key, _)| key == environment)
-                .map(|(_, value)| PathBuf::from(value))
-                .unwrap_or_else(|| home.join(fallback));
-            // This is host settlement metadata, outside the adapter's writable
-            // candidate subtree. Keep it out of the adapter setup steps, whose
-            // file writes are deliberately restricted to scratch.
-            if let Err(error) = write_native_codex_selector(
-                &paths.provider_state,
-                &scratch_name,
-                &codex_home,
-                &route,
-            ) {
+            {
+                if let Err(error) =
+                    write_native_codex_selector(&paths.provider_state, &scratch_name, root, &route)
+                {
+                    reasons.push(setup_skip(&label, error));
+                    continue;
+                }
+            } else if let Err(error) =
+                write_native_session_location(&paths.provider_state, root, &route)
+            {
                 reasons.push(setup_skip(&label, error));
                 continue;
             }

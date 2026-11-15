@@ -257,6 +257,13 @@ fn prepare(
             *value = private.into();
         }
     }
+    let session_state = if input.sandboxed() {
+        crate::SessionStateLocation::AttemptPrivate
+    } else {
+        crate::SessionStateLocation::Native {
+            root: input.home.to_owned(),
+        }
+    };
     Ok(LaunchSpec {
         argv,
         env,
@@ -270,6 +277,7 @@ fn prepare(
         git_wrapper: Default::default(),
         policy: input.policy.clone(),
         credential_roots: input.credential_roots.clone(),
+        session_state,
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 process_executables: vec![exact(input.executable)],

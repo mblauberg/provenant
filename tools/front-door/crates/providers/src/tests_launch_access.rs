@@ -747,6 +747,11 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
                 git_context,
                 ..input
             })?;
+            assert_eq!(
+                spec.session_state,
+                crate::SessionStateLocation::AttemptPrivate,
+                "OpenCode keeps its session database in attempt state even on native launches"
+            );
             let env = |key: &str| {
                 spec.env
                     .iter()
@@ -898,6 +903,11 @@ fn cursor_and_claude_keep_sessions_private_with_or_without_skills() -> Result<()
                     .unwrap()
                     .adapter;
                 let spec = adapter.prepare(input)?;
+                assert_eq!(
+                    spec.session_state,
+                    crate::SessionStateLocation::AttemptPrivate,
+                    "sandboxed {id} state stays in the attempt"
+                );
                 let key = if id == "claude" {
                     "CLAUDE_CONFIG_DIR"
                 } else {
@@ -962,6 +972,17 @@ fn native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation()
         input.host_var =
             &|name| (name == provenant_core::consumer_env::SANDBOX).then(|| "off".into());
         let native = adapter.prepare(input)?;
+        let crate::SessionStateLocation::Native { root: session_root } = &native.session_state
+        else {
+            return Err(ProviderError::UnknownIdentity);
+        };
+        assert!(session_root.is_absolute());
+        match id {
+            "agy" | "cursor" => assert_eq!(session_root, Path::new("/fixture/home")),
+            "claude" => assert_eq!(session_root, Path::new("/fixture/home/.claude")),
+            "codex" => {}
+            _ => unreachable!("only native session-state adapters are listed"),
+        }
         for (key, value) in &host {
             // These selectors bind the child to its provider, Fabric context
             // and private Cargo configuration/target with shared downloads.
@@ -1020,6 +1041,11 @@ fn native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation()
                 Path::new("/fixture/repo"),
                 Some(&token),
             ))?;
+            assert_eq!(
+                confined.session_state,
+                crate::SessionStateLocation::AttemptPrivate,
+                "sandboxed {id} state stays in the attempt"
+            );
             assert!(!confined.tool_requirements.exec.is_empty());
         }
     }

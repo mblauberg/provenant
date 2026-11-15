@@ -6,6 +6,100 @@ struct NativeHome {
     home: provenant_records::StructuredPathWire,
 }
 
+#[derive(serde::Deserialize, serde::Serialize)]
+struct NativeSessionLocation {
+    schema_version: u64,
+    provider: String,
+    model: String,
+    account_key: Option<String>,
+    root: provenant_records::StructuredPathWire,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum NativeSessionLocationError {
+    #[error(
+        "the prior native session location was not recorded; start a new lane because its session location cannot be proven"
+    )]
+    Missing,
+    #[error(
+        "the prior native session location is unreadable; check the selected provider state and retry"
+    )]
+    Unavailable,
+    #[error("the prior native session location record is invalid; start a new lane")]
+    Invalid,
+    #[error(
+        "the prior native session location differs from the selected provider, model, account, or home"
+    )]
+    Mismatch,
+}
+
+pub(super) fn write_native_session_location(
+    provider_state: &Path,
+    root: &Path,
+    route: &ResolvedRoute,
+) -> Result<(), String> {
+    if !root.is_absolute() || route.adapter.is_empty() || route.model.is_empty() {
+        return Err("native provider session location has an invalid route or root".into());
+    }
+    let location = NativeSessionLocation {
+        schema_version: 1,
+        provider: route.adapter.clone(),
+        model: route.model.clone(),
+        account_key: route.account_key.clone(),
+        root: provenant_records::StructuredPathWire::from_path(root)
+            .map_err(|error| error.to_string())?,
+    };
+    let bytes = serde_json::to_vec(&location).map_err(|error| error.to_string())?;
+    let selector = provider_state.join("native-session-location.json");
+    super::confinement::write_setup_file(&[provider_state], &selector, &bytes, false)
+}
+
+pub(super) fn native_session_location_for_route(
+    provider_state: &Path,
+    provider: &str,
+    model: &str,
+    account_key: Option<&str>,
+) -> Result<PathBuf, NativeSessionLocationError> {
+    let state = Directory::open_anchor(provider_state).map_err(|error| {
+        if error.is_not_found() {
+            NativeSessionLocationError::Missing
+        } else {
+            NativeSessionLocationError::Unavailable
+        }
+    })?;
+    let bytes = state
+        .read_stable(
+            std::ffi::OsStr::new("native-session-location.json"),
+            16 * 1024,
+        )
+        .map_err(|error| {
+            if error.is_not_found() {
+                NativeSessionLocationError::Missing
+            } else {
+                NativeSessionLocationError::Unavailable
+            }
+        })?;
+    let location: NativeSessionLocation =
+        serde_json::from_slice(&bytes).map_err(|_| NativeSessionLocationError::Invalid)?;
+    if location.schema_version != 1 || location.provider.is_empty() || location.model.is_empty() {
+        return Err(NativeSessionLocationError::Invalid);
+    }
+    if location.provider != provider
+        || location.model != model
+        || location.account_key.as_deref() != account_key
+    {
+        return Err(NativeSessionLocationError::Mismatch);
+    }
+    let root = location
+        .root
+        .to_path_buf()
+        .map_err(|_| NativeSessionLocationError::Invalid)?;
+    if !root.is_absolute() {
+        return Err(NativeSessionLocationError::Invalid);
+    }
+    Ok(root)
+}
+
 pub(super) fn write_native_codex_selector(
     provider_state: &Path,
     candidate: &str,
@@ -15,11 +109,7 @@ pub(super) fn write_native_codex_selector(
     let valid_candidate = candidate
         .strip_prefix("candidate-")
         .is_some_and(|index| !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit()));
-    if !valid_candidate
-        || !home.is_absolute()
-        || route.adapter != "codex"
-        || route.model.is_empty()
-        || route.account_key.is_none()
+    if !valid_candidate || !home.is_absolute() || route.adapter != "codex" || route.model.is_empty()
     {
         return Err("native Codex selector has an invalid candidate route".into());
     }
@@ -96,7 +186,9 @@ pub(super) fn find_native_codex_rollout(
         if !home.is_absolute() {
             return Err(ProviderError::UnknownIdentity);
         }
-        if !selected_home.is_some_and(|selected| selected == home.as_path()) {
+        if let Some(selected) = selected_home
+            && selected != home.as_path()
+        {
             continue;
         }
         selected_home_seen = true;
@@ -126,7 +218,7 @@ pub(super) fn find_native_codex_rollout(
     if !selector_seen {
         return Ok(None);
     }
-    if !selected_home_seen {
+    if selected_home.is_some() && !selected_home_seen {
         return Err(ProviderError::UnknownIdentity);
     }
     found.map(Some).ok_or(ProviderError::UnknownIdentity)
@@ -147,7 +239,6 @@ pub(crate) fn observe_codex_rollout(
     provider_state: &Path,
     thread: &str,
     route: &run::RouteRecord,
-    selected_home: Option<&Path>,
     native_home_required: bool,
 ) -> Result<provenant_providers::codex_rollout::Turn, provenant_providers::ProviderError> {
     use provenant_providers::ProviderError;
@@ -164,7 +255,7 @@ pub(crate) fn observe_codex_rollout(
         .and_then(|model| model.strip_prefix("codex/"))
         .ok_or(ProviderError::UnknownIdentity)?;
     if native_home_required {
-        return find_native_codex_rollout(provider_state, thread, model, selected_home)?
+        return find_native_codex_rollout(provider_state, thread, model, None)?
             .ok_or(ProviderError::UnknownIdentity);
     }
     let entries = std::fs::read_dir(provider_state).map_err(|_| ProviderError::UnknownIdentity)?;

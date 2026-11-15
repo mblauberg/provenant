@@ -558,6 +558,13 @@ fn prepare(
             ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
         ]);
     }
+    let session_state = if input.sandboxed() {
+        crate::SessionStateLocation::AttemptPrivate
+    } else {
+        crate::SessionStateLocation::Native {
+            root: home.to_owned(),
+        }
+    };
     Ok(LaunchSpec {
         argv,
         env,
@@ -571,6 +578,7 @@ fn prepare(
         git_wrapper: Default::default(),
         policy: input.policy.clone(),
         credential_roots: input.credential_roots.clone(),
+        session_state,
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 // The keyring library reads its token through Apple's `security`.

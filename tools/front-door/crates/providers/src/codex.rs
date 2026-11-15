@@ -27,6 +27,22 @@ pub const REGISTRATION: crate::Registration = crate::Registration {
     },
 };
 
+fn native_codex_home(
+    environment: &[(OsString, OsString)],
+    account_home: Option<&std::path::Path>,
+    host_home: &std::path::Path,
+) -> std::path::PathBuf {
+    account_home
+        .map(std::path::Path::to_path_buf)
+        .or_else(|| {
+            environment
+                .iter()
+                .find(|(key, _)| key == "CODEX_HOME")
+                .map(|(_, value)| std::path::PathBuf::from(value.as_os_str()))
+        })
+        .unwrap_or_else(|| host_home.join(provenant_core::CODEX_ACCOUNT_DIRECTORY))
+}
+
 crate::adapter!(Codex, "codex", prepare);
 
 /// Completed-turn usage; this cannot stop a turn mid-flight. `codex exec --json`
@@ -226,9 +242,22 @@ fn prepare(
         }
     }
     let selected_home = if input.sandboxed() {
-        Some(codex_home.as_path())
+        Some(codex_home.to_path_buf())
     } else {
-        input.account.map(|account| account.directory())
+        input
+            .account
+            .map(|account| account.directory().to_path_buf())
+    };
+    let session_state = if input.sandboxed() {
+        crate::SessionStateLocation::AttemptPrivate
+    } else {
+        crate::SessionStateLocation::Native {
+            root: native_codex_home(
+                &env,
+                input.account.map(|account| account.directory()),
+                input.home,
+            ),
+        }
     };
     if let Some(selected_home) = selected_home {
         env.retain(|(key, _)| key != "CODEX_HOME");
@@ -250,6 +279,7 @@ fn prepare(
         git_wrapper: Default::default(),
         policy: input.policy.clone(),
         credential_roots: input.credential_roots.clone(),
+        session_state,
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 process_executables: vec![exact(input.executable)],
@@ -618,6 +648,34 @@ mod usage_limit_tests {
                 Expected::NoLimit => assert!(actual.is_none(), "{scope}"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod session_location_tests {
+    use super::*;
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn native_state_root_matches_account_or_effective_codex_home() {
+        let host_home = std::path::Path::new("/fixture/home");
+        let explicit = vec![("CODEX_HOME".into(), "/fixture/custom-codex".into())];
+        assert_eq!(
+            native_codex_home(&explicit, None, host_home),
+            std::path::PathBuf::from("/fixture/custom-codex")
+        );
+        assert_eq!(
+            native_codex_home(&[], None, host_home),
+            std::path::PathBuf::from("/fixture/home/.codex")
+        );
+        assert_eq!(
+            native_codex_home(
+                &explicit,
+                Some(std::path::Path::new("/fixture/selected-account")),
+                host_home,
+            ),
+            std::path::PathBuf::from("/fixture/selected-account")
+        );
     }
 }
 

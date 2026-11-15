@@ -1016,6 +1016,13 @@ fn prepare(
     if input.sandboxed() {
         setup.push(SetupStep::CreateDir(config.clone()));
     }
+    let session_state = if input.sandboxed() {
+        crate::SessionStateLocation::AttemptPrivate
+    } else {
+        crate::SessionStateLocation::Native {
+            root: config.clone(),
+        }
+    };
     if let Some(user_skills) = &user_skills {
         setup.push(SetupStep::Symlink {
             link: config.join("skills"),
@@ -1063,6 +1070,7 @@ fn prepare(
         git_wrapper: Default::default(),
         policy: input.policy.clone(),
         credential_roots: input.credential_roots.clone(),
+        session_state,
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 process_executables: vec![exact(input.executable)],

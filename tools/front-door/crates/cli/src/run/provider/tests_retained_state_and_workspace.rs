@@ -129,32 +129,20 @@ fn codex_rollout_is_found_in_the_launched_candidate() -> Result<(), Box<dyn std:
             ),
         )?;
         let route_record = codex_route_record("gpt-6-luna", Some("selected-account-key"));
-        let selected_home = native.then_some(home.as_path());
         assert_eq!(
-            observe_codex_rollout(&base, thread, &route_record, selected_home, native)?.model,
+            observe_codex_rollout(&base, thread, &route_record, native)?.model,
             "gpt-6-luna"
         );
-        assert!(
-            observe_codex_rollout(
-                &base,
-                "another-thread",
-                &route_record,
-                selected_home,
-                native
-            )
-            .is_err()
-        );
+        assert!(observe_codex_rollout(&base, "another-thread", &route_record, native).is_err());
         if native {
             // Two fallback candidates can launch against the same login home.
             write_native_codex_selector(&base, "candidate-0", &home, &route)?;
             assert_eq!(
-                observe_codex_rollout(&base, thread, &route_record, selected_home, native)?.model,
+                observe_codex_rollout(&base, thread, &route_record, native)?.model,
                 "gpt-6-luna"
             );
             let wrong_model = codex_route_record("other-model", Some("selected-account-key"));
-            assert!(
-                observe_codex_rollout(&base, thread, &wrong_model, selected_home, native).is_err()
-            );
+            assert!(observe_codex_rollout(&base, thread, &wrong_model, native).is_err());
             assert!(
                 find_native_codex_rollout(&base, thread, "gpt-6-luna", Some(candidate.as_path()))
                     .is_err()
@@ -169,10 +157,22 @@ fn codex_rollout_is_found_in_the_launched_candidate() -> Result<(), Box<dyn std:
             other_day.join(format!("rollout-2026-10-24T00-00-00-{thread}.jsonl")),
         )?;
         if native {
+            let other_home = temp.path().join("other-native-account");
+            let other_native_day = other_home.join("sessions/2026/10/24");
+            std::fs::create_dir_all(&other_native_day)?;
+            std::fs::copy(
+                day.join(format!("rollout-2026-10-24T00-00-00-{thread}.jsonl")),
+                other_native_day.join(format!("rollout-2026-10-24T00-00-00-{thread}.jsonl")),
+            )?;
+            write_native_codex_selector(&base, "candidate-0", &other_home, &route)?;
+            assert!(matches!(
+                observe_codex_rollout(&base, thread, &route_record, true),
+                Err(provenant_providers::ProviderError::IdentityMismatch)
+            ));
             std::fs::remove_file(base.join("codex-observation-candidate-0.json"))?;
         } else {
             assert!(matches!(
-                observe_codex_rollout(&base, thread, &route_record, selected_home, native),
+                observe_codex_rollout(&base, thread, &route_record, native),
                 Err(provenant_providers::ProviderError::IdentityMismatch)
             ));
         }
@@ -221,22 +221,116 @@ fn codex_route_record(model: &str, account_key: Option<&str>) -> run::RouteRecor
     }
 }
 
-fn native_continuation_state<'a>(
-    state_root: &'a Path,
-    config_root: &'a Path,
-    private_state: &'a Path,
-    selected_native_home: Option<&'a Path>,
-) -> ContinuationState<'a> {
-    ContinuationState {
-        state_root,
-        config_root,
-        private_state,
-        selected_native_home,
-        native_home_required: true,
-    }
+#[test]
+// Spec: docs/specs/fabric.md#session-ready-steering
+fn native_session_location_round_trip_is_bound_to_route_and_account()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{AttemptId, Digest};
+
+    let temp = tempfile::tempdir()?;
+    let state_root = temp.path().join("state");
+    let attempt_id = AttemptId::from_bytes([8; 16]);
+    let provider_state = state_root
+        .join("attempts")
+        .join(attempt_id.to_string())
+        .join("provider-state");
+    let home = temp.path().join("native-home");
+    std::fs::create_dir_all(provider_state.join("candidate-0"))?;
+    let mut route = codex_resolved_route("fixture-model", Some("selected-account-key"));
+    route.adapter = "agy".into();
+    write_native_session_location(&provider_state, &home, &route)?;
+
+    assert_eq!(
+        native_session_location_for_route(
+            &provider_state,
+            "agy",
+            "fixture-model",
+            Some("selected-account-key"),
+        )?,
+        home
+    );
+    assert!(matches!(
+        native_session_location_for_route(
+            &provider_state,
+            "agy",
+            "fixture-model",
+            Some("different-account"),
+        ),
+        Err(NativeSessionLocationError::Mismatch)
+    ));
+    assert!(matches!(
+        native_session_location_for_route(
+            &provider_state,
+            "agy",
+            "other-model",
+            Some("selected-account-key"),
+        ),
+        Err(NativeSessionLocationError::Mismatch)
+    ));
+
+    let prior: run::AttemptRecord = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "attempt_id": attempt_id,
+        "key": {"project": "0123456789abcdef0123456789abcdef", "graph": "fixture", "node": "node", "attempt": 1},
+        "project_id": "0123456789abcdef0123456789abcdef",
+        "attempt_number": 1, "revision": 1, "generation": 0,
+        "requested_route": {"kind": "model", "provider": "agy", "model": "fixture-model"},
+        "applied_route": {"provider": "agy", "model": "agy/fixture-model", "account_key": "selected-account-key", "sandbox": {"effective": false}},
+        "authority_digest": Digest::from_bytes([0; 32]), "read_only_writable": [], "protected_paths": [], "trace": {},
+        "session": "fixture-session", "queued_at": "2026-10-25T00:00:00.000000Z",
+        "state": {"state": "queued"}, "usage": {},
+        "prompt": {"path": {"encoding": "utf8", "path": "prompt.txt"}, "digest": provenant_records::FileDigest::from_bytes([0; 32]), "bytes": 0, "complete": true, "redacted": false}
+    }))?;
+    verify_native_continuation(&prior, &route, &home, &state_root)?;
+    let wrong_home = temp.path().join("different-home");
+    assert!(matches!(
+        verify_native_continuation(&prior, &route, &wrong_home, &state_root),
+        Err(ContinuationError::NativeSessionLocation(
+            NativeSessionLocationError::Mismatch
+        ))
+    ));
+    let mut other_account = route.clone();
+    other_account.account_key = Some("other-account".into());
+    assert!(matches!(
+        verify_native_continuation(&prior, &other_account, &home, &state_root),
+        Err(ContinuationError::RouteMismatch)
+    ));
+    Ok(())
 }
 
 #[test]
+// Spec: docs/specs/fabric.md#session-ready-steering
+fn native_codex_observation_uses_launch_selected_home_without_registered_account()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let provider_state = temp.path().join("provider-state");
+    let candidate = provider_state.join("candidate-0");
+    let home = temp.path().join("discovered-codex-home");
+    let session = "fixture-local-session";
+    let day = home.join("sessions/2026/11/16");
+    std::fs::create_dir_all(&candidate)?;
+    std::fs::create_dir_all(&day)?;
+    let route = codex_resolved_route("gpt-6-luna", None);
+    write_native_codex_selector(&provider_state, "candidate-0", &home, &route)?;
+    std::fs::write(
+        day.join(format!("rollout-2026-11-16T00-00-00-{session}.jsonl")),
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"session_meta","payload":{"id":session}}),
+            serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6-luna"}}),
+        ),
+    )?;
+
+    let route = codex_route_record("gpt-6-luna", None);
+    assert_eq!(
+        observe_codex_rollout(&provider_state, session, &route, true)?.model,
+        "gpt-6-luna"
+    );
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/fabric.md#session-ready-steering
 fn native_codex_continuation_uses_the_bound_account_home_without_copying_it()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, Digest};
@@ -288,7 +382,7 @@ fn native_codex_continuation_uses_the_bound_account_home_without_copying_it()
         "project_id": "0123456789abcdef0123456789abcdef",
         "attempt_number": 1, "revision": 1, "generation": 0,
         "requested_route": {"kind": "model", "provider": "codex", "model": "gpt-6-luna"},
-        "applied_route": {"provider": "codex", "model": "codex/gpt-6-luna", "account_key": "selected-account-key"},
+        "applied_route": {"provider": "codex", "model": "codex/gpt-6-luna", "account_key": "selected-account-key", "sandbox": {"effective": false}},
         "authority_digest": Digest::from_bytes([0; 32]), "read_only_writable": [], "protected_paths": [], "trace": {},
         "session": session, "queued_at": "2026-10-25T00:00:00.000000Z",
         "state": {"state": "queued"}, "usage": {},
@@ -300,10 +394,15 @@ fn native_codex_continuation_uses_the_bound_account_home_without_copying_it()
         &prior,
         &route,
         "fixture",
-        native_continuation_state(&state, &state, &child_state, Some(&native_home)),
+        ContinuationState {
+            state_root: &state,
+            config_root: &state,
+            private_state: &child_state,
+        },
         &provenant_records::policy::Policy::default(),
     )?;
     assert_eq!(continuation.session(), session);
+    verify_native_continuation(&prior, &route, &native_home, &state)?;
     assert_eq!(
         std::fs::read_dir(&child_state)?.count(),
         0,
@@ -327,14 +426,8 @@ fn native_codex_continuation_uses_the_bound_account_home_without_copying_it()
             serde_json::json!({"type":"turn_context","payload":{"model":"other-model"}}),
         ),
     )?;
-    let wrong_session_model = continuation_for_policy(
-        &prior,
-        &route,
-        "fixture",
-        native_continuation_state(&state, &state, &child_state, Some(&native_home)),
-        &provenant_records::policy::Policy::default(),
-    )
-    .unwrap_err();
+    let wrong_session_model =
+        verify_native_continuation(&prior, &route, &native_home, &state).unwrap_err();
     assert!(matches!(
         wrong_session_model,
         ContinuationError::NativeSessionUnavailable
@@ -349,30 +442,15 @@ fn native_codex_continuation_uses_the_bound_account_home_without_copying_it()
     )?;
 
     let wrong_home = base.join("different-account-home");
-    let refusal = continuation_for_policy(
-        &prior,
-        &route,
-        "fixture",
-        native_continuation_state(&state, &state, &child_state, Some(&wrong_home)),
-        &provenant_records::policy::Policy::default(),
-    )
-    .unwrap_err();
+    let refusal = verify_native_continuation(&prior, &route, &wrong_home, &state).unwrap_err();
     assert!(matches!(
         refusal,
         ContinuationError::NativeSessionUnavailable
     ));
-    assert!(refusal.to_string().contains("same registered account"));
     assert!(!refusal.to_string().contains(session));
 
     std::fs::remove_file(&rollout)?;
-    let missing = continuation_for_policy(
-        &prior,
-        &route,
-        "fixture",
-        native_continuation_state(&state, &state, &child_state, Some(&native_home)),
-        &provenant_records::policy::Policy::default(),
-    )
-    .unwrap_err();
+    let missing = verify_native_continuation(&prior, &route, &native_home, &state).unwrap_err();
     assert!(matches!(
         missing,
         ContinuationError::NativeSessionUnavailable
