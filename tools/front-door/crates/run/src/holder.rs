@@ -1741,8 +1741,10 @@ impl RunStore {
                         &stderr,
                         exit,
                         &provider_state,
-                        completion.holder_context(),
-                        continuation.as_ref(),
+                        crate::ContinuationDecodeContext {
+                            context: completion.holder_context(),
+                            expectation: continuation.as_ref(),
+                        },
                     )
                     .map_err(RunError::ProviderEvidence)?
             }
