@@ -523,7 +523,7 @@ fn tick_wakes_graph_without_deadline_but_respects_future_deadline()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
         serde_json::from_value(serde_json::json!({
-            "schema_version": 1, "graph_id": "waiter", "plan_digest": "plan", "nodes": [
+            "schema_version": 2, "graph_id": "waiter", "plan_digest": "plan", "nodes": [
                 {"id":"branch", "worktree":null, "state":"running", "attempts":[{
                     "key":{"graph_id":"waiter", "node_id":"branch", "route_index":0, "attempt": 1},
                     "route":{"adapter":"fixture", "model":"fixture/model"},

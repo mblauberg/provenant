@@ -183,7 +183,7 @@ fn resumed_lane_settlement_ignores_terminal_graph() -> Result<(), Box<dyn std::e
             "access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
     }))?;
     let checkpoint: graph::GraphCheckpoint = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":"terminal-unrelated","plan_digest":"digest",
+        "schema_version":2,"graph_id":"terminal-unrelated","plan_digest":"digest",
         "nodes":[{"id":"one","state":"succeeded","attempts":[]}]
     }))?;
     let mut journal = graph::FileJournal::open(

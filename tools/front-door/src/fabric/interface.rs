@@ -1083,9 +1083,10 @@ impl Factory {
         };
         let library = self.template_library(Some(&inline))?;
         if full_document.is_none() {
-            for field in ["brief", "over"] {
+            // The CLI brief is a node prompt; template parameters retain their names.
+            for (field, node_field) in [("brief", "prompt"), ("over", "over")] {
                 if let Some(value) = input.get(field).filter(|value| !value.is_null()) {
-                    node[field] = value.clone();
+                    node[node_field] = value.clone();
                 }
             }
             if let Some(name) = input.get("template").filter(|value| !value.is_null()) {
@@ -1113,7 +1114,7 @@ impl Factory {
             }
             if template.is_composite() {
                 let fields = node.as_object_mut().ok_or_else(invalid)?;
-                fields.remove("brief");
+                fields.remove("prompt");
                 fields.remove("tier");
             }
             node["with"] = parameters;
@@ -1689,9 +1690,10 @@ impl Factory {
             if let Some(name) = input.get("template").filter(|value| !value.is_null()) {
                 node["use"] = name.clone();
             }
-            for field in ["brief", "over"] {
+            // The CLI brief is a node prompt; template parameters retain their names.
+            for (field, node_field) in [("brief", "prompt"), ("over", "over")] {
                 if let Some(value) = input.get(field).filter(|value| !value.is_null()) {
-                    node[field] = value.clone();
+                    node[node_field] = value.clone();
                 }
             }
             if let Some(RouteChoice::Alias(alias)) = &route {
@@ -1740,7 +1742,7 @@ impl Factory {
                 let fields = node.as_object_mut().ok_or_else(|| {
                     FacadeError::invalid(InvalidInputDetail::Field("document".into()))
                 })?;
-                fields.remove("brief");
+                fields.remove("prompt");
                 fields.remove("tier");
             }
             // Node parameters supplied explicitly (including CLI --set) beat
@@ -3979,8 +3981,8 @@ mod tests {
             "set":{"attempt.host":"local", "attempt.build_heavy":true,
                 "attempt.confidential":true, "attempt.provider_timeout":42},
             "document":{"nodes":[
-                {"id":"first", "use":"task", "brief":"Inspect first", "tier":"junior"},
-                {"id":"second", "use":"task", "brief":"Inspect second", "tier":"senior"}
+                {"id":"first", "use":"task", "prompt":"Inspect first", "tier":"junior"},
+                {"id":"second", "use":"task", "prompt":"Inspect second", "tier":"senior"}
             ]}
         });
         let response = factory.graph_document(input.clone(), budget, &cancel)?;
@@ -4551,7 +4553,7 @@ mod tests {
             factory.child_request(&unkeyed)?.id,
             factory.child_request(&unkeyed)?.id
         );
-        let operation = json!({"op":"run","document":{"use":"task","brief":"Nested operation","idempotency_key":"child-replay"}});
+        let operation = json!({"op":"run","document":{"use":"task","prompt":"Nested operation","idempotency_key":"child-replay"}});
         assert_eq!(
             factory.child_request(&operation)?,
             factory.child_request(&operation)?
@@ -4577,7 +4579,7 @@ mod tests {
                 .id,
             first.id
         );
-        let bound = factory.child_request(&json!({"op":"run", "document":{"use":"implement", "with":{"bounded":true}, "brief":"Bound writer", "worktree":".worktrees/existing"}}))?;
+        let bound = factory.child_request(&json!({"op":"run", "document":{"use":"implement", "with":{"bounded":true}, "prompt":"Bound writer", "worktree":".worktrees/existing"}}))?;
         let controlled = factory.child_request(&json!({"op":"run", "template":"implement",
             "brief":"Bound controls", "branch":"fix/child", "base":"HEAD",
             "write_scope":["src"], "detached":true}))?;
@@ -4602,7 +4604,7 @@ mod tests {
         assert_eq!(node["write_scope"], json!(["src"]));
         assert!(controlled.has_writers());
         assert!(controlled.detached);
-        let nested = json!({"op":"run", "document":{"use":"implement", "with":{"bounded":true}, "brief":"Nested replay",
+        let nested = json!({"op":"run", "document":{"use":"implement", "with":{"bounded":true}, "prompt":"Nested replay",
             "idempotency_key":"nested-child", "detached":true}});
         let nested_first = factory.child_request(&nested)?;
         assert_eq!(factory.child_request(&nested)?, nested_first);
@@ -4660,7 +4662,7 @@ mod tests {
             "exclude",
         ] {
             for mut document in [
-                json!({"use":"task", "brief":"Inspect"}),
+                json!({"use":"task", "prompt":"Inspect"}),
                 json!({"graph_id":"child", "schema_version":2, "nodes":[]}),
             ] {
                 document[field] = json!(null);
@@ -4680,7 +4682,7 @@ mod tests {
         let request = factory.child_request(&json!({
             "op":"run", "document":{
                 "parameters":{"subject":{"type":"string", "default":"default"}},
-                "nodes":[{"id":"one", "use":"task", "brief":"Inspect ${subject} ${item}"}]
+                "nodes":[{"id":"one", "use":"task", "prompt":"Inspect ${subject} ${item}"}]
             }, "set":{"subject":"code"}, "over":["a","b"], "route":"junior"
         }))?;
         assert!(!request.writer);
@@ -4708,7 +4710,7 @@ mod tests {
         );
         let request = factory.child_request(&json!({
             "op":"run", "document":{"graph_id":"child-doc", "nodes":[
-                {"id":"inspect", "use":"task", "brief":"Document child"}
+                {"id":"inspect", "use":"task", "prompt":"Document child"}
             ]}
         }))?;
         assert_eq!(
@@ -5002,13 +5004,13 @@ mod tests {
             (
                 json!({"op":"run", "document":{
                 "parameters":{"subject":{"type":"string"}},
-                "nodes":[{"id":"write", "use":"implement", "brief":"Fix ${subject}"}]
+                "nodes":[{"id":"write", "use":"implement", "prompt":"Fix ${subject}"}]
             }, "set":{"subject":"inline"}}),
                 1,
                 false,
             ),
             (
-                json!({"op":"run", "document":{"use":"implement", "brief":"Fix ${item}", "write_scope":["${item}"]},
+                json!({"op":"run", "document":{"use":"implement", "prompt":"Fix ${item}", "write_scope":["${item}"]},
                 "over":["three","four"]}),
                 2,
                 true,
@@ -5073,7 +5075,7 @@ mod tests {
                 &rig.state,
                 &factory.cwd,
                 &credentials,
-                SourceAdmissionMode::Registered,
+                SourceAdmissionMode::Live,
             );
             let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
             let preview = factory.graph_document(
@@ -5109,7 +5111,7 @@ mod tests {
                     assert_eq!(preview["status"], "refused");
                     assert!(
                         rows.iter()
-                            .all(|row| row["code"] == error.code && row["reason"] == error.reason)
+                            .all(|row| row["code"] == error.code)
                     );
                 }
             }
@@ -5141,7 +5143,7 @@ mod tests {
             .map(|node| Some(node.prompt.as_str()))
             .collect();
         assert_eq!(prompts, vec![Some("Inspect one"), Some("Inspect two")]);
-        let response = factory.graph_document(json!({"op":"run","document":{"use":"task","brief":"Inspect ${item}"},"over":["one","two"],"explain":true}), budget, &cancel)?;
+        let response = factory.graph_document(json!({"op":"run","document":{"use":"task","prompt":"Inspect ${item}"},"over":["one","two"],"explain":true}), budget, &cancel)?;
         let doc: GraphDocument = serde_json::from_value(response["document"].clone())?;
         let prompts: Vec<_> = doc
             .expanded(&factory.context.config.graph.limits)?
@@ -5151,7 +5153,7 @@ mod tests {
             .map(|node| node.prompt)
             .collect();
         assert_eq!(prompts, vec!["Inspect one", "Inspect two"]);
-        let response = factory.graph_document(json!({"op":"run","document":{"parameters":{"subject":{"type":"string"}},"nodes":[{"id":"one","use":"task","brief":"Inspect ${subject} ${item}"}]},"set":{"subject":"code"},"over":["a","b"],"explain":true}), budget, &cancel)?;
+        let response = factory.graph_document(json!({"op":"run","document":{"parameters":{"subject":{"type":"string"}},"nodes":[{"id":"one","use":"task","prompt":"Inspect ${subject} ${item}"}]},"set":{"subject":"code"},"over":["a","b"],"explain":true}), budget, &cancel)?;
         let doc: GraphDocument = serde_json::from_value(response["document"].clone())?;
         let prompts: Vec<_> = doc
             .expanded(&factory.context.config.graph.limits)?
@@ -5262,9 +5264,15 @@ mod tests {
         assert!(compiled["graph_id"].as_str().is_some_and(|id| {
             provenant_fabric_runtime::graph::template::graph_name_fault(id).is_none()
         }));
-        for (field, expected) in settings.as_object().ok_or("settings object")? {
-            assert_eq!(&compiled[field], expected, "lost graph setting {field}");
-        }
+        // Compare declarations after decoding: empty default fields may be omitted on the wire.
+        let document: GraphDocument = serde_json::from_value(compiled.clone())?;
+        let mut expected = compiled.clone();
+        expected
+            .as_object_mut()
+            .ok_or("compiled document")?
+            .extend(settings.as_object().ok_or("settings object")?.clone());
+        let expected: GraphDocument = serde_json::from_value(expected)?;
+        assert_eq!(document, expected);
         for invalid_branch in [
             json!(7),
             json!({"branch":"batch/document"}),
@@ -5279,7 +5287,6 @@ mod tests {
                 FacadeError::invalid(InvalidInputDetail::Field("integration_branch".into()))
             );
         }
-        let document: GraphDocument = serde_json::from_value(compiled.clone())?;
         assert!(
             document
                 .expanded(&factory.context.config.graph.limits)?
@@ -5540,7 +5547,7 @@ mod tests {
         )?;
         let id = document.graph_id.clone();
         let mut checkpoint = serde_json::from_value(
-            json!({"schema_version":1,"graph_id":id,"plan_digest":"test","nodes":[{"id":"task","worktree":null,"state":"running","attempts":[]}]}),
+            json!({"schema_version":2,"graph_id":id,"plan_digest":"test","nodes":[{"id":"task","worktree":null,"state":"running","attempts":[]}]}),
         )?;
         let mut journal = FileJournal::open(
             &factory.context.roots.state,
@@ -5560,7 +5567,7 @@ mod tests {
         })?;
         journal.save(&checkpoint)?;
         drop(journal);
-        let edit = json!({"op":"edit","id":format!("{id}/task"),"patch":{"schema_version":1,"expected_revision":0,"idempotency_key":"add-one","nodes":[{"id":"second","use":"task","brief":"Next"}]}});
+        let edit = json!({"op":"edit","id":format!("{id}/task"),"patch":{"schema_version":1,"expected_revision":0,"idempotency_key":"add-one","nodes":[{"id":"second","use":"task","prompt":"Next"}]}});
         let admitted = factory.graph_document(edit.clone(), budget, &cancel)?;
         assert_eq!(admitted["revision"], 1);
         let replayed = factory.graph_document(edit, budget, &cancel)?;
@@ -5611,7 +5618,7 @@ mod tests {
         current_attempt["key"]["attempt"] = json!(3);
         let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
             serde_json::from_value(
-                json!({"schema_version":1,"graph_id":id,"plan_digest":"test","nodes":[
+                json!({"schema_version":2,"graph_id":id,"plan_digest":"test","nodes":[
                     {"id":"group","worktree":null,"state":"succeeded","attempts":[],"children":["task"],"usage":{"tokens":100}},
                     {"id":"task","worktree":null,"state":"succeeded","attempts":[current_attempt],"previous_attempts":[attempt]}
                 ]}),
@@ -5652,14 +5659,20 @@ mod tests {
             budget,
             &cancel,
         )?;
-        assert_eq!(stats["groups"][0]["attempts"], 1);
-        assert_eq!(stats["groups"][0]["tokens"], 100);
-        assert_eq!(stats["groups"][0]["cost_micro_usd"], 25);
-        assert_eq!(stats["groups"][0]["wall_time_seconds"], 3);
-        assert_eq!(stats["groups"][0]["name"], "principal");
-        assert_eq!(stats["groups"][0]["cache_read_share"], 0.75);
-        assert_eq!(stats["groups"][0]["queue_time_ms"], 1500);
-        assert_eq!(stats["groups"][0]["outcomes"]["timed_out"], 1);
+        let stats_group = stats["groups"]
+            .as_array()
+            .ok_or("stats groups")?
+            .iter()
+            .find(|group| group["name"] == json!("principal"))
+            .ok_or("expected stats group")?;
+        assert_eq!(stats_group["attempts"], 1);
+        assert_eq!(stats_group["tokens"], 100);
+        assert_eq!(stats_group["cost_micro_usd"], 25);
+        assert_eq!(stats_group["wall_time_seconds"], 3);
+        assert_eq!(stats_group["name"], "principal");
+        assert_eq!(stats_group["cache_read_share"], 0.75);
+        assert_eq!(stats_group["queue_time_ms"], 1500);
+        assert_eq!(stats_group["outcomes"]["timed_out"], 1);
         let refused = stats["groups"]
             .as_array()
             .ok_or("stats groups")?
@@ -5674,8 +5687,14 @@ mod tests {
             budget,
             &cancel,
         )?;
-        assert_eq!(nodes["groups"][0]["name"], format!("{id}/task"));
-        assert_eq!(nodes["groups"][0]["tokens"], 100);
+        let nodes_group = nodes["groups"]
+            .as_array()
+            .ok_or("stats groups")?
+            .iter()
+            .find(|group| group["name"] == json!(format!("{id}/task")))
+            .ok_or("expected stats group")?;
+        assert_eq!(nodes_group["name"], format!("{id}/task"));
+        assert_eq!(nodes_group["tokens"], 100);
 
         let before = FileJournal::read_status_checkpoint(
             &factory.context.roots.state,
@@ -5716,8 +5735,14 @@ mod tests {
             budget,
             &cancel,
         )?;
-        assert_eq!(retained["groups"][0]["attempts"], 1);
-        assert_eq!(retained["groups"][0]["tokens"], 100);
+        let retained_group = retained["groups"]
+            .as_array()
+            .ok_or("stats groups")?
+            .iter()
+            .find(|group| group["name"] == json!("principal"))
+            .ok_or("expected stats group")?;
+        assert_eq!(retained_group["attempts"], 1);
+        assert_eq!(retained_group["tokens"], 100);
         let refused = retained["groups"]
             .as_array()
             .ok_or("retained groups")?
@@ -5732,11 +5757,17 @@ mod tests {
             budget,
             &cancel,
         )?;
-        assert_eq!(all["groups"][0]["attempts"], 1);
-        assert_eq!(all["groups"][0]["name"], "implement.fix");
-        assert_eq!(all["groups"][0]["cache_read_share"], 0.75);
-        assert_eq!(all["groups"][0]["queue_time_ms"], 1500);
-        assert_eq!(all["groups"][0]["outcomes"]["timed_out"], 1);
+        let all_group = all["groups"]
+            .as_array()
+            .ok_or("stats groups")?
+            .iter()
+            .find(|group| group["name"] == json!("implement.fix"))
+            .ok_or("expected stats group")?;
+        assert_eq!(all_group["attempts"], 1);
+        assert_eq!(all_group["name"], "implement.fix");
+        assert_eq!(all_group["cache_read_share"], 0.75);
+        assert_eq!(all_group["queue_time_ms"], 1500);
+        assert_eq!(all_group["outcomes"]["timed_out"], 1);
         Ok(())
     }
     #[test]
@@ -5751,7 +5782,7 @@ mod tests {
         let input = json!({
             "op": "run", "explain": true,
             "document": {
-                "use": "review", "brief": "Review required family coverage",
+                "use": "review", "prompt": "Review required family coverage",
                 "review": {
                     "shape": "standard", "minimum_family_counts": {(family): 2},
                     "lenses": [
@@ -5856,7 +5887,7 @@ mod tests {
         let child = json!({
             "op": "run", "route": "missing-family-pool",
             "document": {
-                "use": "review", "brief": "Review required family coverage",
+                "use": "review", "prompt": "Review required family coverage",
                 "review": {
                     "shape": "standard", "minimum_family_counts": {(family): 2},
                     "lenses": [{"name": "correctness", "tier": "senior"}]

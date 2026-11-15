@@ -199,18 +199,11 @@ pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
                                 finding
                                     .reason
                                     .as_deref()
-                                    .or_else(|| finding
-                                        .extra
-                                        .get("triage")
-                                        .and_then(|triage| triage.get("reason"))
-                                        .and_then(serde_json::Value::as_str))
+                                    .or_else(|| finding.triage.as_ref().map(|triage| triage.reason.as_str()))
                                     .unwrap_or("unavailable")
                             ),
                             bounded_reason(
-                                finding
-                                    .extra
-                                    .get("evidence")
-                                    .and_then(serde_json::Value::as_str)
+                                finding.evidence.as_deref()
                                     .unwrap_or("unavailable")
                             )
                         ));
@@ -509,22 +502,33 @@ mod test_presentation {
 
 #[cfg(test)]
 mod spec_chair_tests {
+    // Spec: docs/specs/fabric.md#typed-node-outputs
     #[test]
     fn rejected_boundary_findings_reach_chair_summary() {
-        let summary = super::graph_summary(&serde_json::json!({
-            "status":"complete", "checkpoint":{"graph_id":"g","nodes":[
-                {"id":"review", "state":"succeeded", "outputs":{"findings":[{
-                    "id":"F1", "severity":"high", "file":"a.rs", "status":"open",
-                    "summary":"boundary violation", "class":"boundary", "disposition":"rejected",
-                    "reason":"synthesis disagrees", "evidence":"reachable credential write"
-                }]}}
-            ]}
-        }));
-        let summary = summary.lines.join("\n");
-        assert!(summary.contains("1 rejected boundary or data-loss findings for chair judgement"));
-        assert!(summary.contains(
-            "boundary violation; reason: synthesis disagrees; evidence: reachable credential write"
-        ));
+        for (class, direct_reason, blocking_class, escalated) in [
+            (Some("boundary"), Some("direct reason"), "none", true),
+            (None, None, "data_loss", true),
+            (None, None, "none", false),
+        ] {
+            let summary = super::graph_summary(&serde_json::json!({
+                "status":"complete", "checkpoint":{"graph_id":"g","nodes":[
+                    {"id":"review", "state":"succeeded", "outputs":{"findings":[{
+                        "id":"F1", "severity":"high", "file":"a.rs", "status":"open",
+                        "summary":"checked finding", "class":class, "disposition":"rejected",
+                        "reason":direct_reason, "evidence":"checked evidence",
+                        "triage":{"decision":"rejected", "reason":"triage reason",
+                            "worth_fixing":false, "root_cause":"checked cause",
+                            "blocking_class":blocking_class}
+                    }]}}
+                ]}
+            }));
+            let text = summary.lines.join("\n");
+            assert_eq!(text.contains("checked finding"), escalated, "{text}");
+            if escalated {
+                assert!(text.contains("F1") && text.contains("checked evidence"), "{text}");
+                assert!(text.contains(direct_reason.unwrap_or("triage reason")), "{text}");
+            }
+        }
     }
 
     #[test]
