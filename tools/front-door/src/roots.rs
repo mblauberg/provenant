@@ -276,7 +276,7 @@ pub fn child(home: &Path, assets: &Path, state_dir: PathBuf) -> Result<Roots, Ro
     Ok(roots)
 }
 /// Canonical home used by root selection and home-relative Fabric identity.
-fn home() -> Result<PathBuf, RootError> {
+pub(crate) fn home() -> Result<PathBuf, RootError> {
     let home = PathBuf::from(std::env::var_os("HOME").ok_or(RootError::Home)?);
     if !home.is_absolute() {
         return Err(RootError::Home);

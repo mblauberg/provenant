@@ -818,12 +818,15 @@ fn scheduler_executables(search: &OsStr, projects: &Projects) -> Vec<PathBuf> {
     )
 }
 
+/// Render for `state` while reading registry/configuration from `roots`.
+/// During first install those reads use the staged candidate, never the
+/// unpublished destination.
 pub fn install_plist(
     program: &Path,
     roots: &Roots,
+    state: &Path,
     registry_name: RegistryName,
 ) -> Result<Vec<u8>, AgentError> {
-    let state = roots.state.as_path();
     let search = std::env::var_os("PATH").unwrap_or_default();
     let projects = Projects::registered(roots, registry_name)?;
     let mut executables = provider_executables(&search, &projects);

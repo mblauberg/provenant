@@ -22,6 +22,18 @@ receipt skip the prompts. A bare `provenant install --source "$RELEASE"` targets
 every detected client CLI and `~/.claude-*` directory; with a receipt it reuses
 the recorded targets and binary directory.
 
+### First 2.0 install after 1.x
+
+Wind down every lane before installing 2.0. Run the installer into the fresh
+v2 root; it validates the release and staged install before stopping agents.
+Only `config.toml` and `host-id` are copied from the default v1 root. The old
+receipt and run state are never migrated. Install replaces or removes its
+declared Provenant artifact names, including Fabric MCP registrations and
+retired LaunchAgents. Select harnesses again through autodetection or
+`--harness`; afterwards inspect the v1 root and client configuration, preserve
+anything needed, and manually remove leftovers outside those declared names.
+For a custom 1.x root, use a fresh custom root and configure it manually.
+
 ### Upgrade
 
 ```sh
