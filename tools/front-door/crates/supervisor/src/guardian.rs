@@ -1049,6 +1049,21 @@ impl Driver<'_> {
                     decoder,
                     events: &out_events,
                 });
+        if let Some(identity) = child.identity() {
+            let source = provenant_os::capture::CaptureSourceIdentity {
+                attempt: self.reservation.scope.attempt.to_string(),
+                generation: self.reservation.scope.generation,
+                boot: identity.boot.clone(),
+                pid: identity.pid,
+                native_start: identity.native_start,
+            };
+            if let Some(decoder) = hooks.stdout_decoder {
+                decoder.bind_source(&source);
+            }
+            if let Some(decoder) = hooks.stderr_decoder {
+                decoder.bind_source(&source);
+            }
+        }
         let err_decoder =
             hooks
                 .stderr_decoder
@@ -1336,6 +1351,7 @@ impl Driver<'_> {
             } else if let Some(reason) = request {
                 match reason {
                     machine::StopReason::ExplicitCancellation => Event::Cancel,
+                    machine::StopReason::Steered => Event::Cancel,
                     machine::StopReason::ProtocolRejected => Event::ProtocolRejected,
                     machine::StopReason::SupervisorSignal => Event::SupervisorSignal,
                     machine::StopReason::TokenBudget => Event::TokenBudget,

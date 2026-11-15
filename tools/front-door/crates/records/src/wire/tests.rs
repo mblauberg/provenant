@@ -44,6 +44,7 @@ fn row() -> LaneRow {
         protected_paths: json!([]),
         delivery: Value::Null,
         continuation: Value::Null,
+        steering: None,
         cache_read_share: None,
         result_path: Value::Null,
         transcript: None,
@@ -122,6 +123,14 @@ fn lane_rows_validate_with_and_without_optional_members() {
         session: "s".into(),
         path: None,
     });
+    full.steering = Some(crate::run::SteeringStatus {
+        state: crate::run::SteeringState::Resumed,
+        operations: vec![crate::run::SteeringOperation {
+            operation_id: "steer-op".parse().unwrap(),
+            message_id: "6".repeat(32).parse().unwrap(),
+        }],
+        successor: Some("5".repeat(32).parse().unwrap()),
+    });
     accepted(&schema, &full);
     let value = serde_json::to_value(&full).unwrap();
     assert_eq!(value["requested_priority"], 10);
@@ -129,6 +138,17 @@ fn lane_rows_validate_with_and_without_optional_members() {
     assert_eq!(value["cause"], "declared_stop");
     assert_eq!(value["retry_of"], "3".repeat(32));
     assert_eq!(value["superseded_by"], "4".repeat(32));
+    assert_eq!(value["steering"]["state"], "resumed");
+    assert_eq!(
+        value["steering"]["operations"][0]["operation_id"],
+        "steer-op"
+    );
+    assert_eq!(
+        value["steering"]["operations"][0]["message_id"],
+        "6".repeat(32)
+    );
+    assert_eq!(value["steering"]["successor"], "5".repeat(32));
+    assert!(value["steering"].get("text").is_none());
 }
 
 #[test]

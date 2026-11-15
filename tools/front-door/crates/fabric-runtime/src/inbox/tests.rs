@@ -1550,6 +1550,49 @@ fn chair_message_queues_mail_replays_and_refuses_a_conflicting_reuse() {
 }
 
 #[test]
+fn steer_receipt_names_continuation_and_replay_does_not_redeliver() {
+    let f = Fixture::new();
+    let route = control_route(Some(Harness::Codex), LaunchKind::Lane);
+    let lookup = move |_: &InboxInput, _: &Request<'_>| Ok(route.clone());
+    let deliveries = std::cell::Cell::new(0);
+    let delivery = |attempt, operation: &OperationId, text: &str, _: &Request<'_>| {
+        assert_eq!(attempt, provenant_core::AttemptId::from_bytes([7; 16]));
+        assert_eq!(operation.as_str(), "steer-receipt");
+        assert_eq!(text, "Inspect the failing path.");
+        deliveries.set(deliveries.get() + 1);
+        Ok(MessageId::from_bytes([8; 16]))
+    };
+    let execute = |text| {
+        f.service()
+            .with_control_lookup(&lookup)
+            .with_steer_delivery(&delivery)
+            .execute(steer(text, "steer-receipt"), &f.cancel)
+    };
+
+    let first = match execute("Inspect the failing path.").unwrap() {
+        InboxResult::Control { receipt } => receipt,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(first.support, ControlSupport::ContinuationOnly);
+    assert_eq!(first.transport, Some(AnswerTransport::ProviderContinuation));
+    assert_eq!(first.state, ControlState::Queued);
+    assert_eq!(first.message_id, Some(MessageId::from_bytes([8; 16])));
+    assert!(first.reason.contains("durably saved"));
+
+    let replay = match execute("Inspect the failing path.").unwrap() {
+        InboxResult::Control { receipt } => receipt,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(replay, first);
+    let conflict = execute("Different instruction");
+    assert!(matches!(
+        conflict,
+        Err(InboxError::Mutation { ref source, .. }) if source.code() == "operation_conflict"
+    ));
+    assert_eq!(deliveries.get(), 1);
+}
+
+#[test]
 fn chair_mail_is_isolated_to_its_exact_session() {
     let f = Fixture::new();
     let route = || control_route(None, LaunchKind::Chair);

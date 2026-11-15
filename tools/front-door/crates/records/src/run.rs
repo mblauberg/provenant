@@ -1271,6 +1271,8 @@ pub enum TerminalCause {
     /// The lane's launch-time access token was revoked or expired mid-run
     /// while the account login stayed usable.
     LaneTokenLost,
+    /// The host interrupted this attempt to deliver a queued steering turn.
+    Steered,
 }
 
 impl TerminalCause {
@@ -1309,6 +1311,7 @@ impl TerminalCause {
             Self::ContextHandoff => "context handoff threshold; provenant output ID",
             Self::Blocked => "blocked; provenant output ID",
             Self::LaneTokenLost => "lane token lost; provenant output ID",
+            Self::Steered => "steering interruption; provenant output ID",
         }
     }
 
@@ -1400,6 +1403,9 @@ impl TerminalCause {
             }
             Self::LaneTokenLost => {
                 "the lane's access token was revoked or expired mid-run while the account login stayed usable; a writer continues from its handoff on a new token"
+            }
+            Self::Steered => {
+                "the host interrupted this attempt for a queued steering turn; continuation requires the retained session for this provider, model and account"
             }
         }
     }
@@ -1813,6 +1819,8 @@ settlement_reasons! {
     /// Refused before any process started.
     PreLaunchRefusal { source: Host, node: Failed, outcome: Preserve, stop: None },
     Cancelled { source: Owner, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Cancelled) },
+    /// The host interrupted a run to deliver its queued continuation turn.
+    Steered { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Steered) },
     Lost { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Lost) },
     Unsettled { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Unsettled) },
     /// The provider ran and ended in a non-success outcome.
@@ -1833,6 +1841,9 @@ impl SettlementReason {
             (_, Outcome::Unsettled) => Self::Unsettled,
             (Some(TerminalEvidence::Lost { .. }), _) => Self::Lost,
             (Some(TerminalEvidence::Unsettled { .. }), _) => Self::Unsettled,
+            (_, Outcome::Cancelled) if terminal_cause == Some(TerminalCause::Steered) => {
+                Self::Steered
+            }
             (_, Outcome::Cancelled) => Self::Cancelled,
             (Some(TerminalEvidence::PreLaunchRefusal), _) => Self::PreLaunchRefusal,
             _ if handoff.is_err() => Self::HandoffMalformed,
@@ -2228,6 +2239,10 @@ pub struct AttemptRecord {
     /// Current policy tail on peer observations; absent in durable receipts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<AttemptId>,
+    /// Read-only projection of the host's private steering ledger. This is
+    /// populated by RunStore readers and is never persisted in the attempt row.
+    #[serde(skip)]
+    pub steering: Option<SteeringStatus>,
     pub requested_route: RequestedRoute,
     pub resolved_route: Option<RouteRecord>,
     pub applied_route: Option<RouteRecord>,
@@ -2308,6 +2323,30 @@ pub struct AttemptRecord {
     pub skipped_routes: Vec<SkippedRoute>,
     /// Trace context stamped when the attempt is created.
     pub trace: crate::Trace,
+}
+
+/// Outcome visible for an accepted steering turn, without exposing its text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SteeringState {
+    Queued,
+    Resumed,
+    NotContinued,
+}
+
+/// Stable identifiers for one accepted steering operation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SteeringOperation {
+    pub operation_id: OperationId,
+    pub message_id: provenant_core::MessageId,
+}
+
+/// Safe status projection of the private steering ledger.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SteeringStatus {
+    pub state: SteeringState,
+    pub operations: Vec<SteeringOperation>,
+    pub successor: Option<AttemptId>,
 }
 
 /// Encode the public form of an attempt, retaining all public extra metadata.

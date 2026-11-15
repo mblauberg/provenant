@@ -29,6 +29,18 @@ pub enum FrameEvent {
     },
 }
 
+/// Native process that owns the stream being decoded. The supervisor binds it
+/// after spawn and before the first read, so a decoder can attach facts to the
+/// exact live source even if its reservation update is still being published.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptureSourceIdentity {
+    pub attempt: String,
+    pub generation: u64,
+    pub boot: String,
+    pub pid: i64,
+    pub native_start: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[error("provider frame could not be decoded")]
 pub struct DecodeFailure;
@@ -37,6 +49,10 @@ pub struct DecodeFailure;
 /// or signalling capability. Frames and partial frames are capped at FRAME_LIMIT.
 pub trait FrameDecoder: Send + Sync {
     fn decode(&self, frame: &[u8]) -> Result<FrameEvent, DecodeFailure>;
+
+    /// Bind subsequent frames to the spawned provider process. Called before
+    /// capture starts; decoders that do not need process identity may ignore it.
+    fn bind_source(&self, _identity: &CaptureSourceIdentity) {}
 
     /// Whether this decoder reports token usage while the attempt runs, which
     /// is what lets a token budget end it. A provider that reports usage only

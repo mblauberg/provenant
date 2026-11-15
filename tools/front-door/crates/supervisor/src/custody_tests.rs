@@ -16,6 +16,53 @@ fn admission_clock_error_stays_an_admission_refusal() {
 type TestResult = std::result::Result<(), Box<dyn Error>>;
 
 #[test]
+fn provider_identity_is_read_from_spawned_and_settling_custody() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let lease = crate::fixture::acquire_writer(
+        Directory::open_anchor(root.path())?,
+        scope(),
+        WaitBudget::cli(clock.mono_now(), 1).map_err(|_| CustodyError::InvalidRecord)?,
+        &cancel,
+        &clock,
+    )?;
+    let ProcessObservation::Present(fact) =
+        SystemProcessObserver.observe(i64::from(std::process::id()))
+    else {
+        return Err("test process identity unavailable".into());
+    };
+    let identity = fact.identity;
+    let mut reservation = lease.reservation.clone();
+    reservation.launch_state = LaunchState::Spawned;
+    reservation.provider = Some(identity.clone());
+    write_record(
+        &lease.directory,
+        "reservation.json",
+        &reservation,
+        PublishMode::Replace,
+    )?
+    .require_durable()?;
+    assert_eq!(
+        provider_identity(&lease.directory, scope())?,
+        Some(identity.clone())
+    );
+    reservation.launch_state = LaunchState::Settling;
+    write_record(
+        &lease.directory,
+        "reservation.json",
+        &reservation,
+        PublishMode::Replace,
+    )?
+    .require_durable()?;
+    assert_eq!(
+        provider_identity(&lease.directory, scope())?,
+        Some(identity)
+    );
+    Ok(())
+}
+
+#[test]
 fn current_attempt_reservation_preserves_uncommitted_work() -> TestResult {
     let root = tempfile::tempdir()?;
     let path = root.path().join("writer");

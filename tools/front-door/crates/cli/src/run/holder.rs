@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 struct QuotaFrames {
     decoder: Mutex<Option<&'static dyn provenant_os::capture::FrameDecoder>>,
     evidence: Arc<Mutex<Option<QuotaCapture>>>,
+    source: Mutex<Option<provenant_os::capture::CaptureSourceIdentity>>,
     stderr: bool,
 }
 struct QuotaCapture {
@@ -17,10 +18,34 @@ struct QuotaCapture {
     attempt: Directory,
     state_root: PathBuf,
     route: run::RouteRecord,
+    holder_context: Vec<u8>,
     shared: bool,
     recorded: bool,
+    pending_session: Option<String>,
+    session_ready: Option<String>,
+    pending_conflict_session: Option<String>,
+    ready_source: Option<provenant_os::capture::CaptureSourceIdentity>,
+    pending_source_conflict: bool,
+    identity_conflict: bool,
 }
 impl provenant_os::capture::FrameDecoder for QuotaFrames {
+    fn bind_source(&self, identity: &provenant_os::capture::CaptureSourceIdentity) {
+        let changed = if let Ok(mut source) = self.source.lock() {
+            let changed = source.as_ref().is_some_and(|saved| saved != identity);
+            *source = Some(identity.clone());
+            changed
+        } else {
+            false
+        };
+        if changed
+            && let Ok(mut guard) = self.evidence.lock()
+            && let Some(capture) = guard.as_mut()
+            && capture.session_ready.is_some()
+        {
+            capture.pending_source_conflict = true;
+        }
+    }
+
     fn decode(
         &self,
         frame: &[u8],
@@ -30,9 +55,10 @@ impl provenant_os::capture::FrameDecoder for QuotaFrames {
             Some(decoder) => decoder.decode(frame)?,
             None => FrameEvent::Progress,
         };
+        let source = self.source.lock().ok().and_then(|source| source.clone());
         let mut guard = self.evidence.lock().map_err(|_| DecodeFailure)?;
-        if let Some(capture) = guard.as_mut().filter(|capture| !capture.recorded) {
-            let events = if self.stderr && result == FrameEvent::Terminal {
+        if let Some(capture) = guard.as_mut() {
+            let events: Vec<ProviderEvent> = if self.stderr && result == FrameEvent::Terminal {
                 provenant_providers::opencode::stderr_quota(frame)
                     .into_iter()
                     .collect()
@@ -46,13 +72,95 @@ impl provenant_os::capture::FrameDecoder for QuotaFrames {
                     .observe(&mut capture.stream, &line)
                     .unwrap_or_default()
             };
-            if let Some(ProviderEvent::QuotaLimited {
-                pool,
-                resets_in_seconds,
-                ..
-            }) = events
-                .into_iter()
-                .find(|event| matches!(event, ProviderEvent::QuotaLimited { .. }))
+            if !self.stderr {
+                for session in events.iter().filter_map(|event| match event {
+                    ProviderEvent::Session(session) => Some(session),
+                    _ => None,
+                }) {
+                    if capture.identity_conflict {
+                        break;
+                    }
+                    match capture.session_ready.as_deref() {
+                        Some(ready) if ready != session => {
+                            capture
+                                .pending_conflict_session
+                                .get_or_insert_with(|| session.clone());
+                        }
+                        Some(_) => {}
+                        None => match capture.pending_session.as_deref() {
+                            Some(first) if first != session => {
+                                capture
+                                    .pending_conflict_session
+                                    .get_or_insert_with(|| session.clone());
+                            }
+                            Some(_) => {}
+                            None => capture.pending_session = Some(session.clone()),
+                        },
+                    }
+                }
+                if (capture.pending_session.is_some()
+                    || capture.pending_conflict_session.is_some()
+                    || capture.pending_source_conflict)
+                    && let Some(source) = source.as_ref()
+                    && let Ok((context, store)) = run::HolderContext::open(&capture.holder_context)
+                {
+                    let clock = SystemClock::new();
+                    let cancel = CancelToken::new();
+                    let call = run::Request {
+                        clock: &clock,
+                        cancel: &cancel,
+                    };
+                    if capture.session_ready.is_none()
+                        && let Some(session) = capture.pending_session.as_deref()
+                        && store
+                            .record_provider_session_ready(
+                                context.attempt_id,
+                                &capture.route,
+                                session,
+                                source,
+                                &call,
+                            )
+                            .unwrap_or(false)
+                    {
+                        capture.session_ready = Some(session.to_owned());
+                        capture.ready_source = Some(source.clone());
+                        capture.pending_session = None;
+                    }
+                    let conflict_session = capture.pending_conflict_session.clone().or_else(|| {
+                        (capture.pending_source_conflict
+                            && capture.ready_source.as_ref() != Some(source))
+                        .then(|| capture.session_ready.clone())
+                        .flatten()
+                    });
+                    if !capture.identity_conflict
+                        && capture.session_ready.is_some()
+                        && let Some(session) = conflict_session.as_deref()
+                        && store
+                            .record_provider_session_ready(
+                                context.attempt_id,
+                                &capture.route,
+                                session,
+                                source,
+                                &call,
+                            )
+                            .unwrap_or(false)
+                    {
+                        // The RunStore has durably marked this identity
+                        // disagreement; no later frame can make it safe again.
+                        capture.identity_conflict = true;
+                        capture.pending_conflict_session = None;
+                        capture.pending_source_conflict = false;
+                    }
+                }
+            }
+            if !capture.recorded
+                && let Some(ProviderEvent::QuotaLimited {
+                    pool,
+                    resets_in_seconds,
+                    ..
+                }) = events
+                    .into_iter()
+                    .find(|event| matches!(event, ProviderEvent::QuotaLimited { .. }))
             {
                 let now = SystemClock::new().unix_seconds();
                 let evidence = QuotaEvidence {
@@ -344,8 +452,15 @@ impl Holder for HostHolder<'_> {
                 attempt: attempt.try_clone()?,
                 state_root: context.roots.state_root.clone(),
                 route,
+                holder_context: raw.to_vec(),
                 shared: configuration_root == context.roots.state_root,
                 recorded: false,
+                pending_session: None,
+                session_ready: None,
+                pending_conflict_session: None,
+                ready_source: None,
+                pending_source_conflict: false,
+                identity_conflict: false,
             });
         }
         let Some(fabric) = self.fabric(raw)? else {
@@ -509,9 +624,17 @@ mod tests {
                 attempt: Directory::open_anchor(&attempt_path)?,
                 state_root: state.clone(),
                 route: quota_test_route(),
+                holder_context: Vec::new(),
                 shared: true,
                 recorded: false,
+                pending_session: None,
+                session_ready: None,
+                pending_conflict_session: None,
+                ready_source: None,
+                pending_source_conflict: false,
+                identity_conflict: false,
             }))),
+            source: Mutex::new(None),
             stderr: false,
         };
         frames.decode(br#"{"type":"provider.quota","response":{"body":{"error":{"type":"FreeUsageLimitError","message":"fixture"}}}}"#)?;
@@ -656,9 +779,17 @@ mod tests {
                 attempt: Directory::open_anchor(&attempt)?,
                 state_root: state.clone(),
                 route: quota_test_route(),
+                holder_context: Vec::new(),
                 shared: true,
                 recorded: false,
+                pending_session: None,
+                session_ready: None,
+                pending_conflict_session: None,
+                ready_source: None,
+                pending_source_conflict: false,
+                identity_conflict: false,
             }))),
+            source: Mutex::new(None),
             stderr: false,
         };
         let frame = br#"{"type":"provider.quota","response":{"body":{"error":{"type":"FreeUsageLimitError","message":"fixture"}}}}"#;

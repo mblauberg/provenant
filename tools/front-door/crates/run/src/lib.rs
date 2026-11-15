@@ -56,8 +56,8 @@ pub use admission::{
     LaneWait, PROJECT_ACTIVE, Resources, SystemResources,
 };
 pub use controls::{
-    CancelReceipt, Reconciled, Resume, TemporaryReason, TemporaryReasonKind, UncertainReason,
-    holder_absent, overdue_at,
+    CancelReceipt, Reconciled, Resume, SteerIntent, SteerReceipt, TemporaryReason,
+    TemporaryReasonKind, UncertainReason, holder_absent, overdue_at,
 };
 pub use delivery::HostDeliveryContext;
 pub use git_context::{
@@ -487,6 +487,14 @@ pub enum RunError {
     GitUnavailable,
     #[error("provider evidence could not be committed: {0}")]
     ProviderEvidence(String),
+    #[error(
+        "live provider session or process identity changed, or the terminal session disagrees; accepted steering input stays recorded and no fresh session was started"
+    )]
+    SteerSessionMismatch,
+    #[error(
+        "provider did not retain a resumable session for the queued steering input; accepted text stays recorded and no fresh session was started"
+    )]
+    SteerSessionUnavailable,
     #[error("confinement refused: {0}")]
     Confinement(#[from] provenant_confinement::permissions::PermissionError),
     #[error("writer scope refused: {}", .0.with_repair())]
