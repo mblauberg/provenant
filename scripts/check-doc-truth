@@ -170,7 +170,7 @@ def path_reference(word):
 
 RETIRED = re.compile(r"\b(?:deleted|removed|replaced|retired|deprecated)\b", re.I)
 # Internal commands hidden from `help --json` (clap `hide = true`).
-HIDDEN = {"provenant fabric peer", "provenant fabric peer-agent"}
+HIDDEN = {"provenant fabric peer", "provenant fabric peer-agent", "provenant hook claude"}
 
 
 def resolves_path(root, document, reference, gone):
@@ -197,6 +197,17 @@ def is_strict(root, document):
             or (document.parent == root and document.name in AMBIENT_DOCS))
 
 
+def retired_section_lines(text):
+    """Line numbers under a heading that names removed or retired spellings, listed on purpose."""
+    lines, heading = set(), ""
+    for number, line in enumerate(text.splitlines(), 1):
+        if match := re.match(r"^#{1,6}\s+(.*)", line):
+            heading = match[1]
+        if RETIRED.search(heading):
+            lines.add(number)
+    return lines
+
+
 def check_references(root, document, commands, adrs, gone):
     """Report unresolved references; return the number that fail the check."""
     display = document.relative_to(root)
@@ -207,8 +218,9 @@ def check_references(root, document, commands, adrs, gone):
     references = list(inline_code(text))
     if strict:
         references += list(fenced_commands(text))
+    retired_lines = retired_section_lines(text)
     for line, reference, context in references:
-        if RETIRED.search(context):
+        if RETIRED.search(context) or line in retired_lines:
             continue
         scopes, missing = command_scope(reference, commands) if commands else (None, None)
         if missing and missing not in HIDDEN:
@@ -574,13 +586,7 @@ def check_deleted_commands(root):
         relative = document.relative_to(root)
         text = document.read_text()
         findings = {}
-        # A section headed as removed or retired lists old spellings on purpose.
-        retired_lines, heading = set(), ""
-        for number, line in enumerate(text.splitlines(), 1):
-            if match := re.match(r"^#{1,6}\s+(.*)", line):
-                heading = match[1]
-            if RETIRED.search(heading):
-                retired_lines.add(number)
+        retired_lines = retired_section_lines(text)
         # Explicit commands include fenced shell examples and table cells; a
         # command continued with a trailing backslash is one command.
         joined, pending = [], None
