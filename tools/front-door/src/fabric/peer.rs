@@ -1789,9 +1789,11 @@ pub(super) fn peer_retained_receipt(
 
 #[cfg(test)]
 mod layout_tests {
+    #[allow(unused_imports)] // The worktree driver includes this module without libtest.
     use super::*;
     use std::path::{Path, PathBuf};
 
+    #[allow(dead_code)] // The worktree driver includes this module without libtest.
     fn ports_with_root(root: &str) -> provenant_config::PortTable {
         let mut ports = provenant_config::PortTable::builtin();
         ports.worktree_layout.roots = vec![PathBuf::from(root)];
@@ -1799,6 +1801,7 @@ mod layout_tests {
         ports
     }
 
+    #[allow(dead_code)] // The worktree driver includes this module without libtest.
     fn bind_project(
         roots: &provenant_core::Roots,
         common: &Path,
@@ -1807,6 +1810,7 @@ mod layout_tests {
         Ok(())
     }
 
+    #[allow(dead_code)] // The worktree driver includes this module without libtest.
     fn roots(
         home: &Path,
         assets: &Path,

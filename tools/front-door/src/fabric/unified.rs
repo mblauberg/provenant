@@ -2000,7 +2000,7 @@ fn composite_graph_output(
             .unwrap_or(usize::MAX)
             .min(length)
     };
-    let mut end = start.saturating_add(command.max_bytes as usize).min(length);
+    let end = start.saturating_add(command.max_bytes as usize).min(length);
     if let Some(lines) = tail {
         let bounded_start = composite_tail_start(&text.as_bytes()[start..end], lines);
         start += bounded_start;

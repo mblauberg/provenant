@@ -233,11 +233,17 @@ fn terminal_steer_refusal_settles_without_losing_private_text_or_graph_progress(
     };
     fixture
         .store
-        .mark_starting(&record, &route, &[], &Default::default(), None, &call)?;
-    let running = fixture
-        .store
-        .claim(record.attempt_id, &clock, &call)?
-        .ok_or("steer attempt not admitted")?;
+        .mark_starting_for_fixture(record.attempt_id, &route, &call)?;
+    let attempt = provenant_os::fs::Directory::open_anchor(
+        &fixture.rig.state.join("attempts").join(record.attempt_id.to_string()),
+    )?;
+    let running = fixture.store.admit(
+        record.attempt_id,
+        &attempt,
+        &crate::worktree_tests::FixtureResources,
+        &clock,
+        &cancel,
+    )?;
     fixture.store.steer(
         record.attempt_id,
         "steer-terminal-refusal".parse()?,
@@ -329,9 +335,25 @@ fn terminal_steer_refusal_settles_without_losing_private_text_or_graph_progress(
         !serde_json::to_string(status)?.contains("Keep this private instruction."),
         "the public status must not disclose accepted steering text"
     );
-    let ledger = fixture.store.steer_ledger(record.attempt_id, &call)?;
-    assert_eq!(ledger[0].0.text, "Keep this private instruction.");
-    assert!(ledger[0].1);
+    assert!(fixture.store.steer_intent(record.attempt_id, &call)?.is_empty());
+    assert!(matches!(
+        fixture.store.steer(
+            record.attempt_id,
+            "steer-terminal-refusal".parse()?,
+            "Keep this private instruction.",
+            &call,
+        )?,
+        provenant_run::SteerReceipt::AlreadyTerminal { .. }
+    ));
+    assert!(matches!(
+        fixture.store.steer(
+            record.attempt_id,
+            "steer-terminal-refusal".parse()?,
+            "Different private instruction.",
+            &call,
+        ),
+        Err(provenant_run::RunError::OperationConflict)
+    ));
     let checkpoint =
         FileJournal::read_checkpoint(&fixture.roots.state, fixture.settled.project_id, graph_id)?
             .ok_or("graph checkpoint")?;
