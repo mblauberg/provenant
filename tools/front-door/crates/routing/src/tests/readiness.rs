@@ -214,30 +214,29 @@ fn exclusions_that_empty_a_pool_are_named_and_pins_ignore_them()
     )?;
     assert!(route.alternatives.as_slice().is_empty());
 
-    let mut pin_policy = RoutingConfig::default();
-    pin_policy.provider_scopes.insert(
+    let mut restricted = RoutingConfig::default();
+    restricted.provider_scopes.insert(
         "codex".into(),
         provenant_config::ProviderSettings {
             models: Some(vec!["allowed-*".into()]),
             ..provenant_config::ProviderSettings::default()
         },
     );
-    let mut policy_context = context(&catalogue, &pin_policy, now()?);
-    policy_context.availability = &records;
-    let warned =
-        resolve_for_account_with_seed_excluding(&pin, &policy_context, None, "scope", 0, &[], &[])?;
-    assert_eq!(warned.alternatives.as_slice().len(), 1);
-
-    pin_policy
-        .provider_scopes
-        .get_mut("codex")
-        .expect("codex scope was configured")
-        .out_of_scope_pin = provenant_config::OutOfScopePin::Refuse;
-    let mut policy_context = context(&catalogue, &pin_policy, now()?);
-    policy_context.availability = &records;
-    let refused =
-        resolve_for_account_with_seed_excluding(&pin, &policy_context, None, "scope", 0, &[], &[])?;
-    assert!(refused.alternatives.as_slice().is_empty());
+    restricted
+        .explicit_provider_model_scopes
+        .insert("codex".into());
+    let mut restricted_context = context(&catalogue, &restricted, now()?);
+    restricted_context.availability = &records;
+    let route = resolve_for_account_with_seed_excluding(
+        &pin,
+        &restricted_context,
+        None,
+        "scope",
+        0,
+        &[],
+        &[],
+    )?;
+    assert!(route.alternatives.as_slice().is_empty());
     Ok(())
 }
 
