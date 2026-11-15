@@ -1,28 +1,49 @@
 use super::*;
 
 #[test]
-fn non_fact_host_commands_keep_their_limits() {
-    let listing = provenant_os::exec::DEFAULT_CAPTURE_LIMIT;
-    for args in [
-        &["for-each-ref", "--format=%(refname)"][..],
-        &[
-            "--git-dir",
-            "repo.git",
-            "--work-tree",
-            "tree",
-            "for-each-ref",
-        ],
-        &[
-            "-c",
-            "remote.origin.uploadpack=git-upload-pack",
-            "ls-remote",
-            "origin",
-        ],
+fn host_command_output_classes_follow_the_declared_limits() {
+    for (class, commit_log, args) in [
+        (
+            HostOutputClass::RefListing,
+            false,
+            &["for-each-ref", "--format=%(refname)"][..],
+        ),
+        (
+            HostOutputClass::RefListing,
+            false,
+            &[
+                "--git-dir",
+                "repo.git",
+                "--work-tree",
+                "tree",
+                "for-each-ref",
+            ],
+        ),
+        (
+            HostOutputClass::RefListing,
+            false,
+            &[
+                "-c",
+                "remote.origin.uploadpack=git-upload-pack",
+                "ls-remote",
+                "origin",
+            ],
+        ),
+        (HostOutputClass::Ordinary, false, &["remote"]),
+        (HostOutputClass::CommitLog, true, &["log"]),
+        (
+            HostOutputClass::OriginConfiguration,
+            false,
+            &["config", "--show-origin", "--list"],
+        ),
     ] {
-        assert_eq!(stdout_limit(false, args), listing, "{args:?}");
+        assert_eq!(host_output_class(commit_log, args), class);
+        assert_eq!(
+            stdout_limit(commit_log, args),
+            host_output_limit(class),
+            "{class:?}"
+        );
     }
-    assert_eq!(stdout_limit(false, &["remote"]), 16 * 1024);
-    assert_eq!(stdout_limit(true, &["log"]), 56_000);
 }
 
 #[test]
@@ -66,13 +87,13 @@ fn prepare_refuses_unavailable_and_unsafe_credential_helpers()
     std::os::unix::fs::symlink(&lane_helper, &link)?;
     let opaque = fixture.root.join("gh;echo");
     fixture.executable(&opaque, "#!/bin/sh\nexit 0\n")?;
-    for (helper, detail) in [
-        (&unavailable, "gh: not found"),
-        (&not_executable, "not-executable"),
-        (&fixture.root, "unavailable"),
-        (&lane_helper, "inside the writer worktree"),
-        (&link, "inside the writer worktree"),
-        (&opaque, "opaque shell credential helper"),
+    for (helper, safety) in [
+        (&unavailable, HelperSafety::Unavailable),
+        (&not_executable, HelperSafety::Unavailable),
+        (&fixture.root, HelperSafety::Unavailable),
+        (&lane_helper, HelperSafety::LaneLocalPath),
+        (&link, HelperSafety::LaneLocalPath),
+        (&opaque, HelperSafety::OpaqueShellCommand),
     ] {
         fixture.git(&[
             "config",
@@ -80,20 +101,39 @@ fn prepare_refuses_unavailable_and_unsafe_credential_helpers()
             &format!("!{} auth git-credential", helper.display()),
         ])?;
         let error = fixture.prepare().expect_err("unsafe helper");
-        assert!(
-            matches!(
-                error,
-                RunError::DeliveryPrepare {
-                    step: "credential helper",
-                    ..
-                }
-            ),
-            "{error}"
-        );
-        let reason = error.to_string();
-        assert!(reason.contains(detail), "{reason}");
-        assert!(!reason.contains("receipt"), "{reason}");
+        assert!(matches!(
+            error,
+            RunError::DeliveryPrepare {
+                step: DeliveryPrepareStep::CredentialHelper,
+                refusal: Some(DeliveryPrepareRefusal::CredentialHelper(actual)),
+                ..
+            } if actual == safety
+        ));
     }
+    fixture.git(&["config", "credential.helper", "helper;echo"])?;
+    assert!(matches!(
+        fixture.prepare(),
+        Err(RunError::DeliveryPrepare {
+            step: DeliveryPrepareStep::CredentialHelper,
+            refusal: Some(DeliveryPrepareRefusal::CredentialHelper(
+                HelperSafety::NonPlainExecutable
+            )),
+            ..
+        })
+    ));
+
+    let ssh_fixture = PrepareFixture::new()?;
+    ssh_fixture.git(&["config", "core.sshCommand", "ssh -v"])?;
+    assert!(matches!(
+        ssh_fixture.prepare(),
+        Err(RunError::DeliveryPrepare {
+            step: DeliveryPrepareStep::CredentialHelper,
+            refusal: Some(DeliveryPrepareRefusal::CredentialHelper(
+                HelperSafety::UnsupportedSshCommand
+            )),
+            ..
+        })
+    ));
     Ok(())
 }
 
@@ -390,15 +430,10 @@ fn land_settlement_clears_terminal_writer_reservation()
 }
 
 #[test]
-fn land_settlement_refuses_nonterminal_writer()
--> std::result::Result<(), Box<dyn std::error::Error>> {
-    landed_writer_fence_fixture(LandedWriterFenceCase::Nonterminal)
-}
-
-#[test]
-fn land_settlement_refuses_mismatched_or_incomplete_writer_evidence()
+fn land_settlement_refuses_each_invalid_writer_evidence_state()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     for case in [
+        LandedWriterFenceCase::Nonterminal,
         LandedWriterFenceCase::WrongScope,
         LandedWriterFenceCase::WrongWriter,
         LandedWriterFenceCase::WrongAttempt,
