@@ -111,21 +111,28 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
     let home = path_fixture.path().join("host-home");
     let selected_node = path_fixture.path().join("nvm/versions/node/v24.0.1");
     let later_node = path_fixture.path().join("later-node-prefix");
+    let pnpm_package = path_fixture.path().join("pnpm-10");
     let selected_bin = selected_node.join("bin");
     let later_bin = later_node.join("bin");
+    let pnpm_bin = pnpm_package.join("bin");
     for path in [
         selected_bin.join("node"),
         selected_bin.join("npm"),
         later_bin.join("node"),
         later_bin.join("npm"),
+        pnpm_bin.join("pnpm"),
     ] {
         std::fs::create_dir_all(path.parent().expect("program parent"))?;
         std::fs::write(&path, b"fixture executable")?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
     }
+    std::fs::write(
+        pnpm_package.join("package.json"),
+        r#"{"name":"pnpm","version":"10.33.2"}"#,
+    )?;
     std::fs::create_dir_all(later_node.join("etc"))?;
     std::fs::write(later_node.join("etc/npmrc"), "cache=/later-node-cache\n")?;
-    let path = std::env::join_paths([&selected_bin, &later_bin])?;
+    let path = std::env::join_paths([&selected_bin, &pnpm_bin, &later_bin])?;
     let host = HashMap::from([
         (
             provenant_core::consumer_env::SANDBOX.to_owned(),
@@ -293,20 +300,28 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
                 expected_corepack.as_ref(),
                 "Agy must bind Corepack downloads while its account HOME differs"
             );
-            assert_eq!(
-                configured("pnpm_config_cache_dir")
-                    .or_else(|| configured("npm_config_cache_dir"))
-                    .as_ref(),
-                expected_pnpm_cache.as_ref(),
-                "Agy must bind pnpm cache to the host-configured path"
-            );
-            assert_eq!(
-                configured("pnpm_config_store_dir")
-                    .or_else(|| configured("npm_config_store_dir"))
-                    .as_ref(),
-                expected_pnpm_store.as_ref(),
-                "Agy must bind pnpm store to the host-configured path"
-            );
+            for (legacy, current, expected) in [
+                (
+                    "npm_config_cache_dir",
+                    "pnpm_config_cache_dir",
+                    expected_pnpm_cache.as_ref(),
+                ),
+                (
+                    "npm_config_store_dir",
+                    "pnpm_config_store_dir",
+                    expected_pnpm_store.as_ref(),
+                ),
+            ] {
+                let explicit_legacy = host_value(legacy).map(std::path::PathBuf::from);
+                let explicit_current = host_value(current).map(std::path::PathBuf::from);
+                if explicit_legacy.is_none() && explicit_current.is_none() {
+                    assert_eq!(configured(legacy).as_ref(), expected);
+                    assert!(configured(current).is_none());
+                } else {
+                    assert_eq!(configured(legacy), explicit_legacy);
+                    assert_eq!(configured(current), explicit_current);
+                }
+            }
         }
         if id == "opencode" {
             assert_eq!(
@@ -319,20 +334,28 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
                 expected_corepack.as_ref(),
                 "OpenCode keeps private XDG state while Corepack downloads stay shared"
             );
-            assert_eq!(
-                configured("pnpm_config_cache_dir")
-                    .or_else(|| configured("npm_config_cache_dir"))
-                    .as_ref(),
-                expected_pnpm_cache.as_ref(),
-                "OpenCode binds pnpm cache to the host-configured path"
-            );
-            assert_eq!(
-                configured("pnpm_config_store_dir")
-                    .or_else(|| configured("npm_config_store_dir"))
-                    .as_ref(),
-                expected_pnpm_store.as_ref(),
-                "OpenCode binds pnpm store to the host-configured path"
-            );
+            for (legacy, current, expected) in [
+                (
+                    "npm_config_cache_dir",
+                    "pnpm_config_cache_dir",
+                    expected_pnpm_cache.as_ref(),
+                ),
+                (
+                    "npm_config_store_dir",
+                    "pnpm_config_store_dir",
+                    expected_pnpm_store.as_ref(),
+                ),
+            ] {
+                let explicit_legacy = host_value(legacy).map(std::path::PathBuf::from);
+                let explicit_current = host_value(current).map(std::path::PathBuf::from);
+                if explicit_legacy.is_none() && explicit_current.is_none() {
+                    assert_eq!(configured(legacy).as_ref(), expected);
+                    assert!(configured(current).is_none());
+                } else {
+                    assert_eq!(configured(legacy), explicit_legacy);
+                    assert_eq!(configured(current), explicit_current);
+                }
+            }
             assert!(prepared.env.iter().any(|(key, value)| {
                 key == "XDG_CACHE_HOME" && value == "/fixture/state/cache"
             }));
@@ -342,7 +365,9 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
                 "npm_config_cache",
                 "COREPACK_HOME",
                 "pnpm_config_cache_dir",
+                "npm_config_cache_dir",
                 "pnpm_config_store_dir",
+                "npm_config_store_dir",
             ] {
                 assert_eq!(
                     selector_values(&prepared.env, key),
