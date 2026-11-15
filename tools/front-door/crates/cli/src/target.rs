@@ -173,6 +173,9 @@ pub enum Want {
     /// One attempt. A bare `NAME` is its only node, and a node without `#N`
     /// is its newest attempt, or with `settled` its newest settled one.
     Attempt { settled: bool },
+    /// One output source. A bare graph selects its unique top-level node,
+    /// including a composite that owns declared aggregate outputs.
+    Output,
 }
 
 /// A target checked against its graph's one checkpoint.
@@ -255,6 +258,32 @@ pub fn resolve<E>(
                 });
             }
         },
+        (None, Want::Output) => {
+            let children: std::collections::BTreeSet<String> = checkpoint
+                .nodes
+                .iter()
+                .flat_map(|node| node.children.iter().cloned())
+                .collect();
+            let roots: Vec<_> = checkpoint
+                .nodes
+                .iter()
+                .filter(|node| !children.contains(&node.id))
+                .collect();
+            match roots.as_slice() {
+                [only] => Some(only.id.clone()),
+                [] => return Err(ResolveError::NotFound(target.name.clone())),
+                nodes => {
+                    return Err(ResolveError::Ambiguous {
+                        target: target.to_string(),
+                        candidates: nodes
+                            .iter()
+                            .take(CANDIDATES)
+                            .map(|node| format!("{}/{}", target.name, node.id))
+                            .collect(),
+                    });
+                }
+            }
+        }
     };
     let Some(node) = node else {
         return Ok(Resolved {
@@ -295,8 +324,15 @@ pub fn resolve<E>(
                 newest
             }
         }
+        (None, Want::Output) if !progress.children.is_empty() => None,
+        (None, Want::Output) => numbered
+            .iter()
+            .rfind(|(attempt, _)| attempt.state == AttemptState::Terminal)
+            .copied()
+            .or_else(|| numbered.last().copied()),
     };
-    if target.attempt.is_none() && want != Want::Work && selected.is_none() {
+    let composite_output = want == Want::Output && !progress.children.is_empty();
+    if target.attempt.is_none() && want != Want::Work && !composite_output && selected.is_none() {
         return Err(ResolveError::NotFound(format!(
             "{}/{node} has no attempt",
             target.name
@@ -555,6 +591,50 @@ mod tests {
                 .node,
             None
         );
+    }
+
+    #[test]
+    fn output_bare_graph_selects_a_unique_top_level_composite() {
+        let mut graph = checkpoint("panel", &[("task", &[]), ("task--review", &["terminal"])]);
+        graph.nodes[0].children = vec!["task--review".into()];
+        for spelling in ["panel", "panel/task"] {
+            let target = Target::parse(spelling).unwrap();
+            let resolved =
+                resolve(&target, Want::Output, |_| Ok::<_, ()>(Some(graph.clone()))).unwrap();
+            assert_eq!(resolved.node.as_deref(), Some("task"), "{spelling}");
+            assert_eq!(resolved.number, None, "{spelling}");
+            assert_eq!(resolved.attempt_ref, None, "{spelling}");
+        }
+    }
+
+    #[test]
+    fn output_ambiguity_lists_only_top_level_nodes() {
+        let mut graph = checkpoint(
+            "panel",
+            &[
+                ("task", &[]),
+                ("task--review", &["terminal"]),
+                ("adjacent", &["terminal"]),
+            ],
+        );
+        graph.nodes[0].children = vec!["task--review".into()];
+        let target = Target::parse("panel").unwrap();
+        match resolve(&target, Want::Output, |_| Ok::<_, ()>(Some(graph))) {
+            Err(ResolveError::Ambiguous { candidates, .. }) => {
+                assert_eq!(candidates, ["panel/task", "panel/adjacent"]);
+            }
+            other => panic!("expected top-level output ambiguity, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn output_keeps_the_newest_settled_attempt_for_a_leaf_root() {
+        let graph = checkpoint("single", &[("review", &["terminal", "running"])]);
+        let target = Target::parse("single").unwrap();
+        let resolved = resolve(&target, Want::Output, |_| Ok::<_, ()>(Some(graph))).unwrap();
+        assert_eq!(resolved.node.as_deref(), Some("review"));
+        assert_eq!(resolved.number, NonZeroU32::new(1));
+        assert_eq!(resolved.attempt_ref.as_deref(), Some("host/review-1"));
     }
 
     #[test]

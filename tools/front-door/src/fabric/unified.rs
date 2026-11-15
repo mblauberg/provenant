@@ -277,6 +277,10 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
             "open_asks",
             "result_summary",
             "evidence_error",
+            "review_verdict",
+            "findings_count",
+            "findings_available",
+            "review_partial",
         ] {
             row[field] = Value::Null;
         }
@@ -326,6 +330,22 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
                 node.and_then(|node| node.outputs.as_ref())
                     .and_then(|out| out.result.as_ref())
                     .and_then(|result| result.path.as_ref())
+            );
+            row["review_verdict"] = json!(
+                node.and_then(|node| node.outputs.as_ref())
+                    .and_then(|outputs| outputs.verdict.as_ref())
+            );
+            row["findings_count"] = json!(
+                node.and_then(|node| node.outputs.as_ref())
+                    .and_then(|outputs| outputs.findings_available.map(|_| outputs.findings.len()))
+            );
+            row["findings_available"] = json!(
+                node.and_then(|node| node.outputs.as_ref())
+                    .and_then(|outputs| outputs.findings_available)
+            );
+            row["review_partial"] = json!(
+                node.and_then(|node| node.outputs.as_ref())
+                    .map(|outputs| outputs.partial)
             );
             row["open_asks"] = json!(
                 run.checkpoint
@@ -1865,7 +1885,7 @@ fn host_graph_output(
     cancel: &CancelToken,
 ) -> Result<provenant_cli::run::Reply, Box<dyn std::error::Error>> {
     let (resolved, checkpoint) =
-        match resolve_with_checkpoint(factory, &command.target, Want::Attempt { settled: true }) {
+        match resolve_with_checkpoint(factory, &command.target, Want::Output) {
             Ok(found) => found,
             // A node that failed before it launched has no attempt to read;
             // its failure and remedy are still the answer.
@@ -1877,6 +1897,14 @@ fn host_graph_output(
             }
             Err(fault) => return Err(fault.into()),
         };
+    let progress = checkpoint
+        .nodes
+        .iter()
+        .find(|node| Some(node.id.as_str()) == resolved.node.as_deref())
+        .ok_or_else(|| FacadeError::StateCorrupt)?;
+    if !progress.children.is_empty() {
+        return composite_graph_output(command, &resolved.graph, progress);
+    }
     let Some(reference) = resolved.attempt_ref.clone() else {
         let fault = TargetFault {
             outcome: provenant_records::Outcome::Invalid,
@@ -1906,6 +1934,122 @@ fn host_graph_output(
     selected.target = resolved.target();
     let reply = graph_attempt_output(selected, &reference, edge, factory, budget, cancel)?;
     Ok(with_graph_failures(reply, &failure_rows))
+}
+
+fn composite_graph_output(
+    command: &provenant_cli::Output,
+    graph: &str,
+    progress: &provenant_fabric_runtime::graph::NodeProgress,
+) -> Result<provenant_cli::run::Reply, Box<dyn std::error::Error>> {
+    if command.path {
+        return Ok(output_fail(
+            provenant_records::Outcome::Invalid,
+            "NOT_FOUND",
+            "a composite has no attempt artifact path; read its declared result",
+        ));
+    }
+    if !matches!(command.part, provenant_cli::Part::Result) {
+        return Ok(output_fail(
+            provenant_records::Outcome::Invalid,
+            "NOT_FOUND",
+            "a composite exposes its declared result, not an attempt prompt, stderr, transcript, events or receipt",
+        ));
+    }
+    let Some(outputs) = progress.outputs.as_ref() else {
+        return Ok(output_fail(
+            provenant_records::Outcome::Invalid,
+            "NOT_FOUND",
+            &format!(
+                "NOT_FOUND: {graph}/{} has no settled composite outputs",
+                progress.id
+            ),
+        ));
+    };
+    let Some(result) = outputs.result.as_ref() else {
+        return Ok(output_fail(
+            provenant_records::Outcome::Invalid,
+            "NOT_FOUND",
+            &format!(
+                "NOT_FOUND: {graph}/{} does not declare a result output",
+                progress.id
+            ),
+        ));
+    };
+
+    let text = &result.excerpt;
+    let length = text.len();
+    let tail = command
+        .tail
+        .map(|lines| lines.min(provenant_cli::limits::TAIL_LINES));
+    let mut start = if tail.is_some() {
+        length.saturating_sub(command.max_bytes as usize)
+    } else {
+        usize::try_from(command.offset)
+            .unwrap_or(usize::MAX)
+            .min(length)
+    };
+    let mut end = start.saturating_add(command.max_bytes as usize).min(length);
+    if let Some(lines) = tail {
+        let bounded_start = composite_tail_start(&text.as_bytes()[start..end], lines);
+        start += bounded_start;
+    }
+    while start < end && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    while end > start && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let excerpt = &text[start..end];
+    let state = serde_json::to_value(&progress.state)?
+        .as_str()
+        .unwrap_or("unknown")
+        .to_owned();
+    let selected = json!({
+        "verdict": outputs.verdict,
+        "findings": outputs.findings,
+        "findings_available": outputs.findings_available,
+        "partial": outputs.partial,
+        "warnings": outputs.warnings,
+    });
+    let data = provenant_records::wire::OutputData::Composite(Box::new(
+        provenant_records::wire::CompositeChunk {
+            graph: graph.to_owned(),
+            node: progress.id.clone(),
+            state,
+            part: "result".into(),
+            offset: start as u64,
+            next_offset: end as u64,
+            length: (!result.truncated).then_some(length as u64),
+            eof: end == length,
+            complete: !result.truncated,
+            digest: Some(result.digest.clone()),
+            bytes: provenant_records::wire::ChunkBytes::Utf8(excerpt.to_owned()),
+            selected,
+            tail,
+            tail_clamped: command
+                .tail
+                .map(|lines| lines != lines.min(provenant_cli::limits::TAIL_LINES)),
+            to: None,
+            written: None,
+        },
+    ));
+    let data = serde_json::to_value(data)?;
+    Ok(provenant_cli::run::render_output(
+        command.clone(),
+        Ok((data, excerpt.to_owned())),
+    ))
+}
+
+fn composite_tail_start(bytes: &[u8], lines: u64) -> usize {
+    bytes
+        .strip_suffix(b"\n")
+        .unwrap_or(bytes)
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, byte)| **byte == b'\n')
+        .nth(usize::try_from(lines.saturating_sub(1)).unwrap_or(usize::MAX))
+        .map_or(0, |(index, _)| index + 1)
 }
 
 /// The failed or blocked node rows under a graph or node target.

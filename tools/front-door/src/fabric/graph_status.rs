@@ -14,6 +14,10 @@ pub(crate) struct NodeDigest {
     pub ci: Value,
     pub result_path: Option<String>,
     pub provider_error: Option<String>,
+    pub review_verdict: Option<String>,
+    pub findings_count: Option<usize>,
+    pub findings_available: Option<bool>,
+    pub review_partial: Option<bool>,
     pub line: String,
     pub state: String,
     pub settled: bool,
@@ -96,6 +100,12 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
             };
             let result_path = path_text(&attempt["result_path"]);
             let provider_error = text(&attempt["provider_error"], 1024);
+            let review_verdict = text(&node["review_verdict"], 128);
+            let findings_count = node["findings_count"]
+                .as_u64()
+                .and_then(|count| usize::try_from(count).ok());
+            let findings_available = node["findings_available"].as_bool();
+            let review_partial = node["review_partial"].as_bool();
             let handoff_error = attempt["handoff"].get("Err").and_then(|value| {
                 serde_json::from_value::<provenant_records::handoff::HandoffError>(value.clone())
                     .ok()
@@ -132,6 +142,20 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
                 },
                 result_path.as_deref().unwrap_or("-")
             );
+            if let Some(verdict) = &review_verdict {
+                line.push_str(&format!(" verdict={verdict}"));
+            }
+            if let Some(count) = findings_count {
+                let availability = match findings_available {
+                    Some(true) => "available",
+                    Some(false) => "incomplete",
+                    None => "availability_unknown",
+                };
+                line.push_str(&format!(" findings={count} ({availability})"));
+            }
+            if review_partial == Some(true) {
+                line.push_str(" review_partial=true");
+            }
             if let Some(status) = &handoff_status {
                 line.push_str(&format!(" handoff_status={status}"));
             }
@@ -178,6 +202,10 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
                 ci,
                 result_path,
                 provider_error,
+                review_verdict,
+                findings_count,
+                findings_available,
+                review_partial,
                 line,
                 state,
                 settled,

@@ -53,6 +53,32 @@ pub struct OutputChunk {
     pub selected: Option<Value>,
 }
 
+/// A declared composite result has no attempt identity, but keeps the same
+/// bounded byte-range contract and carries the composite's typed exports.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CompositeChunk {
+    pub graph: String,
+    pub node: String,
+    pub state: String,
+    pub part: String,
+    pub offset: u64,
+    pub next_offset: u64,
+    pub length: Option<u64>,
+    pub eof: bool,
+    pub complete: bool,
+    pub digest: Option<String>,
+    pub bytes: ChunkBytes,
+    pub selected: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tail: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tail_clamped: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<crate::StructuredPathWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub written: Option<u64>,
+}
+
 /// `data` of `output`, by mode.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
@@ -79,6 +105,8 @@ pub enum OutputData {
     },
     /// `--part receipt`: the reviewer receipt.
     Receipt(Box<ReviewerReceipt>),
+    /// The declared result and typed exports of a composite graph node.
+    Composite(Box<CompositeChunk>),
     Chunk(Box<OutputChunk>),
 }
 
@@ -141,6 +169,31 @@ pub fn output_chunk_schema() -> Value {
     ))
 }
 
+pub fn composite_chunk_schema() -> Value {
+    object(
+        &[
+            ("graph", string()),
+            ("node", string()),
+            ("state", string()),
+            ("part", choices(&["result"])),
+            ("offset", unsigned()),
+            ("next_offset", unsigned()),
+            ("length", nullable(unsigned())),
+            ("eof", boolean()),
+            ("complete", boolean()),
+            ("digest", nullable(string())),
+            ("bytes", chunk_bytes_schema()),
+            ("selected", any()),
+        ],
+        &[
+            ("tail", unsigned()),
+            ("tail_clamped", boolean()),
+            ("to", super::schema::worktree_path()),
+            ("written", unsigned()),
+        ],
+    )
+}
+
 pub fn reviewer_receipt_schema() -> Value {
     let a = any();
     with_lane(object(
@@ -200,6 +253,7 @@ pub fn output_data_schema() -> Value {
         )),
         with_lane(object(&[("events", array(any()))], &[])),
         reviewer_receipt_schema(),
+        composite_chunk_schema(),
         output_chunk_schema(),
     ])
 }

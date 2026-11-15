@@ -113,6 +113,8 @@ default, expands with `--full`, and exposes typed records and native presence
 with `--json`. Pagination uses `--limit` and `--cursor`; `--session` selects the
 exact chair session for the session-start digest. Settled custody leaves the
 active view. The digest reads this view instead of extracting PRs from prose.
+For graph nodes with a typed review result, the digest shows execution state
+separately from verdict, findings count and findings availability.
 
 `adopt KIND:ID` takes custody of an external item; `release KIND:ID` records an
 explicit release. `fabric claim acquire|renew|verify|release` takes the same
@@ -127,8 +129,17 @@ Transfer to a named session is deferred.
 
 ### Output references and bounded tails
 
-Output and steering resolve the same numbered attempt. Output reads are bounded
-and a clamped tail reports its effective bound.
+For a graph with one top-level node, `output GRAPH` reads that node's newest
+settled attempt. For a composite root it reads the declared bounded result and
+returns its typed exports, without inventing an attempt identity. A bare graph
+with multiple top-level nodes remains ambiguous and lists only those nodes;
+`output GRAPH/NODE` selects a composite explicitly. Prompt, stderr, transcript,
+events, receipt and artifact-path reads require an attempt and are unavailable
+for a composite. A bounded composite excerpt reports `complete: false` when the
+checkpoint says its source result was truncated, with an unknown source length.
+
+For attempt targets, output and steering resolve the same numbered attempt.
+Output reads are bounded and a clamped tail reports its effective bound.
 By default, `output` shows result text whole up to 12 KiB, then marked head and tail; `--full` shows complete text.
 
 - Why: a reader must be able to inspect the intended attempt safely.

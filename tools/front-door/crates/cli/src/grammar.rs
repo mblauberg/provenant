@@ -692,7 +692,7 @@ pub enum Part {
 }
 #[derive(Clone, Debug, Args)]
 pub struct Output {
-    /// Attempt to read, as NAME[/NODE[#N]]; a node reads its newest settled attempt
+    /// Output source, as NAME[/NODE[#N]]; composites expose their declared result
     #[arg(value_name = "TARGET", catalog_graph_target())]
     pub target: Target,
     /// Which part to read

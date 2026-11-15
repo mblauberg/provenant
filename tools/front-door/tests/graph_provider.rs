@@ -2462,6 +2462,139 @@ fn seed_graph_checkpoint(
     Ok(())
 }
 
+/// Persist a settled composite through the graph runtime without launching a
+/// provider. Its parent outputs are the runtime's declared export aggregate.
+fn seed_composite_output_graph(rig: &TestRig, graph_id: &str, root_ids: &[&str]) -> Result {
+    use provenant_core::{CancelToken, Clock, RootInputs, WaitBudget};
+    use provenant_fabric_runtime::graph::{
+        AccessMode, AttemptKey, AttemptObservation, AttemptOutcome, AttemptOwner, FileJournal,
+        GraphDocument, GraphExecution, GraphRoute, NodeInput, Replay,
+    };
+    use provenant_os::clock::SystemClock;
+
+    struct TerminalOwner {
+        actor: String,
+        host: String,
+        next: u8,
+        response: String,
+    }
+    impl AttemptOwner for TerminalOwner {
+        type Error = std::io::Error;
+
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
+
+        fn actor(&self) -> String {
+            self.actor.clone()
+        }
+
+        fn observe_or_start(
+            &mut self,
+            _key: &AttemptKey,
+            _node: NodeInput<'_>,
+            _route: &GraphRoute,
+            _access: AccessMode,
+            _worktree: Option<&str>,
+            _replay: Replay<'_>,
+        ) -> std::io::Result<AttemptObservation> {
+            let mut id_bytes = [0; 16];
+            id_bytes[15] = self.next;
+            self.next = self.next.saturating_add(1);
+            let attempt_id = provenant_core::AttemptId::from_bytes(id_bytes);
+            let mut result =
+                provenant_records::result_capture::ResultCapture::new(Some("VERDICT: FAIL"));
+            result.push(self.response.as_bytes());
+            Ok(AttemptObservation::Terminal {
+                attempt_ref: Some(format!("{}/{}", self.host, attempt_id)),
+                outcome: AttemptOutcome::Succeeded,
+                launched: true,
+                result: Some(Box::new(result.finish())),
+                result_warning: None,
+                result_path: None,
+                branch: None,
+                commit: None,
+                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                stop: None,
+            })
+        }
+    }
+
+    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let resolved_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let project = provenant_config::bind_project(
+        &resolved_roots,
+        provenant_config::ProjectLocation::new(rig.project.join(".git"))?,
+    )?
+    .project_id();
+    let identity =
+        provenant_cli::fabric::Context::open(resolved_roots.clone(), &rig.home, &rig.project)?
+            .identity;
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+        "graph_id": graph_id,
+        "nodes": root_ids.iter().map(|id| json!({
+            "id": id,
+            "kind": "composite",
+            "access": "read_only",
+            "composite": {
+                "nodes": [{
+                    "id": "review",
+                    "access": "read_only",
+                    "prompt": "review fixture",
+                    "route": {"alias": "senior"}
+                }],
+                "exports": [{"node": "review", "outputs": ["result", "verdict", "findings"]}]
+            }
+        })).collect::<Vec<_>>()
+    }))?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+    let mut journal = FileJournal::open(
+        &resolved_roots.state,
+        project,
+        graph_id,
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    journal.bind(GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+        extra: Default::default(),
+        bases: None,
+        directory: rig.project.clone(),
+        document: document.clone(),
+    })?;
+    let response = format!(
+        "```findings\n{}\n```\nVERDICT: FAIL\n",
+        json!({"schema_version": 1, "findings": [{
+            "id": "F1", "severity": "high", "file": "src/lib.rs", "line": 1,
+            "summary": "The failing path is reachable", "status": "open",
+            "evidence": "Input x reaches the failure", "proposed_fix": "Handle x",
+            "trigger": {"sequence": "Invoke the operation with x", "reach": "default_path", "observed": true},
+            "triage": {"decision": "confirmed", "reason": "Input x reproduces the issue",
+                "worth_fixing": true, "root_cause": "unchecked input x",
+                "blocking_class": "default_path_defect", "shared_flaw": false}
+        }]})
+    );
+    provenant_fabric_runtime::graph::advance_with_budget(
+        &document,
+        &mut TerminalOwner {
+            actor: identity.inbox.actor.to_string(),
+            host: identity.host.to_string(),
+            next: 1,
+            response: response.into(),
+        },
+        &mut journal,
+        &Default::default(),
+        &Default::default(),
+    )?;
+    Ok(())
+}
+
 #[derive(Default)]
 struct PersistedAttemptOptions {
     host_registry: bool,
@@ -3066,6 +3199,92 @@ fn output_names_the_attempt_it_reads_and_writes_or_locates_parts() -> Result {
     let data: Value = serde_json::from_slice(&written.stdout.bytes)?;
     assert_eq!(code(&written), 0, "{data}");
     assert_eq!(std::fs::read(&saved)?, b"provider 500: upstream failed\n");
+    Ok(())
+}
+
+// Spec: docs/specs/cli.md#output-references-and-bounded-tails pins root selection,
+// explicit composite output, ambiguity choices and the typed result envelope.
+fn composite_graph_output_uses_declared_roots_and_exports() -> Result {
+    let rig = TestRig::new()?;
+    seed_composite_output_graph(&rig, "composite-output", &["panel"])?;
+
+    for target in ["composite-output", "composite-output/panel"] {
+        let output = rig.command(&["output", target, "--json"])?;
+        let data = support::last_json_record(&output.stdout.bytes)?;
+        assert_eq!(code(&output), 0, "{data}");
+        let selected = &data["data"]["selected"];
+        assert_eq!(data["data"]["graph"], "composite-output");
+        assert_eq!(data["data"]["node"], "panel");
+        let excerpt = data["data"]["bytes"]["data"]
+            .as_str()
+            .ok_or("composite result bytes")?;
+        assert!(excerpt.contains("VERDICT: FAIL"), "{excerpt}");
+        assert!(excerpt.contains("```findings"), "{excerpt}");
+        assert_eq!(selected["verdict"], "VERDICT: FAIL");
+        assert_eq!(selected["findings"].as_array().map(Vec::len), Some(1));
+        assert_eq!(selected["findings_available"], true);
+        let schema = provenant_records::wire::data_schema("output").ok_or("output schema")?;
+        provenant_records::wire::schema::validate(&schema, &data["data"])?;
+    }
+    let human_output = rig.command(&["output", "composite-output"])?;
+    let human_output = String::from_utf8_lossy(&human_output.stdout.bytes);
+    assert!(
+        human_output.contains("review verdict: VERDICT: FAIL"),
+        "{human_output}"
+    );
+    assert!(
+        human_output.contains("settlement: succeeded"),
+        "{human_output}"
+    );
+    assert!(
+        human_output.contains("findings: 1 (available)"),
+        "{human_output}"
+    );
+
+    let status_output = rig.command(&["status", "composite-output/panel", "--json"])?;
+    assert_eq!(code(&status_output), 0, "{status_output:?}");
+    let status = support::last_json_record(&status_output.stdout.bytes)?;
+    let digest = status["data"]["digests"]
+        .as_array()
+        .and_then(|digests| {
+            digests
+                .iter()
+                .find(|digest| digest["review_verdict"] == "VERDICT: FAIL")
+        })
+        .ok_or_else(|| format!("status omitted composite verdict: {status}"))?;
+    assert_eq!(digest["state"], "succeeded");
+    assert_eq!(digest["findings_count"], 1);
+    assert_eq!(digest["findings_available"], true);
+    let human_status = rig.command(&["status", "composite-output/panel"])?;
+    let human_status = String::from_utf8_lossy(&human_status.stdout.bytes);
+    assert!(
+        human_status.contains("verdict=VERDICT: FAIL"),
+        "{human_status}"
+    );
+    assert!(
+        human_status.contains("findings=1 (available)"),
+        "{human_status}"
+    );
+
+    seed_composite_output_graph(&rig, "multi-output", &["alpha", "beta"])?;
+    let ambiguous_output = rig.command(&["output", "multi-output", "--json"])?;
+    assert_ne!(code(&ambiguous_output), 0);
+    let ambiguous = support::last_json_record(&ambiguous_output.stdout.bytes)?;
+    assert_eq!(ambiguous["error"]["code"], "AMBIGUOUS_TARGET");
+    let message = ambiguous["error"]["message"]
+        .as_str()
+        .ok_or("ambiguity message")?;
+    assert!(message.contains("multi-output/alpha"), "{message}");
+    assert!(message.contains("multi-output/beta"), "{message}");
+    assert!(!message.contains("alpha--review"), "{message}");
+    assert!(!message.contains("beta--review"), "{message}");
+    let explicit = rig.command(&["output", "multi-output/alpha", "--json"])?;
+    assert_eq!(
+        code(&explicit),
+        0,
+        "{}",
+        String::from_utf8_lossy(&explicit.stdout.bytes)
+    );
     Ok(())
 }
 
@@ -4772,6 +4991,10 @@ fn main() -> ExitCode {
             (
                 "output_names_the_attempt_it_reads_and_writes_or_locates_parts",
                 output_names_the_attempt_it_reads_and_writes_or_locates_parts,
+            ),
+            (
+                "composite_graph_output_uses_declared_roots_and_exports",
+                composite_graph_output_uses_declared_roots_and_exports,
             ),
             (
                 "receipt_output_resolves_the_work_key",
