@@ -7,16 +7,16 @@ macro_rules! stored_enum {
     (
         $(#[$attribute:meta])*
         $visibility:vis enum $name:ident {
-            $($(#[$variant_attribute:meta])* $variant:ident $($fields:tt)? => $sample:expr),+ $(,)?
+            $($(#[$variant_attribute:meta])* $variant:ident $({ $($fields:tt)* })? => $sample:expr),+ $(,)?
         }
     ) => {
         $(#[$attribute])*
         $visibility enum $name {
-            $($(#[$variant_attribute])* $variant $($fields)?),+
+            $($(#[$variant_attribute])* $variant $({ $($fields)* })?),+
         }
 
         impl $name {
-            #[allow(dead_code, reason = "the stored-shape table derives cases from this declaration")]
+            #[cfg(test)]
             pub(crate) fn all() -> Vec<Self> {
                 vec![$($sample),+]
             }
