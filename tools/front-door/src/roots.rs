@@ -172,6 +172,13 @@ pub enum Workspace<'a> {
     Home,
     /// A canonical directory the command has already chosen.
     At(&'a Path),
+    /// A path selected by the shared Git-layout resolver. The optional
+    /// metadata directory is added as a hard boundary, including when a bare
+    /// common directory is itself the workspace root.
+    VerifiedLayout {
+        root: &'a Path,
+        git_metadata: Option<&'a Path>,
+    },
 }
 
 /// Whether a command needs the installed product root. An optional product
@@ -207,25 +214,35 @@ pub fn resolve(
         Product::Required => Some(product_root()?),
         Product::Optional => None,
     };
-    let (project, home) = match workspace {
+    let (project, home, git_metadata) = match workspace {
         Workspace::Home => {
             let home = home()?;
-            (home.clone(), home)
+            (home.clone(), home, None)
         }
         Workspace::Directory => {
             let project = match &globals.project {
                 Some(project) => fs::canonicalize(project).map_err(|_| RootError::Checkout)?,
                 None => fs::canonicalize(std::env::current_dir()?)?,
             };
-            (project, home()?)
+            (project, home()?, None)
         }
         Workspace::Project => (
             selected_project(globals.project.as_deref(), false)?,
             home()?,
+            None,
         ),
-        Workspace::Checkout => (selected_project(globals.project.as_deref(), true)?, home()?),
-        Workspace::SessionSave => (session_project(globals.project.as_deref())?, home()?),
-        Workspace::At(path) => (path.to_owned(), home()?),
+        Workspace::Checkout => (
+            selected_project(globals.project.as_deref(), true)?,
+            home()?,
+            None,
+        ),
+        Workspace::SessionSave => (session_project(globals.project.as_deref())?, home()?, None),
+        Workspace::At(path) => (path.to_owned(), home()?, None),
+        Workspace::VerifiedLayout { root, git_metadata } => (
+            fs::canonicalize(root)?,
+            home()?,
+            git_metadata.map(fs::canonicalize).transpose()?,
+        ),
     };
     let assets = match installed {
         Some(assets) => assets,
@@ -243,6 +260,11 @@ pub fn resolve(
     inputs.environment_state_dir =
         std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).map(PathBuf::from);
     inputs.workspaces.push(project.clone());
+    if let Some(metadata) = git_metadata {
+        if !inputs.git_metadata.contains(&metadata) {
+            inputs.git_metadata.push(metadata);
+        }
+    }
     let roots = provenant_os::fs::bind_roots(&inputs)?;
     report_warnings(&roots);
     Ok(Resolved {
