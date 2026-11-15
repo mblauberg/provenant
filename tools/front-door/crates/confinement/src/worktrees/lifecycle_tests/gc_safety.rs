@@ -35,6 +35,107 @@ fn remove_registered_detached_worktree() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn retirement_preserves_unique_tips_before_removing_the_worktree() -> Result<(), Box<dyn Error>> {
+    for detached in [false, true] {
+        for unique in [false, true] {
+            for discard in [false, true] {
+                let fixture = Fixture::new()?;
+                let test = TestContext::new(&fixture)?;
+                let context = test.context();
+                let branch = format!(
+                    "custody-{}-{unique}",
+                    if detached { "detached" } else { "branch" }
+                );
+                let created = create(
+                    &context,
+                    WorktreeCreate {
+                        branch: branch.clone(),
+                        base: None,
+                    },
+                    &cancel(),
+                )?;
+                if unique {
+                    run_in_worktree(
+                        &fixture,
+                        &created.path,
+                        &["commit", "--allow-empty", "-m", "unique worktree tip"],
+                    )?;
+                }
+                let tip_output = fixture.run(&[
+                    "-C",
+                    created.path.to_str().ok_or("worktree path")?,
+                    "rev-parse",
+                    "HEAD",
+                ])?;
+                let tip = GitOid::parse(std::str::from_utf8(&tip_output.stdout.bytes)?.trim())?;
+                if detached {
+                    run_in_worktree(&fixture, &created.path, &["checkout", "--detach"])?;
+                    fixture.run(&["branch", "-D", &branch])?;
+                }
+                let entries = context.facts.fresh_inventory(&context, &cancel())?;
+                let entry = entries
+                    .iter()
+                    .find(|entry| canonicalize(&entry.path).ok().as_ref() == Some(&created.path))
+                    .ok_or("worktree vanished before retirement")?;
+                let repository = if discard {
+                    super::super::lifecycle::Repository::Discard
+                } else {
+                    super::super::lifecycle::Repository::Remove
+                };
+                let mut archive_bundle = None;
+                let removed = super::super::lifecycle::remove_tree_when_before_delete(
+                    &context,
+                    entry,
+                    tip,
+                    &cancel(),
+                    &|_| Ok(()),
+                    Some(&Default::default()),
+                    repository,
+                    |_, _, archive| {
+                        if discard {
+                            let archive = archive.ok_or(WorktreeError::IdentityChanged)?;
+                            assert!(archive.path.join("tip.bundle").is_file());
+                            archive_bundle = Some(archive.path.join("tip.bundle"));
+                        } else if unique {
+                            let reference = GitRefName::preserved_tip(tip.to_string())
+                                .map_err(|_| WorktreeError::InvalidRequest)?;
+                            assert_eq!(ref_tip(&context, &reference, &cancel())?, Some(tip));
+                            let record = RefLedger::for_context(&context)?
+                                .load(&RefEndpoint::Local, &reference)?
+                                .ok_or(WorktreeError::RegistrationUnconfirmed)?;
+                            assert_eq!(record.tip, tip);
+                        }
+                        Ok(())
+                    },
+                )?;
+                assert_eq!(removed.info.head, tip);
+                drop(removed);
+                if !detached {
+                    fixture.run(&["branch", "-D", &branch])?;
+                }
+                if discard {
+                    let bundle = archive_bundle.ok_or("discard did not publish its bundle")?;
+                    let heads = fixture.run(&[
+                        "bundle",
+                        "list-heads",
+                        bundle.to_str().ok_or("bundle path")?,
+                    ])?;
+                    assert!(
+                        String::from_utf8_lossy(&heads.stdout.bytes).contains(&tip.to_string())
+                    );
+                } else if unique {
+                    let reference = GitRefName::preserved_tip(tip.to_string())?;
+                    assert_eq!(ref_tip(&context, &reference, &cancel())?, Some(tip));
+                } else if !unique {
+                    assert!(is_ancestor(&context, tip, fixture.head()?, &cancel())?);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn detached_removal_keeps_dirty_unmerged_and_live_work() -> Result<(), Box<dyn Error>> {
     for scenario in ["dirty", "unmerged", "live", "changed-head"] {
         let fixture = Fixture::new()?;
@@ -434,10 +535,7 @@ fn gc_foreign_cleanup_respects_exclusions_census_and_durable_ownership()
             },
             &cancel(),
         )?;
-        let worktree_subject = provenant_records::custody::Subject::new(
-            provenant_records::custody::SubjectKind::Worktree,
-            path.to_string_lossy().into_owned(),
-        );
+        let worktree_path = path.clone();
         if scenario == "preview" {
             assert!(
                 report
@@ -466,7 +564,7 @@ fn gc_foreign_cleanup_respects_exclusions_census_and_durable_ownership()
             assert!(!path.exists(), "applied foreign retirement left its tree");
             assert!(!branch_exists(&fixture, "native"));
             assert!(report.removals.iter().any(|removal| {
-                removal.subject == worktree_subject
+                worktree_subject_matches_path(&removal.subject, &worktree_path)
                     && matches!(
                         &removal.outcome,
                         provenant_records::custody::RemovalOutcome::Removed { .. }
@@ -704,12 +802,8 @@ fn gc_foreign_prunes_under_writer_then_locks_repository() -> Result<(), Box<dyn 
         },
         &cancel(),
     )?;
-    let subject = provenant_records::custody::Subject::new(
-        provenant_records::custody::SubjectKind::Worktree,
-        lane.path.to_string_lossy().into_owned(),
-    );
     assert!(report.removals.iter().any(|removal| {
-        removal.subject == subject
+        worktree_subject_matches_path(&removal.subject, &lane.path)
             && matches!(
                 &removal.outcome,
                 provenant_records::custody::RemovalOutcome::Removed { .. }
@@ -775,16 +869,8 @@ fn gc_failed_prune_retains_once_and_continues() -> Result<(), Box<dyn Error>> {
     assert!(report.worktrees.retained.iter().any(|retained| {
         retained.branch == "gc-prune-failed" && retained.reason == RetainReason::UnknownWriter
     }));
-    let first_subject = provenant_records::custody::Subject::new(
-        provenant_records::custody::SubjectKind::Worktree,
-        first.path.to_string_lossy().into_owned(),
-    );
-    let second_subject = provenant_records::custody::Subject::new(
-        provenant_records::custody::SubjectKind::Worktree,
-        second.path.to_string_lossy().into_owned(),
-    );
     assert!(report.removals.iter().any(|removal| {
-        removal.subject == first_subject
+        worktree_subject_matches_path(&removal.subject, &first.path)
             && matches!(
                 &removal.outcome,
                 provenant_records::custody::RemovalOutcome::Kept {
@@ -793,7 +879,7 @@ fn gc_failed_prune_retains_once_and_continues() -> Result<(), Box<dyn Error>> {
             )
     }));
     assert!(report.removals.iter().any(|removal| {
-        removal.subject == second_subject
+        worktree_subject_matches_path(&removal.subject, &second.path)
             && matches!(
                 &removal.outcome,
                 provenant_records::custody::RemovalOutcome::Removed { .. }
@@ -854,7 +940,7 @@ fn gc_refreshes_the_owned_ref_generation_before_recording_retirement() -> Result
     );
 
     let retirement = HostRetirementFixture::new(&test_context)?;
-    let canonical = fs::canonicalize(&lane.path)?;
+    let worktree = acquire_worktree_subject_at(&context, &lane.path)?;
     let upstream = fixture.head()?;
     let evidence = gc_landing_evidence(&fixture, upstream)?;
     let report = collect(
@@ -886,10 +972,6 @@ fn gc_refreshes_the_owned_ref_generation_before_recording_retirement() -> Result
     assert!(current.generation > original.generation);
     assert_eq!(current.tip, lane.head);
     assert_eq!(current.origin, original.origin);
-    let worktree = provenant_records::custody::Subject::new(
-        provenant_records::custody::SubjectKind::Worktree,
-        canonical.to_string_lossy().into_owned(),
-    );
     let recorded = retirement
         .retirement_for_subject(context.binding.project_id(), &worktree)?
         .ok_or("missing durable retirement")?;
@@ -1025,12 +1107,8 @@ fn gc_merged_tree_previews_and_removes_declared_output() -> Result<(), Box<dyn E
         },
         &cancel(),
     )?;
-    let subject = provenant_records::custody::Subject::new(
-        provenant_records::custody::SubjectKind::Worktree,
-        lane.path.to_string_lossy().into_owned(),
-    );
     assert!(applied.removals.iter().any(|removal| {
-        removal.subject == subject
+        worktree_subject_matches_path(&removal.subject, &lane.path)
             && matches!(
                 &removal.outcome,
                 provenant_records::custody::RemovalOutcome::Removed { .. }
@@ -1114,12 +1192,8 @@ fn gc_census_never_runs_under_the_repository_lock() -> Result<(), Box<dyn Error>
             );
             assert!(lane.path.is_dir());
         } else {
-            let subject = provenant_records::custody::Subject::new(
-                provenant_records::custody::SubjectKind::Worktree,
-                lane.path.to_string_lossy().into_owned(),
-            );
             assert!(report.removals.iter().any(|removal| {
-                removal.subject == subject
+                worktree_subject_matches_path(&removal.subject, &lane.path)
                     && matches!(
                         &removal.outcome,
                         provenant_records::custody::RemovalOutcome::Removed { .. }

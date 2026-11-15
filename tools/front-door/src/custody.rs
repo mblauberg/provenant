@@ -354,58 +354,9 @@ fn pending_retirements(
     project: ProjectId,
     request: &Request<'_>,
 ) -> Result<Vec<RetirementRecord>, provenant_confinement::worktrees::WorktreeError> {
-    let mut query = CustodyQuery {
-        project: Some(project),
-        state: Some(StateKind::Retired),
-        ..Default::default()
-    };
-    let mut subjects_by_id = std::collections::BTreeMap::<String, Vec<Subject>>::new();
-    loop {
-        let page = store
-            .custody(&query, request)
-            .map_err(RetirementWriter::error)?;
-        for item in page.items {
-            if let CustodyState::Retired { retirement_id } = item.state {
-                subjects_by_id
-                    .entry(retirement_id)
-                    .or_default()
-                    .push(item.subject);
-            }
-        }
-        match page.next {
-            Some(next) if next > query.after => query.after = next,
-            Some(_) => {
-                return Err(provenant_confinement::worktrees::WorktreeError::InvalidOutput);
-            }
-            None => break,
-        }
-    }
-    let mut pending = Vec::new();
-    for (id, subjects) in subjects_by_id {
-        let Some(record) = store
-            .retirement(project, &id, request)
-            .map_err(RetirementWriter::error)?
-        else {
-            return Err(RetirementWriter::error(
-                provenant_fabric_store::Error::NotFound,
-            ));
-        };
-        if record.id != id
-            || record.project != project
-            || !record.valid_evidence()
-            || subjects.iter().any(|subject| !record.owns_subject(subject))
-        {
-            return Err(provenant_confinement::worktrees::WorktreeError::IdentityChanged);
-        }
-        if record
-            .outcomes
-            .iter()
-            .any(|outcome| !matches!(&outcome.state, RetirementStepState::Completed { .. }))
-        {
-            pending.push(record);
-        }
-    }
-    Ok(pending)
+    store
+        .pending_retirements(project, request)
+        .map_err(RetirementWriter::error)
 }
 
 pub(crate) fn presence(
@@ -543,7 +494,7 @@ pub fn collect_cloud(
     let subjects = [
         key.clone(),
         Subject::new(SubjectKind::Branch, branch),
-        Subject::new(SubjectKind::Worktree, worktree),
+        provenant_cli::fabric::checkout_subject(&resolved.roots, Path::new(worktree))?,
     ];
     let changes = ledger.acquire_custody_group(
         context.identity.project,

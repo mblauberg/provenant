@@ -20,7 +20,7 @@ fn custody_is_durable_advisory_and_queryable_by_declared_kinds() {
     let original = holder(1);
     let adopter = holder(2);
     for &kind in SubjectKind::ALL {
-        let id = if kind.is_path() {
+        let id = if kind == SubjectKind::Worktree || kind.is_path() {
             f.temp
                 .path()
                 .canonicalize()
@@ -30,7 +30,11 @@ fn custody_is_durable_advisory_and_queryable_by_declared_kinds() {
         } else {
             format!("{kind}-item")
         };
-        let subject = Subject::new(kind, id);
+        let subject = if kind == SubjectKind::Worktree {
+            Subject::worktree(id, "fixture-1")
+        } else {
+            Subject::new(kind, id)
+        };
         ledger
             .acquire_custody(
                 project(),
@@ -165,19 +169,19 @@ fn retirement_is_custody_owned_and_resumes_by_revision() {
     };
     let subject = reference.custody_subject().unwrap();
     let worktree_root = fixture.temp.path().canonicalize().unwrap();
-    let worktree = Subject::new(
-        SubjectKind::Worktree,
+    let worktree = Subject::worktree(
         worktree_root
             .join("retired-worktree")
             .to_string_lossy()
             .into_owned(),
+        "fixture-1",
     );
-    let second_worktree = Subject::new(
-        SubjectKind::Worktree,
+    let second_worktree = Subject::worktree(
         worktree_root
             .join("second-retired-worktree")
             .to_string_lossy()
             .into_owned(),
+        "fixture-2",
     );
     let holder = holder(1);
     for subject in [&subject, &worktree, &second_worktree] {
@@ -366,6 +370,13 @@ fn retirement_is_custody_owned_and_resumes_by_revision() {
             &fixture.request(),
         )
         .unwrap();
+    assert_eq!(
+        ledger
+            .pending_retirements(project, &fixture.request())
+            .unwrap()
+            .len(),
+        1
+    );
     let pending = ledger
         .set_retirement_step(
             project,
@@ -392,6 +403,13 @@ fn retirement_is_custody_owned_and_resumes_by_revision() {
             &fixture.request(),
         )
         .unwrap();
+    assert_eq!(
+        ledger
+            .pending_retirements(project, &fixture.request())
+            .unwrap()
+            .len(),
+        1
+    );
     let partial_removals = partial.removals();
     let removed = partial_removals
         .iter()
@@ -565,8 +583,7 @@ fn retirement_decisions_preserve_archive_proof_and_reference_custody() {
         let fixture = Fixture::new();
         let ledger = HostStore::open(&fixture.root, &fixture.request()).unwrap();
         let project = project();
-        let worktree = Subject::new(
-            SubjectKind::Worktree,
+        let worktree = Subject::worktree(
             fixture
                 .temp
                 .path()
@@ -575,12 +592,17 @@ fn retirement_decisions_preserve_archive_proof_and_reference_custody() {
                 .join("explicit-discard")
                 .to_string_lossy()
                 .into_owned(),
+            "fixture-1",
         );
         let reference = RefOwnership {
             repository: project,
             endpoint: if detached {
                 RefEndpoint::Worktree {
-                    path: worktree.id.clone(),
+                    path: worktree
+                        .worktree_path()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
                 }
             } else {
                 RefEndpoint::Local
@@ -658,6 +680,13 @@ fn retirement_decisions_preserve_archive_proof_and_reference_custody() {
             .unwrap_or_else(|error| {
                 panic!("{remove_reference} {with_worktree} {detached}: {error:?} {record:?}")
             });
+        assert_eq!(
+            ledger
+                .pending_retirements(project, &fixture.request())
+                .unwrap()
+                .len(),
+            1
+        );
         let completion_evidence = if matches!(
             &evidence,
             RemovalEvidence::ExplicitDiscard { archive: Some(_) }
@@ -708,6 +737,12 @@ fn retirement_decisions_preserve_archive_proof_and_reference_custody() {
                 )
                 .unwrap();
         }
+        assert!(
+            ledger
+                .pending_retirements(project, &fixture.request())
+                .unwrap()
+                .is_empty()
+        );
         assert!(current.removals().iter().all(|removal| matches!(
             &removal.outcome, RemovalOutcome::Removed { evidence: proof, retirement_id }
                 if proof == &completion_evidence && retirement_id == &record.id
@@ -734,6 +769,158 @@ fn retirement_decisions_preserve_archive_proof_and_reference_custody() {
             );
         }
     }
+}
+
+#[test]
+fn retirement_table_declares_pending_state_without_a_subject_anchor() {
+    let fixture = Fixture::new();
+    let ledger = HostStore::open(&fixture.root, &fixture.request()).unwrap();
+    let mut statement = ledger
+        .0
+        .db
+        .prepare("PRAGMA table_info(retirements)")
+        .unwrap();
+    let columns = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                (row.get::<_, String>(2)?, row.get::<_, i64>(3)?),
+            ))
+        })
+        .unwrap()
+        .collect::<std::result::Result<std::collections::BTreeMap<_, _>, _>>()
+        .unwrap();
+    assert_eq!(
+        columns
+            .get("pending")
+            .map(|(kind, not_null)| (kind.as_str(), *not_null)),
+        Some(("INTEGER", 1))
+    );
+    assert!(!columns.contains_key("kind"));
+    assert!(!columns.contains_key("subject"));
+    assert!(ledger
+        .0
+        .db
+        .execute(
+            "INSERT INTO retirements(project,id,revision,pending,record) VALUES('shape-project','shape-id',1,2,x'00')",
+            [],
+        )
+        .is_err());
+
+    let mut statement = ledger
+        .0
+        .db
+        .prepare("PRAGMA index_info(retirement_pending)")
+        .unwrap();
+    let indexed = statement
+        .query_map([], |row| row.get::<_, String>(2))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(indexed, ["project".to_owned(), "pending".to_owned()]);
+}
+
+#[test]
+fn a_reused_worktree_path_keeps_each_incarnation_custody() {
+    let fixture = Fixture::new();
+    let ledger = HostStore::open(&fixture.root, &fixture.request()).unwrap();
+    let project = project();
+    let path = fixture
+        .temp
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("reused-worktree")
+        .to_string_lossy()
+        .into_owned();
+    let first = Subject::worktree(&path, "generation-1");
+    let second = Subject::worktree(&path, "generation-2");
+    let reference = RefOwnership {
+        repository: project,
+        endpoint: RefEndpoint::Local,
+        reference: "refs/heads/lane/reused".into(),
+        generation: 1,
+        origin: RefOrigin::Created,
+    };
+    let reference_subject = reference.custody_subject().unwrap();
+    let actor = holder(1);
+    for subject in [&reference_subject, &first] {
+        ledger
+            .acquire_custody(
+                project,
+                subject,
+                &actor,
+                Origin::Provenant,
+                &fixture.request(),
+            )
+            .unwrap();
+    }
+    let tip = "5123456789abcdef0123456789abcdef01234567".parse().unwrap();
+    let evidence = RemovalEvidence::IdleRetirement { tip };
+    let record = RetirementRecord::plan(
+        project,
+        vec![first.clone()],
+        reference,
+        tip,
+        RetirementDecision::RetireWorktree {
+            authority: actor.actor(),
+            evidence: evidence.clone(),
+        },
+    )
+    .unwrap();
+    let started = ledger
+        .start_retirement(&record, &fixture.request())
+        .unwrap();
+    ledger
+        .set_retirement_step(
+            project,
+            &record.id,
+            started.revision,
+            RetirementStepOutcome {
+                step: RetirementStep::Worktree {
+                    subject: first.clone(),
+                },
+                state: RetirementStepState::Completed { evidence },
+            },
+            &fixture.request(),
+        )
+        .unwrap();
+
+    ledger
+        .acquire_custody(
+            project,
+            &second,
+            &actor,
+            Origin::Provenant,
+            &fixture.request(),
+        )
+        .unwrap();
+    assert_eq!(
+        ledger
+            .custody_item(project, &first, &fixture.request())
+            .unwrap()
+            .unwrap()
+            .state,
+        CustodyState::Retired {
+            retirement_id: record.id.clone(),
+        }
+    );
+    assert_eq!(
+        ledger
+            .custody_item(project, &second, &fixture.request())
+            .unwrap()
+            .unwrap()
+            .state,
+        CustodyState::Active
+    );
+    assert_eq!(
+        ledger
+            .retirement(project, &record.id, &fixture.request())
+            .unwrap()
+            .unwrap()
+            .related_subjects,
+        vec![first]
+    );
 }
 
 #[test]

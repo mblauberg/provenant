@@ -364,7 +364,7 @@ pub(crate) enum GitMutation {
         output: PathBuf,
         reference: GitRefName,
     },
-    CreateArchiveRef {
+    CreatePreservationRef {
         reference: GitRefName,
         tip: GitOid,
     },
@@ -2305,8 +2305,19 @@ fn run_git_probe(
 fn mutation_args(mutation: GitMutation) -> Result<(Vec<OsString>, Option<Vec<u8>>), UtilityError> {
     let mut args = GIT_COMMON.iter().map(OsString::from).collect::<Vec<_>>();
     let input = match mutation {
-        GitMutation::CreateArchiveRef { reference, tip } => {
+        GitMutation::CreatePreservationRef { reference, tip } => {
+            if GitRefName::parse_discard_archive(reference.as_str()).is_err()
+                && GitRefName::parse_preserved_tip(reference.as_str()).is_err()
+            {
+                return Err(UtilityError::InvalidOperationValue);
+            }
+            // Preservation is a data-integrity boundary even when repository
+            // defaults disable reference hardening.
             args.extend([
+                "-c".into(),
+                "core.fsync=reference".into(),
+                "-c".into(),
+                "core.fsyncMethod=fsync".into(),
                 "update-ref".into(),
                 reference.as_str().into(),
                 tip.to_string().into(),

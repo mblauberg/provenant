@@ -268,11 +268,9 @@ fn execute(
                 Worktree::SeedBuild => unreachable!(),
                 Worktree::Create { branch, base } => {
                     let info = worktrees::create(context, WorktreeCreate { branch, base }, cancel)?;
-                    use provenant_records::custody::{Subject, SubjectKind};
-                    let mut subjects = vec![Subject::new(
-                        SubjectKind::Worktree,
-                        info.path.to_string_lossy(),
-                    )];
+                    let verified =
+                        provenant_confinement::verify_worktree(context.repo, &info.path)?;
+                    let mut subjects = vec![worktrees::acquire_worktree_subject(verified.repo())?];
                     if let Some(branch) = info.branch.as_deref().and_then(|reference| {
                         provenant_confinement::repo::GitRefName::new(reference).ok()
                     }) && let Some(owner) =
@@ -1114,7 +1112,15 @@ pub(crate) fn retention_event(
         |context, cancel| {
             let lanes = worktrees::list_for_gc_matching(context, cancel, |path, branch| {
                 subjects.iter().any(|subject| match subject.kind {
-                    SubjectKind::Worktree | SubjectKind::Path => path == Path::new(&subject.id),
+                    SubjectKind::Worktree => {
+                        subject.worktree_path().as_deref() == Some(path)
+                            && provenant_confinement::verify_worktree(context.repo, path)
+                                .ok()
+                                .and_then(|tree| worktrees::worktree_subject(tree.repo()).ok())
+                                .as_ref()
+                                == Some(subject)
+                    }
+                    SubjectKind::Path => path == Path::new(&subject.id),
                     SubjectKind::Branch => branch == Some(subject.id.as_str()),
                     _ => false,
                 })
@@ -2459,7 +2465,7 @@ mod gc_preview_tests {
         assert!(report.removals.is_empty());
         let projection = RemovalRecord {
             project,
-            subject: Subject::new(SubjectKind::Worktree, "/repo/.worktrees/topic"),
+            subject: Subject::worktree("/repo/.worktrees/topic", "fixture-1"),
             tip,
             outcome: RemovalOutcome::Removed {
                 evidence: provenant_records::custody::RemovalEvidence::Landing {

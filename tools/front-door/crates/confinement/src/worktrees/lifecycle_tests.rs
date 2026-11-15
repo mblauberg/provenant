@@ -32,6 +32,25 @@ use std::fs;
 
 use std::os::unix::fs::PermissionsExt;
 
+pub(super) fn worktree_subject_matches_path(
+    subject: &provenant_records::custody::Subject,
+    path: &Path,
+) -> bool {
+    match subject.kind {
+        provenant_records::custody::SubjectKind::Worktree => subject.worktree_path().as_deref() == Some(path),
+        provenant_records::custody::SubjectKind::Path => Path::new(&subject.id) == path,
+        _ => false,
+    }
+}
+
+pub(super) fn acquire_worktree_subject_at(
+    context: &WorktreeContext<'_>,
+    path: &Path,
+) -> Result<provenant_records::custody::Subject, WorktreeError> {
+    let tree = verify_worktree(context.repo, path)?;
+    acquire_worktree_subject(tree.repo())
+}
+
 pub(super) struct FreeWorkers;
 
 impl WorkerObserver for FreeWorkers {
@@ -288,11 +307,8 @@ impl HostRetirementFixture {
                 process: None,
             },
         };
-        let path = fs::canonicalize(&lane.path)?;
-        let worktree = provenant_records::custody::Subject::new(
-            provenant_records::custody::SubjectKind::Worktree,
-            path.to_string_lossy().into_owned(),
-        );
+        let tree = verify_worktree(context.repo, &lane.path)?;
+        let worktree = acquire_worktree_subject(&tree)?;
         for subject in [&branch, &worktree] {
             self.store.acquire_custody(
                 self.project,
@@ -383,48 +399,12 @@ impl RetirementPort for HostRetirementFixture {
         &self,
         project: provenant_core::ProjectId,
     ) -> Result<Vec<provenant_records::custody::RetirementRecord>, WorktreeError> {
-        use provenant_records::custody::{CustodyQuery, CustodyState, StateKind};
-
         if project != self.project {
             return Err(WorktreeError::InvalidRequest);
         }
-        let request = self.request();
-        let mut query = CustodyQuery {
-            project: Some(project),
-            state: Some(StateKind::Retired),
-            ..Default::default()
-        };
-        let mut records = std::collections::BTreeMap::new();
-        loop {
-            let page = self.store.custody(&query, &request).map_err(Self::error)?;
-            for item in page.items {
-                let CustodyState::Retired { retirement_id } = item.state else {
-                    continue;
-                };
-                let record = self
-                    .store
-                    .retirement(project, &retirement_id, &request)
-                    .map_err(Self::error)?
-                    .ok_or(WorktreeError::RegistrationUnconfirmed)?;
-                if !record.valid_evidence() {
-                    return Err(WorktreeError::InvalidOutput);
-                }
-                if record.outcomes.iter().any(|outcome| {
-                    !matches!(
-                        &outcome.state,
-                        provenant_records::custody::RetirementStepState::Completed { .. }
-                    )
-                }) {
-                    records.insert(record.id.clone(), record);
-                }
-            }
-            match page.next {
-                Some(next) if next > query.after => query.after = next,
-                Some(_) => return Err(WorktreeError::RegistrationUnconfirmed),
-                None => break,
-            }
-        }
-        Ok(records.into_values().collect())
+        self.store
+            .pending_retirements(project, &self.request())
+            .map_err(Self::error)
     }
 
     fn advance_retirement(
@@ -458,6 +438,10 @@ impl RetirementFeeds for HostRetirementFixture {
 
     fn forge(&self, _branch: &GitRefName) -> ForgeObservation {
         ForgeObservation::Absent
+    }
+
+    fn fresh_forge(&self, branch: &GitRefName) -> ForgeObservation {
+        self.forge(branch)
     }
 
     fn integration_bases(&self) -> Vec<(String, GitOid)> {
@@ -636,6 +620,53 @@ pub(super) fn gc_owned_lane(
         .ok_or_else(|| "missing GC fixture worktree".into())
 }
 
+#[test]
+fn recreating_a_worktree_path_starts_a_fresh_custody_incarnation() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let first = create(
+        &context,
+        WorktreeCreate {
+            branch: "custody-incarnation".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let first_subject = acquire_worktree_subject_at(&context, &first.path)?;
+
+    remove_with_port(
+        &test,
+        &context,
+        WorktreeRemove::Name {
+            name: "custody-incarnation".into(),
+            discard: false,
+            integration: None,
+            expected_head: Some(first.head),
+        },
+        &cancel(),
+    )?;
+    fixture.run(&["branch", "-D", "custody-incarnation"])?;
+
+    let second = create(
+        &context,
+        WorktreeCreate {
+            branch: "custody-incarnation".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let second_subject = acquire_worktree_subject_at(&context, &second.path)?;
+
+    assert_eq!(first.path, second.path);
+    assert_eq!(
+        first_subject.worktree_path(),
+        second_subject.worktree_path()
+    );
+    assert_ne!(first_subject, second_subject);
+    Ok(())
+}
+
 /// Commit in `lane`, merge its branch into the default branch, and relist it.
 fn merge_lane(
     fixture: &Fixture,
@@ -789,11 +820,12 @@ pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck_and_re
 -> Result<(), Box<dyn Error>> {
     for scenario in [
         "remove",
+        "detached-unique",
         "final-refusal",
         "contended-refusal",
         "cancelled-refusal",
     ] {
-        let refuse = scenario != "remove";
+        let refuse = !matches!(scenario, "remove" | "detached-unique");
         let fixture = Fixture::new()?;
         let test_context = TestContext::new(&fixture)?;
         let mut context = test_context.context();
@@ -811,7 +843,13 @@ pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck_and_re
             "native-no-state",
             path.to_str().ok_or("path")?,
         ])?;
+        if scenario == "detached-unique" {
+            run_in_worktree(&fixture, &path, &["commit", "--allow-empty", "-m", "unique detached work"])?;
+            run_in_worktree(&fixture, &path, &["checkout", "--detach"])?;
+            fixture.run(&["branch", "-D", "native-no-state"])?;
+        }
         let lanes = list(&context, &cancel())?;
+        let detached_tip = lanes.iter().find(|lane| lane.path == path).ok_or("missing foreign checkout")?.head;
         let retirement = HostRetirementFixture::new(&test_context)?;
         let state_name = state_dir_name(&path);
         assert!(
@@ -890,12 +928,8 @@ pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck_and_re
             }));
             assert!(path.is_dir());
         } else {
-            let subject = provenant_records::custody::Subject::new(
-                provenant_records::custody::SubjectKind::Worktree,
-                path.to_string_lossy().into_owned(),
-            );
             assert!(report.removals.iter().any(|removal| {
-                removal.subject == subject
+                worktree_subject_matches_path(&removal.subject, &path)
                     && matches!(
                         &removal.outcome,
                         provenant_records::custody::RemovalOutcome::Removed { .. }
@@ -903,7 +937,13 @@ pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck_and_re
             }));
         }
         assert_eq!(path.is_dir(), refuse, "idle foreign worktree outcome");
-        assert!(branch_exists(&fixture, "native-no-state"));
+        if scenario == "detached-unique" {
+            assert!(!branch_exists(&fixture, "native-no-state"));
+            let preserved = GitRefName::preserved_tip(detached_tip.to_string())?;
+            assert_eq!(ref_tip(&context, &preserved, &cancel())?, Some(detached_tip));
+        } else {
+            assert!(branch_exists(&fixture, "native-no-state"));
+        }
         if let Some(holder) = holder.into_inner() {
             drop(holder);
         } else {

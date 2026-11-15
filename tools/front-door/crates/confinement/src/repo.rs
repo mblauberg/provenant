@@ -205,6 +205,7 @@ pub struct GitRevision(String);
 pub struct GitRevisionError;
 
 const DISCARD_ARCHIVE_REF_PREFIX: &str = "refs/provenant/discard-archives/";
+const PRESERVED_TIP_REF_PREFIX: &str = "refs/provenant/retained/";
 
 impl GitRefName {
     pub fn new(value: impl AsRef<str>) -> Result<Self, GitRefError> {
@@ -235,6 +236,29 @@ impl GitRefName {
             .strip_prefix(DISCARD_ARCHIVE_REF_PREFIX)
             .ok_or(GitRefError)
             .and_then(Self::discard_archive)
+    }
+
+    /// A durable ref that keeps a worktree tip reachable after retirement.
+    /// The object ID is used as the stable component so replay reuses one ref.
+    pub fn preserved_tip(id: impl AsRef<str>) -> Result<Self, GitRefError> {
+        let id = id.as_ref();
+        if !matches!(id.len(), 40 | 64)
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(GitRefError);
+        }
+        Ok(Self(format!("{PRESERVED_TIP_REF_PREFIX}{id}")))
+    }
+
+    /// Parse a full ref previously produced by `preserved_tip`.
+    pub fn parse_preserved_tip(value: impl AsRef<str>) -> Result<Self, GitRefError> {
+        value
+            .as_ref()
+            .strip_prefix(PRESERVED_TIP_REF_PREFIX)
+            .ok_or(GitRefError)
+            .and_then(Self::preserved_tip)
     }
 
     /// A remote-tracking ref named `remote/branch`, such as `origin/main`.
