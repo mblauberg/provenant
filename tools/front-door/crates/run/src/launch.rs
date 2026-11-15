@@ -1279,9 +1279,28 @@ impl RunStore {
             command_phase,
             &request_key,
             &execution,
+            provenant_config::PortReceiptLifetime::AttemptTerminalAndRelease {
+                attempt_id: attempt,
+                project_id: self.context.project_id,
+                actor_id: self.context.actor_id,
+                lease_epoch: binding.lease_epoch,
+            },
         );
+        let evidence_visible = match evidence {
+            Ok(provenant_config::PortCommandPublication::Durable) => true,
+            Ok(provenant_config::PortCommandPublication::VisibleDurabilityUnconfirmed {
+                cause,
+            }) => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: admission receipt is visible but durability is unconfirmed: {cause}"
+                );
+                true
+            }
+            Err(_) => false,
+        };
         execution.disposition == provenant_config::PortCommandDisposition::Succeeded
-            && evidence.is_ok()
+            && evidence_visible
     }
 
     #[cfg(test)]
@@ -3500,6 +3519,12 @@ mod admission_port_lifecycle_tests {
             "release",
             &key,
             &execution,
+            provenant_config::PortReceiptLifetime::AttemptTerminalAndRelease {
+                attempt_id: attempt,
+                project_id: context.project_id,
+                actor_id: context.actor_id,
+                lease_epoch: terminal_binding.lease_epoch,
+            },
         )?;
         assert!(store.admission_release_receipt_confirmed(attempt, &terminal_binding));
         assert!(

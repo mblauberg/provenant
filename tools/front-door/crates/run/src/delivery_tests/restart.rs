@@ -658,11 +658,20 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
             .any(|(_, result)| matches!(result, crate::Reconciled::TemporaryRetained { .. }))
     );
     assert!(store.open_attempts(100, &call)?.contains(&input.attempt_id));
+    // Exercise scratch cleanup after its declared age; the retained pin has
+    // its own retry marker and must survive that independent collection.
+    let scratch_days = 7_u64;
+    let AttemptState::Terminal { finished_at, .. } = store.record(input.attempt_id, &call)?.state
+    else {
+        return Err("fixture attempt is not terminal".into());
+    };
+    let collection_time = provenant_core::WallTime::from_micros(
+        finished_at.as_micros() + i64::try_from(scratch_days)? * 86_400_000_000,
+    )?;
     let gc = store.gc_temporary(
         &Directory::open_anchor(execution.state_root.as_path())?,
-        7,
-        30,
-        provenant_core::WallTime::from_micros(86_400_000_150)?,
+        scratch_days,
+        collection_time,
         false,
         &call,
     )?;

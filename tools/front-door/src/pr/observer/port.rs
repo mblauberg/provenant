@@ -112,15 +112,25 @@ impl CommandTransport {
         path: &str,
         execution: &provenant_config::PortCommandExecution,
     ) -> io::Result<()> {
-        provenant_config::record_port_command(
+        match provenant_config::record_port_command(
             &self.state,
             "ci_observation",
             self.source,
             "request",
             path,
             execution,
-        )
-        .map_err(io::Error::other)
+            provenant_config::PortReceiptLifetime::AgeDays {
+                days: provenant_config::DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS,
+            },
+        ) {
+            Ok(provenant_config::PortCommandPublication::Durable) => Ok(()),
+            Ok(provenant_config::PortCommandPublication::VisibleDurabilityUnconfirmed {
+                cause,
+            }) => Err(io::Error::other(format!(
+                "CI command receipt is visible but durability is unconfirmed: {cause}"
+            ))),
+            Err(error) => Err(io::Error::other(error)),
+        }
     }
 }
 impl Forge for CommandTransport {

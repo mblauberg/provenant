@@ -63,6 +63,8 @@ pub(crate) enum Error {
     GitUnavailable,
     #[error("cannot establish worktree lock budget")]
     Budget,
+    #[error("retention collection failed: {0}")]
+    RetentionCollection(String),
     #[error("graph checkpoint collection failed: {0}")]
     GraphGc(String),
     #[error("{0}")]
@@ -430,6 +432,14 @@ struct GcData {
     target_seeds: provenant_run::target_seed_gc::Report,
     build_dirs: provenant_run::build_dir_gc::Report,
     graph_checkpoints_removed: usize,
+    #[serde(skip)]
+    graph_bytes: Option<provenant_config::ByteObservation>,
+    port_receipts: crate::port_receipt_retention::Report,
+    retention_errors: Vec<provenant_config::RetentionIssue>,
+    #[serde(skip)]
+    failed_classes: Vec<provenant_config::RetentionKind>,
+    #[serde(skip)]
+    retention_observations: Vec<provenant_config::RetentionBytes>,
     discard_archives: worktrees::ArchiveReport,
     staging_busy: Vec<PathBuf>,
     worktree_cleanup: Vec<worktrees::WorktreeGcReport>,
@@ -461,79 +471,160 @@ fn gc_cache_bytes(data: &GcData) -> u64 {
 }
 
 fn gc_retention_bytes(data: &GcData) -> Vec<provenant_config::RetentionBytes> {
-    use provenant_config::{ByteObservation, RETENTION_CLASSES, RetentionKind};
-
-    RETENTION_CLASSES
+    provenant_config::RETENTION_CLASSES
         .iter()
-        .map(|class| {
-            let observation = match class.class {
-                RetentionKind::LaneCargoCaches
-                    if !data.report.errors.is_empty()
-                        || data.report.bytes_estimated
-                        || data
-                            .worktree_cleanup
-                            .iter()
-                            .any(|r| !r.cache_errors.is_empty()) =>
-                {
-                    ByteObservation::Partial {
-                        bytes: gc_cache_bytes(data),
-                    }
-                }
-                RetentionKind::LaneCargoCaches => ByteObservation::Measured {
-                    bytes: gc_cache_bytes(data),
-                },
-                RetentionKind::GitWorktrees => {
-                    let bytes = data
-                        .worktree_cleanup
-                        .iter()
-                        .map(|r| r.bytes)
-                        .fold(0_u64, u64::saturating_add);
-                    if data
-                        .worktree_cleanup
-                        .iter()
-                        .any(|r| !r.byte_errors.is_empty())
-                    {
-                        ByteObservation::Partial { bytes }
-                    } else {
-                        ByteObservation::Measured { bytes }
-                    }
-                }
-                RetentionKind::TargetSeeds => ByteObservation::Measured {
-                    bytes: data.target_seeds.bytes,
-                },
-                RetentionKind::BuildDirectories => ByteObservation::Measured {
-                    bytes: data.build_dirs.bytes,
-                },
-                RetentionKind::DiscardArchives => ByteObservation::Measured {
-                    bytes: data.discard_archives.bytes,
-                },
-                RetentionKind::PayloadCap => ByteObservation::Measured {
-                    bytes: data.provider_state.payload.reclaimed_bytes,
-                },
-                RetentionKind::ProviderState => ByteObservation::Partial {
-                    bytes: data
-                        .provider_state
-                        .attempt_logs
-                        .iter()
-                        .map(|item| item.bytes)
-                        .fold(0, u64::saturating_add),
-                },
-                RetentionKind::AttemptScratch => ByteObservation::Partial {
-                    bytes: data
-                        .provider_state
-                        .attempt_tmp
-                        .iter()
-                        .map(|item| item.bytes)
-                        .fold(0, u64::saturating_add),
-                },
-                _ => ByteObservation::Unknown,
-            };
-            provenant_config::RetentionBytes {
-                class: class.class,
-                observation,
-            }
+        .map(|class| provenant_config::RetentionBytes {
+            class: class.class,
+            observation: data
+                .retention_observations
+                .iter()
+                .find(|row| row.class == class.class)
+                .map_or(provenant_config::ByteObservation::Unknown, |row| {
+                    row.observation
+                }),
         })
         .collect()
+}
+
+impl GcData {
+    /// Measure only adapters selected for this pass. Keep results, so rendering
+    /// cannot turn an unexecuted adapter's empty report into a measured zero.
+    fn observe_retention(&mut self, trigger: provenant_config::RetentionTrigger) {
+        self.retention_observations = provenant_config::retention_schedule(trigger)
+            .map(|class| provenant_config::RetentionBytes {
+                class: class.class,
+                observation: if self.failed_classes.contains(&class.class) {
+                    provenant_config::ByteObservation::Unknown
+                } else {
+                    class.adapter.measure(self)
+                },
+            })
+            .collect();
+    }
+}
+
+impl provenant_config::RetentionMeasurements for GcData {
+    fn lane_cargo_caches(&self) -> provenant_config::ByteObservation {
+        let bytes = gc_cache_bytes(self);
+        if !self.report.errors.is_empty()
+            || self.report.bytes_estimated
+            || self
+                .worktree_cleanup
+                .iter()
+                .any(|r| !r.cache_errors.is_empty())
+        {
+            provenant_config::ByteObservation::Partial { bytes }
+        } else {
+            provenant_config::ByteObservation::Measured { bytes }
+        }
+    }
+    fn git_worktrees(&self) -> provenant_config::ByteObservation {
+        let bytes = self
+            .worktree_cleanup
+            .iter()
+            .map(|r| r.bytes)
+            .fold(0_u64, u64::saturating_add);
+        if self
+            .worktree_cleanup
+            .iter()
+            .any(|r| !r.byte_errors.is_empty())
+        {
+            provenant_config::ByteObservation::Partial { bytes }
+        } else {
+            provenant_config::ByteObservation::Measured { bytes }
+        }
+    }
+    fn target_seeds(&self) -> provenant_config::ByteObservation {
+        provenant_config::ByteObservation::Measured {
+            bytes: self.target_seeds.bytes,
+        }
+    }
+    fn build_directories(&self) -> provenant_config::ByteObservation {
+        if self.build_dirs.errors.is_empty() {
+            provenant_config::ByteObservation::Measured {
+                bytes: self.build_dirs.bytes,
+            }
+        } else {
+            provenant_config::ByteObservation::Partial {
+                bytes: self.build_dirs.bytes,
+            }
+        }
+    }
+    fn discard_archives(&self) -> provenant_config::ByteObservation {
+        if self.discard_archives.errors.is_empty() {
+            provenant_config::ByteObservation::Measured {
+                bytes: self.discard_archives.bytes,
+            }
+        } else {
+            provenant_config::ByteObservation::Partial {
+                bytes: self.discard_archives.bytes,
+            }
+        }
+    }
+    fn payload_cap(&self) -> provenant_config::ByteObservation {
+        if self.provider_state.payload.errors.is_empty() {
+            provenant_config::ByteObservation::Measured {
+                bytes: self.provider_state.payload.reclaimed_bytes,
+            }
+        } else {
+            provenant_config::ByteObservation::Partial {
+                bytes: self.provider_state.payload.reclaimed_bytes,
+            }
+        }
+    }
+    fn provider_state(&self) -> provenant_config::ByteObservation {
+        provenant_config::ByteObservation::Partial {
+            bytes: self
+                .provider_state
+                .attempt_logs
+                .iter()
+                .map(|r| r.bytes)
+                .fold(0_u64, u64::saturating_add),
+        }
+    }
+    fn attempt_scratch(&self) -> provenant_config::ByteObservation {
+        provenant_config::ByteObservation::Partial {
+            bytes: self
+                .provider_state
+                .attempt_tmp
+                .iter()
+                .map(|r| r.bytes)
+                .fold(0_u64, u64::saturating_add),
+        }
+    }
+    fn graph_checkpoints(&self) -> provenant_config::ByteObservation {
+        self.graph_bytes
+            .unwrap_or(provenant_config::ByteObservation::Unknown)
+    }
+    fn port_receipts(&self) -> provenant_config::ByteObservation {
+        self.port_receipts.observation
+    }
+    // These owners expose no byte census to GC. Their adapters explicitly report
+    // that limitation; adding a class cannot inherit it through a wildcard.
+    fn staging(&self) -> provenant_config::ByteObservation {
+        provenant_config::ByteObservation::Unknown
+    }
+    fn chair_logs(&self) -> provenant_config::ByteObservation {
+        provenant_config::ByteObservation::Unknown
+    }
+    fn observation_ledgers(&self) -> provenant_config::ByteObservation {
+        provenant_config::ByteObservation::Unknown
+    }
+    fn retirement_records(&self) -> provenant_config::ByteObservation {
+        provenant_config::ByteObservation::Unknown
+    }
+    fn ref_generation_sequences(&self) -> provenant_config::ByteObservation {
+        provenant_config::ByteObservation::Unknown
+    }
+    fn quota_history(&self) -> provenant_config::ByteObservation {
+        provenant_config::ByteObservation::Unknown
+    }
+    fn usage(&self) -> provenant_config::ByteObservation {
+        provenant_config::ByteObservation::Unknown
+    }
+    fn managed_releases(&self) -> provenant_config::ByteObservation {
+        provenant_config::ByteObservation::Unknown
+    }
 }
 
 fn gc_removal_records(data: &GcData) -> Vec<RemovalRecord> {
@@ -576,6 +667,9 @@ pub(crate) fn scheduled_gc(
     if !data.provider_state.errors.is_empty()
         || !data.chair_logs.errors.is_empty()
         || !data.discard_archives.errors.is_empty()
+        || !data.port_receipts.errors.is_empty()
+        || !data.retention_errors.is_empty()
+        || !data.provider_state.payload.errors.is_empty()
     {
         return Err("retention incomplete; next: provenant gc --apply".into());
     }
@@ -605,7 +699,10 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
             let human = gc_data_summary(&data);
             let failed = !data.provider_state.errors.is_empty()
                 || !data.chair_logs.errors.is_empty()
-                || !data.discard_archives.errors.is_empty();
+                || !data.discard_archives.errors.is_empty()
+                || !data.port_receipts.errors.is_empty()
+                || !data.retention_errors.is_empty()
+                || !data.provider_state.payload.errors.is_empty();
             let result = if failed {
                 gc_failure(&data, "retention incomplete", globals.json)
             } else {
@@ -633,6 +730,11 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
                 target_seeds: Default::default(),
                 build_dirs: Default::default(),
                 graph_checkpoints_removed: 0,
+                graph_bytes: None,
+                port_receipts: Default::default(),
+                retention_errors: Vec::new(),
+                failed_classes: Vec::new(),
+                retention_observations: Vec::new(),
                 discard_archives: Default::default(),
                 staging_busy: Vec::new(),
                 worktree_cleanup,
@@ -765,6 +867,25 @@ fn gc_data_summary(data: &GcData) -> String {
             },
             data.chair_logs.expired
         ));
+    }
+    for error in &data.retention_errors {
+        human.push_str(&format!(
+            "{}: {}: {}\n",
+            error.path.display(),
+            error.operation,
+            error.cause
+        ));
+    }
+    for error in &data.port_receipts.errors {
+        human.push_str(&format!(
+            "{}: {}: {}\n",
+            error.path.display(),
+            error.operation,
+            error.cause
+        ));
+    }
+    for error in &data.provider_state.payload.errors {
+        human.push_str(&format!("{}: {}\n", error.path.display(), error.reason));
     }
     for error in &data.chair_logs.errors {
         human.push_str(&format!("{}: {}\n", error.path.display(), error.reason));
@@ -927,6 +1048,9 @@ enum GcOutput<'a> {
         build_dir_bytes_reclaimed: u64,
         build_dir_bytes: u64,
         graph_checkpoints_removed: usize,
+        port_receipts: &'a crate::port_receipt_retention::Report,
+        retention_errors: &'a [provenant_config::RetentionIssue],
+        payload_errors: &'a [provenant_run::ProviderStateIssue],
         errors: &'a [provenant_run::ProviderStateIssue],
         unobserved_projects: &'a [PathBuf],
         alerts: &'a [String],
@@ -979,6 +1103,9 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
         build_dir_bytes_reclaimed: data.build_dirs.bytes,
         build_dir_bytes: data.build_dirs.cache_bytes,
         graph_checkpoints_removed: data.graph_checkpoints_removed,
+        port_receipts: &data.port_receipts,
+        retention_errors: &data.retention_errors,
+        payload_errors: &data.provider_state.payload.errors,
         errors: &data.provider_state.errors,
         unobserved_projects: &data.unobserved_projects,
         alerts: &data.alerts,
@@ -1403,7 +1530,7 @@ pub(crate) fn land_cleanup(
 }
 
 fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<GcData, Error> {
-    use provenant_confinement::cache::{CacheGcPolicy, gc_worktree_cargo_caches_with_writer_guard};
+    use provenant_confinement::cache::CacheGcPolicy;
 
     let workspace = if command.scheduled {
         roots::Workspace::Home
@@ -1488,18 +1615,6 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         project_ids.push(selected.binding.project_id());
         projects.push(selected);
     }
-    let graph_checkpoints_removed = if !command.scheduled && !command.pressure {
-        crate::tick::collect_graph_checkpoints(
-            &roots.state,
-            project_ids.iter().copied(),
-            config.gc.graph_checkpoint_days,
-            command.dry_run,
-            &SystemClock,
-        )
-        .map_err(Error::GraphGc)?
-    } else {
-        0
-    };
     let free_floor = command
         .free_floor
         .map(Ok)
@@ -1514,7 +1629,6 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     } else {
         command.idle_days
     };
-    let mut worktree_cleanup = Vec::new();
     let lanes: Vec<_> = projects.iter().flat_map(|project| &project.lanes).collect();
     let now_ns = SystemClock
         .wall_now()
@@ -1547,429 +1661,608 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         .map_err(|_| Error::GcObservation("invalid alert threshold"))?
         .unwrap_or(0)
         .max(free_floor);
-    use provenant_config::{RetentionKind, RetentionTrigger, retention_schedule};
-    let mut report = Ok(Default::default());
-    let mut discard_archives = worktrees::ArchiveReport::default();
-    let mut unhandled_retention_owners = Vec::new();
-    let mut staging_busy = Vec::new();
-    let mut provider_state = Default::default();
-    let mut chair_logs = Default::default();
-    let mut seed_collection: Result<
-        provenant_run::target_seed_gc::Report,
-        Box<dyn std::error::Error>,
-    > = Ok(Default::default());
-    let mut build_collection: Result<
-        provenant_run::build_dir_gc::Report,
-        Box<dyn std::error::Error>,
-    > = Ok(Default::default());
-    let seed_policy = &config.domains.fabric.lanes.cargo_seed;
-    let build_settings = config.domains.fabric.lanes.build_settings();
-    let trigger = if command.pressure {
-        RetentionTrigger::Gc
-    } else {
-        RetentionTrigger::FullGc
+    let mut adapters = GcAdapters {
+        command,
+        roots: &roots,
+        home: &home,
+        assets: &assets,
+        config: &config,
+        workers,
+        facts: &facts,
+        projects,
+        project_ids: &project_ids,
+        policy,
+        now_ns,
+        output_idle_days,
+        free_floor,
+        cache_error: None,
+        data: GcData {
+            idle_days: command.idle_days,
+            unobserved_projects,
+            skipped_transient,
+            ..Default::default()
+        },
     };
-    for class in retention_schedule(trigger) {
-        match class.class {
-            RetentionKind::LaneCargoCaches => {
-                report = gc_worktree_cargo_caches_with_writer_guard(&home, &policy, |path| {
-                    for project in &projects {
-                        if project.lanes.iter().any(|lane| lane.path == path) {
-                            return if policy.dry_run {
-                                worktrees::cache_writer_probe(&project.state, path)
-                            } else {
-                                worktrees::cache_writer_guard(&project.state, path).map(Some)
-                            };
-                        }
-                    }
-                    Err(worktrees::Occupancy::custody_unknown(
-                        path.to_path_buf(),
-                        "writer registration was not observed",
-                    ))
+    let trigger = if command.pressure {
+        provenant_config::RetentionTrigger::Pressure
+    } else {
+        provenant_config::RetentionTrigger::FullGc
+    };
+    for class in provenant_config::retention_schedule(trigger) {
+        if let Err(error) = class.adapter.collect(&mut adapters) {
+            adapters.data.failed_classes.push(class.class);
+            adapters
+                .data
+                .retention_errors
+                .push(provenant_config::RetentionIssue {
+                    path: roots.state.as_path().to_owned(),
+                    operation: format!("collect {:?}", class.class),
+                    cause: error.to_string(),
                 });
-            }
-            RetentionKind::GitWorktrees => {
-                for project in &mut projects {
-                    let settings = config
-                        .gc
-                        .project_settings(&project.binding.project_id().to_string(), &project.path);
-                    let cleanup = with_context_mode(
-                        &roots,
-                        &home,
-                        &project.path,
-                        if command.dry_run {
-                            Duration::from_secs(2)
-                        } else {
-                            MUTATION_TIMEOUT
-                        },
-                        workers,
-                        &facts,
-                        command.dry_run,
-                        |context, cancel| {
-                            // When the fetch fails, there is no origin, or the sweep is a
-                            // pressure sweep, upstream is None: the path-based pass below
-                            // cannot grant removal authority. Settled lane collection
-                            // requires an exact delivered or integration ref for its
-                            // removal evidence. Output pruning still has its independent
-                            // terminal-state proof.
-                            let (upstream, upstream_error) = if command.pressure || command.dry_run
-                            {
-                                (None, None)
-                            } else {
-                                match crate::gc_support::fetch_default(context, cancel) {
-                                    Ok(upstream) => (upstream, None),
-                                    Err(error) => (None, Some(error.to_string())),
-                                }
-                            };
-                            // Settled lanes whose settlement-time collection missed keep a
-                            // receipt that is not final. Collect them through the same
-                            // owner-bound proof before the path-based pass below. The
-                            // subpass requires an exact integration ref for reportable removal.
-                            let unsettled = if command.apply && !command.dry_run {
-                                crate::fabric::gc_cleanup::collect_unsettled(
-                                    &roots,
-                                    &home,
-                                    &project.path,
-                                    project.binding.project_id(),
-                                    upstream.clone(),
-                                    workers,
-                                )
-                                .unwrap_or_else(|error| {
-                                    use std::io::Write;
-                                    let _ = writeln!(
-                                        std::io::stderr().lock(),
-                                        "warning: settled lane collection failed for {}: {error}",
-                                        project.path.display()
-                                    );
-                                    crate::fabric::gc_cleanup::UnsettledCollection::default()
-                                })
-                            } else {
-                                crate::fabric::gc_cleanup::UnsettledCollection::default()
-                            };
-                            let lanes: Vec<_> = project
-                                .lanes
-                                .iter()
-                                .filter(|lane| !unsettled.removed.contains(&lane.path))
-                                .cloned()
-                                .collect();
-                            // Fetch can take a while, so begin the single sweep snapshot
-                            // only after it completes. A stale snapshot is refreshed by
-                            // the callbacks below, which collect() invokes under the
-                            // worktree writer lock before each mutation.
-                            let states = RefCell::new(
-                                crate::gc_support::lane_states(
-                                    &roots,
-                                    &home,
-                                    &assets,
-                                    project.binding.project_id(),
-                                )
-                                .ok(),
-                            );
-                            let rescan_failed = std::cell::Cell::new(false);
-                            let refresh = || {
-                                crate::gc_support::refresh_if_stale(
-                                    &states,
-                                    &rescan_failed,
-                                    |snapshot| snapshot.is_current(),
-                                    || {
-                                        crate::gc_support::lane_states(
-                                            &roots,
-                                            &home,
-                                            &assets,
-                                            project.binding.project_id(),
-                                        )
-                                        .ok()
-                                    },
-                                );
-                            };
-                            let terminal = |path: &Path| {
-                                refresh();
-                                states
-                                    .borrow()
-                                    .as_ref()
-                                    .and_then(|snapshot| snapshot.get(path))
-                                    == Some(&true)
-                            };
-                            let no_live_lanes = |path: &Path| {
-                                refresh();
-                                states
-                                    .borrow()
-                                    .as_ref()
-                                    .is_some_and(|snapshot| snapshot.no_live_lanes(path))
-                            };
-                            let now_ns = SystemClock
-                                .wall_now()
-                                .map(|now| i128::from(now.as_micros()) * 1_000)
-                                .map_err(|_| Error::Budget)?;
-                            let retention_owner =
-                                crate::retention_owner::Owner::new(&roots, &home, &project.path);
-                            let retirement_writer = if command.apply && !command.dry_run {
-                                let authority = provenant_cli::fabric::Context::open(
-                                    roots.clone(),
-                                    &home,
-                                    &project.path,
-                                )
-                                .map_err(|_| {
-                                    Error::GcObservation("cannot establish retirement authority")
-                                })?;
-                                if authority.identity.project != context.binding.project_id() {
-                                    return Err(Error::InvalidScope);
-                                }
-                                Some(crate::custody::RetirementWriter::open(
-                                    &roots,
-                                    context.binding.project_id(),
-                                    provenant_cli::fabric::current_chair(&authority),
-                                    context.clock,
-                                    cancel,
-                                )?)
-                            } else {
-                                None
-                            };
-                            let retirement_reader = if retirement_writer.is_none() {
-                                Some(crate::custody::RetirementReader::open(
-                                    &roots,
-                                    context.binding.project_id(),
-                                    context.clock,
-                                    cancel,
-                                )?)
-                            } else {
-                                None
-                            };
-                            let retirement_port = retirement_writer.as_ref().map(|writer| {
-                                writer as &dyn provenant_confinement::worktrees::RetirementPort
-                            });
-                            let retirement_lookup = retirement_writer
-                                .as_ref()
-                                .map(|writer| writer as &dyn crate::lane_cleanup::RetirementLookup)
-                                .or_else(|| {
-                                    retirement_reader.as_ref().map(|reader| {
-                                        reader as &dyn crate::lane_cleanup::RetirementLookup
-                                    })
-                                })
-                                .ok_or(Error::GcObservation("retirement reader unavailable"))?;
-                            let mut report = worktrees::collect(
-                                context,
-                                &lanes,
-                                &worktrees::WorktreeGcPolicy {
-                                    upstream: upstream.as_ref().map(|(_, oid)| *oid),
-                                    mode:
-                                        provenant_confinement::worktrees::CollectionMode::Worktrees,
-                                    proof: None,
-                                    upstream_reference: upstream
-                                        .as_ref()
-                                        .map(|(name, _)| name.as_str()),
-                                    terminal: &terminal,
-                                    no_live_lanes: &no_live_lanes,
-                                    regenerable: &settings.regenerable,
-                                    keep: &settings.keep,
-                                    written_before_ns: now_ns
-                                        - i128::from(output_idle_days) * 86_400 * 1_000_000_000,
-                                    include_foreign: !command.pressure
-                                        && settings.foreign_worktrees
-                                            == provenant_config::ForeignWorktrees::Collect,
-                                    retirement_port,
-                                    retirement_feeds: Some(&retention_owner),
-                                    integration_patterns: &settings.integration_branches,
-                                    excluded_paths: &settings.keep_paths,
-                                    dry_run: command.dry_run || !command.apply,
-                                },
-                                cancel,
-                            )?;
-                            if !report.dry_run {
-                                let writer =
-                                    retirement_writer.as_ref().ok_or(Error::GcObservation(
-                                        "retirement writer unavailable during apply",
-                                    ))?;
-                                let recovered = retention_owner.recover(context, writer, cancel)?;
-                                append_gc_subpass_removals(&mut report, recovered);
-                            }
-                            report.upstream_error = upstream_error;
-                            if !unsettled.removals.is_empty() {
-                                report.byte_errors.push(provenant_config::RetentionIssue {
-                                    path: project.path.clone(),
-                                    operation: "account recovered settlement".into(),
-                                    cause: "already-removed settlement bytes are unavailable"
-                                        .into(),
-                                });
-                            }
-                            append_gc_subpass_removals(&mut report, unsettled.removals);
-                            // Only proven landed refs with unchanged ledger tips may go.
-                            if !command.pressure {
-                                let sweep = crate::lane_cleanup::Sweep::new(
-                                    report.dry_run || !command.apply,
-                                )
-                                .with_retention(&retention_owner, &settings);
-                                report.refs = crate::lane_cleanup::collect(
-                                    context,
-                                    upstream
-                                        .as_ref()
-                                        .and_then(crate::lane_cleanup::fetched_target),
-                                    &sweep,
-                                    retirement_lookup,
-                                    retirement_port,
-                                    cancel,
-                                );
-                            }
-                            append_gc_removal_records(&mut report);
-                            Ok(report)
-                        },
-                    );
-                    match cleanup {
-                        Ok(cleanup) => worktree_cleanup.push(cleanup),
-                        Err(_) => unobserved_projects.push(project.path.clone()),
-                    }
-                }
-            }
-            RetentionKind::DiscardArchives => {
-                for project in &projects {
-                    let mut archived = with_context_using_facts(&roots, &home, &project.path, Duration::ZERO, workers, &facts, |context, _| {
-                        Ok(worktrees::collect_archives(context, now_ns - i128::from(config.gc.discard_archive_days) * 86_400 * 1_000_000_000, command.dry_run))
-                    }).unwrap_or_else(|error| worktrees::ArchiveReport { errors: vec![provenant_config::RetentionIssue { path: project.path.clone(), operation: "observe archives".into(), cause: error.to_string() }], ..Default::default() });
-                    discard_archives.bytes = discard_archives.bytes.saturating_add(archived.bytes);
-                    discard_archives.removed.append(&mut archived.removed);
-                    discard_archives.would_remove.append(&mut archived.would_remove);
-                    discard_archives.busy.append(&mut archived.busy);
-                    discard_archives.errors.append(&mut archived.errors);
-                }
-            }
-            RetentionKind::Staging => {
-                staging_busy = crate::staging_gc::collect(
-                    roots.state.as_path(),
-                    now_ns - i128::from(command.idle_days) * 86_400 * 1_000_000_000,
-                    command.dry_run,
-                )?;
-            }
-            RetentionKind::ProviderState => {
-                provider_state = if command.pressure {
-                    crate::provider_retention::collect_pressure(
-                        (!command.scheduled).then_some(project_ids.as_slice()),
-                        &roots,
-                        &home,
-                        &assets,
-                        config.retention.provider_state_days,
-                        config.retention.logs_days,
-                        config.retention.payload_cap_bytes,
-                        command.dry_run,
-                    )
-                } else {
-                    crate::provider_retention::collect_with_logs(
-                        &roots,
-                        &home,
-                        &assets,
-                        config.retention.provider_state_days,
-                        config.retention.logs_days,
-                        config.retention.payload_cap_bytes,
-                        command.dry_run,
-                    )
-                };
-            }
-            RetentionKind::ChairLogs => {
-                chair_logs = crate::chair_log_retention::collect(
-                    &roots.state,
-                    provenant_workflow::log::Retention {
-                        max_age_seconds: config.retention.chair_log_days * 86_400,
-                        replay_horizon_seconds: config.retention.chair_log_replay_seconds(),
-                        max_entries: config.retention.chair_log_entries,
-                        max_bytes: config.retention.chair_log_bytes,
-                    },
-                    i64::try_from(now_ns / 1_000_000_000).map_err(|_| Error::Budget)?,
-                    command.dry_run,
-                );
-            }
-            RetentionKind::TargetSeeds => {
-                seed_collection = provenant_run::target_seed_gc::collect(
-                    roots.state.as_path(), seed_policy.max_generations, seed_policy.max_bytes, command.dry_run,
-                );
-            }
-            RetentionKind::BuildDirectories => {
-                build_collection = provenant_run::build_dir_gc::collect(
-                    roots.state.as_path(), &home,
-                    provenant_run::build_dir_gc::Limits {
-                        max_bytes: build_settings.build_dir_cap(), free_floor,
-                        grace_seconds: build_settings.build_dir_grace_seconds(),
-                    }, command.dry_run,
-                );
-            }
-            // Custody-only and append-triggered classes never enter GC.
-            RetentionKind::ObservationLedgers
-            | RetentionKind::QuotaHistory
-            | RetentionKind::Usage
-            // Payload and scratch collection is owned by the ProviderState pass.
-            | RetentionKind::PayloadCap
-            | RetentionKind::AttemptScratch
-            // These owners run at their existing checkpoint/install boundaries,
-            // or have no behaviour declared yet.
-            | RetentionKind::GraphCheckpoints
-            | RetentionKind::ManagedReleases => {}
-            _ => unhandled_retention_owners.push(class.owner),
         }
     }
-    // Observe after every collection class, including a partially failed sweep.
-    let mut alerts =
+    adapters.data.observe_retention(trigger);
+    adapters.data.alerts.extend(
         crate::gc_support::disk_alert(&roots, &project_ids, alert_floor, command.dry_run)
-            .unwrap_or_else(|error| vec![format!("disk alert failed: {error}")]);
-    alerts.extend(unhandled_retention_owners.into_iter().map(|owner| {
-        format!("retention owner {owner} has no GC handler; scheduled class was skipped")
-    }));
-    let target_seeds = match seed_collection {
-        Ok(report) => report,
-        Err(error) => {
-            alerts.push(format!("target seed collection skipped: {error}"));
-            Default::default()
-        }
-    };
-    let build_dirs = match build_collection {
-        Ok(report) => report,
-        Err(error) => {
-            alerts.push(format!("lane build output collection skipped: {error}"));
-            Default::default()
-        }
-    };
-    let report = match report {
-        Ok(report) => report,
-        Err(error) => {
-            return Err(Error::CacheGc(
-                Box::new(error),
-                unobserved_projects,
-                skipped_transient,
-                Box::new(provider_state),
-                worktree_cleanup,
-                alerts,
-            ));
-        }
-    };
+            .unwrap_or_else(|error| vec![format!("disk alert failed: {error}")]),
+    );
+    if let Some(error) = adapters.cache_error {
+        return Err(Error::CacheGc(
+            Box::new(error),
+            adapters.data.unobserved_projects,
+            adapters.data.skipped_transient,
+            Box::new(adapters.data.provider_state),
+            adapters.data.worktree_cleanup,
+            adapters.data.alerts,
+        ));
+    }
+    let mut data = adapters.data;
     let notice = if command.dry_run {
         Some("Allocated bytes are measured without following links; APFS clones may share physical blocks. Upstream evidence uses last fetched refs in previews.".into())
     } else {
         (command.pressure
-            && report.removed.is_empty()
-            && build_dirs.removed.is_empty()
-            && provider_state.removed.is_empty()
-            && provider_state.attempt_tmp.is_empty()
-            && provider_state.attempt_logs.is_empty()
-            && provider_state.expired_events == 0
-            && provider_state.errors.is_empty()
-            && worktree_cleanup
+            && data.report.removed.is_empty()
+            && data.build_dirs.removed.is_empty()
+            && data.provider_state.removed.is_empty()
+            && data.provider_state.attempt_tmp.is_empty()
+            && data.provider_state.attempt_logs.is_empty()
+            && data.provider_state.expired_events == 0
+            && data.provider_state.errors.is_empty()
+            && data
+                .worktree_cleanup
                 .iter()
                 .all(|project| project.output.is_empty() && project.idle_output.is_empty()))
         .then(|| "pressure collection: no eligible data in scope".into())
     };
-    Ok(GcData {
-        report,
-        idle_days: command.idle_days,
-        provider_state,
-        chair_logs,
-        target_seeds,
-        build_dirs,
-        graph_checkpoints_removed,
-        discard_archives,
-        staging_busy,
-        unobserved_projects,
-        skipped_transient,
-        worktree_cleanup,
-        alerts,
-        notice,
-    })
+    data.notice = notice;
+    Ok(data)
+}
+
+struct GcAdapters<'a> {
+    command: &'a Gc,
+    roots: &'a provenant_core::Roots,
+    home: &'a Path,
+    assets: &'a Path,
+    config: &'a provenant_config::ResolvedConfig<provenant_cli::domains::Domains>,
+    workers: &'a dyn WorkerObserver,
+    facts: &'a worktrees::RepoFacts,
+    projects: Vec<GcProject>,
+    project_ids: &'a [provenant_core::ProjectId],
+    policy: provenant_confinement::cache::CacheGcPolicy,
+    now_ns: i128,
+    output_idle_days: u64,
+    free_floor: u64,
+    cache_error: Option<provenant_confinement::cache::CacheGcError>,
+    data: GcData,
+}
+impl provenant_config::RetentionCollector for GcAdapters<'_> {
+    type Error = Error;
+    fn lane_cargo_caches(&mut self) -> Result<(), Error> {
+        let home = self.home;
+
+        let result = provenant_confinement::cache::gc_worktree_cargo_caches_with_writer_guard(
+            home,
+            &self.policy,
+            |path| {
+                for project in &self.projects {
+                    if project.lanes.iter().any(|lane| lane.path == path) {
+                        return if self.policy.dry_run {
+                            worktrees::cache_writer_probe(&project.state, path)
+                        } else {
+                            worktrees::cache_writer_guard(&project.state, path).map(Some)
+                        };
+                    }
+                }
+                Err(worktrees::Occupancy::custody_unknown(
+                    path.to_path_buf(),
+                    "writer registration was not observed",
+                ))
+            },
+        );
+
+        match result {
+            Ok(report) => self.data.report = report,
+            Err(error) => {
+                self.data.report = (*error.report).clone();
+                self.cache_error = Some(error);
+            }
+        }
+
+        Ok(())
+    }
+    fn git_worktrees(&mut self) -> Result<(), Error> {
+        let command = self.command;
+        let roots = self.roots;
+        let home = self.home;
+        let assets = self.assets;
+        let config = self.config;
+        let workers = self.workers;
+        let facts = self.facts;
+        let output_idle_days = self.output_idle_days;
+
+        for project in &mut self.projects {
+            let settings = config
+                .gc
+                .project_settings(&project.binding.project_id().to_string(), &project.path);
+            let cleanup = with_context_mode(
+                roots,
+                home,
+                &project.path,
+                if command.dry_run {
+                    Duration::from_secs(2)
+                } else {
+                    MUTATION_TIMEOUT
+                },
+                workers,
+                facts,
+                command.dry_run,
+                |context, cancel| {
+                    // When the fetch fails, there is no origin, or the sweep is a
+                    // pressure sweep, upstream is None: the path-based pass below
+                    // cannot grant removal authority. Settled lane collection
+                    // requires an exact delivered or integration ref for its
+                    // removal evidence. Output pruning still has its independent
+                    // terminal-state proof.
+                    let (upstream, upstream_error) = if command.pressure || command.dry_run {
+                        (None, None)
+                    } else {
+                        match crate::gc_support::fetch_default(context, cancel) {
+                            Ok(upstream) => (upstream, None),
+                            Err(error) => (None, Some(error.to_string())),
+                        }
+                    };
+                    // Settled lanes whose settlement-time collection missed keep a
+                    // receipt that is not final. Collect them through the same
+                    // owner-bound proof before the path-based pass below. The
+                    // subpass requires an exact integration ref for reportable removal.
+                    let unsettled = if command.apply && !command.dry_run {
+                        crate::fabric::gc_cleanup::collect_unsettled(
+                            roots,
+                            home,
+                            &project.path,
+                            project.binding.project_id(),
+                            upstream.clone(),
+                            workers,
+                        )
+                        .unwrap_or_else(|error| {
+                            use std::io::Write;
+                            let _ = writeln!(
+                                std::io::stderr().lock(),
+                                "warning: settled lane collection failed for {}: {error}",
+                                project.path.display()
+                            );
+                            crate::fabric::gc_cleanup::UnsettledCollection::default()
+                        })
+                    } else {
+                        crate::fabric::gc_cleanup::UnsettledCollection::default()
+                    };
+                    let lanes: Vec<_> = project
+                        .lanes
+                        .iter()
+                        .filter(|lane| !unsettled.removed.contains(&lane.path))
+                        .cloned()
+                        .collect();
+                    // Fetch can take a while, so begin the single sweep snapshot
+                    // only after it completes. A stale snapshot is refreshed by
+                    // the callbacks below, which collect() invokes under the
+                    // worktree writer lock before each mutation.
+                    let states = RefCell::new(
+                        crate::gc_support::lane_states(
+                            roots,
+                            home,
+                            assets,
+                            project.binding.project_id(),
+                        )
+                        .ok(),
+                    );
+                    let rescan_failed = std::cell::Cell::new(false);
+                    let refresh = || {
+                        crate::gc_support::refresh_if_stale(
+                            &states,
+                            &rescan_failed,
+                            |snapshot| snapshot.is_current(),
+                            || {
+                                crate::gc_support::lane_states(
+                                    roots,
+                                    home,
+                                    assets,
+                                    project.binding.project_id(),
+                                )
+                                .ok()
+                            },
+                        );
+                    };
+                    let terminal = |path: &Path| {
+                        refresh();
+                        states
+                            .borrow()
+                            .as_ref()
+                            .and_then(|snapshot| snapshot.get(path))
+                            == Some(&true)
+                    };
+                    let no_live_lanes = |path: &Path| {
+                        refresh();
+                        states
+                            .borrow()
+                            .as_ref()
+                            .is_some_and(|snapshot| snapshot.no_live_lanes(path))
+                    };
+                    let now_ns = SystemClock
+                        .wall_now()
+                        .map(|now| i128::from(now.as_micros()) * 1_000)
+                        .map_err(|_| Error::Budget)?;
+                    let retention_owner =
+                        crate::retention_owner::Owner::new(roots, home, &project.path);
+                    let retirement_writer = if command.apply && !command.dry_run {
+                        let authority = provenant_cli::fabric::Context::open(
+                            roots.clone(),
+                            home,
+                            &project.path,
+                        )
+                        .map_err(|_| {
+                            Error::GcObservation("cannot establish retirement authority")
+                        })?;
+                        if authority.identity.project != context.binding.project_id() {
+                            return Err(Error::InvalidScope);
+                        }
+                        Some(crate::custody::RetirementWriter::open(
+                            roots,
+                            context.binding.project_id(),
+                            provenant_cli::fabric::current_chair(&authority),
+                            context.clock,
+                            cancel,
+                        )?)
+                    } else {
+                        None
+                    };
+                    let retirement_reader = if retirement_writer.is_none() {
+                        Some(crate::custody::RetirementReader::open(
+                            roots,
+                            context.binding.project_id(),
+                            context.clock,
+                            cancel,
+                        )?)
+                    } else {
+                        None
+                    };
+                    let retirement_port = retirement_writer.as_ref().map(|writer| {
+                        writer as &dyn provenant_confinement::worktrees::RetirementPort
+                    });
+                    let retirement_lookup = retirement_writer
+                        .as_ref()
+                        .map(|writer| writer as &dyn crate::lane_cleanup::RetirementLookup)
+                        .or_else(|| {
+                            retirement_reader
+                                .as_ref()
+                                .map(|reader| reader as &dyn crate::lane_cleanup::RetirementLookup)
+                        })
+                        .ok_or(Error::GcObservation("retirement reader unavailable"))?;
+                    let mut report = worktrees::collect(
+                        context,
+                        &lanes,
+                        &worktrees::WorktreeGcPolicy {
+                            upstream: upstream.as_ref().map(|(_, oid)| *oid),
+                            mode: provenant_confinement::worktrees::CollectionMode::Worktrees,
+                            proof: None,
+                            upstream_reference: upstream.as_ref().map(|(name, _)| name.as_str()),
+                            terminal: &terminal,
+                            no_live_lanes: &no_live_lanes,
+                            regenerable: &settings.regenerable,
+                            keep: &settings.keep,
+                            written_before_ns: now_ns
+                                - i128::from(output_idle_days) * 86_400 * 1_000_000_000,
+                            include_foreign: !command.pressure
+                                && settings.foreign_worktrees
+                                    == provenant_config::ForeignWorktrees::Collect,
+                            retirement_port,
+                            retirement_feeds: Some(&retention_owner),
+                            integration_patterns: &settings.integration_branches,
+                            excluded_paths: &settings.keep_paths,
+                            dry_run: command.dry_run || !command.apply,
+                        },
+                        cancel,
+                    )?;
+                    if !report.dry_run {
+                        let writer = retirement_writer.as_ref().ok_or(Error::GcObservation(
+                            "retirement writer unavailable during apply",
+                        ))?;
+                        let recovered = retention_owner.recover(context, writer, cancel)?;
+                        append_gc_subpass_removals(&mut report, recovered);
+                    }
+                    report.upstream_error = upstream_error;
+                    if !unsettled.removals.is_empty() {
+                        report.byte_errors.push(provenant_config::RetentionIssue {
+                            path: project.path.clone(),
+                            operation: "account recovered settlement".into(),
+                            cause: "already-removed settlement bytes are unavailable".into(),
+                        });
+                    }
+                    append_gc_subpass_removals(&mut report, unsettled.removals);
+                    // Only proven landed refs with unchanged ledger tips may go.
+                    if !command.pressure {
+                        let sweep =
+                            crate::lane_cleanup::Sweep::new(report.dry_run || !command.apply)
+                                .with_retention(&retention_owner, &settings);
+                        report.refs = crate::lane_cleanup::collect(
+                            context,
+                            upstream
+                                .as_ref()
+                                .and_then(crate::lane_cleanup::fetched_target),
+                            &sweep,
+                            retirement_lookup,
+                            retirement_port,
+                            cancel,
+                        );
+                    }
+                    append_gc_removal_records(&mut report);
+                    Ok(report)
+                },
+            );
+            match cleanup {
+                Ok(cleanup) => self.data.worktree_cleanup.push(cleanup),
+                Err(_) => self.data.unobserved_projects.push(project.path.clone()),
+            }
+        }
+
+        Ok(())
+    }
+    fn discard_archives(&mut self) -> Result<(), Error> {
+        let command = self.command;
+        let roots = self.roots;
+        let home = self.home;
+        let config = self.config;
+        let workers = self.workers;
+        let facts = self.facts;
+        let now_ns = self.now_ns;
+
+        for project in &self.projects {
+            let mut archived = with_context_using_facts(
+                roots,
+                home,
+                &project.path,
+                Duration::ZERO,
+                workers,
+                facts,
+                |context, _| {
+                    Ok(worktrees::collect_archives(
+                        context,
+                        now_ns
+                            - i128::from(config.gc.discard_archive_days) * 86_400 * 1_000_000_000,
+                        command.dry_run,
+                    ))
+                },
+            )
+            .unwrap_or_else(|error| worktrees::ArchiveReport {
+                errors: vec![provenant_config::RetentionIssue {
+                    path: project.path.clone(),
+                    operation: "observe archives".into(),
+                    cause: error.to_string(),
+                }],
+                ..Default::default()
+            });
+            self.data.discard_archives.bytes = self
+                .data
+                .discard_archives
+                .bytes
+                .saturating_add(archived.bytes);
+            self.data
+                .discard_archives
+                .removed
+                .append(&mut archived.removed);
+            self.data
+                .discard_archives
+                .would_remove
+                .append(&mut archived.would_remove);
+            self.data.discard_archives.busy.append(&mut archived.busy);
+            self.data
+                .discard_archives
+                .errors
+                .append(&mut archived.errors);
+        }
+
+        Ok(())
+    }
+    fn staging(&mut self) -> Result<(), Error> {
+        let command = self.command;
+        let roots = self.roots;
+        let now_ns = self.now_ns;
+
+        self.data.staging_busy = crate::staging_gc::collect(
+            roots.state.as_path(),
+            now_ns - i128::from(command.idle_days) * 86_400 * 1_000_000_000,
+            command.dry_run,
+        )?;
+
+        Ok(())
+    }
+    fn chair_logs(&mut self) -> Result<(), Error> {
+        let command = self.command;
+        let roots = self.roots;
+        let config = self.config;
+        let now_ns = self.now_ns;
+
+        self.data.chair_logs = crate::chair_log_retention::collect(
+            &roots.state,
+            provenant_workflow::log::Retention {
+                max_age_seconds: config.retention.chair_log_days * 86_400,
+                replay_horizon_seconds: config.retention.chair_log_replay_seconds(),
+                max_entries: config.retention.chair_log_entries,
+                max_bytes: config.retention.chair_log_bytes,
+            },
+            i64::try_from(now_ns / 1_000_000_000).map_err(|_| Error::Budget)?,
+            command.dry_run,
+        );
+
+        Ok(())
+    }
+    fn target_seeds(&mut self) -> Result<(), Error> {
+        let command = self.command;
+        let roots = self.roots;
+        let config = self.config;
+
+        let result = provenant_run::target_seed_gc::collect(
+            roots.state.as_path(),
+            config.domains.fabric.lanes.cargo_seed.max_generations,
+            config.domains.fabric.lanes.cargo_seed.max_bytes,
+            command.dry_run,
+        );
+
+        self.data.target_seeds =
+            result.map_err(|error| Error::RetentionCollection(error.to_string()))?;
+
+        Ok(())
+    }
+    fn build_directories(&mut self) -> Result<(), Error> {
+        let command = self.command;
+        let roots = self.roots;
+        let home = self.home;
+        let config = self.config;
+        let free_floor = self.free_floor;
+
+        let result = provenant_run::build_dir_gc::collect(
+            roots.state.as_path(),
+            home,
+            provenant_run::build_dir_gc::Limits {
+                max_bytes: config.domains.fabric.lanes.build_settings().build_dir_cap(),
+                free_floor,
+                grace_seconds: config
+                    .domains
+                    .fabric
+                    .lanes
+                    .build_settings()
+                    .build_dir_grace_seconds(),
+            },
+            command.dry_run,
+        );
+
+        self.data.build_dirs =
+            result.map_err(|error| Error::RetentionCollection(error.to_string()))?;
+
+        Ok(())
+    }
+
+    fn provider_state(&mut self) -> Result<(), Error> {
+        self.data.provider_state = crate::provider_retention::collect_provider_state(
+            self.roots,
+            self.home,
+            self.assets,
+            self.config.retention.provider_state_days,
+            self.config.retention.logs_days,
+            self.command.dry_run,
+        );
+        Ok(())
+    }
+    fn attempt_scratch(&mut self) -> Result<(), Error> {
+        let mut report = crate::provider_retention::collect_attempt_scratch(
+            self.roots,
+            self.home,
+            self.assets,
+            self.config.retention.provider_state_days,
+            (self.command.pressure && !self.command.scheduled).then_some(self.project_ids),
+            self.command.dry_run,
+        );
+        self.data
+            .provider_state
+            .attempt_tmp
+            .append(&mut report.attempt_tmp);
+        self.data.provider_state.kept.append(&mut report.kept);
+        self.data.provider_state.errors.append(&mut report.errors);
+        Ok(())
+    }
+    fn payload_cap(&mut self) -> Result<(), Error> {
+        let mut report = crate::provider_retention::collect_payload_cap(
+            (self.command.pressure && !self.command.scheduled).then_some(self.project_ids),
+            self.roots,
+            self.home,
+            self.assets,
+            self.config.retention.payload_cap_bytes,
+            !self.command.pressure && !self.command.dry_run,
+            self.command.dry_run,
+        );
+        self.data.provider_state.payload = report.payload;
+        self.data.provider_state.errors.append(&mut report.errors);
+        Ok(())
+    }
+    fn graph_checkpoints(&mut self) -> Result<(), Error> {
+        // Graph state survives an unavailable checkout. Scheduled collection
+        // must not depend on observing that checkout's Git/worktree state.
+        let projects = if self.command.scheduled {
+            provenant_config::registered_projects(self.roots)?
+                .into_iter()
+                .map(|binding| binding.project_id())
+                .collect::<Vec<_>>()
+        } else {
+            self.project_ids.to_vec()
+        };
+        self.data.graph_bytes = Some(
+            crate::checkpoint_retention::measure(&self.roots.state, projects.iter().copied())
+                .map_err(Error::GraphGc)?,
+        );
+        self.data.graph_checkpoints_removed = crate::checkpoint_retention::collect(
+            &self.roots.state,
+            projects.iter().copied(),
+            self.config.gc.graph_checkpoint_days,
+            self.command.dry_run,
+            &SystemClock,
+        )
+        .map_err(Error::GraphGc)?;
+        Ok(())
+    }
+    fn port_receipts(&mut self) -> Result<(), Error> {
+        self.data.port_receipts =
+            crate::port_receipt_retention::collect(self.roots, self.command.dry_run);
+        Ok(())
+    }
+    fn observation_ledgers(&mut self) -> Result<(), Error> {
+        Err(Error::GcObservation(
+            "retention class belongs to its declared append/install/permanent boundary",
+        ))
+    }
+    fn retirement_records(&mut self) -> Result<(), Error> {
+        Err(Error::GcObservation(
+            "retention class belongs to its declared append/install/permanent boundary",
+        ))
+    }
+    fn ref_generation_sequences(&mut self) -> Result<(), Error> {
+        Err(Error::GcObservation(
+            "retention class belongs to its declared append/install/permanent boundary",
+        ))
+    }
+    fn quota_history(&mut self) -> Result<(), Error> {
+        Err(Error::GcObservation(
+            "retention class belongs to its declared append/install/permanent boundary",
+        ))
+    }
+    fn usage(&mut self) -> Result<(), Error> {
+        Err(Error::GcObservation(
+            "retention class belongs to its declared append/install/permanent boundary",
+        ))
+    }
+    fn managed_releases(&mut self) -> Result<(), Error> {
+        Err(Error::GcObservation(
+            "retention class belongs to its declared append/install/permanent boundary",
+        ))
+    }
 }
 
 /// Run one worktree-owner action for `project` under fresh state `roots`,
@@ -2311,6 +2604,30 @@ mod gc_preview_tests {
         );
     }
     #[test]
+    fn retention_registry_settings_resolve_and_adapters_cover_every_class() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut input =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("assets"));
+        input.state_dir = Some(temp.path().join("state"));
+        let roots = input
+            .resolve(&provenant_os::fs::SystemPathResolver)
+            .unwrap();
+        let sections = provenant_cli::config_reads::sections_for("config").unwrap();
+        let config = provenant_cli::config_reads::read_for(&roots, "config").unwrap();
+        let schema = provenant_config::schema(&config, &sections, String::new()).unwrap();
+        for class in provenant_config::RETENTION_CLASSES {
+            assert_eq!(class.adapter.kind(), class.class);
+            for key in class.settings {
+                assert!(
+                    schema.fields.iter().any(|field| field.path == *key),
+                    "{:?} declares missing setting {key}",
+                    class.class
+                );
+            }
+        }
+    }
+
+    #[test]
     fn measurement_failure_is_scoped_to_its_retention_class() {
         use provenant_config::{ByteObservation, RetentionIssue, RetentionKind};
         for failed_class in [RetentionKind::GitWorktrees, RetentionKind::LaneCargoCaches] {
@@ -2327,6 +2644,7 @@ mod gc_preview_tests {
             });
             let mut data = GcData::default();
             data.worktree_cleanup.push(report);
+            data.observe_retention(provenant_config::RetentionTrigger::FullGc);
             for row in gc_retention_bytes(&data).into_iter().filter(|r| {
                 matches!(
                     r.class,
@@ -2367,6 +2685,12 @@ mod gc_preview_tests {
             },
         ]);
 
+        assert!(
+            gc_retention_bytes(&data)
+                .iter()
+                .all(|row| matches!(row.observation, ByteObservation::Unknown))
+        );
+        data.observe_retention(provenant_config::RetentionTrigger::FullGc);
         let rows = gc_retention_bytes(&data);
         assert_eq!(rows.len(), RETENTION_CLASSES.len());
         assert!(RETENTION_CLASSES.iter().all(|declared| {

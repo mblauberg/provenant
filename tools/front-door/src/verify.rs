@@ -192,20 +192,40 @@ pub fn run(tier: Option<&str>, globals: &Globals) -> u8 {
             "{}:{tier}",
             CanonicalV1::file_digest(project.as_os_str().as_encoded_bytes())
         );
-        if let Err(error) = provenant_config::record_port_command(
+        let publication = match provenant_config::record_port_command(
             resolved.roots.state.as_path(),
             "verify",
             source,
             "tier",
             &key,
             &execution,
+            provenant_config::PortReceiptLifetime::AgeDays {
+                days: provenant_config::DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS,
+            },
         ) {
+            Ok(publication) => publication,
+            Err(error) => {
+                return render(
+                    report(&tier, backend, source, &execution),
+                    Outcome::Error,
+                    Some((
+                        "VERIFY_EVIDENCE",
+                        format!("cannot record verify command evidence: {error}"),
+                    )),
+                    Some(&execution),
+                    globals,
+                );
+            }
+        };
+        if let provenant_config::PortCommandPublication::VisibleDurabilityUnconfirmed { cause } =
+            publication
+        {
             return render(
                 report(&tier, backend, source, &execution),
                 Outcome::Error,
                 Some((
-                    "VERIFY_EVIDENCE",
-                    format!("cannot record verify command evidence: {error}"),
+                    "VERIFY_EVIDENCE_VISIBLE",
+                    format!("verify receipt is visible but durability is unconfirmed: {cause}"),
                 )),
                 Some(&execution),
                 globals,

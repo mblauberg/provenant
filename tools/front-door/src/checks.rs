@@ -52,6 +52,8 @@ enum ReleasePortFailure {
     InvalidOutput,
     #[error("cannot record release command evidence")]
     Evidence,
+    #[error("release command evidence is visible but durability is unconfirmed: {0}")]
+    EvidenceVisible(String),
     #[error("cannot start release command executor")]
     Executor,
 }
@@ -402,8 +404,23 @@ fn command_release_page(
         "{}:{range_key}",
         CanonicalV1::file_digest(project.as_os_str().as_encoded_bytes())
     );
-    provenant_config::record_port_command(state, "release", source, "check", &key, &execution)
-        .map_err(|_| ReleasePortFailure::Evidence)?;
+    match provenant_config::record_port_command(
+        state,
+        "release",
+        source,
+        "check",
+        &key,
+        &execution,
+        provenant_config::PortReceiptLifetime::AgeDays {
+            days: provenant_config::DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS,
+        },
+    ) {
+        Ok(provenant_config::PortCommandPublication::Durable) => {}
+        Ok(provenant_config::PortCommandPublication::VisibleDurabilityUnconfirmed { cause }) => {
+            return Err(ReleasePortFailure::EvidenceVisible(cause).into());
+        }
+        Err(_) => return Err(ReleasePortFailure::Evidence.into()),
+    }
     let output: ReleaseCommandOutput = output?;
     let normalized =
         serde_json::to_vec(&output.findings).map_err(|_| ReleasePortFailure::InvalidOutput)?;

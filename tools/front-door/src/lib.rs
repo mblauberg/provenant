@@ -21,6 +21,7 @@ mod tick_agent;
 mod tracker;
 
 mod chair_log_retention;
+mod checkpoint_retention;
 mod gc_support;
 mod handoff;
 mod hook_state;
@@ -31,6 +32,7 @@ mod install;
 mod lane_cleanup;
 pub mod local_answers;
 mod overflow;
+mod port_receipt_retention;
 mod pr;
 #[cfg(test)]
 mod pr_land_tests;

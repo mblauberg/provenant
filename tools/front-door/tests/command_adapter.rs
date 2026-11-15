@@ -824,33 +824,31 @@ printf 'private-output\n'
         "security/linux|security/linux\n"
     );
 
-    let mut receipts = Vec::new();
-    for entry in fs::read_dir(&rig.state)? {
-        let entry = entry?;
-        if entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with("port-command-verify-tier-")
-        {
-            receipts.push(serde_json::from_slice::<Value>(&fs::read(entry.path())?)?);
-        }
-    }
-    assert_eq!(receipts.len(), 1);
-    let receipt = &receipts[0];
-    assert_eq!(receipt["owner"], "verify");
-    assert_eq!(receipt["backend"], "repository_command");
-    assert_eq!(receipt["source"], "project");
-    assert_eq!(receipt["phase"], "tier");
-    assert_eq!(receipt["outcome"], "succeeded");
-    assert_eq!(receipt["exit_code"], 0);
-    assert_eq!(receipt["command_digest"], command.digest().to_string());
-    assert!(receipt["request_key_digest"].as_str().is_some());
-    assert!(receipt["stdout_digest"].as_str().is_some());
-    assert!(
-        receipt["capture_complete"]
-            .as_bool()
-            .ok_or("capture_complete")?
+    let inventory = provenant_config::port_command_receipts(&rig.state)?;
+    assert!(inventory.complete, "{:?}", inventory.issues);
+    let receipt = &inventory
+        .entries
+        .iter()
+        .find(|entry| entry.receipt.owner == "verify" && entry.receipt.phase == "tier")
+        .ok_or("missing verify receipt")?
+        .receipt;
+    assert_eq!(
+        receipt.schema_version(),
+        provenant_records::PORT_COMMAND_RECEIPT_SCHEMA_VERSION
     );
+    assert_eq!(
+        receipt.backend,
+        provenant_records::PortCommandBackend::RepositoryCommand
+    );
+    assert_eq!(receipt.source, provenant_records::PortSource::Project);
+    assert_eq!(
+        receipt.outcome,
+        provenant_records::PortCommandDisposition::Succeeded
+    );
+    assert_eq!(receipt.exit_code, Some(0));
+    assert_eq!(receipt.command_digest, command.digest());
+    assert!(receipt.stdout_digest.is_some());
+    assert!(receipt.capture_complete);
     let receipt_text = serde_json::to_string(receipt)?;
     assert!(!receipt_text.contains("verify-port.sh"));
     assert!(!receipt_text.contains("private-output"));
@@ -891,16 +889,15 @@ printf 'executed\n' > verify-call.txt
     assert_eq!(result["data"]["backend"], "none");
     assert_eq!(result["error"]["code"], "VERIFY_UNAVAILABLE");
     assert!(!marker.exists());
-    for entry in fs::read_dir(&rig.state)? {
-        let entry = entry?;
-        assert!(
-            !entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("port-command-verify-tier-"),
-            "disabled verify port wrote command evidence"
-        );
-    }
+    let inventory = provenant_config::port_command_receipts(&rig.state)?;
+    assert!(inventory.complete, "{:?}", inventory.issues);
+    assert!(
+        inventory
+            .entries
+            .iter()
+            .all(|entry| { entry.receipt.owner != "verify" || entry.receipt.phase != "tier" }),
+        "disabled verify port wrote command evidence"
+    );
     Ok(())
 }
 

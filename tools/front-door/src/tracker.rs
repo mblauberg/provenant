@@ -147,10 +147,29 @@ impl TrackerPort {
                     "{}:{number}",
                     CanonicalV1::file_digest(root.as_os_str().as_encoded_bytes())
                 );
-                provenant_config::record_port_command(
-                    state, "tracker", *source, "issue", &key, &execution,
-                )
-                .map_err(|_| "cannot record tracker command evidence".to_owned())?;
+                match provenant_config::record_port_command(
+                    state,
+                    "tracker",
+                    *source,
+                    "issue",
+                    &key,
+                    &execution,
+                    provenant_config::PortReceiptLifetime::AgeDays {
+                        days: provenant_config::DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS,
+                    },
+                ) {
+                    Ok(provenant_config::PortCommandPublication::Durable) => {}
+                    Ok(
+                        provenant_config::PortCommandPublication::VisibleDurabilityUnconfirmed {
+                            cause,
+                        },
+                    ) => {
+                        return Err(format!(
+                            "tracker command receipt is visible but durability is unconfirmed: {cause}"
+                        ));
+                    }
+                    Err(_) => return Err("cannot record tracker command evidence".to_owned()),
+                }
                 issue
             }
         }

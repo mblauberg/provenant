@@ -280,7 +280,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "gc_reports_transient_and_preserves_unobserved_project_array",
             "gc_pressure_collects_only_the_selected_primary_project",
             "gc_refuses_bare_projects_and_their_linked_checkout_fallback",
-            "provider_state_gc_sweeps_host_and_refuses_replaced_roots",
+            "provider_retention_classes_sweep_host_and_refuse_replaced_roots",
             "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees",
             "merged_pruning_deletes_a_merged_branch_without_a_worktree",
             "remove_by_name_follows_the_branch_merge_state",
@@ -396,8 +396,8 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache" => {
                     gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache()
                 }
-                "provider_state_gc_sweeps_host_and_refuses_replaced_roots" => {
-                    crate::provider_retention::provider_state_gc_sweeps_host_and_refuses_replaced_roots()
+                "provider_retention_classes_sweep_host_and_refuse_replaced_roots" => {
+                    crate::provider_retention::provider_retention_classes_sweep_host_and_refuse_replaced_roots()
                 }
                 "gc_pressure_collects_only_the_selected_primary_project" => gc_pressure_collects_only_the_selected_primary_project(),
                 "gc_refuses_bare_projects_and_their_linked_checkout_fallback" => gc_refuses_bare_projects_and_their_linked_checkout_fallback(),

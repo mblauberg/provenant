@@ -564,7 +564,121 @@ impl FileJournal {
                 .retire_owner_lock(OsStr::new(&format!("graph-{id}.lock")), &journal._lock)?;
             removed += 1;
         }
+        removed += Self::collect_unreferenced_artifacts(root, project, cancel, clock)?;
         Ok(removed)
+    }
+
+    /// Resume cleanup when an earlier collection removed the checkpoint but
+    /// stopped before deleting its prompt blobs or derived sidecars. Reserved
+    /// graph names are durable, so the missing checkpoint is the proof that no
+    /// live graph owns these derived files. The per-graph writer lock fences a
+    /// concurrent admission or save while the absence is checked and artifacts
+    /// are removed.
+    fn collect_unreferenced_artifacts(
+        root: &StateRoot,
+        project: ProjectId,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<usize, JournalError> {
+        let directory = match graph_directory(root, project) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => return Ok(0),
+            Err(error) => return Err(error.into()),
+        };
+        let reserved = Self::reserved_graph_ids(root, project)?
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        let checkpoints = Self::graph_ids(root, project)?
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut candidates = std::collections::BTreeSet::new();
+        for entry in directory.entries()? {
+            let name = entry?;
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let Some(rest) = name.strip_prefix("graph-") else {
+                continue;
+            };
+            let id = [".lock", ".unreadable", ".advance-error"]
+                .iter()
+                .find_map(|suffix| rest.strip_suffix(suffix))
+                .or_else(|| {
+                    rest.split_once(".prompt-").and_then(|(id, digest)| {
+                        (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                            .then_some(id)
+                    })
+                });
+            if let Some(id) = id.filter(|id| valid_identifier(id)) {
+                candidates.insert(id.to_owned());
+            }
+        }
+        match directory.open_verified_directory(OsStr::new("pending")) {
+            Ok(markers) => {
+                for entry in markers.entries()? {
+                    let name = entry?;
+                    if let Some(id) = name
+                        .to_str()
+                        .and_then(|name| name.strip_suffix(".pending"))
+                        .filter(|id| valid_identifier(id))
+                    {
+                        candidates.insert(id.to_owned());
+                    }
+                }
+            }
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        let mut recovered = 0;
+        for id in candidates
+            .into_iter()
+            .filter(|id| reserved.contains(id) && !checkpoints.contains(id))
+        {
+            let journal = match Self::open(
+                root,
+                project,
+                &id,
+                WaitBudget::nonblocking(clock.mono_now()),
+                cancel,
+                clock,
+            ) {
+                Ok(journal) => journal,
+                Err(JournalError::Filesystem(FsError::LockTimeout { .. })) => continue,
+                Err(error) => return Err(error),
+            };
+            match journal.directory.open_read(&journal.checkpoint_name()) {
+                Ok(_) => continue,
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error.into()),
+            }
+
+            prompt_store::collect(&journal.directory, &id)?;
+            for sidecar in [unreadable_marker_name(&id), advance_error_name(&id)] {
+                match journal.directory.unlink(&sidecar) {
+                    Ok(()) => {}
+                    Err(error) if error.is_not_found() => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            match journal
+                .directory
+                .open_verified_directory(OsStr::new("pending"))
+            {
+                Ok(markers) => remove_pending_marker(&markers, &id)?,
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error.into()),
+            }
+            journal
+                .directory
+                .sync()
+                .map_err(JournalError::DurabilityUnconfirmed)?;
+            journal
+                .directory
+                .retire_owner_lock(OsStr::new(&format!("graph-{id}.lock")), &journal._lock)?;
+            recovered += 1;
+        }
+        Ok(recovered)
     }
 
     fn rebuild_pending_in(
