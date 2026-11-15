@@ -448,6 +448,69 @@ fn command_dispatch_launches_with_normal_store_semantics() -> Result {
     Ok(())
 }
 
+/// A repository with no Provenant files, scripts, build files or instruction
+/// files runs a lane, and the lane leaves nothing in it beyond the repository
+/// paths Provenant declares it creates (`repository_files`) and the lane
+/// worktree roots the worktree-layout port names.
+#[test]
+fn a_bare_repository_runs_a_lane_and_gains_only_declared_paths() -> Result {
+    use provenant_config::repository_files::{Access, REPOSITORY_FILES};
+    if !available()? {
+        return Ok(());
+    }
+    let rig = rig(json!({"pass":{"argv":["/bin/sh","-c","printf 'hello\\n'"]}}))?;
+    let _cleanup = rig.process_cleanup();
+    let before = repository_entries(&rig.project)?;
+    assert!(
+        REPOSITORY_FILES
+            .iter()
+            .all(|file| !before.contains(std::path::Path::new(file.path))),
+        "the fixture repository is not bare: {before:?}"
+    );
+    let submitted = dispatch(&rig, "pass", 10)?;
+    let lane = settled(&rig, attempt_id(&submitted)?)?;
+    assert_eq!(lane["state"], "succeeded", "{lane}");
+    let worktree_roots = provenant_config::PortTable::builtin().worktree_layout.roots;
+    let created: Vec<_> = REPOSITORY_FILES
+        .iter()
+        .filter(|file| file.access == Access::Created)
+        .map(|file| std::path::Path::new(file.path))
+        .chain(worktree_roots.iter().map(std::path::PathBuf::as_path))
+        .collect();
+    for entry in repository_entries(&rig.project)?.difference(&before) {
+        assert!(
+            created
+                .iter()
+                .any(|path| path.starts_with(entry) || entry.starts_with(path)),
+            "undeclared repository path {}",
+            entry.display()
+        );
+    }
+    Ok(())
+}
+
+/// Every path below `project`, relative to it, except Git's own directory.
+fn repository_entries(
+    project: &std::path::Path,
+) -> Result<std::collections::BTreeSet<std::path::PathBuf>> {
+    let mut entries = std::collections::BTreeSet::new();
+    let mut pending = vec![std::path::PathBuf::new()];
+    while let Some(relative) = pending.pop() {
+        for entry in fs::read_dir(project.join(&relative))? {
+            let entry = entry?;
+            let path = relative.join(entry.file_name());
+            if path == std::path::Path::new(".git") {
+                continue;
+            }
+            if entry.file_type()?.is_dir() {
+                pending.push(path.clone());
+            }
+            entries.insert(path);
+        }
+    }
+    Ok(entries)
+}
+
 #[test]
 fn command_custom_shebang_runtime_keeps_credentials_and_writes_denied() -> Result {
     use std::os::unix::fs::PermissionsExt;
