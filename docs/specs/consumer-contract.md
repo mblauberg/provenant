@@ -136,7 +136,7 @@ listed because a lane's home is never the caller's.
 | `PROVENANT_STATE_DIR` | lane_or_caller | evolving | State root. A caller sets it to use a root other than `~/.local/share/provenant/v2`; in a lane it names the attempt's private store. | every lane; when a caller leaves it unset the default root applies |
 | `PROVENANT_AGENT_LABEL` | lane_or_caller | evolving | The agent name inbox, fabric and checkpoint writes are attributed to: `lane-<attempt>` in a lane. A caller may set it to name itself. | every lane; when a caller leaves it unset the harness identity applies |
 | `PROVENANT_PARENT_ATTEMPT_ID` | lane | evolving | The lane's own attempt. A `provenant run` inside the lane records it as the parent. | every lane |
-| `HOME` | lane | evolving | The attempt's private home, where provider credentials and caches are staged. It is never the caller's home. | every lane |
+| `HOME` | lane | evolving | In a sandboxed lane, the attempt's private home, where provider credentials and caches are staged. An unsandboxed lane, the default, inherits the caller's home with its credentials and tool caches in place. | every lane |
 | `PROVENANT_GIT` | lane_or_caller | evolving | The Git executable Provenant runs. In a lane it is the wrapped Git the lane must use. | every lane; when a caller leaves it unset Git is found on PATH |
 | `PROVENANT_LANE_HEAD` | lane | evolving | The branch the writer lane delivers to. | lanes whose task names a head branch |
 | `PROVENANT_LANE_BASE` | lane | evolving | The branch the lane's head is based on. | lanes whose task names both a head and a base |
