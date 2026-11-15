@@ -31,9 +31,41 @@ pub enum Status {
     /// Coverage is short; more or different reviews could still pass.
     Incomplete,
 }
+/// Stable machine-readable reasons returned by review-coverage evaluation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticCode {
+    AuthorTierUnknown,
+    StaleSubject,
+    BlockingReview,
+    InconclusiveReview,
+    ReviewerNotIndependent,
+    ReviewerRouteUnknown,
+    ReviewerBelowAuthorTier,
+    RepeatedReviewer,
+    MissingReviews,
+    MissingCrossFamilyLeg,
+    MissingAdversarialLens,
+}
+impl DiagnosticCode {
+    /// Every emitted reason is paired with a coverage test case.
+    pub const ALL: [Self; 11] = [
+        Self::AuthorTierUnknown,
+        Self::StaleSubject,
+        Self::BlockingReview,
+        Self::InconclusiveReview,
+        Self::ReviewerNotIndependent,
+        Self::ReviewerRouteUnknown,
+        Self::ReviewerBelowAuthorTier,
+        Self::RepeatedReviewer,
+        Self::MissingReviews,
+        Self::MissingCrossFamilyLeg,
+        Self::MissingAdversarialLens,
+    ];
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Diagnostic {
-    pub code: &'static str,
+    pub code: DiagnosticCode,
     pub field: String,
     pub message: String,
     pub remedy: &'static str,
@@ -110,7 +142,7 @@ pub fn check(ctx: &ReviewContext<'_>, facts: &[ReviewFact]) -> ValidationReport 
     let author_tier = agents.iter().filter_map(|r| tier(r)).max();
     if need > 0 && agents.iter().any(|r| tier(r).is_none()) {
         note(
-            "author_tier_unknown",
+            DiagnosticCode::AuthorTierUnknown,
             "authors".into(),
             "an agent author has no recorded route tier".into(),
             "record the author's route and tier before relying on review coverage",
@@ -131,7 +163,7 @@ pub fn check(ctx: &ReviewContext<'_>, facts: &[ReviewFact]) -> ValidationReport 
         let field = format!("reviews/{}", fact.attempt_id);
         if &fact.subject != ctx.subject {
             note(
-                "stale_subject",
+                DiagnosticCode::StaleSubject,
                 field,
                 "review is for a different subject than the receipt".into(),
                 "re-run the review against the current subject",
@@ -139,7 +171,7 @@ pub fn check(ctx: &ReviewContext<'_>, facts: &[ReviewFact]) -> ValidationReport 
         } else if fact.verdict == ReviewVerdict::RequestChanges {
             failed = true;
             note(
-                "blocking_review",
+                DiagnosticCode::BlockingReview,
                 field,
                 format!(
                     "{} blocking finding(s) outstanding",
@@ -149,35 +181,35 @@ pub fn check(ctx: &ReviewContext<'_>, facts: &[ReviewFact]) -> ValidationReport 
             );
         } else if fact.verdict == ReviewVerdict::Inconclusive {
             note(
-                "inconclusive_review",
+                DiagnosticCode::InconclusiveReview,
                 field,
                 "review is inconclusive and supplies no coverage".into(),
                 "obtain a fresh review with a passing verdict",
             );
         } else if excluded.contains(&fact.reviewer_id) {
             note(
-                "reviewer_not_independent",
+                DiagnosticCode::ReviewerNotIndependent,
                 field,
                 "reviewer is an author or decision maker".into(),
                 "use a reviewer who did not author or decide this work",
             );
         } else if matches!(fact.eligibility.provenance, RouteProvenance::Unknown { .. }) {
             note(
-                "reviewer_route_unknown",
+                DiagnosticCode::ReviewerRouteUnknown,
                 field,
                 "reviewer route is unknown, so the review is findings only".into(),
                 "record the reviewer's route from the attempt or host record",
             );
         } else if tier(&fact.eligibility.provenance) < author_tier {
             note(
-                "reviewer_below_author_tier",
+                DiagnosticCode::ReviewerBelowAuthorTier,
                 field,
                 "reviewer tier is below the highest author tier".into(),
                 "review with a route at or above the author's tier",
             );
         } else if !seen_reviewers.insert(fact.reviewer_id) {
             note(
-                "repeated_reviewer",
+                DiagnosticCode::RepeatedReviewer,
                 field,
                 "this reviewer already supplies coverage".into(),
                 "repeating a reviewer adds no coverage",
@@ -251,7 +283,7 @@ pub fn check(ctx: &ReviewContext<'_>, facts: &[ReviewFact]) -> ValidationReport 
     let counted: Vec<AttemptId> = picked.iter().map(|c| c.fact.attempt_id).collect();
     if (picked.len() as u64) < need {
         note(
-            "missing_reviews",
+            DiagnosticCode::MissingReviews,
             "reviews".into(),
             format!(
                 "{} independent review(s) with distinct lenses are required; {} counted",
@@ -271,7 +303,7 @@ pub fn check(ctx: &ReviewContext<'_>, facts: &[ReviewFact]) -> ValidationReport 
     let waived = (need.saturating_sub(cross) as usize).min(blocker_evidence.len()) as u64;
     if need.saturating_sub(cross) > waived {
         note(
-            "missing_cross_family_leg",
+            DiagnosticCode::MissingCrossFamilyLeg,
             "reviews".into(),
             format!(
                 "{} cross-family review leg(s) lack a verified reviewer or an unexpired blocker",
@@ -282,7 +314,7 @@ pub fn check(ctx: &ReviewContext<'_>, facts: &[ReviewFact]) -> ValidationReport 
     }
     if terminal && !picked.iter().any(|c| lens_key(&c.fact.lens) == adversarial) {
         note(
-            "missing_adversarial_lens",
+            DiagnosticCode::MissingAdversarialLens,
             "reviews".into(),
             "terminal risk needs a counted adversarial review".into(),
             "request an adversarial review",
@@ -295,17 +327,19 @@ pub fn check(ctx: &ReviewContext<'_>, facts: &[ReviewFact]) -> ValidationReport 
         diagnostics.retain(|d| {
             matches!(
                 d.code,
-                "blocking_review" | "stale_subject" | "inconclusive_review"
+                DiagnosticCode::BlockingReview
+                    | DiagnosticCode::StaleSubject
+                    | DiagnosticCode::InconclusiveReview
             )
         });
     }
     let incomplete = diagnostics.iter().any(|d| {
         matches!(
             d.code,
-            "missing_reviews"
-                | "missing_cross_family_leg"
-                | "missing_adversarial_lens"
-                | "author_tier_unknown"
+            DiagnosticCode::MissingReviews
+                | DiagnosticCode::MissingCrossFamilyLeg
+                | DiagnosticCode::MissingAdversarialLens
+                | DiagnosticCode::AuthorTierUnknown
         )
     });
     let status = if failed {
@@ -405,7 +439,7 @@ mod tests {
             facts,
         )
     }
-    fn codes(report: &ValidationReport) -> Vec<&'static str> {
+    fn codes(report: &ValidationReport) -> Vec<DiagnosticCode> {
         report.diagnostics.iter().map(|d| d.code).collect()
     }
     fn blocker(expires: i64) -> LegBlocker {
@@ -413,6 +447,90 @@ mod tests {
             reference: evidence(),
             expires_at: UtcMicros::from_micros(expires).unwrap(),
         }
+    }
+
+    #[test]
+    fn every_declared_diagnostic_code_has_an_emission_case() {
+        let unknown_author = [author(RouteProvenance::Unknown {
+            extra: Default::default(),
+        })];
+        let mut stale = review(
+            2,
+            observed(ModelTier::Senior, "openai"),
+            Some("openai"),
+            "stale",
+        );
+        stale.subject = Subject::Document {
+            extra: Default::default(),
+            path: evidence().path,
+            digest: Digest::from_bytes([7; 32]),
+        };
+        let mut blocking = review(
+            3,
+            observed(ModelTier::Senior, "openai"),
+            Some("openai"),
+            "blocking",
+        );
+        blocking.verdict = ReviewVerdict::RequestChanges;
+        let mut inconclusive = review(
+            4,
+            observed(ModelTier::Senior, "openai"),
+            Some("openai"),
+            "inconclusive",
+        );
+        inconclusive.verdict = ReviewVerdict::Inconclusive;
+        let mut self_review = review(
+            5,
+            observed(ModelTier::Senior, "openai"),
+            Some("openai"),
+            "self",
+        );
+        self_review.reviewer_id = ActorId::from_bytes([1; 16]);
+        let unknown_route = review(
+            6,
+            RouteProvenance::Unknown {
+                extra: Default::default(),
+            },
+            None,
+            "unknown",
+        );
+        let incomplete = run(
+            RiskTier::Terminal,
+            &unknown_author,
+            &[stale, blocking, inconclusive, self_review, unknown_route],
+            &[],
+        );
+
+        let principal_author = [author(attested(ModelTier::Principal))];
+        let junior = review(
+            7,
+            observed(ModelTier::Junior, "openai"),
+            Some("openai"),
+            "junior",
+        );
+        let repeated = review(
+            8,
+            observed(ModelTier::Principal, "openai"),
+            Some("openai"),
+            "review",
+        );
+        let mut duplicate = repeated.clone();
+        duplicate.attempt_id = AttemptId::from_bytes([9; 16]);
+        let repeated = run(
+            RiskTier::Substantial,
+            &principal_author,
+            &[junior, repeated, duplicate],
+            &[],
+        );
+
+        let emitted: BTreeSet<_> = incomplete
+            .diagnostics
+            .iter()
+            .chain(&repeated.diagnostics)
+            .map(|diagnostic| diagnostic.code)
+            .collect();
+        let declared: BTreeSet<_> = DiagnosticCode::ALL.into_iter().collect();
+        assert_eq!(emitted, declared);
     }
 
     #[test]
@@ -439,8 +557,8 @@ mod tests {
             let report = run(risk, &authors, std::slice::from_ref(&inconclusive), &[]);
             assert_eq!(report.status, expected);
             assert!(report.counted.is_empty());
-            assert!(codes(&report).contains(&"inconclusive_review"));
-            assert!(!codes(&report).contains(&"blocking_review"));
+            assert!(codes(&report).contains(&DiagnosticCode::InconclusiveReview));
+            assert!(!codes(&report).contains(&DiagnosticCode::BlockingReview));
         }
         let good = review(
             3,
@@ -451,7 +569,7 @@ mod tests {
         let report = run(RiskTier::Substantial, &authors, &[inconclusive, good], &[]);
         assert_eq!(report.status, Status::Passed);
         assert_eq!(report.counted.len(), 1);
-        assert!(codes(&report).contains(&"inconclusive_review"));
+        assert!(codes(&report).contains(&DiagnosticCode::InconclusiveReview));
     }
 
     #[test]
@@ -471,7 +589,7 @@ mod tests {
         bad.blocking_findings = vec!["bug".into()];
         let report = run(RiskTier::Routine, &authors, &[bad], &[]);
         assert_eq!(report.status, Status::Failed);
-        assert_eq!(codes(&report), ["blocking_review"]);
+        assert!(codes(&report).contains(&DiagnosticCode::BlockingReview));
     }
 
     #[test]
@@ -508,7 +626,7 @@ mod tests {
         let report = run(RiskTier::Substantial, &authors, &[good, extra], &[]);
         assert_eq!(report.status, Status::Passed);
         assert_eq!(report.counted.len(), 1);
-        assert!(codes(&report).contains(&"reviewer_route_unknown"));
+        assert!(codes(&report).contains(&DiagnosticCode::ReviewerRouteUnknown));
     }
 
     #[test]
@@ -550,7 +668,7 @@ mod tests {
             &[],
         );
         assert_eq!(report.status, Status::Incomplete);
-        assert_eq!(codes(&report), ["missing_cross_family_leg"]);
+        assert!(codes(&report).contains(&DiagnosticCode::MissingCrossFamilyLeg));
         let waived = run(
             RiskTier::Substantial,
             &authors,
@@ -587,7 +705,7 @@ mod tests {
             &[same_blocker.clone(), same_blocker],
         );
         assert_eq!(report.status, Status::Incomplete);
-        assert!(codes(&report).contains(&"missing_cross_family_leg"));
+        assert!(codes(&report).contains(&DiagnosticCode::MissingCrossFamilyLeg));
     }
 
     #[test]
@@ -626,17 +744,15 @@ mod tests {
             &[],
         );
         assert_eq!(report.status, Status::Incomplete);
-        assert_eq!(
-            codes(&report),
-            [
-                "missing_cross_family_leg",
-                "missing_reviews",
-                "reviewer_below_author_tier",
-                "reviewer_not_independent",
-                "reviewer_not_independent",
-                "reviewer_route_unknown",
-            ]
-        );
+        for code in [
+            DiagnosticCode::MissingCrossFamilyLeg,
+            DiagnosticCode::MissingReviews,
+            DiagnosticCode::ReviewerBelowAuthorTier,
+            DiagnosticCode::ReviewerNotIndependent,
+            DiagnosticCode::ReviewerRouteUnknown,
+        ] {
+            assert!(codes(&report).contains(&code));
+        }
         let first = review(
             2,
             observed(ModelTier::Principal, "openai"),
@@ -646,7 +762,7 @@ mod tests {
         let mut again = first.clone();
         again.attempt_id = AttemptId::from_bytes([5; 16]);
         let report = run(RiskTier::Crucial, &authors, &[first, again], &[]);
-        assert!(codes(&report).contains(&"repeated_reviewer"));
+        assert!(codes(&report).contains(&DiagnosticCode::RepeatedReviewer));
     }
 
     #[test]
@@ -662,7 +778,7 @@ mod tests {
         );
         let report = run(RiskTier::Substantial, &authors, &[good], &[]);
         assert_eq!(report.status, Status::Incomplete);
-        assert!(codes(&report).contains(&"author_tier_unknown"));
+        assert!(codes(&report).contains(&DiagnosticCode::AuthorTierUnknown));
     }
 
     #[test]
@@ -687,11 +803,11 @@ mod tests {
             "correctness",
         );
         let report = run(RiskTier::Crucial, &authors, &[a.clone(), same_lens], &[]);
-        assert!(codes(&report).contains(&"missing_reviews"));
+        assert!(codes(&report).contains(&DiagnosticCode::MissingReviews));
         let report = run(RiskTier::Crucial, &authors, &[a.clone(), b.clone()], &[]);
         assert_eq!(report.status, Status::Passed);
         let report = run(RiskTier::Terminal, &authors, &[a.clone(), b], &[]);
-        assert_eq!(codes(&report), ["missing_adversarial_lens"]);
+        assert!(codes(&report).contains(&DiagnosticCode::MissingAdversarialLens));
         let adv = review(
             5,
             observed(ModelTier::Senior, "google"),
@@ -718,6 +834,6 @@ mod tests {
         };
         let report = run(RiskTier::Substantial, &authors, &[stale], &[]);
         assert_eq!(report.status, Status::Incomplete);
-        assert!(codes(&report).contains(&"stale_subject"));
+        assert!(codes(&report).contains(&DiagnosticCode::StaleSubject));
     }
 }

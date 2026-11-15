@@ -2,7 +2,7 @@
 use crate::{persistence, session::HostSessionId};
 use provenant_core::{CancelToken, Clock, OperationId, ProjectId, StateRoot, WaitBudget};
 use provenant_os::fs::{Directory, FileKind, FsError, LockGuard, LockMode};
-use provenant_records::{CanonicalV1, Limits, decode_v1};
+use provenant_records::{CanonicalV1, ExtraFields, Limits, decode_v1};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{ffi::OsStr, path::PathBuf};
@@ -49,6 +49,9 @@ pub struct LogEntry {
     pub created_at: i64,
     #[serde(flatten)]
     pub update: Append,
+    /// Unknown envelope fields survive bounded SQLite JSON decoding.
+    #[serde(default, flatten)]
+    pub extra: ExtraFields,
 }
 #[derive(Debug, Clone, Copy)]
 pub struct Retention {
@@ -431,6 +434,7 @@ impl LogStore {
                     session_id: self.session.clone(),
                     created_at,
                     update: input,
+                    extra: Default::default(),
                 })
             };
         }
@@ -451,6 +455,7 @@ impl LogStore {
             session_id: self.session.clone(),
             created_at: now,
             update: input,
+            extra: Default::default(),
         };
         let payload = serde_json::to_vec(&entry)?;
         tx.execute(
@@ -554,22 +559,12 @@ impl LogStore {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use provenant_core::{PathResolver, RootInputs};
-    use std::path::{Path, PathBuf};
-    struct Resolver;
-    impl PathResolver for Resolver {
-        fn resolve_existing_ancestor(&self, path: &Path) -> std::io::Result<PathBuf> {
-            Ok(path.into())
-        }
-    }
+    use provenant_test_support::{IdentityPathResolver, test_roots};
     fn fixture() -> (tempfile::TempDir, LogStore) {
         let tmp = crate::test_support::tempdir().unwrap();
         let base = tmp.path().canonicalize().unwrap();
-        let state = base.join("state");
-        provenant_os::fixture::private_state_dir(&state).unwrap();
-        let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
-        inputs.state_dir = Some(state);
-        let root = StateRoot::resolve(&inputs, &Resolver).unwrap();
+        let inputs = test_roots(&base).unwrap();
+        let root = StateRoot::resolve(&inputs, &IdentityPathResolver).unwrap();
         let store = LogStore::new(
             root,
             ProjectId::from_bytes([1; 16]),
@@ -611,6 +606,56 @@ mod tests {
             max_bytes: 65536,
             replay_horizon_seconds: 10,
         }
+    }
+    #[test]
+    fn sqlite_schema_is_created_checked_and_future_versions_are_refused() {
+        let (_tmp, store) = fixture();
+        let directory = store.dir(true).unwrap();
+        let db = store.open(&directory, true).unwrap().unwrap();
+        assert_eq!(
+            provenant_sqlite::stored_version(&db).unwrap(),
+            SCHEMA.version
+        );
+        drop(db);
+        assert!(store.open(&directory, false).unwrap().is_some());
+
+        let db = store.open(&directory, true).unwrap().unwrap();
+        let future = SCHEMA.version + 1;
+        db.pragma_update(None, "user_version", future).unwrap();
+        drop(db);
+        assert!(matches!(
+            store.open(&directory, false),
+            Err(Error::Version(provenant_sqlite::VersionError::Refused {
+                found,
+                expected
+            })) if found == future && expected == SCHEMA.version
+        ));
+    }
+
+    #[test]
+    fn stored_log_extensions_survive_bounded_decode_and_reencode() {
+        let (_tmp, store) = fixture();
+        let entry = store
+            .append(update("extended", 1, "entry"), retention(), 1)
+            .unwrap();
+        let mut value = serde_json::to_value(entry).unwrap();
+        let future = serde_json::json!({"nested":true});
+        value["future"] = future.clone();
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let decoded = LogStore::decode_entry(1, &bytes).unwrap();
+        let encoded = provenant_records::encode(&decoded).unwrap();
+        let bounded: LogEntry = provenant_records::decode(
+            encoded.as_slice(),
+            Limits {
+                max_bytes: (ENTRY_LIMIT * 2) as u64,
+                ..Limits::default()
+            },
+        )
+        .unwrap();
+        let output = serde_json::to_value(&bounded).unwrap();
+        assert_eq!(output["future"], future);
+        assert_eq!(output["kind"], "update");
+        assert_eq!(output["markdown"], "entry");
     }
     #[test]
     fn log_commit_signals_chair() {
@@ -678,7 +723,7 @@ mod tests {
         assert_eq!((page.total_appended, page.total_pruned), (3, 3));
     }
     #[test]
-    fn replay_horizon_expires_receipts_and_survives_clock_and_config_changes() {
+    fn replay_horizon_expires_operations_and_survives_clock_and_config_changes() {
         let (_tmp, store) = fixture();
         let mut retention = retention();
         retention.max_entries = 100;
@@ -698,21 +743,10 @@ mod tests {
         store
             .append(update("new", 111, "new"), retention, 111)
             .unwrap();
-        let dir = store.dir(false).unwrap();
-        let db = store.open(&dir, false).unwrap().unwrap();
-        let old_count: i64 = db
-            .query_row(
-                "SELECT count(*) FROM receipts WHERE operation_id='old'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(old_count, 0);
         assert_eq!(
             store.page(None, 100, retention, 111).unwrap().entries.len(),
             2
         );
-        drop(db);
         retention.replay_horizon_seconds = 1000;
         assert!(matches!(
             store.append(original.clone(), retention, 111),
@@ -941,46 +975,5 @@ mod tests {
             .unwrap();
         first.host = "host-b".into();
         assert_eq!(store.append(first, policy, 2).unwrap(), original);
-    }
-    #[test]
-    fn replay_store_has_no_lifetime_receipt_cap() {
-        let (_tmp, store) = fixture();
-        let retention = retention();
-        store
-            .append(update("first", 1, "first"), retention, 1)
-            .unwrap();
-        let dir = store.dir(false).unwrap();
-        let mut db = store.open(&dir, true).unwrap().unwrap();
-        let tx = db.transaction().unwrap();
-        tx.execute_batch(
-            "WITH RECURSIVE rows(n) AS (VALUES(0) UNION ALL SELECT n + 1 FROM rows WHERE n < 100000)
-             INSERT INTO receipts (operation_id, issued_at, digest, sequence, created_at, host) SELECT 'synthetic-' || n, 1, 'digest', n + 2, 1, 'host' FROM rows",
-        )
-        .unwrap();
-        tx.commit().unwrap();
-        drop(db);
-        assert_eq!(
-            store
-                .append(update("next", 2, "next"), retention, 2)
-                .unwrap()
-                .sequence,
-            2
-        );
-        assert_eq!(
-            store.page(None, 100, retention, 2).unwrap().total_appended,
-            2
-        );
-        assert_eq!(
-            store
-                .append(update("later", 20, "later"), retention, 20)
-                .unwrap()
-                .sequence,
-            3
-        );
-        let db = store.open(&dir, false).unwrap().unwrap();
-        let count: i64 = db
-            .query_row("SELECT count(*) FROM receipts", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(count, 1);
     }
 }

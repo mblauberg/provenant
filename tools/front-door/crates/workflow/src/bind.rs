@@ -292,19 +292,13 @@ mod tests {
     fn observed_provenance_requires_the_actual_observed_route() {
         let mut a = attempt();
         a.observed_route = None;
-        assert_eq!(
-            bind(&a, &subject()).unwrap_err().to_string(),
-            "review attempt has no observed route"
-        );
+        assert_eq!(bind(&a, &subject()), Err(BindError::NoObservedRoute));
     }
 
     #[test]
     fn review_attempt_with_multiple_outputs_is_rejected() {
         let mut a = attempt();
         a.output_refs.push(a.output_refs[0].clone());
-        assert_eq!(
-            bind(&a, &subject()).unwrap_err().to_string(),
-            "review attempt retained more than one output"
-        );
+        assert_eq!(bind(&a, &subject()), Err(BindError::MultipleOutputs));
     }
 }

@@ -2,10 +2,15 @@
 use crate::session::HostSessionId;
 use provenant_core::StateRoot;
 use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
-use provenant_records::CanonicalV1;
+use provenant_records::{CanonicalV1, DecodeError, ExtraFields, Limits, decode};
 use serde::{Deserialize, Serialize};
 use std::{ffi::OsStr, path::PathBuf};
 const LIMIT: u64 = 32 * 1024;
+const LIMITS: Limits = Limits {
+    max_bytes: LIMIT,
+    max_depth: 32,
+    max_members: 8192,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Handoff {
@@ -21,6 +26,8 @@ pub struct Handoff {
     pub target_account: Option<String>,
     pub reason: String,
     pub consumed: bool,
+    #[serde(default, flatten)]
+    pub extra: ExtraFields,
 }
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -28,6 +35,8 @@ pub enum Error {
     Filesystem(#[from] FsError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Record(#[from] DecodeError),
     #[error("{0}")]
     Invalid(&'static str),
 }
@@ -97,7 +106,7 @@ impl HandoffStore {
             Err(error) if error.is_not_found() => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        let handoff: Handoff = serde_json::from_slice(&bytes)?;
+        let handoff: Handoff = decode(bytes.as_slice(), LIMITS)?;
         if handoff.cwd != self.cwd {
             return Err(Error::Invalid("handoff working directory mismatch"));
         }
@@ -225,23 +234,13 @@ impl HandoffStore {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use provenant_core::{PathResolver, RootInputs};
-    use std::path::Path;
-    struct Resolver;
-    impl PathResolver for Resolver {
-        fn resolve_existing_ancestor(&self, path: &Path) -> std::io::Result<PathBuf> {
-            Ok(path.into())
-        }
-    }
+    use provenant_test_support::{IdentityPathResolver, test_roots};
     #[test]
     fn chair_handoff_preserves_pending_source_and_consumes_once_for_target_only() {
         let tmp = crate::test_support::tempdir().unwrap();
         let base = tmp.path().canonicalize().unwrap();
-        let state = base.join("state");
-        provenant_os::fixture::private_state_dir(&state).unwrap();
-        let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
-        inputs.state_dir = Some(state);
-        let root = StateRoot::resolve(&inputs, &Resolver).unwrap();
+        let inputs = test_roots(&base).unwrap();
+        let root = StateRoot::resolve(&inputs, &IdentityPathResolver).unwrap();
         let store = HandoffStore::new(root.clone(), base.clone());
         let id = |s| HostSessionId::parse(s).unwrap();
         let mut handoff = Handoff {
@@ -255,7 +254,10 @@ mod tests {
             target_account: Some("target".into()),
             reason: "quota threshold".into(),
             consumed: false,
+            extra: Default::default(),
         };
+        let extension = serde_json::json!({"nested":true});
+        handoff.extra.insert("future".into(), extension.clone());
         // Simulate failure after the source checkpoint is durable but before
         // pending publication. No launch claim may survive this incomplete save.
         let dir = store.directory(true).unwrap();
@@ -280,6 +282,10 @@ mod tests {
         let restored = store.consume("target", &id("new"), 1001).unwrap().unwrap();
         assert_eq!(restored.session_id, id("old"));
         assert_eq!(restored.open_lanes, handoff.open_lanes);
+        assert_eq!(restored.extra["future"], extension);
+        let encoded = provenant_records::encode(&restored).unwrap();
+        let bounded: Handoff = decode(encoded.as_slice(), LIMITS).unwrap();
+        assert_eq!(bounded.extra["future"], extension);
         // Interruption after pending publication and target consumption, but
         // before the prepare marker, must not overwrite consumed context.
         dir.unlink(OsStr::new(".prepared-old.json")).unwrap();
