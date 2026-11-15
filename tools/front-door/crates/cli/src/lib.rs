@@ -2522,7 +2522,10 @@ mod tests {
                 panic!("wait command")
             };
             assert_eq!(
-                crate::wait::Settings::default().timeout(wait.timeout, None),
+                crate::wait::Settings::default().timeout(
+                    wait.timeout,
+                    &crate::wait::Origin::compiled(Default::default())
+                ),
                 provenant_core::MAX_LANE_RUNTIME_SECONDS
             );
         }

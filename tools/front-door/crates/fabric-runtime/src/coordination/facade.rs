@@ -328,6 +328,9 @@ pub enum InvalidInputDetail {
     InputTooLarge,
     InputInvalidUtf8,
     GraphDocumentTooLarge,
+    /// Host configuration a request depends on is malformed. Configuration
+    /// errors carry locations and rules, never TOML text.
+    Configuration(String),
 }
 
 impl InvalidInputDetail {
@@ -378,6 +381,7 @@ impl InvalidInputDetail {
             }
             Self::InputTooLarge => Some("input exceeds the 1 MiB limit".into()),
             Self::InputInvalidUtf8 => Some("input is not UTF-8".into()),
+            Self::Configuration(error) => Some(format!("host configuration is invalid: {error}")),
             Self::GraphDocumentTooLarge => {
                 let bound = crate::config::GraphLimits::document_bytes_bound();
                 Some(format!("limits.{}={} reached; set by {}", bound.name, bound.maximum, bound.owner))

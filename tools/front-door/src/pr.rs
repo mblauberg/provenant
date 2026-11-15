@@ -17,6 +17,7 @@ pub(crate) mod land;
 pub(crate) mod landing;
 pub(crate) mod observer;
 mod open;
+pub(crate) mod request;
 pub(crate) mod status;
 mod wait;
 
@@ -338,19 +339,17 @@ fn watch_with(
 // The `pr watch` edge owns its real clock and sleep.
 #[allow(clippy::disallowed_methods)]
 fn watch(project: &Path, state: &Path, number: &str, head: GitOid, repository: &str) -> Result<()> {
-    let started = std::time::Instant::now();
-    let mut ci = observer::Observer::open(state, project, repository, WATCH_BUDGET)
+    // One request context bounds the whole watch: every checks read and the
+    // final pull request read share its deadline.
+    let request = request::Request::within(WATCH_BUDGET);
+    let mut ci = observer::Observer::open(state, project, repository, &request)
         .map_err(|error| wait::ci_failure(error, &format!("provenant pr watch {number}")))?;
     let commit = head.to_string();
     let max_age = ci.fast_interval();
     let next_poll = std::cell::Cell::new(max_age);
     watch_with(
         &mut || {
-            let result = ci.checks(
-                &commit,
-                max_age,
-                WATCH_BUDGET.saturating_sub(started.elapsed()),
-            );
+            let result = ci.checks(&commit, max_age, &request);
             next_poll.set(ci.next_poll_interval());
             result
         },
@@ -359,11 +358,7 @@ fn watch(project: &Path, state: &Path, number: &str, head: GitOid, repository: &
         number,
     )?;
     let pull = ci
-        .resource(
-            &format!("pulls/{number}"),
-            Duration::ZERO,
-            WATCH_BUDGET.saturating_sub(started.elapsed()),
-        )
+        .resource(&format!("pulls/{number}"), Duration::ZERO, &request)
         .map_err(|error| wait::ci_failure(error, &format!("provenant pr watch {number}")))?;
     let expected_head = head.to_string();
     if pull["head"]["sha"].as_str() != Some(expected_head.as_str()) {
@@ -460,14 +455,15 @@ pub fn run(command: Pr, globals: &Globals, _workers: &dyn WorkerObserver) -> u8 
                 roots::resolve(globals, roots::Workspace::Project, roots::Product::Optional)?
                     .roots
                     .state;
-            let repository = status::wait_repository(state.as_path(), &project, WATCH_BUDGET)?;
+            let request = request::Request::within(WATCH_BUDGET);
+            let repository = status::wait_repository(state.as_path(), &project, &request)?;
             let mut observer =
-                observer::Observer::open(state.as_path(), &project, &repository, WATCH_BUDGET)
+                observer::Observer::open(state.as_path(), &project, &repository, &request)
                     .map_err(|error| {
                         wait::ci_failure(error, &format!("provenant pr watch {number}"))
                     })?;
             let pull = observer
-                .resource(&format!("pulls/{number}"), Duration::ZERO, WATCH_BUDGET)
+                .resource(&format!("pulls/{number}"), Duration::ZERO, &request)
                 .map_err(|error| {
                     wait::ci_failure(error, &format!("provenant pr watch {number}"))
                 })?;

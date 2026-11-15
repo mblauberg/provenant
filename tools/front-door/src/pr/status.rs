@@ -523,32 +523,35 @@ fn open_numbers(project: &Path) -> Result<Vec<u64>> {
     listed.sort_by_key(|entry| entry.number);
     Ok(listed.into_iter().map(|entry| entry.number).collect())
 }
-/// Resolve the selected repository once before a `wait --pr` observation loop.
+/// Resolve the selected repository once before a `wait --pr` observation
+/// loop, within the waiter's request context.
 pub(crate) fn wait_repository(
     state: &Path,
     project: &Path,
-    budget: std::time::Duration,
+    request: &super::request::Request,
 ) -> Result<String> {
     Ok(super::observer::repository_for_project(
-        state, project, budget,
+        state, project, request,
     )?)
 }
 
-/// Revalidate PR metadata and its CI through the shared observer during a wait loop.
+/// Revalidate PR metadata and its CI through the shared observer during a wait
+/// loop. The metadata read, every check page and the checks read share
+/// `request`'s one deadline and cancellation.
 pub(crate) fn wait_line_observed(
     project: &Path,
     state: &Path,
     repository: &str,
     number: u64,
-    timeout: std::time::Duration,
+    request: &super::request::Request,
     max_age: std::time::Duration,
 ) -> Result<Line> {
     use super::observer::{ObserveError, Observer};
-    let mut observer = Observer::open(state, project, repository, timeout)?;
+    let mut observer = Observer::open(state, project, repository, request)?;
     let value = observer.resource(
         &format!("pulls/{number}"),
         std::time::Duration::ZERO,
-        timeout,
+        request,
     )?;
     let pull: RestWaitPull = serde_json::from_value(value)?;
     let state = if pull.merged_at.is_some() {
@@ -566,7 +569,7 @@ pub(crate) fn wait_line_observed(
         draft: pull.draft,
         url: pull.html_url,
     };
-    let checks = match observer.checks(&view.head, max_age, timeout) {
+    let checks = match observer.checks(&view.head, max_age, request) {
         Ok(checks) => Some(checks),
         Err(ObserveError::Unavailable(_)) => None,
         Err(error) => return Err(error.to_string().into()),
@@ -580,9 +583,8 @@ pub(crate) fn wait_line(
     project: &Path,
     state: &Path,
     number: u64,
-    timeout: std::time::Duration,
+    request: &super::request::Request,
     max_age: std::time::Duration,
-    cancel: Option<&provenant_core::CancelToken>,
 ) -> Result<Line> {
     use super::observer::{ObserveError, Observer};
     let text = number.to_string();
@@ -596,10 +598,10 @@ pub(crate) fn wait_line(
             "--json",
             "state,headRefOid,mergeStateStatus,reviewDecision,isDraft,url",
         ],
-        timeout,
+        request.remaining(),
         false,
         None,
-        cancel,
+        Some(request.cancel()),
     )?)?;
     let view: View = serde_json::from_slice(&bytes)?;
     let segments: Vec<&str> = view.url.trim_end_matches('/').split('/').collect();
@@ -609,8 +611,8 @@ pub(crate) fn wait_line(
     };
     // Unreadable or incomplete checks leave the row readable, as before; a
     // rate limit or an expired read is a failed row naming why.
-    let checks = match Observer::open(state, project, &repository, timeout)
-        .and_then(|mut observer| observer.checks(&view.head, max_age, timeout))
+    let checks = match Observer::open(state, project, &repository, request)
+        .and_then(|mut observer| observer.checks(&view.head, max_age, request))
     {
         Ok(checks) => Some(checks),
         Err(ObserveError::Unavailable(_)) => None,
@@ -676,9 +678,8 @@ fn snapshot(project: &Path, state: &Path, numbers: &[u64]) -> Vec<Line> {
                 project,
                 state,
                 number,
-                std::time::Duration::from_secs(60),
+                &super::request::Request::within(std::time::Duration::from_secs(60)),
                 std::time::Duration::ZERO,
-                None,
             )
             .unwrap_or_else(|error| Line {
                 number,

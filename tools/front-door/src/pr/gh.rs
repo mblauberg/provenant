@@ -20,8 +20,10 @@ pub struct Response {
 /// A serial REST adapter. Header names in responses must be lowercase.
 pub trait Forge {
     fn get(&mut self, path: &str, etag: Option<&str>) -> io::Result<Response>;
-    /// Bounds later requests to `left`. Adapters without a deadline ignore it.
-    fn bound(&mut self, _left: Duration) {}
+    /// Binds later requests to `request`'s deadline and cancellation; each
+    /// request derives its own bound from the time remaining. Adapters with
+    /// neither a deadline nor a process to interrupt ignore it.
+    fn bind(&mut self, _request: &super::request::Request) {}
 }
 
 /// A single-worker adapter. It honors per-resource GitHub poll intervals.
@@ -31,14 +33,20 @@ pub struct Gh {
     retry: Option<Instant>,
     cwd: Option<PathBuf>,
     timeout: Option<Duration>,
+    cancel: Option<provenant_core::CancelToken>,
 }
 impl Gh {
-    /// Run `gh` in `cwd`, so it reaches that checkout's GitHub host, and
-    /// bound each request by `timeout` rather than the default minute.
-    pub fn in_checkout(cwd: PathBuf, timeout: Duration) -> Self {
+    /// Run `gh` in `cwd`, so it reaches that checkout's GitHub host, bound
+    /// by `timeout` rather than the default minute and stopped by `cancel`.
+    pub fn in_checkout(
+        cwd: PathBuf,
+        timeout: Duration,
+        cancel: provenant_core::CancelToken,
+    ) -> Self {
         Self {
             cwd: Some(cwd),
             timeout: Some(timeout),
+            cancel: Some(cancel),
             ..Self::default()
         }
     }
@@ -126,12 +134,24 @@ impl Forge for Gh {
         let mut options = ExecOptions::new(&argv, &cwd, timeout);
         options.process_group = true;
         options.stop_on_output_limit = true;
+        options.cancel = self.cancel.as_ref();
         let output = SystemExecutor::new(1)
             .map_err(io::Error::other)?
             .execute(options)
             .map_err(io::Error::other)?;
-        if output.timed_out || output.stdout.truncated || output.drain_truncated || output.cancelled
-        {
+        if output.cancelled {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "gh request was cancelled",
+            ));
+        }
+        if output.timed_out {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "gh request timed out",
+            ));
+        }
+        if output.stdout.truncated || output.drain_truncated {
             return Err(io::Error::other("gh request did not complete"));
         }
         let response = parse(&output.stdout.bytes)?;

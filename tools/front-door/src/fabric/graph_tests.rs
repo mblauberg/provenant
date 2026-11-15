@@ -283,7 +283,7 @@ mod graph_writer_admission_tests {
             let mut journal = MemoryJournal::default();
             let first = advance(&document, &mut owner, &mut journal).unwrap();
             let mut observation = crate::status_wait::LocalObservation::paced(
-                std::time::Duration::from_millis(250),
+                provenant_cli::wait::LocalCadence::compiled(std::time::Duration::from_millis(250)),
                 "test event source unavailable",
             );
             let (waited, _observation, _remote_read_allowed) = super::interface::wait_submission(
@@ -359,7 +359,7 @@ mod graph_writer_admission_tests {
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(clock.mono_now(), 1).unwrap();
         let mut observation = crate::status_wait::LocalObservation::paced(
-            std::time::Duration::from_millis(20),
+            provenant_cli::wait::LocalCadence::compiled(std::time::Duration::from_millis(20)),
             "fixture event source unavailable",
         );
         let remote_reads = Cell::new(0);
@@ -408,7 +408,7 @@ mod graph_writer_admission_tests {
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(clock.mono_now(), 1).unwrap();
         let mut observation = crate::status_wait::LocalObservation::paced(
-            std::time::Duration::from_millis(500),
+            provenant_cli::wait::LocalCadence::compiled(std::time::Duration::from_millis(500)),
             "fixture event source unavailable",
         );
         let (settled, observation, _remote_read_allowed) = super::interface::wait_submission(
