@@ -789,6 +789,16 @@ impl FileJournal {
         project: ProjectId,
         graph_id: &str,
     ) -> Result<Option<GraphCheckpoint>, JournalError> {
+        Ok(Self::read_status_snapshot(root, project, graph_id)?.map(|(_, checkpoint)| checkpoint))
+    }
+
+    /// Read the status document and checkpoint from one atomic stored record.
+    /// The document is the declared topology authority for graph selectors.
+    pub fn read_status_snapshot(
+        root: &StateRoot,
+        project: ProjectId,
+        graph_id: &str,
+    ) -> Result<Option<(GraphExecution, GraphCheckpoint)>, JournalError> {
         if !valid_identifier(graph_id) {
             return Err(JournalError::InvalidGraphId);
         }
@@ -814,7 +824,7 @@ impl FileJournal {
             super::recover_status_minima(&stored.execution.document, &mut stored.checkpoint)
                 .map_err(|_| JournalError::BadEnvelope)?;
         }
-        Ok(Some(stored.checkpoint))
+        Ok(Some((stored.execution, stored.checkpoint)))
     }
 
     /// Read a checkpoint with compacted findings expanded for reporting.

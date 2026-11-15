@@ -231,6 +231,81 @@ pub enum ResolveError<E> {
 /// Most candidates an ambiguity lists.
 const CANDIDATES: usize = 20;
 
+fn composite_output(progress: &provenant_fabric_runtime::graph::NodeProgress) -> bool {
+    !progress.children.is_empty()
+}
+
+fn output_roots(
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+    document: Option<&provenant_fabric_runtime::graph::GraphDocument>,
+) -> Vec<String> {
+    use std::collections::BTreeSet;
+
+    let mut declared = BTreeSet::new();
+    let mut expansion_children = BTreeSet::new();
+    if let Some(document) = document {
+        declared.extend(
+            document
+                .nodes
+                .iter()
+                .filter(|node| {
+                    node.kind != Some(provenant_fabric_runtime::graph::NodeKind::Gate)
+                        && node.condition.is_none()
+                })
+                .map(|node| node.id.clone()),
+        );
+    } else {
+        declared.extend(
+            checkpoint
+                .nodes
+                .iter()
+                .filter(|node| node.gate.is_none())
+                .map(|node| node.id.clone()),
+        );
+    }
+
+    for expansion in &checkpoint.expansions {
+        let owner = expansion
+            .patch
+            .as_ref()
+            .and_then(|patch| patch.parent.as_deref())
+            .or_else(|| {
+                (expansion.patch.is_none() && !expansion.source.is_empty())
+                    .then_some(expansion.source.as_str())
+            });
+        if owner.is_some() {
+            expansion_children.extend(expansion.nodes.iter().map(|node| node.id.clone()));
+        } else {
+            declared.extend(
+                expansion
+                    .nodes
+                    .iter()
+                    .filter(|node| {
+                        node.kind != Some(provenant_fabric_runtime::graph::NodeKind::Gate)
+                            && node.condition.is_none()
+                    })
+                    .map(|node| node.id.clone()),
+            );
+        }
+    }
+
+    let composite_children: BTreeSet<_> = checkpoint
+        .nodes
+        .iter()
+        .flat_map(|node| node.children.iter().cloned())
+        .collect();
+    checkpoint
+        .nodes
+        .iter()
+        .filter(|node| {
+            declared.contains(&node.id)
+                && !composite_children.contains(&node.id)
+                && !expansion_children.contains(&node.id)
+        })
+        .map(|node| node.id.clone())
+        .collect()
+}
+
 /// Resolve `target` by reading only its own graph's checkpoint: `read` is
 /// called once, with the target's name, so no other graph is ever opened.
 pub fn resolve<E>(
@@ -238,8 +313,48 @@ pub fn resolve<E>(
     want: Want,
     read: impl FnOnce(&str) -> Result<Option<provenant_fabric_runtime::graph::GraphCheckpoint>, E>,
 ) -> Result<Resolved, ResolveError<E>> {
+    resolve_inner(target, want, |name| {
+        read(name).map(|checkpoint| checkpoint.map(|checkpoint| (None, checkpoint)))
+    })
+}
+
+/// Resolve graph output with its retained document as the topology authority.
+/// This excludes host gates and owned expansions before selecting or listing
+/// result-bearing roots, even when a gate has not yet produced a checkpoint
+/// result.
+pub fn resolve_with_document<E>(
+    target: &Target,
+    want: Want,
+    read: impl FnOnce(
+        &str,
+    ) -> Result<
+        Option<(
+            provenant_fabric_runtime::graph::GraphDocument,
+            provenant_fabric_runtime::graph::GraphCheckpoint,
+        )>,
+        E,
+    >,
+) -> Result<Resolved, ResolveError<E>> {
+    resolve_inner(target, want, |name| {
+        read(name).map(|record| record.map(|(document, checkpoint)| (Some(document), checkpoint)))
+    })
+}
+
+fn resolve_inner<E>(
+    target: &Target,
+    want: Want,
+    read: impl FnOnce(
+        &str,
+    ) -> Result<
+        Option<(
+            Option<provenant_fabric_runtime::graph::GraphDocument>,
+            provenant_fabric_runtime::graph::GraphCheckpoint,
+        )>,
+        E,
+    >,
+) -> Result<Resolved, ResolveError<E>> {
     use provenant_fabric_runtime::graph::AttemptState;
-    let checkpoint = read(&target.name)
+    let (document, checkpoint) = read(&target.name)
         .map_err(ResolveError::Read)?
         .ok_or_else(|| ResolveError::NotFound(target.name.clone()))?;
     let node = match (&target.node, want) {
@@ -259,18 +374,9 @@ pub fn resolve<E>(
             }
         },
         (None, Want::Output) => {
-            let children: std::collections::BTreeSet<String> = checkpoint
-                .nodes
-                .iter()
-                .flat_map(|node| node.children.iter().cloned())
-                .collect();
-            let roots: Vec<_> = checkpoint
-                .nodes
-                .iter()
-                .filter(|node| !children.contains(&node.id))
-                .collect();
+            let roots = output_roots(&checkpoint, document.as_ref());
             match roots.as_slice() {
-                [only] => Some(only.id.clone()),
+                [only] => Some(only.clone()),
                 [] => return Err(ResolveError::NotFound(target.name.clone())),
                 nodes => {
                     return Err(ResolveError::Ambiguous {
@@ -278,7 +384,7 @@ pub fn resolve<E>(
                         candidates: nodes
                             .iter()
                             .take(CANDIDATES)
-                            .map(|node| format!("{}/{}", target.name, node.id))
+                            .map(|node| format!("{}/{node}", target.name))
                             .collect(),
                     });
                 }
@@ -324,14 +430,14 @@ pub fn resolve<E>(
                 newest
             }
         }
-        (None, Want::Output) if !progress.children.is_empty() => None,
+        (None, Want::Output) if composite_output(progress) => None,
         (None, Want::Output) => numbered
             .iter()
             .rfind(|(attempt, _)| attempt.state == AttemptState::Terminal)
             .copied()
             .or_else(|| numbered.last().copied()),
     };
-    let composite_output = want == Want::Output && !progress.children.is_empty();
+    let composite_output = want == Want::Output && composite_output(progress);
     if target.attempt.is_none() && want != Want::Work && !composite_output && selected.is_none() {
         return Err(ResolveError::NotFound(format!(
             "{}/{node} has no attempt",
@@ -498,6 +604,18 @@ mod tests {
         serde_json::from_value(serde_json::json!({"schema_version":1,"graph_id":name,"plan_digest":"digest","nodes":nodes})).unwrap()
     }
 
+    fn document(
+        name: &str,
+        nodes: Vec<serde_json::Value>,
+    ) -> provenant_fabric_runtime::graph::GraphDocument {
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "graph_id": name,
+            "nodes": nodes
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn resolution_reads_only_the_named_graph() {
         let graph = checkpoint("fix", &[("review", &["terminal", "running"])]);
@@ -624,6 +742,73 @@ mod tests {
                 assert_eq!(candidates, ["panel/task", "panel/adjacent"]);
             }
             other => panic!("expected top-level output ambiguity, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn output_document_topology_ignores_gate_and_owned_expansion_nodes() {
+        let target = Target::parse("mixed-output").unwrap();
+        let mut graph = checkpoint(
+            "mixed-output",
+            &[
+                ("panel", &[]),
+                ("panel--review", &["terminal"]),
+                ("approval", &[]),
+            ],
+        );
+        graph.nodes[0].children = vec!["panel--review".into()];
+        let doc = document(
+            "mixed-output",
+            vec![
+                serde_json::json!({
+                    "id": "panel", "kind": "composite", "access": "read_only",
+                    "composite": {"nodes": [{"id": "review", "access": "read_only"}],
+                        "exports": [{"node": "review", "outputs": ["result"]}]}
+                }),
+                serde_json::json!({
+                    "id": "approval", "kind": "gate", "access": "read_only",
+                    "condition": {"type": "budget"}
+                }),
+            ],
+        );
+        let resolved =
+            resolve_with_document(&target, Want::Output, |_| Ok::<_, ()>(Some((doc, graph))))
+                .unwrap();
+        assert_eq!(resolved.node.as_deref(), Some("panel"));
+    }
+
+    #[test]
+    fn output_document_topology_keeps_multi_root_ambiguity_without_planner_child() {
+        let target = Target::parse("expanded-output").unwrap();
+        let mut graph = checkpoint(
+            "expanded-output",
+            &[
+                ("planner", &["terminal"]),
+                ("verify", &["terminal"]),
+                ("planner--slice", &[]),
+            ],
+        );
+        graph.expansions = serde_json::from_value(serde_json::json!([{
+            "source": "planner",
+            "nodes": [{"id": "planner--slice", "access": "read_only", "prompt": "expanded"}],
+            "patch": {"revision": 1, "digest": "sha256:fixture", "parent": "planner"}
+        }]))
+        .unwrap();
+        let doc = document(
+            "expanded-output",
+            vec![
+                serde_json::json!({"id":"planner", "access":"read_only", "prompt":"plan"}),
+                serde_json::json!({"id":"verify", "access":"read_only", "prompt":"verify"}),
+            ],
+        );
+        match resolve_with_document(&target, Want::Output, |_| Ok::<_, ()>(Some((doc, graph)))) {
+            Err(ResolveError::Ambiguous { candidates, .. }) => {
+                assert_eq!(
+                    candidates,
+                    ["expanded-output/planner", "expanded-output/verify"]
+                );
+            }
+            other => panic!("expected two declared output roots, got {other:?}"),
         }
     }
 

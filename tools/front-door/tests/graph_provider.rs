@@ -2464,6 +2464,15 @@ fn seed_graph_checkpoint(
 /// Persist a settled composite through the graph runtime without launching a
 /// provider. Its parent outputs are the runtime's declared export aggregate.
 fn seed_composite_output_graph(rig: &TestRig, graph_id: &str, root_ids: &[&str]) -> Result {
+    seed_composite_output_graph_with_gate(rig, graph_id, root_ids, false)
+}
+
+fn seed_composite_output_graph_with_gate(
+    rig: &TestRig,
+    graph_id: &str,
+    root_ids: &[&str],
+    include_gate: bool,
+) -> Result {
     use provenant_core::{CancelToken, Clock, RootInputs, WaitBudget};
     use provenant_fabric_runtime::graph::{
         AccessMode, AttemptKey, AttemptObservation, AttemptOutcome, AttemptOwner, FileJournal,
@@ -2530,23 +2539,38 @@ fn seed_composite_output_graph(rig: &TestRig, graph_id: &str, root_ids: &[&str])
     let identity =
         provenant_cli::fabric::Context::open(resolved_roots.clone(), &rig.home, &rig.project)?
             .identity;
+    let mut nodes: Vec<Value> = root_ids
+        .iter()
+        .map(|id| {
+            json!({
+                "id": id,
+                "kind": "composite",
+                "access": "read_only",
+                "composite": {
+                    "nodes": [{
+                        "id": "review",
+                        "access": "read_only",
+                        "prompt": "review fixture",
+                        "route": {"alias": "senior"}
+                    }],
+                    "exports": [{"node": "review", "outputs": ["result", "verdict", "findings"]}]
+                }
+            })
+        })
+        .collect();
+    if include_gate {
+        nodes.push(json!({
+            "id": "approval",
+            "kind": "gate",
+            "access": "read_only",
+            "depends_on": [root_ids.first().ok_or("gate fixture needs an output root")?],
+            "condition": {"type": "budget"}
+        }));
+    }
     let document: GraphDocument = serde_json::from_value(json!({
         "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
         "graph_id": graph_id,
-        "nodes": root_ids.iter().map(|id| json!({
-            "id": id,
-            "kind": "composite",
-            "access": "read_only",
-            "composite": {
-                "nodes": [{
-                    "id": "review",
-                    "access": "read_only",
-                    "prompt": "review fixture",
-                    "route": {"alias": "senior"}
-                }],
-                "exports": [{"node": "review", "outputs": ["result", "verdict", "findings"]}]
-            }
-        })).collect::<Vec<_>>()
+        "nodes": nodes
     }))?;
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -2592,6 +2616,50 @@ fn seed_composite_output_graph(rig: &TestRig, graph_id: &str, root_ids: &[&str])
         &Default::default(),
         &Default::default(),
     )?;
+    Ok(())
+}
+
+/// Add one planner-owned descendant to the persisted fixture without creating
+/// an attempt. Output selection must keep it under its declared patch owner.
+fn append_owned_expansion_child(rig: &TestRig, graph_id: &str, owner: &str, child: &str) -> Result {
+    use provenant_core::{CancelToken, Clock, RootInputs, WaitBudget};
+    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal};
+    use provenant_os::clock::SystemClock;
+
+    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let resolved_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let project = provenant_config::bind_project(
+        &resolved_roots,
+        provenant_config::ProjectLocation::new(rig.project.join(".git"))?,
+    )?
+    .project_id();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+    let mut journal = FileJournal::open(
+        &resolved_roots.state,
+        project,
+        graph_id,
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    let mut checkpoint = journal
+        .load(graph_id)?
+        .ok_or("graph fixture checkpoint is missing")?;
+    checkpoint.nodes.push(serde_json::from_value(json!({
+        "id": child,
+        "state": "running",
+        "worktree": null,
+        "attempts": []
+    }))?);
+    checkpoint.expansions.push(serde_json::from_value(json!({
+        "source": owner,
+        "nodes": [{"id": child, "kind": "task", "access": "read_only", "prompt": "expanded fixture"}],
+        "patch": {"revision": 1, "digest": "sha256:fixture", "parent": owner}
+    }))?);
+    journal.save(&checkpoint)?;
     Ok(())
 }
 
@@ -3268,7 +3336,19 @@ fn composite_graph_output_uses_declared_roots_and_exports() -> Result {
         "{human_status}"
     );
 
+    seed_composite_output_graph_with_gate(&rig, "composite-gate-output", &["panel"], true)?;
+    let gated_output = rig.command(&["output", "composite-gate-output", "--json"])?;
+    let gated_data = support::last_json_record(&gated_output.stdout.bytes)?;
+    assert_eq!(code(&gated_output), 0, "{gated_data}");
+    assert_eq!(gated_data["data"]["node"], "panel");
+
     seed_composite_output_graph(&rig, "multi-output", &["alpha", "beta"])?;
+    append_owned_expansion_child(
+        &rig,
+        "multi-output",
+        "alpha--review",
+        "alpha--review--slice",
+    )?;
     let ambiguous_output = rig.command(&["output", "multi-output", "--json"])?;
     assert_ne!(code(&ambiguous_output), 0);
     let ambiguous = support::last_json_record(&ambiguous_output.stdout.bytes)?;
@@ -3279,6 +3359,7 @@ fn composite_graph_output_uses_declared_roots_and_exports() -> Result {
     assert!(message.contains("multi-output/alpha"), "{message}");
     assert!(message.contains("multi-output/beta"), "{message}");
     assert!(!message.contains("alpha--review"), "{message}");
+    assert!(!message.contains("alpha--review--slice"), "{message}");
     assert!(!message.contains("beta--review"), "{message}");
     let explicit = rig.command(&["output", "multi-output/alpha", "--json"])?;
     assert_eq!(
