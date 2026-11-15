@@ -2,7 +2,6 @@
 use provenant_core::Clock;
 use provenant_os::exec::{ExecError, ExecOptions, Executor, SystemExecutor, Termination};
 use provenant_run::target_seed::{self, Manifest};
-use sha2::{Digest, Sha256};
 use std::{
     error::Error,
     ffi::OsString,
@@ -70,7 +69,10 @@ fn run(cwd: &Path, argv: &[OsString], overrides: &[(OsString, OsString)]) -> Res
     let mut options = ExecOptions::new(argv, cwd, Duration::from_secs(4 * 60 * 60));
     options.env = Some(&env);
     options.process_group = true;
-    let result = SystemExecutor::new(1)?.execute(options)?;
+    let executor = SystemExecutor::new(1)?;
+    let result = executor
+        .execute(options)
+        .map_err(|error| seed_error("running seed command", &error))?;
     if result.termination != Termination::Exit(0)
         || result.timed_out
         || result.stdout.truncated
@@ -157,7 +159,7 @@ fn verify_base(host_state: &Path, project: &Path) -> Result<(String, String)> {
     let repo = utility
         .open_read_repo(&executor, project, budget, &cancel)
         .map_err(|error| seed_error("opening repository", &error))?;
-    let project_key = project_key(repo.common_git_dir());
+    let project_key = target_seed::project_key(repo.common_git_dir());
     let facts = RepoFacts::default();
     let base = provenant_config::PortTable::read_for(Some(project), host_state)?
         .verify
@@ -213,14 +215,6 @@ impl std::fmt::Display for AlreadyCurrent {
     }
 }
 impl Error for AlreadyCurrent {}
-
-/// Stable identity for one verified canonical Git common directory. Linked
-/// worktrees therefore share currentness with their primary checkout.
-fn project_key(common_git_dir: &Path) -> String {
-    provenant_core::hex(&Sha256::digest(
-        common_git_dir.as_os_str().as_encoded_bytes(),
-    ))
-}
 
 fn refresh_with(
     state: &Path,
@@ -589,12 +583,15 @@ mod tests {
         let common_b = state.path().join("repo-b/.git");
         fs::create_dir_all(&common_a).unwrap();
         fs::create_dir_all(&common_b).unwrap();
-        let key_a = project_key(&common_a.canonicalize().unwrap());
-        let key_b = project_key(&common_b.canonicalize().unwrap());
+        let key_a = target_seed::project_key(&common_a.canonicalize().unwrap());
+        let key_b = target_seed::project_key(&common_b.canonicalize().unwrap());
         assert_ne!(key_a, key_b);
         let alias_a = state.path().join("repo-a-alias");
         std::os::unix::fs::symlink(&common_a, &alias_a).unwrap();
-        assert_eq!(project_key(&alias_a.canonicalize().unwrap()), key_a);
+        assert_eq!(
+            target_seed::project_key(&alias_a.canonicalize().unwrap()),
+            key_a
+        );
         for (project_key, commit) in [(&key_a, "aaa"), (&key_b, "bbb")] {
             assert!(matches!(
                 refresh_with(state.path(), project_key, commit, |stage| {

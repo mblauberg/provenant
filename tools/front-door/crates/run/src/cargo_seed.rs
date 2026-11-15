@@ -129,15 +129,43 @@ pub(crate) struct Outcome {
     /// an environment value or path.
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
+    /// Path-free receipt proving which complete generation supplied a seed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    seed_source: Option<SeedSource>,
     #[serde(flatten)]
     extra: provenant_records::ExtraFields,
 }
+
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct SeedSource {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generation_id: Option<String>,
+    project_match: bool,
+}
+
+struct SeedCandidate {
+    target: PathBuf,
+    generation_id: Option<String>,
+    project_match: bool,
+}
+
+fn safe_generation_id(name: &std::ffi::OsStr) -> Option<String> {
+    let name = name.to_str()?;
+    (!name.is_empty()
+        && name.len() <= 96
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')))
+    .then(|| name.to_owned())
+}
+
 impl Outcome {
     pub(crate) fn skipped(reason: &'static str) -> Self {
         Self {
             status: "skipped".into(),
             reason: reason.into(),
             detail: None,
+            seed_source: None,
             extra: Default::default(),
         }
     }
@@ -147,6 +175,7 @@ impl Outcome {
             status: "fallback".into(),
             reason: reason.into(),
             detail: None,
+            seed_source: None,
             extra: Default::default(),
         }
     }
@@ -169,6 +198,7 @@ impl Outcome {
             status: "fallback".into(),
             reason: reason.into(),
             detail: Some(detail.into()),
+            seed_source: None,
             extra: Default::default(),
         }
     }
@@ -179,6 +209,7 @@ pub(crate) fn seed_target(
     state: &Path,
     cache: &Path,
     worktree: &Path,
+    project_key: &str,
     home: &Path,
     environment: &[(std::ffi::OsString, std::ffi::OsString)],
     cancel: &provenant_core::CancelToken,
@@ -205,13 +236,22 @@ pub(crate) fn seed_target(
             cache,
             &version,
             &triple,
+            project_key,
             Some(cancel),
             |source, dest, deadline| clone_target_until(source, dest, cancel, deadline),
         )
     }
     #[cfg(not(unix))]
     {
-        let _ = (state, cache, worktree, home, environment, cancel);
+        let _ = (
+            state,
+            cache,
+            worktree,
+            project_key,
+            home,
+            environment,
+            cancel,
+        );
         Outcome::skipped("unsupported_platform")
     }
 }
@@ -224,9 +264,15 @@ fn seed_target_with(
     triple: &str,
     clone: impl FnOnce(&Path, &provenant_os::fs::Directory) -> Result<(), &'static str>,
 ) -> Outcome {
-    seed_target_cancellable(state, cache, version, triple, None, |source, dest, _| {
-        clone(source, dest)
-    })
+    seed_target_cancellable(
+        state,
+        cache,
+        version,
+        triple,
+        "",
+        None,
+        |source, dest, _| clone(source, dest),
+    )
 }
 
 #[cfg(any(unix, test))]
@@ -235,6 +281,7 @@ fn seed_target_cancellable(
     cache: &Path,
     version: &str,
     triple: &str,
+    project_key: &str,
     cancel: Option<&provenant_core::CancelToken>,
     clone: impl FnOnce(&Path, &provenant_os::fs::Directory, &SeedBudget) -> Result<(), &'static str>,
 ) -> Outcome {
@@ -294,7 +341,8 @@ fn seed_target_cancellable(
     let mut saw_version = false;
     let mut saw_manifest = false;
     let mut saw_entry = false;
-    let mut selected = None;
+    let mut selected_project = None;
+    let mut selected_shared = None;
     for entry in entries {
         if deadline.expired() {
             return Outcome::fallback(fallback_reasons::SEED_BUDGET_EXHAUSTED);
@@ -332,10 +380,21 @@ fn seed_target_cancellable(
         if manifest.host_triple != triple {
             continue;
         }
-        selected = Some(entry.path().join("target"));
-        break;
+        let project_match = !project_key.is_empty() && manifest.project_key == project_key;
+        let candidate = SeedCandidate {
+            target: entry.path().join("target"),
+            generation_id: safe_generation_id(&entry.file_name()),
+            project_match,
+        };
+        if project_match {
+            selected_project = Some(candidate);
+            break;
+        }
+        if selected_shared.is_none() {
+            selected_shared = Some(candidate);
+        }
     }
-    let Some(source) = selected else {
+    let Some(selected) = selected_project.or(selected_shared) else {
         return Outcome::fallback(if !saw_entry {
             fallback_reasons::NO_GENERATIONS
         } else if !saw_manifest {
@@ -346,6 +405,7 @@ fn seed_target_cancellable(
             fallback_reasons::TRIPLE_MISMATCH
         });
     };
+    let source = selected.target;
     let Ok(random) = temporary_name() else {
         return Outcome::fallback(fallback_reasons::STAGING_UNAVAILABLE);
     };
@@ -380,6 +440,10 @@ fn seed_target_cancellable(
                 "durability_unconfirmed".into()
             },
             detail: None,
+            seed_source: Some(SeedSource {
+                generation_id: selected.generation_id,
+                project_match: selected.project_match,
+            }),
             extra: Default::default(),
         },
         Err(reason)
@@ -569,13 +633,23 @@ mod tests {
     use super::*;
 
     fn generation(state: &Path, name: &str, version: &str, triple: &str) {
+        generation_for_project(state, name, version, triple, "");
+    }
+
+    fn generation_for_project(
+        state: &Path,
+        name: &str,
+        version: &str,
+        triple: &str,
+        project_key: &str,
+    ) {
         let dir = crate::target_seed::store_path(state)
             .join("generations")
             .join(name);
         std::fs::create_dir_all(dir.join("target")).unwrap();
         std::fs::write(dir.join("complete"), b"complete\n").unwrap();
         let manifest = crate::target_seed::Manifest {
-            project_key: String::new(),
+            project_key: project_key.into(),
             rustc_vv: version.into(),
             host_triple: triple.into(),
             commit: "abc".into(),
@@ -726,6 +800,76 @@ mod tests {
         assert_eq!(run("v1", "host"), Outcome::skipped("existing_target"));
     }
 
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn project_generation_beats_newer_foreign_generation_and_receipt_identifies_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        generation_for_project(&state, "001", "v1", "host", "project-a");
+        generation_for_project(&state, "002", "v1", "host", "project-b");
+        let outcome = seed_target_cancellable(
+            &state,
+            &cache,
+            "v1",
+            "host",
+            "project-a",
+            None,
+            |source, _, _| {
+                assert!(source.ends_with("001/target"));
+                Ok(())
+            },
+        );
+        assert_eq!(
+            (outcome.status.as_str(), outcome.reason.as_str()),
+            ("seeded", "cloned")
+        );
+        assert_eq!(
+            outcome.seed_source,
+            Some(SeedSource {
+                generation_id: Some("001".into()),
+                project_match: true,
+            })
+        );
+        let record = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(
+            record["seed_source"],
+            serde_json::json!({"generation_id":"001", "project_match":true})
+        );
+        assert!(!record.to_string().contains("/target"));
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn compatible_foreign_generation_is_used_only_when_project_seed_is_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        generation_for_project(&state, "001", "v1", "host", "project-b");
+        let outcome = seed_target_cancellable(
+            &state,
+            &cache,
+            "v1",
+            "host",
+            "project-a",
+            None,
+            |source, _, _| {
+                assert!(source.ends_with("001/target"));
+                Ok(())
+            },
+        );
+        assert_eq!(outcome.status, "seeded");
+        assert_eq!(
+            outcome.seed_source,
+            Some(SeedSource {
+                generation_id: Some("001".into()),
+                project_match: false,
+            })
+        );
+    }
+
     #[test]
     fn target_failed_clone_is_removed() {
         let tmp = tempfile::tempdir().unwrap();
@@ -815,6 +959,8 @@ mod tests {
         )
         .unwrap();
         let report = "rustc 1.99.1\nhost: test-host\nrelease: 1.99.1\n";
+        std::fs::create_dir(worktree.join(".git")).unwrap();
+        let project_key = crate::target_seed::project_key(&worktree.join(".git"));
         let rustc = bin.join("rustc");
         std::fs::write(
             &rustc,
@@ -822,7 +968,7 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&rustc, std::fs::Permissions::from_mode(0o755)).unwrap();
-        generation(&state, "001", report, "test-host");
+        generation_for_project(&state, "001", report, "test-host", &project_key);
         // No ambient CARGO_HOME: the same finalisation used by handoff must
         // make a fresh, arbitrarily nested Cargo project seedable.
         let mut env = vec![];
@@ -834,6 +980,7 @@ mod tests {
             &state,
             &cache,
             &worktree,
+            &project_key,
             &home,
             &env,
             &provenant_core::CancelToken::new(),
@@ -850,6 +997,7 @@ mod tests {
             &state,
             &cache,
             &worktree,
+            &project_key,
             &home,
             &refused,
             &provenant_core::CancelToken::new(),

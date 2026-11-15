@@ -1111,12 +1111,9 @@ impl LaunchConfinement {
             .source_environment(self.plan.permissions().network, environment);
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
         let target_outcome = match (&self.plan.permissions().mode, writer) {
-            (AccessMode::WorktreeWrite(authority), Some((worktree, _))) => self.seed_cargo_target(
-                worktree.path(),
-                &authority.cargo_cache().path,
-                environment,
-                cancel,
-            ),
+            (AccessMode::WorktreeWrite(authority), Some((worktree, _))) => {
+                self.seed_cargo_target(worktree, &authority.cargo_cache().path, environment, cancel)
+            }
             _ => crate::cargo_seed::Outcome::skipped("read_only_lane"),
         };
         if let Some(warning) = target_outcome.fallback_warning("the Cargo target") {
@@ -1136,7 +1133,7 @@ impl LaunchConfinement {
 
     fn seed_cargo_target(
         &self,
-        worktree: &Path,
+        worktree: &VerifiedWorktree,
         cache: &Path,
         environment: &[(OsString, OsString)],
         cancel: &CancelToken,
@@ -1145,22 +1142,23 @@ impl LaunchConfinement {
         if !self.cargo_target_seed {
             return Outcome::skipped("disabled");
         }
-        let build = match crate::target_seed::cargo_build_directory(worktree, &self.state_root) {
-            Ok(Some(build)) => build,
-            Ok(None) => return Outcome::skipped("non_cargo_project"),
-            Err(_) => {
-                return Outcome::fallback_detail(
-                    "toolchain_unverified",
-                    codes::CARGO_WORKSPACE_UNREADABLE,
-                );
-            }
-        };
+        let build =
+            match crate::target_seed::cargo_build_directory(worktree.path(), &self.state_root) {
+                Ok(Some(build)) => build,
+                Ok(None) => return Outcome::skipped("non_cargo_project"),
+                Err(_) => {
+                    return Outcome::fallback_detail(
+                        "toolchain_unverified",
+                        codes::CARGO_WORKSPACE_UNREADABLE,
+                    );
+                }
+            };
         if cfg!(unix)
             && let Err(detail) =
                 verified_cargo_config(&build, &self.cargo_home.path).and_then(|()| {
                     trusted_lane_toolchain_diagnostic(
                         &self.home,
-                        worktree,
+                        worktree.path(),
                         environment,
                         &provenant_confinement::write_grants(
                             self.plan.permissions(),
@@ -1175,7 +1173,8 @@ impl LaunchConfinement {
             true,
             &self.state_root,
             cache,
-            worktree,
+            worktree.path(),
+            &crate::target_seed::project_key(worktree.repo().common_git_dir()),
             &self.home,
             environment,
             cancel,
