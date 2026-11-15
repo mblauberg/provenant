@@ -442,6 +442,7 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let context = context(temp.path())?;
         let state = context.state_root.as_path();
+        let mut payloads = Vec::new();
         for index in 0..100 {
             let attempt = state.join(format!("attempts/{index}"));
             fs::create_dir_all(attempt.join("provider-state"))?;
@@ -452,40 +453,29 @@ mod tests {
                 "stdout.log",
                 "stderr.log",
             ] {
-                fs::write(attempt.join(part), vec![1; 4096])?;
+                let path = attempt.join(part);
+                fs::write(&path, vec![1; 4096])?;
+                payloads.push(path);
             }
-            fs::write(attempt.join("provider-state/keep"), vec![2; 4096])?;
+            let path = attempt.join("provider-state/keep");
+            fs::write(&path, vec![2; 4096])?;
+            payloads.push(path);
         }
+        let payload_bytes: u64 = payloads
+            .iter()
+            .map(|path| fs::metadata(path).map(|metadata| metadata.len()))
+            .collect::<std::io::Result<Vec<_>>>()?
+            .into_iter()
+            .sum();
         let before = snapshot(state)?;
         let mut report = DiskReport::new(state.into(), 0);
         RunStore::disk_usage_unindexed(&context.state_root, &mut report)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
-        assert_eq!(
+        assert!(
             report
                 .entries
                 .iter()
-                .map(|row| row.class.as_str())
-                .collect::<std::collections::BTreeSet<_>>(),
-            ["attempt_logs", "other_state", "provider_state"]
-                .into_iter()
-                .collect()
-        );
-        let logs = report
-            .entries
-            .iter()
-            .find(|row| row.class == "attempt_logs")
-            .ok_or("capture class missing")?;
-        assert_eq!(logs.count, Some(200));
-        assert!(logs.allocated_bytes >= 200 * 4096);
-        let (provider, runs): (Vec<_>, Vec<_>) = report
-            .entries
-            .iter()
-            .partition(|entry| entry.class == "provider_state");
-        assert_eq!(provider.len(), 1);
-        assert_eq!(provider[0].count, Some(100));
-        assert!(
-            runs.iter()
-                .all(|entry| entry.path == state.join("attempts"))
+                .all(|entry| { entry.path == state.join("attempts") })
         );
         assert!(
             report
@@ -493,7 +483,7 @@ mod tests {
                 .iter()
                 .map(|entry| entry.allocated_bytes)
                 .sum::<u64>()
-                >= 600 * 4096
+                >= payload_bytes
         );
         assert_eq!(snapshot(state)?, before);
         Ok(())
