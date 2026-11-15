@@ -661,6 +661,7 @@ mod tests {
     use provenant_core::{ActorId, Digest, OperationId, ProjectId, RootInputs};
     use provenant_records::CanonicalV1;
 
+    // Spec: docs/specs/fabric.md#session-ready-steering
     #[test]
     fn provider_identity_mismatches_are_retained_for_host_conflict_recording()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -679,19 +680,27 @@ mod tests {
         };
         let route = run::RouteRecord {
             provider: Some("agy".into()),
-            model: Some("agy/expected-model".into()),
+            model: Some("agy/gemini-3.8-flash".into()),
             ..Default::default()
         };
         assert_eq!(
             crate::run::stream_model(&route).as_deref(),
-            Some("expected-model")
+            Some("gemini-3.8-flash")
         );
+        const EXPECTED_SESSION: &str = "FIXTURE_SESSION_IDENTIFIER";
         let initial =
-            br#"{"event":"init","conversation_id":"s1","init":{"model":"expected-model"}}"#;
+            include_str!("../../../../tests/fixtures/providers/agy/live-read_only-resume.jsonl")
+                .lines()
+                .next()
+                .ok_or("Agy resume fixture has no initial frame")?;
+        // Agy streams newline-delimited JSON; complete the valid producer frame
+        // before injecting a later identity mismatch.
+        let mut initial_frame = initial.as_bytes().to_vec();
+        initial_frame.push(b'\n');
 
         let stream = registration
             .adapter
-            .stream_for_continuation("s1", "expected-model")?;
+            .stream_for_continuation(EXPECTED_SESSION, "gemini-3.8-flash")?;
         let first_frame = QuotaFrames {
             decoder: Mutex::new(None),
             evidence: Arc::new(Mutex::new(Some(QuotaCapture {
@@ -719,7 +728,7 @@ mod tests {
             stderr: false,
         };
         let wrong_first_model =
-            br#"{"event":"init","conversation_id":"s1","init":{"model":"other-model"}}"#;
+            br#"{"event":"init","conversation_id":"FIXTURE_SESSION_IDENTIFIER","init":{"model":"other-model"}}"#;
         assert_eq!(
             first_frame.decode(wrong_first_model),
             Ok(provenant_os::capture::FrameEvent::Progress)
@@ -737,7 +746,7 @@ mod tests {
 
         let stream = registration
             .adapter
-            .stream_for_continuation("s1", "expected-model")?;
+            .stream_for_continuation(EXPECTED_SESSION, "gemini-3.8-flash")?;
         let wrong_first_session = QuotaFrames {
             decoder: Mutex::new(None),
             evidence: Arc::new(Mutex::new(Some(QuotaCapture {
@@ -766,7 +775,7 @@ mod tests {
         };
         assert_eq!(
             wrong_first_session.decode(
-                br#"{"event":"init","conversation_id":"fresh-session","init":{"model":"expected-model"}}"#
+                br#"{"event":"init","conversation_id":"fresh-session","init":{"model":"gemini-3.8-flash"}}"#
             ),
             Ok(provenant_os::capture::FrameEvent::Progress)
         );
@@ -782,14 +791,16 @@ mod tests {
         );
 
         for mismatch in [
-            br#"{"event":"init","conversation_id":"s2","init":{"model":"expected-model"}}"#
+            br#"{"event":"init","conversation_id":"another-session","init":{"model":"gemini-3.8-flash"}}"#
                 .as_slice(),
-            br#"{"event":"init","conversation_id":"s1","init":{"model":"other-model"}}"#.as_slice(),
+            br#"{"event":"init","conversation_id":"FIXTURE_SESSION_IDENTIFIER","init":{"model":"other-model"}}"#.as_slice(),
         ] {
             let mut stream = registration
                 .adapter
-                .stream_for_continuation("s1", "expected-model")?;
-            registration.adapter.observe(&mut stream, initial)?;
+                .stream_for_continuation(EXPECTED_SESSION, "gemini-3.8-flash")?;
+            let observed = registration.adapter.observe(&mut stream, &initial_frame)?;
+            assert!(observed.contains(&ProviderEvent::Session(EXPECTED_SESSION.into())));
+            assert!(observed.contains(&ProviderEvent::Model("gemini-3.8-flash".into())));
             let frames = QuotaFrames {
                 decoder: Mutex::new(None),
                 evidence: Arc::new(Mutex::new(Some(QuotaCapture {
@@ -802,7 +813,7 @@ mod tests {
                     shared: true,
                     recorded: false,
                     pending_session: None,
-                    session_ready: Some("s1".into()),
+                    session_ready: Some(EXPECTED_SESSION.into()),
                     pending_conflict_session: None,
                     ready_source: Some(source.clone()),
                     pending_source_conflict: false,
