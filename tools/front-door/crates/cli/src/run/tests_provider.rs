@@ -359,7 +359,10 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
     );
     record.applied_route.as_mut().unwrap().model = Some("codex/gpt-6.1-sol".into());
     record.applied_route.as_mut().unwrap().pool_selection = Some(serde_json::from_value(
-        json!({"pool":"junior","candidates":[],"roll":0,"total_weight":1,"pick":"codex/gpt-6.1-sol"}),
+        json!({"selection_rule":"weighted_draw","considered_exclusions":[],
+            "exploration":{"selected":false,"percent":0,"enabled":false,"source":"fixture"},
+            "weight_source":"catalogue","account_load":null,
+            "pool":"junior","candidates":[],"roll":0,"total_weight":1,"pick":"codex/gpt-6.1-sol"}),
     )?);
     // An unavailable candidate is still a pool selection, not a fallback.
     assert_eq!(
