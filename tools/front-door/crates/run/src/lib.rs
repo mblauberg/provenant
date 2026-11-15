@@ -724,6 +724,24 @@ impl RunError {
                 if let Some(action) = error.repair() {
                     diagnostic = diagnostic.next(action);
                 }
+                if let WorktreeError::ManagedPathMismatch {
+                    requested,
+                    expected,
+                } = error
+                {
+                    let detail = match (
+                        safe_path(requested, destination),
+                        safe_path(expected, destination),
+                    ) {
+                        (Some(requested), Some(expected)) => format!(
+                            "requested writer path {requested} does not match configured project path {expected}"
+                        ),
+                        _ => {
+                            "requested writer path does not match the configured project worktree layout".into()
+                        }
+                    };
+                    diagnostic = diagnostic.detail(detail);
+                }
                 if let WorktreeError::UnknownWriterAt { path }
                 | WorktreeError::CensusUnknown { path, .. }
                 | WorktreeError::UnknownOccupancy { path, .. } = error

@@ -4,7 +4,10 @@ Anchor: [`lifecycle.rs`](../tools/front-door/crates/confinement/src/worktrees/li
 
 Use linked worktrees for implementation and keep the primary checkout on the
 integration branch. Use `<primary-repository-root>/.worktrees/<branch-with-slashes-as-dashes>`;
-do not nest worktrees.
+do not nest worktrees. `provenant run --branch` uses that primary checkout and
+its project port configuration even when invoked from a linked checkout or a
+subdirectory. An explicit relative `--worktree` path remains relative to the
+invoking directory.
 
 ## Helper
 

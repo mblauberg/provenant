@@ -626,6 +626,7 @@ fn bind_launch_controls(
     input: &Value,
     node: &mut Value,
     cwd: &Path,
+    project_root: &Path,
     ports: &provenant_config::PortTable,
 ) -> Result<(), FacadeError> {
     let invalid = |field: &str| FacadeError::invalid(InvalidInputDetail::Field(field.into()));
@@ -665,7 +666,7 @@ fn bind_launch_controls(
         let worktree = ports
             .managed_writer_path(branch)
             .map_err(|_| invalid("branch"))?;
-        node["worktree"] = json!(cwd.join(worktree));
+        node["worktree"] = json!(project_root.join(worktree));
         if node.get("attempt").is_none() {
             node["attempt"] = json!({});
         }
@@ -1119,7 +1120,13 @@ impl Factory {
             }
             node["with"] = parameters;
         }
-        bind_launch_controls(input, &mut node, &self.cwd, &self.context.port_table)?;
+        bind_launch_controls(
+            input,
+            &mut node,
+            &self.cwd,
+            &self.context.project_root,
+            &self.context.port_table,
+        )?;
         node["id"] = json!(key);
         let resolvers = self.launch_resolvers_for_tier(raw, route.as_ref())?;
         let mut compiled = provenant_fabric_runtime::graph::template::Compiler {
@@ -1711,7 +1718,13 @@ impl Factory {
                     "launch controls require a leaf template".into(),
                 )));
             }
-            bind_launch_controls(input, &mut node, &self.cwd, &self.context.port_table)?;
+            bind_launch_controls(
+                input,
+                &mut node,
+                &self.cwd,
+                &self.context.project_root,
+                &self.context.port_table,
+            )?;
             let mut parameters = node.get("with").cloned().unwrap_or_else(|| json!({}));
             let overrides = input
                 .get("set")
@@ -3541,6 +3554,7 @@ mod tests {
             &json!({"branch":"feature/topic"}),
             &mut node,
             project.path(),
+            project.path(),
             &ports,
         )?;
         assert_eq!(
@@ -3561,8 +3575,10 @@ mod tests {
             &json!({"branch":"topic"}),
             &mut node,
             Path::new("/repo/src"),
+            Path::new("/repo"),
             &provenant_config::PortTable::builtin(),
         )?;
+        assert_eq!(node["worktree"], "/repo/.worktrees/topic");
         assert_eq!(
             node["attempt"]["new_worktree"]["base"],
             "refs/remotes/origin/HEAD"
@@ -3572,6 +3588,7 @@ mod tests {
         bind_launch_controls(
             &json!({"branch":"topic", "base":"refs/remotes/origin/HEAD"}),
             &mut explicit,
+            Path::new("/repo"),
             Path::new("/repo"),
             &provenant_config::PortTable::builtin(),
         )?;
@@ -3584,6 +3601,7 @@ mod tests {
             bind_launch_controls(
                 &json!({"base":"HEAD"}),
                 &mut node,
+                Path::new("/repo"),
                 Path::new("/repo"),
                 &provenant_config::PortTable::builtin()
             )
@@ -4297,6 +4315,7 @@ mod tests {
             &json!({"branch":"fix/parser","base":"origin/main"}),
             &mut node,
             cwd,
+            cwd,
             &provenant_config::PortTable::builtin(),
         )?;
         assert_eq!(node["worktree"], "/fixture/project/.worktrees/fix-parser");
@@ -4304,6 +4323,7 @@ mod tests {
         bind_launch_controls(
             &json!({"worktree":".worktrees/fix-parser"}),
             &mut explicit,
+            Path::new("/fixture/project"),
             Path::new("/fixture/project"),
             &provenant_config::PortTable::builtin(),
         )?;
@@ -4316,6 +4336,7 @@ mod tests {
             &json!({"worktree":"writer"}),
             &mut relative,
             Path::new("/fixture/project/src"),
+            Path::new("/fixture/project"),
             &provenant_config::PortTable::builtin(),
         )?;
         assert_eq!(relative["worktree"], "/fixture/project/src/writer");
@@ -4335,6 +4356,7 @@ mod tests {
                 bind_launch_controls(
                     &input,
                     &mut json!({"use":"task"}),
+                    cwd,
                     cwd,
                     &provenant_config::PortTable::builtin()
                 )

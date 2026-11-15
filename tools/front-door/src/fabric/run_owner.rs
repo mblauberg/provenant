@@ -109,6 +109,25 @@ pub(crate) fn run_error(error: provenant_run::RunError) -> FacadeError {
     // immediate repository probe must schedule a retry, not fail the writer.
     if matches!(
         &error,
+        provenant_run::RunError::Writer(
+            provenant_confinement::worktrees::WorktreeError::ManagedPathMismatch { .. }
+        )
+    ) {
+        let diagnostic = error.diagnostic(provenant_records::diagnostic::Destination::Local);
+        return FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason: format!(
+                "{}; use `--branch` to create a writer in the configured layout, or select an existing checkout with `--worktree`",
+                diagnostic.detail.unwrap_or_else(|| {
+                    "requested writer path does not match the configured project worktree layout"
+                        .into()
+                })
+            ),
+        };
+    }
+    if matches!(
+        &error,
         provenant_run::RunError::Filesystem(provenant_os::fs::FsError::LockTimeout { .. })
     ) {
         return FacadeError::Busy;

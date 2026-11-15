@@ -233,6 +233,13 @@ refuses credential-bearing URLs.
 
 ## Worktrees
 
+### Managed writer path owner
+
+`run --branch` uses primary root/ports regardless of cwd; relative
+`--worktree` stays cwd-relative.
+- Why: roots differ.
+- Owner: `Context::open`, `bind_launch_controls`, `worktrees::open_primary_repo`
+
 ### One writer; removal never forces
 
 Git's own inventory is the worktree registry. One writer holds each linked

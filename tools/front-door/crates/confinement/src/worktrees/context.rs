@@ -84,18 +84,7 @@ pub fn with_context_using_workers_and_facts<T>(
         .project_location(&executor, project, budget, cancel)?
         .repository
         .ok_or(WorktreeError::InvalidRequest)?;
-    let primary = selected
-        .common_git_dir()
-        .parent()
-        .ok_or(WorktreeError::InvalidRequest)?
-        .to_path_buf();
-    // The selected checkout is commonly the primary itself. Its verified
-    // handle already contains the Git probes needed by this context.
-    let repo = if selected.root_path() == primary {
-        selected
-    } else {
-        runtime.open_repo(&executor, &primary, budget, cancel)?
-    };
+    let repo = open_primary_repo(&runtime, &executor, selected, budget, cancel)?;
     let binding = provenant_config::bind_project(
         roots,
         provenant_config::ProjectLocation::new(repo.common_git_dir())
@@ -120,4 +109,29 @@ pub fn with_context_using_workers_and_facts<T>(
         mutation_budget: UtilityBudget::bounded(Duration::from_secs(120))?,
         lock_budget,
     })
+}
+
+/// Resolve the verified primary checkout shared by a selected checkout and
+/// every linked worktree. Project-owned paths must be anchored here, not at
+/// the caller's current worktree.
+pub fn open_primary_repo(
+    runtime: &UtilityRuntime,
+    executor: &dyn Executor,
+    selected: VerifiedRepo,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+) -> Result<VerifiedRepo, WorktreeError> {
+    let primary = selected
+        .common_git_dir()
+        .parent()
+        .ok_or(WorktreeError::InvalidRequest)?;
+    // The selected checkout is commonly the primary itself. Its verified
+    // handle already contains the Git probes needed by this context.
+    if selected.root_path() == primary {
+        Ok(selected)
+    } else {
+        runtime
+            .open_repo(executor, primary, budget, cancel)
+            .map_err(WorktreeError::from)
+    }
 }
