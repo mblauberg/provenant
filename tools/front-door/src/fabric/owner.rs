@@ -2505,45 +2505,6 @@ impl BoundGraphOwner<'_> {
         replay: provenant_fabric_runtime::graph::Replay<'_>,
         refusal: Option<&GraphRefusalScope>,
     ) -> Result<provenant_fabric_runtime::graph::AttemptObservation, FacadeError> {
-        if let Some(reference) = replay.stored_ref {
-            // Accepted work is observed by its immutable attempt reference. Keep
-            // this path outside preparation so it never allocates launch state.
-            let _operation_id = graph_operation("graph-attempt-operation", key)?;
-            let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
-            let target = AttemptTarget {
-                extra: Default::default(),
-                host: Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?),
-                attempt: attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
-            };
-            let mut owner = BinaryRunOwner {
-                factory: self.factory,
-                allow_remote: true,
-                actor: None,
-                chair: None,
-            };
-            return self.observe_graph_attempt(
-                &mut owner,
-                key,
-                &node,
-                access,
-                target,
-                Some(reference.to_owned()),
-            );
-        }
-        self.start_graph_attempt(key, node, route, access, worktree, replay, refusal)
-    }
-
-    #[allow(clippy::too_many_arguments)] // Launch facts stay outside the kernel's public input shape.
-    fn start_graph_attempt(
-        &mut self,
-        key: &provenant_fabric_runtime::graph::AttemptKey,
-        node: provenant_fabric_runtime::graph::NodeInput<'_>,
-        route: &provenant_fabric_runtime::graph::GraphRoute,
-        access: provenant_fabric_runtime::graph::AccessMode,
-        worktree: Option<&str>,
-        replay: provenant_fabric_runtime::graph::Replay<'_>,
-        refusal: Option<&GraphRefusalScope>,
-    ) -> Result<provenant_fabric_runtime::graph::AttemptObservation, FacadeError> {
         use provenant_fabric_runtime::graph::{AttemptObservation, AttemptOutcome};
         let mut owner = BinaryRunOwner {
             factory: self.factory,
@@ -2565,7 +2526,18 @@ impl BoundGraphOwner<'_> {
                         .unwrap_or_else(|| "custody release failed".into())
                 }))
         };
-        let refusal = refusal.ok_or(FacadeError::StateCorrupt)?;
+        let (target, reference) = if let Some(reference) = replay.stored_ref {
+            // An accepted attempt is observed by reference: operation replay is
+            // actor-scoped, so resubmitting under another actor would launch again.
+            let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+            let target = AttemptTarget {
+                extra: Default::default(),
+                host: Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?),
+                attempt: attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+            };
+            (target, Some(reference.to_owned()))
+        } else {
+            let refusal = refusal.ok_or(FacadeError::StateCorrupt)?;
             let host = node
                 .attempt
                 .and_then(|spec| spec.host.as_deref())
@@ -3255,17 +3227,211 @@ impl BoundGraphOwner<'_> {
                 provenant_core::ActorId::parse(replay.launch_actor)
                     .map_err(|_| FacadeError::StateCorrupt)?,
             );
-            let grants = self.graph_attempt_access(
-                key,
-                &node,
-                access,
-                worktree,
-                source_commit,
-                accepted,
-                accepted_access,
-                peer_root,
-                route,
-            )?;
+            let mut grants = if accepted {
+                accepted_access.ok_or(FacadeError::StateCorrupt)?
+            } else {
+                let configured =
+                    provenant_cli::config_reads::read_for(&self.factory.context.roots, "run")
+                        .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+                let default_capabilities = configured
+                    .domains
+                    .lanes
+                    .projects
+                    .get(&self.factory.context.identity.project.to_string())
+                    .map(|settings| settings.capabilities.as_slice())
+                    .unwrap_or_default();
+                let mut capabilities = node
+                    .capabilities
+                    .unwrap_or_else(|| {
+                        if access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite {
+                            default_capabilities
+                        } else {
+                            &[]
+                        }
+                    })
+                    .to_vec();
+                capabilities.retain(|name| {
+                    if name == "postgres" {
+                        true
+                    } else {
+                        provenant_cli::run::warn_ignored_capability("node or project ", name);
+                        false
+                    }
+                });
+                if access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite {
+                    for capability in &self.capability_overrides.0 {
+                        if capability != "postgres" {
+                            provenant_cli::run::warn_ignored_capability("flag ", capability);
+                            continue;
+                        }
+                        if !capabilities.contains(capability) {
+                            capabilities.push(capability.clone());
+                        }
+                    }
+                }
+                capabilities.retain(|name| !self.capability_overrides.1.contains(name));
+                let mut seen = std::collections::BTreeSet::new();
+                capabilities.retain(|name| seen.insert(name.clone()));
+                let mut grants = provenant_cli::run::lane_access(
+                    &provenant_cli::Access {
+                        attach: node
+                            .attachments
+                            .iter()
+                            .map(|path| {
+                                let path = Path::new(path);
+                                if path.is_absolute() {
+                                    path.to_owned()
+                                } else {
+                                    self.factory.cwd.join(path)
+                                }
+                            })
+                            .collect(),
+                        mode: Some(provenant_cli::Mode::ReadOnly),
+                        worktree: (access
+                            == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite)
+                            .then(|| worktree.map(PathBuf::from))
+                            .flatten(),
+                        read_root: node
+                            .read_roots
+                            .iter()
+                            .map(|root| {
+                                let path = Path::new(root);
+                                if path.is_absolute() {
+                                    path.to_path_buf()
+                                } else {
+                                    self.factory.cwd.join(path)
+                                }
+                            })
+                            .collect(),
+                        write_root: node
+                            .attempt
+                            .into_iter()
+                            .flat_map(|spec| &spec.write_roots)
+                            .map(|root| {
+                                let path = Path::new(root);
+                                if path.is_absolute() {
+                                    path.to_owned()
+                                } else {
+                                    self.factory.cwd.join(path)
+                                }
+                            })
+                            .collect(),
+                        network: self.network,
+                        capability: capabilities.clone(),
+                        no_capability: Vec::new(),
+                    },
+                    self.factory.context.roots.state.as_path(),
+                    &self.factory.credential_roots()?,
+                )
+                .map_err(dispatch_refused)?;
+                if !capabilities.is_empty() {
+                    grants.capability_sources = capabilities
+                        .iter()
+                        .map(|name| {
+                            let inherited = node
+                                .capability_sources
+                                .and_then(|sources| sources.get(name));
+                            let source = if self.capability_overrides.0.contains(name) {
+                                "flag"
+                            } else {
+                                inherited.map(String::as_str).unwrap_or(
+                                    if node.capabilities.is_some() {
+                                        "node"
+                                    } else {
+                                        "project default"
+                                    },
+                                )
+                            };
+                            (name.clone(), source.to_owned())
+                        })
+                        .collect();
+                }
+                grants
+            };
+            if !accepted {
+                grants.inputs_root = node.inputs_dir.map(Path::to_path_buf);
+                if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
+                    && source_commit.is_none()
+                    && let Some(directory) = node.attempt.and_then(|spec| spec.directory.as_deref())
+                {
+                    bind_child_directory(
+                        &mut grants,
+                        directory,
+                        self.factory.context.roots.state.as_path(),
+                        &self.factory.credential_roots()?,
+                        self.network,
+                    )?;
+                }
+                // Every pinned reader resolves and verifies its snapshot source.
+                if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
+                    && source_commit.is_some()
+                {
+                    grants.source_root = {
+                        let path = worktree.map_or(self.factory.cwd.as_path(), Path::new);
+                        let source = provenant_run::resolve_reader_source(
+                            self.factory.context.roots.state.as_path(),
+                            &self.factory.cwd,
+                            path,
+                        )
+                        .map_err(|_| FacadeError::DispatchRefused {
+                            fact: None,
+                            disk: None,
+                            reason:
+                                "graph source checkout is no longer registered with the project"
+                                    .into(),
+                        })?;
+                        let directory = provenant_os::fs::Directory::open_anchor(&source)
+                            .map_err(|error| FacadeError::filesystem(&error))?;
+                        let identity = directory
+                            .metadata()
+                            .map_err(|error| FacadeError::filesystem(&error))?;
+                        let source_identity = provenant_records::run::SourceIdentity {
+                            device: identity.device,
+                            inode: identity.inode,
+                        };
+                        if worktree.is_some()
+                            && let Some(checkpoint) =
+                                provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
+                                    &self.factory.context.roots.state,
+                                    self.factory.context.identity.project,
+                                    &key.graph_id,
+                                )
+                                .map_err(graph_journal_error)?
+                            && !writer_source_identity_matches(
+                                &checkpoint,
+                                &source,
+                                &source_identity,
+                            )
+                        {
+                            return Err(FacadeError::DispatchRefused {
+                                fact: None,
+                                disk: None,
+                                reason: "graph source checkout identity changed or is unavailable"
+                                    .into(),
+                            });
+                        }
+                        grants.source_identity = Some(source_identity);
+                        grants.source_live = false;
+                        // The immutable view replaces live-source grants.
+                        grants.read_roots.retain(|root| !root.starts_with(&source));
+                        Some(source)
+                    };
+                }
+            }
+            if !accepted
+                && access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
+                && source_commit.is_none()
+                && let Some(warning) = provenant_cli::run::read_only_checkout_warning(
+                    self.factory.context.roots.state.as_path(),
+                    grants.source_root.as_deref().unwrap_or(&self.factory.cwd),
+                )
+            {
+                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                self.launch_warnings.push(warning);
+            }
+            if peer_root && let Some(network) = route.peer_network {
+                grants.network = Some(network);
+            }
             let peer_retry = peer_root.then_some(route.peer_retry_limit).flatten();
             let retry_limit =
                 accepted_retry_limit.unwrap_or(peer_retry.or(node.settlement_retries));
@@ -3327,236 +3493,8 @@ impl BoundGraphOwner<'_> {
                 target.host.unwrap_or(self.factory.context.identity.host),
                 target.attempt
             ));
-            self.observe_graph_attempt(&mut owner, key, &node, access, target, reference)
-    }
-
-    #[allow(clippy::too_many_arguments)] // Access binding is one graph-attempt phase.
-    fn graph_attempt_access(
-        &mut self,
-        key: &provenant_fabric_runtime::graph::AttemptKey,
-        node: &provenant_fabric_runtime::graph::NodeInput<'_>,
-        access: provenant_fabric_runtime::graph::AccessMode,
-        worktree: Option<&str>,
-        source_commit: Option<&str>,
-        accepted: bool,
-        accepted_access: Option<provenant_records::run::LaneAccess>,
-        peer_root: bool,
-        route: &provenant_fabric_runtime::graph::GraphRoute,
-    ) -> Result<provenant_records::run::LaneAccess, FacadeError> {
-        let mut grants = if accepted {
-            accepted_access.ok_or(FacadeError::StateCorrupt)?
-        } else {
-            let configured =
-                provenant_cli::config_reads::read_for(&self.factory.context.roots, "run")
-                    .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-            let default_capabilities = configured
-                .domains
-                .lanes
-                .projects
-                .get(&self.factory.context.identity.project.to_string())
-                .map(|settings| settings.capabilities.as_slice())
-                .unwrap_or_default();
-            let mut capabilities = node
-                .capabilities
-                .unwrap_or_else(|| {
-                    if access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite {
-                        default_capabilities
-                    } else {
-                        &[]
-                    }
-                })
-                .to_vec();
-            capabilities.retain(|name| {
-                if name == "postgres" {
-                    true
-                } else {
-                    provenant_cli::run::warn_ignored_capability("node or project ", name);
-                    false
-                }
-            });
-            if access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite {
-                for capability in &self.capability_overrides.0 {
-                    if capability != "postgres" {
-                        provenant_cli::run::warn_ignored_capability("flag ", capability);
-                        continue;
-                    }
-                    if !capabilities.contains(capability) {
-                        capabilities.push(capability.clone());
-                    }
-                }
-            }
-            capabilities.retain(|name| !self.capability_overrides.1.contains(name));
-            let mut seen = std::collections::BTreeSet::new();
-            capabilities.retain(|name| seen.insert(name.clone()));
-            let mut grants = provenant_cli::run::lane_access(
-                &provenant_cli::Access {
-                    attach: node
-                        .attachments
-                        .iter()
-                        .map(|path| {
-                            let path = Path::new(path);
-                            if path.is_absolute() {
-                                path.to_owned()
-                            } else {
-                                self.factory.cwd.join(path)
-                            }
-                        })
-                        .collect(),
-                    mode: Some(provenant_cli::Mode::ReadOnly),
-                    worktree: (access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite)
-                        .then(|| worktree.map(PathBuf::from))
-                        .flatten(),
-                    read_root: node
-                        .read_roots
-                        .iter()
-                        .map(|root| {
-                            let path = Path::new(root);
-                            if path.is_absolute() {
-                                path.to_path_buf()
-                            } else {
-                                self.factory.cwd.join(path)
-                            }
-                        })
-                        .collect(),
-                    write_root: node
-                        .attempt
-                        .into_iter()
-                        .flat_map(|spec| &spec.write_roots)
-                        .map(|root| {
-                            let path = Path::new(root);
-                            if path.is_absolute() {
-                                path.to_owned()
-                            } else {
-                                self.factory.cwd.join(path)
-                            }
-                        })
-                        .collect(),
-                    network: self.network,
-                    capability: capabilities.clone(),
-                    no_capability: Vec::new(),
-                },
-                self.factory.context.roots.state.as_path(),
-                &self.factory.credential_roots()?,
-            )
-            .map_err(dispatch_refused)?;
-            if !capabilities.is_empty() {
-                grants.capability_sources = capabilities
-                    .iter()
-                    .map(|name| {
-                        let inherited = node
-                            .capability_sources
-                            .and_then(|sources| sources.get(name));
-                        let source = if self.capability_overrides.0.contains(name) {
-                            "flag"
-                        } else {
-                            inherited.map(String::as_str).unwrap_or(if node.capabilities.is_some() {
-                                "node"
-                            } else {
-                                "project default"
-                            })
-                        };
-                        (name.clone(), source.to_owned())
-                    })
-                    .collect();
-            }
-            grants
+            (target, reference)
         };
-        if !accepted {
-            grants.inputs_root = node.inputs_dir.map(Path::to_path_buf);
-            if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
-                && source_commit.is_none()
-                && let Some(directory) = node.attempt.and_then(|spec| spec.directory.as_deref())
-            {
-                bind_child_directory(
-                    &mut grants,
-                    directory,
-                    self.factory.context.roots.state.as_path(),
-                    &self.factory.credential_roots()?,
-                    self.network,
-                )?;
-            }
-            // Every pinned reader resolves and verifies its snapshot source.
-            if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
-                && source_commit.is_some()
-            {
-                grants.source_root = {
-                    let path = worktree.map_or(self.factory.cwd.as_path(), Path::new);
-                    let source = provenant_run::resolve_reader_source(
-                        self.factory.context.roots.state.as_path(),
-                        &self.factory.cwd,
-                        path,
-                    )
-                    .map_err(|_| FacadeError::DispatchRefused {
-                        fact: None,
-                        disk: None,
-                        reason: "graph source checkout is no longer registered with the project"
-                            .into(),
-                    })?;
-                    let directory = provenant_os::fs::Directory::open_anchor(&source)
-                        .map_err(|error| FacadeError::filesystem(&error))?;
-                    let identity = directory
-                        .metadata()
-                        .map_err(|error| FacadeError::filesystem(&error))?;
-                    let source_identity = provenant_records::run::SourceIdentity {
-                        device: identity.device,
-                        inode: identity.inode,
-                    };
-                    if worktree.is_some()
-                        && let Some(checkpoint) =
-                            provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
-                                &self.factory.context.roots.state,
-                                self.factory.context.identity.project,
-                                &key.graph_id,
-                            )
-                            .map_err(graph_journal_error)?
-                        && !writer_source_identity_matches(
-                            &checkpoint,
-                            &source,
-                            &source_identity,
-                        )
-                    {
-                        return Err(FacadeError::DispatchRefused {
-                            fact: None,
-                            disk: None,
-                            reason: "graph source checkout identity changed or is unavailable"
-                                .into(),
-                        });
-                    }
-                    grants.source_identity = Some(source_identity);
-                    grants.source_live = false;
-                    // The immutable view replaces live-source grants.
-                    grants.read_roots.retain(|root| !root.starts_with(&source));
-                    Some(source)
-                };
-            }
-        }
-        if !accepted
-            && access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
-            && source_commit.is_none()
-            && let Some(warning) = provenant_cli::run::read_only_checkout_warning(
-                self.factory.context.roots.state.as_path(),
-                grants.source_root.as_deref().unwrap_or(&self.factory.cwd),
-            )
-        {
-            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
-            self.launch_warnings.push(warning);
-        }
-        if peer_root && let Some(network) = route.peer_network {
-            grants.network = Some(network);
-        }
-        Ok(grants)
-    }
-
-    fn observe_graph_attempt(
-        &mut self,
-        owner: &mut BinaryRunOwner<'_>,
-        key: &provenant_fabric_runtime::graph::AttemptKey,
-        node: &provenant_fabric_runtime::graph::NodeInput<'_>,
-        access: provenant_fabric_runtime::graph::AccessMode,
-        target: AttemptTarget,
-        reference: Option<String>,
-    ) -> Result<provenant_fabric_runtime::graph::AttemptObservation, FacadeError> {
-        use provenant_fabric_runtime::graph::{AttemptObservation, AttemptOutcome};
         let attempt = owner.snapshot(target.clone(), self.budget, self.cancel)?;
         // A local attempt carries this node's exact work key. A remote attempt
         // lives in the receiver's own graph and carries its immutable origin.
