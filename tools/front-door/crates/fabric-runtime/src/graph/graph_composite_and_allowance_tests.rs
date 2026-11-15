@@ -133,6 +133,8 @@ fn quota_reroute_recomputes_composite_before_checkpoint_resume() {
 // Spec: docs/specs/fabric.md#composite-settlement
 #[test]
 fn public_patch_preserves_inactive_composite_and_replays_derived_state() {
+    // Raw GraphDocument input bypasses template lowering, so mirror the
+    // parent's inherited false condition on its member.
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 2,
         "graph_id": "inactive-composite-patch",
@@ -141,7 +143,8 @@ fn public_patch_preserves_inactive_composite_and_replays_derived_state() {
             {"id":"inactive","kind":"composite","access":"read_only","depends_on":["hold"],
              "when":[{"name":"enabled","expected":"true","actual":"false"}],
              "composite":{"nodes":[
-                 {"id":"member","access":"read_only","prompt":"Inactive member","route":{"alias":"fixture"}}
+                 {"id":"member","access":"read_only","prompt":"Inactive member","route":{"alias":"fixture"},
+                  "when":[{"name":"enabled","expected":"true","actual":"false"}]}
              ],"exports":[{"node":"member","outputs":["result"]}]}},
             {"id":"active","kind":"composite","access":"read_only","composite":{"nodes":[
                 {"id":"member","access":"read_only","prompt":"Active member","route":{"alias":"fixture"}}
@@ -172,7 +175,7 @@ fn public_patch_preserves_inactive_composite_and_replays_derived_state() {
     assert_eq!(state(&checkpoint, "inactive"), Some(NodeState::Skipped));
     assert_eq!(
         state(&checkpoint, "inactive--member"),
-        Some(NodeState::Pending)
+        Some(NodeState::Skipped)
     );
     assert_eq!(state(&checkpoint, "active"), Some(NodeState::Succeeded));
 
@@ -198,11 +201,11 @@ fn public_patch_preserves_inactive_composite_and_replays_derived_state() {
     )
     .unwrap();
     // A retry in the active composite must leave the unrelated conditionally
-    // inactive boundary untouched, while recomputing the affected boundary.
+    // inactive boundary and member untouched while recomputing the active boundary.
     assert_eq!(state(&checkpoint, "inactive"), Some(NodeState::Skipped));
     assert_eq!(
         state(&checkpoint, "inactive--member"),
-        Some(NodeState::Pending)
+        Some(NodeState::Skipped)
     );
     assert_eq!(
         state(&checkpoint, "active--member"),
@@ -224,7 +227,6 @@ fn public_patch_preserves_inactive_composite_and_replays_derived_state() {
     let mut resumed_owner = FakeOwner {
         observations: [
             terminal_with_result(AttemptOutcome::Succeeded, "hold complete"),
-            terminal_with_result(AttemptOutcome::Succeeded, "inactive member complete"),
             terminal_with_result(AttemptOutcome::Succeeded, "active member complete"),
         ]
         .into(),
@@ -239,13 +241,15 @@ fn public_patch_preserves_inactive_composite_and_replays_derived_state() {
     );
     assert_eq!(
         state(&resumed.checkpoint, "inactive--member"),
-        Some(NodeState::Succeeded)
+        Some(NodeState::Skipped)
     );
     assert_eq!(
         state(&resumed.checkpoint, "active"),
         Some(NodeState::Succeeded)
     );
-    assert_eq!(resumed_owner.calls.len(), 3);
+    // The inactive child has no success observation because its own condition
+    // skips it, matching the form emitted by template lowering.
+    assert_eq!(resumed_owner.calls.len(), 2);
     assert_eq!(
         resumed_owner
             .calls
@@ -253,6 +257,12 @@ fn public_patch_preserves_inactive_composite_and_replays_derived_state() {
             .filter(|call| call.0.node_id == "active--member")
             .count(),
         1
+    );
+    assert!(
+        resumed_owner
+            .calls
+            .iter()
+            .all(|call| call.0.node_id != "inactive--member")
     );
 
     let replayed_checkpoint: GraphCheckpoint =
