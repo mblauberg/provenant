@@ -1024,6 +1024,21 @@ pub fn provision_writer(
 fn provisioning_refusal(error: provenant_confinement::worktrees::WorktreeError) -> ServiceError {
     use provenant_confinement::worktrees::WorktreeError;
     use provenant_fabric_runtime::coordination::facade::DispatchRefusalFact;
+    if matches!(&error, WorktreeError::ManagedPathMismatch { .. }) {
+        let diagnostic = provenant_run::RunError::Writer(error)
+            .diagnostic(provenant_records::diagnostic::Destination::Local);
+        return ServiceError::Facade(FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason: format!(
+                "{}; use `--branch` to create a writer in the configured layout, or select an existing checkout with `--worktree`",
+                diagnostic.detail.unwrap_or_else(|| {
+                    "requested writer path does not match the configured project worktree layout"
+                        .into()
+                })
+            ),
+        });
+    }
     let fact = match &error {
         WorktreeError::Dirty(_) => Some(DispatchRefusalFact::DirtyWriter),
         WorktreeError::DetachedWorktree { .. } | WorktreeError::DetachedPrimary => {
@@ -1085,10 +1100,15 @@ fn resolve_managed_writer_path(
     let expected = ports
         .managed_writer_path(branch)
         .map_err(WorktreeError::PortConfiguration)?;
-    if project_root.join(path) == project_root.join(&expected) {
-        Ok(project_root.join(expected))
+    let requested = project_root.join(path);
+    let expected = project_root.join(expected);
+    if requested == expected {
+        Ok(expected)
     } else {
-        Err(WorktreeError::InvalidRequest)
+        Err(WorktreeError::ManagedPathMismatch {
+            requested,
+            expected,
+        })
     }
 }
 

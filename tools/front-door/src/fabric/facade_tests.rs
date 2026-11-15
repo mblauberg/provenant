@@ -1598,6 +1598,29 @@ fn confinement_refusal_keeps_actual_cause_through_cli_and_dispatch() {
     );
 }
 
+#[test]
+fn managed_writer_path_mismatch_names_the_layout_and_repair() {
+    let error = run_error(provenant_run::RunError::Writer(
+        provenant_confinement::worktrees::WorktreeError::ManagedPathMismatch {
+            requested: PathBuf::from("/tmp/project/.worktrees/linked/.worktrees/fix-parser"),
+            expected: PathBuf::from("/tmp/project/.worktrees/fix-parser"),
+        },
+    ));
+    let diagnostic = error.diagnostic();
+    assert_eq!(diagnostic.code, "dispatch_refused");
+    assert!(
+        diagnostic
+            .detail
+            .as_deref()
+            .is_some_and(|detail| {
+                detail.contains("does not match") && detail.contains("configured project")
+            })
+    );
+    let detail = diagnostic.detail.as_deref().unwrap();
+    assert!(detail.contains("--branch"));
+    assert!(detail.contains("--worktree"));
+}
+
 #[cfg(test)]
 #[test]
 fn failed_worktree_add_retains_safe_operation_and_lock_facts_through_relay()

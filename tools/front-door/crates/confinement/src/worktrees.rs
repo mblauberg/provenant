@@ -23,7 +23,7 @@ mod removal;
 mod setup;
 pub use census::*;
 pub use context::{
-    with_context, with_context_using_facts, with_context_using_workers,
+    open_primary_repo, with_context, with_context_using_facts, with_context_using_workers,
     with_context_using_workers_and_facts,
 };
 pub use custody::*;
@@ -224,6 +224,11 @@ pub enum WorktreeError {
     PortConfiguration(#[source] io::Error),
     #[error("worktree request is invalid")]
     InvalidRequest,
+    #[error("requested worktree path does not match the configured managed writer path")]
+    ManagedPathMismatch {
+        requested: PathBuf,
+        expected: PathBuf,
+    },
     #[error("worktree name {name} matches more than one checkout")]
     AmbiguousName { name: String },
     #[error("primary checkout has a detached HEAD; an integration branch is required")]
@@ -466,6 +471,9 @@ impl WorktreeError {
             }
             Self::IdentityChanged => {
                 "run `provenant worktree list` and retry against the current checkout identity"
+            }
+            Self::ManagedPathMismatch { .. } => {
+                "use `--branch` to create a writer in the configured project layout, or select an existing checkout with `--worktree`"
             }
             Self::AmbiguousName { .. } => {
                 "run `provenant worktree list` and select an unambiguous branch or directory name"
@@ -800,7 +808,7 @@ impl Serialize for WorktreeInfo {
         state.serialize_field("writer", self.occupancy.label())?;
         state.serialize_field("owner", self.owner_label())?;
         if self.is_unowned() {
-            state.serialize_field("next", "This checkout has no Provenant lane owner; it may have been created outside Provenant. Inspect its custody, then select it explicitly with --worktree <path>.")?;
+            state.serialize_field("next", "No Provenant lane currently owns this checkout. If its custody is unclear, run `provenant worktree doctor <path>`, then select it with `--worktree <path>` to launch a writer.")?;
         }
         state.end()
     }

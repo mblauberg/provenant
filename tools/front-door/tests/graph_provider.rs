@@ -753,12 +753,13 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
         "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.routing.pools]\njunior=[{model='codex/gpt-6-luna',effort='low'}]\n",
     )?;
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    let branch_mode = location == "branch";
+    let branch_mode = matches!(location, "branch" | "branch-worktree");
+    let primary_branch_mode = location == "branch";
     for name in ["AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md"] {
         fs::write(rig.project.join(name), "original instructions\n")?;
     }
     let mut git_commands = vec![vec!["add", "."], vec!["commit", "-qm", "instructions"]];
-    if !branch_mode {
+    if !primary_branch_mode {
         git_commands.push(vec![
             "worktree",
             "add",
@@ -771,13 +772,43 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
         let output = rig.execute(&git, &args, None)?;
         assert_eq!(code(&output), 0, "{output:?}");
     }
+    if location == "branch-worktree" {
+        let config_dir = rig.project.join(".provenant");
+        fs::create_dir_all(&config_dir)?;
+        fs::write(
+            config_dir.join(provenant_config::PORTS_CONFIG),
+            br#"{"schema_version":2,"worktree_layout":{"roots":["writer-trees"],"default":"writer-trees/<branch>"}}"#,
+        )?;
+        for args in [
+            vec!["add", ".provenant/ports.json"],
+            vec!["commit", "-qm", "configure managed writer layout"],
+        ] {
+            let output = rig.execute(&git, &args, None)?;
+            assert_eq!(code(&output), 0, "{output:?}");
+        }
+    }
     let tree = if branch_mode {
-        rig.project.join(".worktrees/writer-branch")
+        let root = if location == "branch-worktree" {
+            "writer-trees"
+        } else {
+            ".worktrees"
+        };
+        rig.project.join(root).join("writer-branch")
     } else {
         rig.project.join(".worktrees/writer-cwd")
     };
     if !branch_mode {
         fs::create_dir_all(tree.join("nested/directory"))?;
+    }
+    let linked_invocation = rig.project.join(".worktrees/writer-cwd");
+    if location == "branch-worktree" {
+        assert!(
+            !linked_invocation
+                .join(".provenant")
+                .join(provenant_config::PORTS_CONFIG)
+                .exists(),
+            "fixture must keep the custom layout only in the primary checkout"
+        );
     }
     // TestRig uses project as the child's cwd; PROVENANT_ROOT selects assets.
     rig.project = match location {
@@ -786,6 +817,7 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
             fs::create_dir_all(&directory)?;
             directory
         }
+        "branch-worktree" => linked_invocation.clone(),
         "worktree" => tree.clone(),
         "subdirectory" => tree.join("nested/directory"),
         _ => rig.project.clone(),
@@ -828,8 +860,16 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
             tree.is_dir(),
             "branch launch did not keep its new worktree: {response}"
         );
-        assert_eq!(node["worktree"], ".worktrees/writer-branch");
+        if location == "branch" {
+            assert_eq!(node["worktree"], ".worktrees/writer-branch");
+        }
         assert_eq!(node["writer_binding"]["worktree"].as_str(), tree.to_str());
+        if location == "branch-worktree" {
+            assert!(
+                !linked_invocation.join(".worktrees/writer-branch").exists(),
+                "branch path was nested under the invoking linked checkout: {response}"
+            );
+        }
     }
     assert!(
         node["attempts"][0]["attempt_ref"].is_string(),
@@ -868,6 +908,11 @@ fn writer_cli_launches_from_worktree_root() -> Result {
 
 fn writer_cli_branch_binds_the_new_worktree() -> Result {
     writer_cli_launches_from_cwd("branch")
+}
+
+// Spec: docs/specs/supervisor.md#managed-writer-path-owner
+fn writer_cli_branch_from_linked_checkout_uses_primary_layout() -> Result {
+    writer_cli_launches_from_cwd("branch-worktree")
 }
 
 fn writer_cli_launches_from_worktree_subdirectory() -> Result {
@@ -4677,6 +4722,10 @@ fn main() -> ExitCode {
             (
                 "writer_cli_branch_binds_the_new_worktree",
                 writer_cli_branch_binds_the_new_worktree,
+            ),
+            (
+                "writer_cli_branch_from_linked_checkout_uses_primary_layout",
+                writer_cli_branch_from_linked_checkout_uses_primary_layout,
             ),
             (
                 "writer_cli_launches_from_worktree_subdirectory",
