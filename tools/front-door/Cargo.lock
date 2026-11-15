@@ -493,7 +493,7 @@ dependencies = [
 
 [[package]]
 name = "provenant"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "jiff",
  "provenant-cli",
@@ -526,7 +526,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-cli"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "clap",
  "jiff",
@@ -557,7 +557,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-config"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "jiff",
  "provenant-core",
@@ -573,7 +573,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-confinement"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "provenant-config",
  "provenant-core",
@@ -592,7 +592,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-core"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "jiff",
  "serde",
@@ -603,7 +603,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-fabric-runtime"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "provenant-config",
  "provenant-confinement",
@@ -625,7 +625,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-fabric-store"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "provenant-core",
  "provenant-os",
@@ -640,7 +640,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-os"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "jiff",
  "libc",
@@ -654,7 +654,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-providers"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "jiff",
  "provenant-config",
@@ -675,7 +675,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-quota"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "jiff",
  "provenant-config",
@@ -689,7 +689,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-records"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "provenant-core",
  "serde",
@@ -702,7 +702,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-routing"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "jiff",
  "provenant-config",
@@ -720,7 +720,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-run"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "libc",
  "provenant-config",
@@ -742,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-sqlite"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "provenant-core",
  "provenant-os",
@@ -752,7 +752,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-supervisor"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "libc",
  "provenant-config",
@@ -770,7 +770,7 @@ dependencies = [
 
 [[package]]
 name = "provenant-telemetry"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "jiff",
  "libc",
@@ -789,14 +789,14 @@ dependencies = [
 
 [[package]]
 name = "provenant-test-support"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "provenant-core",
 ]
 
 [[package]]
 name = "provenant-workflow"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "provenant-core",
  "provenant-os",
