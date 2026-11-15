@@ -247,8 +247,6 @@ struct SeedPass {
     busy: usize,
     /// Projects with no selected Cargo manifest, which have nothing to seed.
     skipped: usize,
-    /// Commits whose last build failed, waiting for `origin/main` to move.
-    backed_off: Vec<String>,
     errors: Vec<String>,
 }
 
@@ -279,24 +277,11 @@ fn refresh_projects(
             Ok(Refresh::Built(_)) => pass.built += 1,
             Ok(Refresh::NotCargo) => pass.skipped += 1,
             Ok(Refresh::Current) => pass.current += 1,
-            Ok(Refresh::BackedOff(commit)) => pass.backed_off.push(commit),
             Ok(Refresh::Busy) => pass.busy += 1,
             Err(error) => pass.errors.push(format!("{}: {error}", project.display())),
         }
     }
     pass
-}
-
-fn backed_off_note(commits: &[String]) -> Option<String> {
-    let mut commits = commits.to_vec();
-    commits.sort();
-    commits.dedup();
-    (!commits.is_empty()).then(|| {
-        format!(
-            "commit {} failed; waiting for origin/main to move",
-            commits.join(", ")
-        )
-    })
 }
 
 /// Run one single-flight pass under `seed-worker.lock`. A second worker, or a
@@ -327,16 +312,10 @@ fn seed_pass(
         Ok(pass) if pass.busy > 0 => (
             "busy",
             Some(format!(
-                "{} project(s) had a build running; retrying next tick{}",
-                pass.busy,
-                backed_off_note(&pass.backed_off)
-                    .map(|note| format!("; {note}"))
-                    .unwrap_or_default()
+                "{} project(s) had a build running; retrying next tick",
+                pass.busy
             )),
         ),
-        Ok(pass) if !pass.backed_off.is_empty() => {
-            ("backed_off", backed_off_note(&pass.backed_off))
-        }
         Ok(_) => ("complete", None),
         Err(error) => ("failed", Some(error)),
     };
@@ -409,7 +388,6 @@ fn seed_state(directory: &Directory) -> &'static str {
                 "running" => "running",
                 "complete" => "complete",
                 "busy" => "busy",
-                "backed_off" => "backed_off",
                 "disabled" => "disabled",
                 _ => "last_failed",
             },
@@ -783,8 +761,9 @@ mod tests {
         assert!(!seed_retry_due(&directory, far), "only busy is retried");
     }
 
+    /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
-    fn seed_pass_skips_projects_without_a_manifest_and_reports_a_back_off() {
+    fn seed_pass_skips_non_cargo_projects_and_allows_later_retry_after_failure() {
         use crate::target_seed_build::Refresh;
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
@@ -801,17 +780,14 @@ mod tests {
             || Ok(listed),
             |project| {
                 called.borrow_mut().push(project.to_owned());
-                Ok(Refresh::BackedOff("abc123".into()))
+                Err(std::io::Error::other("temporary Git spawn failure").into())
             },
         )
         .unwrap();
         assert_eq!(*called.borrow(), vec![broken.clone()], "bare is skipped");
         let (state, note) = seed_state_of(&directory);
-        assert_eq!(state, "backed_off", "a back-off is not `complete`");
-        assert_eq!(
-            note.unwrap(),
-            "commit abc123 failed; waiting for origin/main to move"
-        );
+        assert_eq!(state, "last_failed");
+        assert!(note.unwrap().contains("temporary Git spawn failure"));
         let pass = refresh_projects(&[bare], &root, |_| panic!("no manifest, no refresh"));
         assert_eq!(
             pass,
@@ -820,6 +796,16 @@ mod tests {
                 ..Default::default()
             }
         );
+        seed_pass(
+            &directory,
+            &root,
+            &seed_clock(),
+            true,
+            || Ok(vec![broken]),
+            |_| Ok(Refresh::Built("generation".into())),
+        )
+        .unwrap();
+        assert_eq!(seed_state_of(&directory), ("complete", None));
     }
 
     #[allow(dead_code)] // The worktree driver includes this module without libtest.
