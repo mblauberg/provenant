@@ -173,10 +173,15 @@ impl Accounts {
                     provenant_records::AdapterSpec::get(&account.adapter)
                         .is_some_and(|spec| spec.is_unregistered_local(&account.key))
                 };
+                // Entries for an adapter with only a local login are metadata
+                // associations, not distinct trees that require isolation.
+                let shared_local_login = account.adapter == other.adapter
+                    && provenant_records::AdapterSpec::get(&account.adapter)
+                        .is_some_and(provenant_records::AdapterSpec::uses_shared_local_login);
                 same_identity
                     || (account_directories_overlap(&account.directory, &other.directory)
                         && !(account.adapter == other.adapter
-                            && (local_login(account) || local_login(other))))
+                            && (local_login(account) || local_login(other) || shared_local_login)))
             }) {
                 return Err(crate::ProviderError::IdentityMismatch);
             }
@@ -230,6 +235,27 @@ mod account_registry_tests {
             RegisteredAccount::new("agy", "agy-nested", home.join(".agy-work/nested")).unwrap();
         assert!(matches!(
             Accounts::new(vec![first, nested]),
+            Err(crate::ProviderError::IdentityMismatch)
+        ));
+    }
+
+    // Spec: docs/specs/routing.md#accounts-and-credentials
+    #[test]
+    fn shared_local_login_metadata_accounts_can_share_a_directory() {
+        let store = std::path::PathBuf::from("/fixture/home/.local/share/opencode");
+        let go = RegisteredAccount::new("opencode", "opencode-go", store.clone()).unwrap();
+        let zen = RegisteredAccount::new("opencode", "opencode-zen", store).unwrap();
+        assert!(Accounts::new(vec![go, zen]).is_ok());
+    }
+
+    // Spec: docs/specs/routing.md#accounts-and-credentials
+    #[test]
+    fn shared_local_login_does_not_allow_cross_adapter_overlap() {
+        let store = std::path::PathBuf::from("/fixture/home/.local/share/opencode");
+        let opencode = RegisteredAccount::new("opencode", "opencode-go", store.clone()).unwrap();
+        let cursor = RegisteredAccount::new("cursor", "cursor-one", store).unwrap();
+        assert!(matches!(
+            Accounts::new(vec![opencode, cursor]),
             Err(crate::ProviderError::IdentityMismatch)
         ));
     }

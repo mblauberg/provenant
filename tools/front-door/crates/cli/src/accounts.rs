@@ -16,6 +16,7 @@ pub(crate) fn credential_directories(
 #[derive(Clone)]
 struct AccountDirectories {
     id: String,
+    adapter: String,
     paths: Vec<PathBuf>,
 }
 
@@ -30,11 +31,18 @@ fn directory_inventory(settings: &Settings) -> Vec<AccountDirectories> {
         .iter()
         .map(|(id, entry)| AccountDirectories {
             id: id.clone(),
+            adapter: entry.adapter.clone(),
             paths: credential_directories(entry)
                 .map(Path::to_path_buf)
                 .collect(),
         })
         .collect()
+}
+
+fn shares_unregistered_local_login(left: &str, right: &str) -> bool {
+    left == right
+        && provenant_records::AdapterSpec::get(left)
+            .is_some_and(provenant_records::AdapterSpec::uses_shared_local_login)
 }
 
 fn resolve_directory(path: &Path) -> PathBuf {
@@ -55,6 +63,7 @@ fn directory_inventory_findings(
         .map(|account| {
             (
                 &account.id,
+                account.adapter.as_str(),
                 account
                     .paths
                     .iter()
@@ -64,14 +73,20 @@ fn directory_inventory_findings(
         })
         .collect();
     let mut findings = Vec::new();
-    for (index, (id, paths)) in resolved.iter().enumerate() {
+    for (index, (id, adapter, paths)) in resolved.iter().enumerate() {
         if paths.iter().any(|path| home.starts_with(path)) {
             findings.push(DirectoryFinding {
                 accounts: vec![(*id).clone()],
                 message: format!("account {id}: directory is HOME or its ancestor; a login at HOME is the adapter's local account and needs no registration"),
             });
         }
-        for (other_id, other_paths) in resolved.iter().skip(index + 1) {
+        for (other_id, other_adapter, other_paths) in resolved.iter().skip(index + 1) {
+            // These entries classify quota/menu metadata for the same local
+            // login; they do not claim isolated account trees. Preserve every
+            // HOME and cross-adapter check, and all registered-account checks.
+            if shares_unregistered_local_login(*adapter, *other_adapter) {
+                continue;
+            }
             if paths.iter().any(|path| {
                 other_paths.iter().any(|other| {
                     provenant_providers::identity::account_directories_overlap(path, other)
@@ -106,6 +121,7 @@ fn candidate_directory_findings(
     accounts.retain(|account| !replaced.contains(account.id.as_str()));
     accounts.push(AccountDirectories {
         id: id.to_owned(),
+        adapter: adapter.to_owned(),
         paths: std::iter::once(directory.to_path_buf())
             .chain(additional.iter().cloned())
             .collect(),

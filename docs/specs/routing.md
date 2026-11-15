@@ -131,14 +131,21 @@ preserves its selected identity and controls.
 ## Accounts and credentials
 
 Account identity is detected, not guessed; a changed identity around a probe is
-refused. Registered account directories must not contain HOME or overlap each
-other; `accounts register` refuses these and `check config` reports them. A
-login at HOME is the adapter's local account and needs no registration. Agy's
-local login remains selectable as `account=local` beside isolated registered
-accounts, but is an in-memory identity rather than a registered credential root;
-automatic routing continues to choose among registered accounts. A pin does not
-switch accounts. Credential custody is owned by
-[supervision](supervisor.md#native-environment-and-sandbox-tool-stores). A registered long-lived lane token is not rotated by the host.
+refused. Credential roots must not be HOME or an ancestor of HOME.
+Additional directories within one account entry are aliases and may overlap.
+Distinct isolated registered-account directories must not overlap;
+`accounts register` refuses these and `check config` reports them. An adapter
+that declares no registered accounts but uses a local login can have multiple
+quota/menu entries whose directory paths overlap; those entries all describe
+the same local login, not separate credential trees. This allowance is limited
+to that adapter and does not include isolated registered accounts. A login at
+HOME is the adapter's local account and needs no registration. Agy's local
+login remains selectable as `account=local` beside isolated registered accounts,
+but is an in-memory identity
+rather than a registered credential root; automatic routing continues to choose
+among registered accounts. A pin does not switch accounts. Credential custody
+is owned by [supervision](supervisor.md#native-environment-and-sandbox-tool-stores).
+A registered long-lived lane token is not rotated by the host.
 
 OpenCode models are partitioned by the registered plan, independently of account
 keys and labels. Enumeration keeps one row per registered identity and never
